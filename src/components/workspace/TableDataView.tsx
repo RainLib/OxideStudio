@@ -23,6 +23,7 @@ import type {
   TableExportFormat,
   TableExportEncoding,
   TableExportReport,
+  SqlInsertConflictPolicy,
 } from "@/services/tauri/types";
 import { isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -58,6 +59,7 @@ import {
   defaultDatabaseCapabilities,
   isRelationalDataModel,
   isReadOnlyRelationObject,
+  normalizeDatabaseDriverName,
 } from "@/lib/databaseDialect";
 import { stepGridZoom } from "@/lib/dataGridView";
 import { cn } from "@/lib/utils";
@@ -143,6 +145,11 @@ export function TableDataView() {
   const tableExportFormats = HOST_TABLE_EXPORT_FORMATS.filter((format) =>
     activeCapabilities.tableExportFormats?.includes(format),
   );
+  const supportsSqlConflictSkip =
+    !activeConnection?.driverPackageVersion &&
+    ["postgres", "mysql", "sqlite"].includes(
+      normalizeDatabaseDriverName(driver) || "",
+    );
   // New package data models (graph, time-series, queue, etc.) must never
   // accidentally enter the mutable relational grid while their dedicated
   // workspace is still unavailable.
@@ -840,6 +847,7 @@ export function TableDataView() {
     format: TableExportFormat,
     encoding: TableExportEncoding = "utf8",
     sqlInsertBatchSize?: number,
+    sqlInsertConflictPolicy: SqlInsertConflictPolicy = "strict",
   ) => {
     if (
       !tabConnectionId ||
@@ -884,6 +892,7 @@ export function TableDataView() {
           projectId: activeProjectId,
           encoding,
           sqlInsertBatchSize,
+          sqlInsertConflictPolicy,
         },
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
@@ -1605,6 +1614,7 @@ export function TableDataView() {
         viewOnly={isTransposed}
         exportDisabled={isCrossDatabasePreview || isNativeObjectPreview}
         exportFormats={tableExportFormats}
+        supportsSqlConflictSkip={supportsSqlConflictSkip}
         isExporting={Boolean(activeTableExport)}
         transferDisabled={
           isCrossDatabasePreview ||
@@ -1644,7 +1654,9 @@ export function TableDataView() {
         onExportJson={() => void handleExport("json")}
         onExportJsonl={() => void handleExport("jsonl")}
         onExportMarkdown={() => void handleExport("markdown")}
-        onExportSql={(batchSize) => void handleExport("sql", "utf8", batchSize)}
+        onExportSql={(batchSize, conflictPolicy) =>
+          void handleExport("sql", "utf8", batchSize, conflictPolicy)
+        }
         onExportTsv={() => void handleExport("tsv")}
         onExportXlsx={() => void handleExport("xlsx")}
         onExportParquet={() => void handleExport("parquet", "binary")}

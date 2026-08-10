@@ -21,12 +21,16 @@ import {
   Square,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import type { TableExportFormat } from "@/services/tauri/types";
+import type {
+  SqlInsertConflictPolicy,
+  TableExportFormat,
+} from "@/services/tauri/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuPortal,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -40,6 +44,7 @@ interface TableDataToolbarProps {
   viewOnly?: boolean;
   exportDisabled?: boolean;
   exportFormats: readonly TableExportFormat[];
+  supportsSqlConflictSkip?: boolean;
   isExporting?: boolean;
   transferDisabled?: boolean;
   editingEnabled: boolean;
@@ -68,7 +73,10 @@ interface TableDataToolbarProps {
   onExportJson: () => void;
   onExportJsonl: () => void;
   onExportMarkdown: () => void;
-  onExportSql: (batchSize: number) => void;
+  onExportSql: (
+    batchSize: number,
+    conflictPolicy?: SqlInsertConflictPolicy,
+  ) => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
   onExportParquet: () => void;
@@ -82,6 +90,7 @@ export function TableDataToolbar({
   viewOnly = false,
   exportDisabled = false,
   exportFormats,
+  supportsSqlConflictSkip = false,
   isExporting = false,
   transferDisabled = false,
   editingEnabled,
@@ -366,6 +375,20 @@ export function TableDataToolbar({
                         )}
                       </DropdownMenuItem>
                     ))}
+                    {supportsSqlConflictSkip && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          className="wb-menu-item"
+                          onSelect={() => onExportSql(100, "skip")}
+                        >
+                          <span>Skip conflicting rows</span>
+                          <span className="ml-auto pl-3 text-[10px] wb-muted">
+                            100 / statement
+                          </span>
+                        </DropdownMenuItem>
+                      </>
+                    )}
                   </DropdownMenuSubContent>
                 </DropdownMenuPortal>
               </DropdownMenuSub>

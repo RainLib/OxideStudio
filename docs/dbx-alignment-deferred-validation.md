@@ -334,6 +334,11 @@ explicit deferred validation task rather than an implicit release check.
 - Exercise every SQL export batch choice (25/100/250/500/1,000) with narrow
   and wide rows. Row limits must split at the selected size, the 512 KiB byte
   cap must still split earlier, and invalid IPC values must publish no file.
+- Replay strict and conflict-skip exports against versioned PostgreSQL, MySQL,
+  MariaDB, and SQLite fixtures with duplicate primary/unique keys. Strict must
+  stop on the conflict; skip must use only the reviewed dialect form and retain
+  every non-conflicting row. External packages, DuckDB, and unknown dialects
+  must reject skip before creating a partial file.
 - Use a provider that initiates `workspace/configuration`,
   `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
   requests. Confirm every request receives a matching numeric or string id,

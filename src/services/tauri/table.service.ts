@@ -15,6 +15,7 @@ import type {
   TableExportProgress,
   TableExportReport,
   TableExportResult,
+  SqlInsertConflictPolicy,
   TableImportFormat,
   TableCsvImportOptions,
   TableCsvImportPreview,
@@ -59,6 +60,8 @@ export interface TableExportOptions {
   encoding?: TableExportEncoding;
   /** SQL INSERT rows per statement. The host enforces 1..1,000 and a 512 KiB byte cap. */
   sqlInsertBatchSize?: number;
+  /** Defaults to strict. Skip is accepted only for reviewed native SQL dialects. */
+  sqlInsertConflictPolicy?: SqlInsertConflictPolicy;
 }
 
 export interface TableImportOptions {
@@ -160,6 +163,7 @@ export async function exportTableData(
     pageSize,
     maxRows,
     sqlInsertBatchSize: options.sqlInsertBatchSize,
+    sqlInsertConflictPolicy: options.sqlInsertConflictPolicy,
   });
 }
 

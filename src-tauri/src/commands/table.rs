@@ -127,6 +127,13 @@ pub enum TableExportFormat {
     Xlsx,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SqlInsertConflictPolicy {
+    Strict,
+    Skip,
+}
+
 impl TableExportFormat {
     fn as_str(self) -> &'static str {
         match self {
@@ -1549,6 +1556,7 @@ struct TableExportWriterContext {
     sql_dialect: SqlExportDialect,
     override_system_value: bool,
     sql_insert_batch_rows: usize,
+    sql_insert_conflict_policy: SqlInsertConflictPolicy,
     analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
@@ -2128,6 +2136,7 @@ fn write_table_export_stream(
         sql_dialect,
         override_system_value,
         sql_insert_batch_rows,
+        sql_insert_conflict_policy,
         analytical_type_policy,
         schema,
         table,
@@ -2314,12 +2323,13 @@ fn write_table_export_stream(
                             dialect: sql_dialect,
                             override_system_value,
                             batch_rows: sql_insert_batch_rows,
+                            conflict_policy: sql_insert_conflict_policy,
                             schema: &schema,
                             table: &table,
                         },
                         &columns,
                         &rows,
-                    ) {
+                    )? {
                         if *cancel_rx.borrow() {
                             return Err(format!(
                                 "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
@@ -2605,6 +2615,7 @@ struct SqlInsertExportOptions<'a> {
     dialect: SqlExportDialect,
     override_system_value: bool,
     batch_rows: usize,
+    conflict_policy: SqlInsertConflictPolicy,
     schema: &'a str,
     table: &'a str,
 }
@@ -2613,10 +2624,11 @@ fn sql_insert_statements(
     options: SqlInsertExportOptions<'_>,
     columns: &[ColumnDef],
     rows: &[Vec<Value>],
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     if columns.is_empty() || rows.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    ensure_sql_insert_conflict_policy(options.dialect, options.conflict_policy)?;
     let quoted_columns = columns
         .iter()
         .map(|column| options.kind.quote_identifier(&column.name))
@@ -2628,8 +2640,20 @@ fn sql_insert_statements(
         } else {
             ""
         };
+    let insert_keyword = match (options.conflict_policy, options.dialect) {
+        (SqlInsertConflictPolicy::Skip, SqlExportDialect::Mysql) => "INSERT IGNORE INTO",
+        (SqlInsertConflictPolicy::Skip, SqlExportDialect::Sqlite) => "INSERT OR IGNORE INTO",
+        _ => "INSERT INTO",
+    };
+    let conflict_suffix = if options.conflict_policy == SqlInsertConflictPolicy::Skip
+        && options.dialect == SqlExportDialect::Postgres
+    {
+        " ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
     let prefix = format!(
-        "INSERT INTO {} ({quoted_columns}){identity_override} VALUES\n",
+        "{insert_keyword} {} ({quoted_columns}){identity_override} VALUES\n",
         options
             .kind
             .qualified_table(schema_option(options.schema), options.table),
@@ -2639,7 +2663,7 @@ fn sql_insert_statements(
         .batch_rows
         .clamp(1, SQL_EXPORT_MAX_INSERT_BATCH_ROWS);
     let mut tuples = Vec::with_capacity(batch_rows);
-    let mut statement_bytes = prefix.len() + 1;
+    let mut statement_bytes = prefix.len() + conflict_suffix.len() + 1;
 
     for row in rows {
         let values = format_sql_export_row(options.dialect, columns, row);
@@ -2648,9 +2672,9 @@ fn sql_insert_statements(
             && (tuples.len() >= batch_rows
                 || statement_bytes.saturating_add(tuple_bytes) > SQL_EXPORT_TARGET_STATEMENT_BYTES)
         {
-            statements.push(format!("{prefix}{};", tuples.join(",\n")));
+            statements.push(format!("{prefix}{}{conflict_suffix};", tuples.join(",\n")));
             tuples.clear();
-            statement_bytes = prefix.len() + 1;
+            statement_bytes = prefix.len() + conflict_suffix.len() + 1;
         }
         statement_bytes = statement_bytes.saturating_add(values.len());
         if !tuples.is_empty() {
@@ -2659,9 +2683,24 @@ fn sql_insert_statements(
         tuples.push(values);
     }
     if !tuples.is_empty() {
-        statements.push(format!("{prefix}{};", tuples.join(",\n")));
+        statements.push(format!("{prefix}{}{conflict_suffix};", tuples.join(",\n")));
     }
-    statements
+    Ok(statements)
+}
+
+fn ensure_sql_insert_conflict_policy(
+    dialect: SqlExportDialect,
+    policy: SqlInsertConflictPolicy,
+) -> Result<(), String> {
+    if policy == SqlInsertConflictPolicy::Strict
+        || matches!(
+            dialect,
+            SqlExportDialect::Postgres | SqlExportDialect::Mysql | SqlExportDialect::Sqlite
+        )
+    {
+        return Ok(());
+    }
+    Err("Skipping conflicting SQL INSERT rows is unavailable for this database dialect".to_string())
 }
 
 fn sql_export_insert_batch_rows(requested: Option<usize>) -> Result<usize, String> {
@@ -7348,6 +7387,7 @@ pub async fn export_table_data(
     page_size: Option<u32>,
     max_rows: Option<u64>,
     sql_insert_batch_size: Option<usize>,
+    sql_insert_conflict_policy: Option<SqlInsertConflictPolicy>,
 ) -> Result<Response<TableExportResult>, String> {
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
     let started_at = current_table_timestamp_millis();
@@ -7410,6 +7450,20 @@ pub async fn export_table_data(
         } else {
             SQL_EXPORT_INSERT_BATCH_ROWS
         };
+        let sql_insert_conflict_policy = if sql_export {
+            sql_insert_conflict_policy.unwrap_or(SqlInsertConflictPolicy::Strict)
+        } else {
+            SqlInsertConflictPolicy::Strict
+        };
+        ensure_sql_insert_conflict_policy(sql_dialect, sql_insert_conflict_policy)?;
+        if sql_insert_conflict_policy == SqlInsertConflictPolicy::Skip
+            && analytical_type_policy == AnalyticalTypePolicy::ExternalText
+        {
+            return Err(
+                "Skipping conflicting SQL INSERT rows requires a native reviewed dialect"
+                    .to_string(),
+            );
+        }
         let metadata_required = structured_filters.is_some()
             || requested_sort.is_some()
             || analytical_export
@@ -7504,6 +7558,7 @@ pub async fn export_table_data(
                         sql_dialect,
                         override_system_value,
                         sql_insert_batch_rows,
+                        sql_insert_conflict_policy,
                         analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
@@ -10462,12 +10517,12 @@ mod tests {
         build_structured_filter_where, build_table_order_by, build_update_mutation,
         build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
         csv_record_values, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_table_export_format,
-        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
-        filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
-        normalized_table_data_transfer_project_id, object_label_from_type,
+        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
+        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
+        execute_target_parameterized_batch, filter_sql_export_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         overwrite_transfer_verification, postgres_view_definition_query, preview_metadata_required,
         query_target, query_target_parameterized, read_csv_import_preview,
@@ -10483,11 +10538,12 @@ mod tests {
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
         AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, SqlExportDialect, SqlInsertExportOptions, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
+        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
+        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
         TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
@@ -10660,6 +10716,7 @@ mod tests {
                     dialect: SqlExportDialect::Postgres,
                     override_system_value: false,
                     batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    conflict_policy: SqlInsertConflictPolicy::Strict,
                     schema: "public",
                     table: "users",
                 },
@@ -10674,7 +10731,8 @@ mod tests {
                     },
                 ],
                 &[vec![json!(7), json!("O'Reilly")]],
-            ),
+            )
+            .unwrap(),
             vec![
                 r#"INSERT INTO "public"."users" ("id", "display name") VALUES
 (7, 'O''Reilly');"#
@@ -10687,6 +10745,7 @@ mod tests {
                     dialect: SqlExportDialect::Mysql,
                     override_system_value: false,
                     batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    conflict_policy: SqlInsertConflictPolicy::Strict,
                     schema: "app",
                     table: "events",
                 },
@@ -10701,7 +10760,8 @@ mod tests {
                     },
                 ],
                 &[vec![json!({"kind": "login"}), json!(true)]],
-            ),
+            )
+            .unwrap(),
             vec![
                 r#"INSERT INTO `app`.`events` (`payload`, `active`) VALUES
 ('{"kind":"login"}', TRUE);"#
@@ -10768,12 +10828,14 @@ mod tests {
                 dialect: SqlExportDialect::Postgres,
                 override_system_value: true,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "public",
                 table: "users",
             },
             &columns,
             &rows,
-        );
+        )
+        .unwrap();
         assert!(overridden[0].contains(") OVERRIDING SYSTEM VALUE VALUES"));
 
         let mysql = sql_insert_statements(
@@ -10782,13 +10844,60 @@ mod tests {
                 dialect: SqlExportDialect::Mysql,
                 override_system_value: true,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "app",
                 table: "users",
             },
             &columns,
             &rows,
-        );
+        )
+        .unwrap();
         assert!(!mysql[0].contains("OVERRIDING SYSTEM VALUE"));
+    }
+
+    #[test]
+    fn sql_export_can_skip_conflicting_rows_for_reviewed_native_dialects() {
+        let columns = [ColumnDef {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+        }];
+        let rows = [vec![json!(42)]];
+        let statement = |kind, dialect| {
+            sql_insert_statements(
+                SqlInsertExportOptions {
+                    kind,
+                    dialect,
+                    override_system_value: false,
+                    batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    conflict_policy: SqlInsertConflictPolicy::Skip,
+                    schema: "main",
+                    table: "events",
+                },
+                &columns,
+                &rows,
+            )
+            .unwrap()
+            .remove(0)
+        };
+
+        assert!(
+            statement(DatabaseKind::Postgres, SqlExportDialect::Postgres)
+                .ends_with(" ON CONFLICT DO NOTHING;")
+        );
+        assert!(statement(DatabaseKind::Mysql, SqlExportDialect::Mysql)
+            .starts_with("INSERT IGNORE INTO "));
+        assert!(statement(DatabaseKind::Postgres, SqlExportDialect::Sqlite)
+            .starts_with("INSERT OR IGNORE INTO "));
+        assert!(ensure_sql_insert_conflict_policy(
+            SqlExportDialect::Standard,
+            SqlInsertConflictPolicy::Skip
+        )
+        .is_err());
+        assert!(ensure_sql_insert_conflict_policy(
+            SqlExportDialect::DuckDb,
+            SqlInsertConflictPolicy::Skip
+        )
+        .is_err());
     }
 
     #[test]
@@ -10812,12 +10921,14 @@ mod tests {
                 dialect: SqlExportDialect::Postgres,
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "public",
                 table: "events",
             },
             &columns,
             &rows,
-        );
+        )
+        .unwrap();
 
         assert_eq!(statements.len(), 2);
         assert_eq!(statements[0].matches("ARRAY[").count(), 100);
@@ -10831,6 +10942,7 @@ mod tests {
                 dialect: SqlExportDialect::Mysql,
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "app",
                 table: "files",
             },
@@ -10845,7 +10957,8 @@ mod tests {
                 },
             ],
             &[vec![json!("0x00ff"), json!("line one\nline two\\tail")]],
-        );
+        )
+        .unwrap();
         assert!(mysql[0].contains("(0X00FF, 'line one\\nline two\\\\tail')"));
 
         let sqlite = sql_insert_statements(
@@ -10854,6 +10967,7 @@ mod tests {
                 dialect: SqlExportDialect::Sqlite,
                 override_system_value: false,
                 batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "main",
                 table: "files",
             },
@@ -10868,7 +10982,8 @@ mod tests {
                 },
             ],
             &[vec![json!("0x00ff"), json!(["one", "two"])]],
-        );
+        )
+        .unwrap();
         assert!(sqlite[0].contains("(X'00FF', '[\"one\",\"two\"]')"));
     }
 
@@ -10886,6 +11001,7 @@ mod tests {
                 dialect: SqlExportDialect::Postgres,
                 override_system_value: false,
                 batch_rows: 25,
+                conflict_policy: SqlInsertConflictPolicy::Strict,
                 schema: "public",
                 table: "events",
             },
@@ -10894,7 +11010,8 @@ mod tests {
                 data_type: "integer".to_string(),
             }],
             &rows,
-        );
+        )
+        .unwrap();
         assert_eq!(statements.len(), 2);
         assert_eq!(statements[0].matches('(').count(), 26);
         assert_eq!(statements[1].matches('(').count(), 2);
@@ -13492,6 +13609,7 @@ WITH DATA;"#
             sql_dialect: SqlExportDialect::Postgres,
             override_system_value: false,
             sql_insert_batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+            sql_insert_conflict_policy: SqlInsertConflictPolicy::Strict,
             analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),
