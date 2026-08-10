@@ -3,7 +3,7 @@
 ## Phase 130 -- PostgreSQL relation-backup entry point
 
 - In a real Tauri desktop build, verify that only an eligible built-in PostgreSQL table tab shows the backup menu item; verify the confirmation boundary, task progress, cancellation and file reveal. Confirm cross-database previews, native-object previews and non-PostgreSQL drivers do not expose it.
-- Restore a produced file into a clean PostgreSQL target and compare the relation schema/data. The omitted object kinds shown in the confirmation must remain absent until their source and ordering contracts are implemented.
+- Restore a produced file into a clean PostgreSQL target and compare the relation schema/data, including FK cycles and parent/child enumeration orders. The omitted object kinds shown in the confirmation must remain absent until their source and ordering contracts are implemented.
 
 ## Phase 129 -- fallback completion generation
 

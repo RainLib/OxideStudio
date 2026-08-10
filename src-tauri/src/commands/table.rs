@@ -4695,6 +4695,17 @@ fn postgres_constraint_definition(
     ))
 }
 
+fn is_postgres_foreign_key_constraint(constraint: &ConstraintInfo) -> bool {
+    constraint
+        .constraint_type
+        .trim()
+        .eq_ignore_ascii_case("FOREIGN KEY")
+        || constraint
+            .definition
+            .as_deref()
+            .is_some_and(|definition| definition.trim_start().to_ascii_uppercase().starts_with("FOREIGN KEY"))
+}
+
 fn generate_postgres_table_ddl(
     schema: &str,
     table: &str,
@@ -8652,6 +8663,10 @@ pub async fn export_database_sql(
             .map_err(|error| error.to_string())?;
         let mut rows_exported = 0_u64;
         let mut batches = 0_u64;
+        // PostgreSQL requires a referenced relation to exist when creating a
+        // FK. Emit FKs after every relation and its data are present so schema
+        // enumeration order cannot make an otherwise valid dump fail.
+        let mut foreign_key_constraints = Vec::<(String, Vec<ConstraintInfo>)>::new();
         for table_info in &tables {
             if *cancel_rx.borrow() {
                 return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
@@ -8663,14 +8678,20 @@ pub async fn export_database_sql(
             if include_structure {
                 let columns = manager.get_columns(&connection_id, schema, table).await
                     .map_err(|error| error.to_string())?;
-                // Emit FKs only after a future dependency-aware second pass.
-                // Inline FK constraints make otherwise valid schemas fail when
-                // catalog enumeration places a child before its parent.
-                let constraints = manager.get_constraints(&connection_id, schema, table).await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|constraint| !constraint.constraint_type.eq_ignore_ascii_case("FOREIGN KEY"))
+                let all_constraints = manager.get_constraints(&connection_id, schema, table).await
+                    .unwrap_or_default();
+                let constraints = all_constraints
+                    .iter()
+                    .filter(|constraint| !is_postgres_foreign_key_constraint(constraint))
+                    .cloned()
                     .collect::<Vec<_>>();
+                let foreign_keys = all_constraints
+                    .into_iter()
+                    .filter(is_postgres_foreign_key_constraint)
+                    .collect::<Vec<_>>();
+                if !foreign_keys.is_empty() {
+                    foreign_key_constraints.push((table.to_string(), foreign_keys));
+                }
                 let indexes = manager.get_indexes(&connection_id, schema, table).await
                     .unwrap_or_default();
                 writeln!(writer, "\n-- Structure for {}", DatabaseKind::Postgres.qualified_table(Some(schema), table))
@@ -8727,6 +8748,26 @@ pub async fn export_database_sql(
                 }
             }
         }
+        if include_structure && !foreign_key_constraints.is_empty() {
+            writeln!(writer, "\n-- Foreign-key constraints (applied after relation data)")
+                .map_err(|error| error.to_string())?;
+            for (table, constraints) in foreign_key_constraints {
+                for constraint in constraints {
+                    if let Some(definition) = postgres_constraint_definition(
+                        DatabaseKind::Postgres,
+                        &constraint,
+                    ) {
+                        writeln!(
+                            writer,
+                            "ALTER TABLE {} ADD {};",
+                            DatabaseKind::Postgres.qualified_table(Some(schema), &table),
+                            definition.trim(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+        }
         writer.flush().map_err(|error| error.to_string())?;
         writer.get_ref().sync_all().map_err(|error| error.to_string())?;
         temporary_file.finalize(&final_path)?;
@@ -8739,7 +8780,6 @@ pub async fn export_database_sql(
             omitted_object_kinds: vec![
                 "views".to_string(), "materialized views".to_string(), "routines".to_string(),
                 "sequences".to_string(), "extensions".to_string(), "grants".to_string(),
-                "foreign key constraints".to_string(),
             ],
         })
     }.await;
