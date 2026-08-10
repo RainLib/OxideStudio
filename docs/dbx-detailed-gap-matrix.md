@@ -36,6 +36,7 @@
 | D08 | 已对齐：连接级事实源 | DBX `connectionStore.ts`、`connectionDatabaseInfo.ts` | `get_connection_database_capability_context`；`LiveConnectionCapabilitySnapshot` | package、server version、capability 和 migration mode 必须来自同一 live driver 实例。 |
 | D09 | 部分对齐：复杂连接参数 | `lib/connection/oracleTnsConnection.ts`、`postgresTlsMode.ts`、`hiveKerberosOptions.ts`、`damengSslOptions.ts` | SSH、SSL、URL 与常用连接字段已支持 | 按产品包声明结构化字段；Oracle TNS、Kerberos、代理、集群地址需逐产品实现并脱敏持久化。 |
 | D10 | 部分对齐：真实版本矩阵的证据门禁已落地，矩阵本身尚未覆盖 | `crates/dbx-core/tests/live_*`、各 `agents/drivers/*/src/test`、`.github/workflows/database-environments.yml` | `scripts/run-driver-conformance.mjs`、fixture/report schema、签名 catalog evidence binding；DuckDB v1.5.5 已完成本地 package 运行证据，尚未签名发布；其余真实数据库组合不足 | PostgreSQL/MySQL 最低/主流/最新；ES 6/7/8；Mongo/Redis；每个首发外置包至少两个 server 版本。 |
+| D11 | 本阶段逻辑已对齐，真实兼容产品验证延期：PostgreSQL backend identity | DBX `crates/dbx-core/src/db/postgres.rs`（`a3cf5fe25`）将 PID/port 转为文本并以 fallible decode 避免兼容数据库连接崩溃 | native PostgreSQL driver 以 `CAST(pg_backend_pid() AS TEXT)` 归一化兼容产品返回类型并安全解析正 `i32`；无法读取、解析或超出范围时仅关闭该请求的 server-side cancellation tracking，正常查询不失败。active-query mutex poison 也恢复为可用 map，不再引发二次 panic | 延期在 CockroachDB/YugabyteDB/兼容代理等受控 fixture 验证原生、numeric/text-like、缺失和越界 PID；只有成功取得标准 PID 时才声明 cancellation evidence。 |
 
 ## 3. SQL Editor、语义分析与 LSP
 

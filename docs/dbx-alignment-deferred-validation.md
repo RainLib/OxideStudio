@@ -254,6 +254,12 @@ explicit deferred validation task rather than an implicit release check.
   including connect, metadata, query, parameter binding, cancellation, and
   normalized error mapping. The catalog must remain candidate-only without
   evidence.
+- Run native PostgreSQL queries against PostgreSQL-compatible fixtures whose
+  `pg_backend_pid()` is exposed as native int4, int8/numeric-compatible text,
+  malformed text, missing function, and an out-of-range value. Normal queries
+  must succeed in every non-query-error case; cancellation may be advertised
+  only when the normalized value is a positive `i32`, and an unavailable PID
+  must not fail connection setup or execution.
 - Run the Headless Agent Host against a controlled MySQL-compatible routing
   proxy with leading `/*+`, `/*@`, and `/*&` hints. Its server-side row-limit
   wrapper must keep the hint before the outer SELECT, preserve ordinary comments

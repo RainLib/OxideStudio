@@ -42,6 +42,15 @@ const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const METADATA_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const METADATA_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const METADATA_POOL_MAX_LIFETIME: Duration = Duration::from_secs(300);
+const POSTGRES_BACKEND_PID_SQL: &str = "SELECT CAST(pg_backend_pid() AS TEXT)";
+
+fn parse_postgres_backend_pid(value: &str) -> Option<i32> {
+    value
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|backend_pid| *backend_pid > 0)
+}
 
 struct PostgresMetadataPool {
     database: String,
@@ -70,7 +79,7 @@ impl Drop for PostgresTrackedQueryGuard<'_> {
             let mut active_queries = self
                 .active_queries
                 .lock()
-                .expect("PostgreSQL active query map mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             active_queries.remove(&query_id);
         }
     }
@@ -937,16 +946,29 @@ impl PostgresDriver {
         conn: &mut sqlx::PgConnection,
     ) -> Result<PostgresTrackedQueryGuard<'a>> {
         let tracked_query_id = if let Some(query_id) = query_id {
-            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            let backend_pid = sqlx::query_scalar::<_, String>(POSTGRES_BACKEND_PID_SQL)
                 .persistent(false)
                 .fetch_one(&mut *conn)
-                .await?;
-            let mut active_queries = self
-                .active_queries
-                .lock()
-                .expect("PostgreSQL active query map mutex poisoned");
-            active_queries.insert(query_id.to_string(), backend_pid);
-            Some(query_id.to_string())
+                .await
+                .ok()
+                .and_then(|value| parse_postgres_backend_pid(&value));
+
+            if let Some(backend_pid) = backend_pid {
+                let mut active_queries = self
+                    .active_queries
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                active_queries.insert(query_id.to_string(), backend_pid);
+                Some(query_id.to_string())
+            } else {
+                // PostgreSQL-compatible servers do not always expose the native
+                // int4 backend PID. Query execution must still work; only
+                // server-side cancellation is unavailable for this request.
+                tracing::debug!(
+                    "PostgreSQL-compatible server did not expose a cancellable backend PID"
+                );
+                None
+            }
         } else {
             None
         };
@@ -960,7 +982,7 @@ impl PostgresDriver {
     fn drain_active_query_backends(&self) -> Vec<(String, i32)> {
         self.active_queries
             .lock()
-            .expect("PostgreSQL active query map mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .drain()
             .collect()
     }
@@ -968,7 +990,7 @@ impl PostgresDriver {
     fn active_query_backend(&self, query_id: &str) -> Option<i32> {
         self.active_queries
             .lock()
-            .expect("PostgreSQL active query map mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(query_id)
             .copied()
     }
@@ -977,7 +999,7 @@ impl PostgresDriver {
         let mut active_queries = self
             .active_queries
             .lock()
-            .expect("PostgreSQL active query map mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active_queries.get(query_id) == Some(&backend_pid) {
             active_queries.remove(query_id);
         }
@@ -2649,6 +2671,23 @@ mod tests {
         assert!(params[1].optional);
         assert_eq!(params[2].name, "tags");
         assert_eq!(params[2].data_type, "text[]");
+    }
+
+    #[test]
+    fn parses_postgres_backend_pid_from_compatible_text_value() {
+        assert_eq!(parse_postgres_backend_pid(" 4242 "), Some(4242));
+        assert_eq!(parse_postgres_backend_pid("0"), None);
+        assert_eq!(parse_postgres_backend_pid("-1"), None);
+        assert_eq!(parse_postgres_backend_pid("2147483648"), None);
+        assert_eq!(parse_postgres_backend_pid("not-a-pid"), None);
+    }
+
+    #[test]
+    fn postgres_backend_pid_query_normalizes_compatible_numeric_types() {
+        assert_eq!(
+            POSTGRES_BACKEND_PID_SQL,
+            "SELECT CAST(pg_backend_pid() AS TEXT)"
+        );
     }
 
     #[test]
