@@ -243,6 +243,27 @@
   transform: translateX(1px);
 }
 
+/* Table metadata hovers can contain a compact DDL-shaped table. Keep all
+ * Monaco hovers inside the editor viewport instead of letting a wide schema
+ * push the popup beyond the workspace; the content itself owns both axes. */
+.monaco-editor .monaco-hover {
+  max-width: min(80vw, 900px);
+  max-height: calc(50vh - 12px);
+  overflow: hidden;
+}
+
+.monaco-editor .monaco-hover .hover-contents {
+  max-width: 100%;
+  max-height: min(480px, calc(50vh - 24px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.monaco-editor .monaco-hover .markdown-hover table {
+  max-width: 100%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .monaco-editor .oxide-es-run-glyph::before {
     transition: none;
