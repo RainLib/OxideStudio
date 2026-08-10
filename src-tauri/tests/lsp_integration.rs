@@ -2529,6 +2529,112 @@ async fn bundled_sql_lsp_keeps_manticore_and_d1_signature_catalog_boundaries() -
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_exposes_the_dbx_clickhouse_function_registry() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let expression_uri = "file:///oxide/clickhouse-expression-functions.sql";
+    let alias_uri = "file:///oxide/clickhouse-alias-functions.sql";
+    let combinator_uri = "file:///oxide/clickhouse-combinator-functions.sql";
+    let table_uri = "file:///oxide/clickhouse-table-functions.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (expression_uri): "clickhouse",
+                    (alias_uri): "clickhouse",
+                    (combinator_uri): "clickhouse",
+                    (table_uri): "clickhouse"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let expression_sql = "SELECT arraym";
+    let alias_sql = "SELECT uca";
+    let combinator_sql = "SELECT sumarrayif";
+    let table_sql = "SELECT * FROM num";
+    open_document(&mut lsp, expression_uri, "sql", expression_sql).await?;
+    open_document(&mut lsp, alias_uri, "sql", alias_sql).await?;
+    open_document(&mut lsp, combinator_uri, "sql", combinator_sql).await?;
+    open_document(&mut lsp, table_uri, "sql", table_sql).await?;
+
+    let expression = completion_items_at(
+        &mut lsp,
+        expression_uri,
+        0,
+        expression_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let alias = completion_items_at(
+        &mut lsp,
+        alias_uri,
+        0,
+        alias_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let combinator = completion_items_at(
+        &mut lsp,
+        combinator_uri,
+        0,
+        combinator_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let table = completion_items_at(
+        &mut lsp,
+        table_uri,
+        0,
+        table_sql.encode_utf16().count() as u32,
+    )
+    .await?;
+    let find = |completion: &Value, label: &str| -> Option<Value> {
+        completion
+            .as_array()
+            .or_else(|| completion.get("items").and_then(Value::as_array))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&expression, "arrayMap")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("arrayMap(${1:lambda}, ${2:array}, ${3:arrays})")
+    );
+    assert_eq!(
+        find(&alias, "upper")
+            .as_ref()
+            .and_then(|item| item.get("filterText"))
+            .and_then(Value::as_str),
+        Some("uca upper")
+    );
+    assert_eq!(
+        find(&combinator, "sumArrayIf")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("sumArrayIf(${1:array}, ${2:condition})")
+    );
+    let numbers = find(&table, "numbers").context("ClickHouse numbers table function")?;
+    assert_eq!(numbers.get("kind").and_then(Value::as_u64), Some(7));
+    assert_eq!(
+        numbers.get("insertText").and_then(Value::as_str),
+        Some("numbers(${1:count})")
+    );
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());

@@ -1104,3 +1104,27 @@ explicit deferred validation task rather than an implicit release check.
   consolidated database-validation phase. Phase 105 compiled the offline Rust
   tests but the Windows unit-test process exited before its harness with the
   known `STATUS_ENTRYPOINT_NOT_FOUND`; no database was opened.
+
+## ClickHouse complete function registry and table-function completion
+
+- Against supported ClickHouse 23.x, 24.x and 25.x fixtures, compare
+  `system.functions` and `system.table_functions` with the bundled DBX-derived
+  snapshot. Record additions, removals, aliases, experimental/deprecated
+  changes and server-version boundaries without silently mutating the shipped
+  static catalog at runtime.
+- In a real Monaco/WebView session, test canonical and alias prefixes, zero- and
+  fixed-argument calls, overloads, optional/variadic parameters, parametric
+  aggregate groups, window functions and generated `Array`/`Map`/`ForEach`/
+  `Distinct`/`If`/`Resample`/state combinator sequences. Confirm signature help
+  selects the active parameter group and live routine metadata remains
+  authoritative for collisions.
+- In `FROM` and `JOIN` relation positions, accept representative entries from
+  all 90 table functions, including `numbers`, `file`, `s3`, `mysql`,
+  `postgresql`, `remote` and `url`. Confirm these candidates remain absent from
+  expression positions and ordinary scalar/aggregate functions remain absent
+  from relation positions.
+- Measure cold and warm completion latency for empty, broad, alias-only,
+  combinator and no-match prefixes in the packaged desktop process. Verify the
+  100-item and 64 KiB bounds, cancellation, stale-response rejection, undo and
+  product switching. Phase 106 performed no real ClickHouse or other database
+  connection; all live/version/Monaco checks remain in this consolidated queue.
