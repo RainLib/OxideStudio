@@ -415,6 +415,19 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
   语义。真实 PostgreSQL/MySQL/SQL Server 的 quoted/unquoted collision、case setting 与
   live metadata refresh 继续在延期队列验证；本阶段不连接数据库。
 
+## Phase 123：quoted alias 的 code-action 身份收口
+
+- DBX `lib/sql/semantic/completion.ts:sqlSemanticReferencedTables` 的 `aliasSql` 与
+  `sqlCompletion.ts:buildReferencedAliasItems` → Oxide
+  `vendor/sql-lsp/src/server.rs:column_qualification_sources`、
+  `qualification_sources_are_equivalent`、`source_matches_qualifier`。
+- 限定/取消限定列的 source 去重与 qualifier match 现在共享 SQL identifier 边界：普通
+  alias 仍按大小写不敏感匹配，任一方为双引号、反引号或方括号的 alias 则按原始 SQL
+  拼写精确匹配。`u` 和 `"U"` 因而可以同时提供正确的 `u.id`/`"U".id` action，
+  未加引号的 `U.total` 不会错误解除 `"U".total` 的限定。
+- library contract 覆盖 quoted/unquoted collision 与错误 quote 形式；真实 Monaco
+  code-action 菜单、各 dialect quote policy 和 live metadata 继续延期验证，本阶段不连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

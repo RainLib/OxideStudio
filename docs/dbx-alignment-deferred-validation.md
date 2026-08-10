@@ -1375,3 +1375,13 @@ explicit deferred validation task rather than an implicit release check.
   only by case, non-ASCII identifiers, stale metadata and live schema refresh.
   Quoted collisions must remain explicit rather than silently selecting a
   different relation. Phase 122 adds no database connection.
+
+## LSP quoted-alias code actions
+
+- In a real Monaco menu, verify qualify/unqualify and batch-qualify actions for
+  ordinary aliases beside double quotes, backticks and SQL Server brackets,
+  including `u`/`"U"` collisions, escaped identifier characters and Unicode.
+  The action must preserve the selected source's original SQL spelling and
+  never remove a qualifier when its unqualified column would be ambiguous.
+- Repeat after a schema refresh and with metadata from PostgreSQL, MySQL and
+  SQL Server. Phase 123 is library-only and makes no database connection.
