@@ -3315,6 +3315,40 @@ fn postgres_backup_routine_definitions(
         .collect()
 }
 
+fn postgres_extension_query(schema: &str) -> String {
+    format!(
+        "SELECT extension.extname, namespace.nspname \
+         FROM pg_catalog.pg_extension extension \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = extension.extnamespace \
+         WHERE namespace.nspname = {} ORDER BY extension.extname;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_extension_ddls(results: &[QueryResult]) -> Result<Vec<String>, String> {
+    results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .map(|row| {
+            let name = row
+                .first()
+                .and_then(value_to_string)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "PostgreSQL extension metadata has no extension name".to_string())?;
+            let schema = row
+                .get(1)
+                .and_then(value_to_string)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("PostgreSQL extension {name} has no schema"))?;
+            Ok(format!(
+                "CREATE EXTENSION IF NOT EXISTS {} WITH SCHEMA {};",
+                DatabaseKind::Postgres.quote_identifier(&name),
+                DatabaseKind::Postgres.quote_identifier(&schema),
+            ))
+        })
+        .collect()
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -8916,6 +8950,21 @@ pub async fn export_database_sql(
         } else {
             discovered_views
         };
+        let extensions = if include_structure {
+            let extension_results = manager
+                .query(
+                    &connection_id,
+                    &postgres_extension_query(schema),
+                    None,
+                    None,
+                    Some(export_id.clone()),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            postgres_extension_ddls(&extension_results)?
+        } else {
+            Vec::new()
+        };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -8974,6 +9023,13 @@ pub async fn export_database_sql(
         // Keep the backup atomic on restore: a failed relation, row or deferred
         // FK must not leave a partly restored schema behind.
         writeln!(writer, "BEGIN;").map_err(|error| error.to_string())?;
+        if include_structure && !extensions.is_empty() {
+            writeln!(writer, "\n-- Extensions (created before dependent relation types and defaults)")
+                .map_err(|error| error.to_string())?;
+            for ddl in &extensions {
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
         if include_structure && !sequences.is_empty() {
             writeln!(writer, "\n-- Sequences (created before relation defaults)")
                 .map_err(|error| error.to_string())?;
@@ -9166,8 +9222,7 @@ pub async fn export_database_sql(
             rows_exported,
             batches,
             omitted_object_kinds: vec![
-                "extensions".to_string(), "grants".to_string(), "sequence ownership".to_string(),
-                "view options".to_string(),
+                "grants".to_string(), "sequence ownership".to_string(), "view options".to_string(),
                 "materialized view indexes and refresh state".to_string(),
             ],
         })

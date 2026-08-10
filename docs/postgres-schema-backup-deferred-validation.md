@@ -16,3 +16,9 @@
 - Restore a schema containing overloaded SQL and PL/pgSQL functions, a procedure, and routines that refer to base relations and views. Confirm `pg_get_functiondef` output restores with the intended owner-independent behavior.
 - Verify the explicit routine count and source-size limits fail before finalizing a file, and cancellation during routine discovery or write removes the partial output.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. Real PostgreSQL restore and the focused Windows Rust test binary remain deferred.
+
+## Phase 131 -- Extensions
+
+- Restore a schema using an extension-provided type, operator, default, and function. Confirm extension DDL is emitted before dependent relation DDL and the target's compatible installed extension version is selected.
+- Verify a target without the required extension fails atomically and leaves no finalized backup restore; extension version pinning, grants, and ownership remain outside the conservative export contract.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. No database was opened.
