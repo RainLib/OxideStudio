@@ -683,3 +683,21 @@ explicit deferred validation task rather than an implicit release check.
   quote rewriting or partial persistence.
 - Saved metadata imports must remain offline/review-only: diagram and live diff
   are allowed, while Apply and direct DDL generation remain disabled.
+
+## Typed SQL table export
+
+- Replay exports containing 101+ rows and individual rows larger than 512 KiB
+  against PostgreSQL, MySQL and SQLite. Confirm statements split at both the
+  100-row and 512 KiB boundaries without losing or duplicating a row.
+- Round-trip PostgreSQL arrays (including empty and nested arrays) and `bytea`,
+  MySQL binary values plus NUL/newline/backslash text, and SQLite BLOB values.
+  Repeat under non-default string/escape modes where the server exposes them.
+- For signed external SQLite and DuckDB packages, confirm the SQL literal
+  dialect follows the declared driver rather than the PostgreSQL-compatible
+  paging/identifier profile. Add product-specific temporal, spatial, vector,
+  identity/generated-column and custom-type fixtures before advertising those
+  cases as conformant.
+- The Rust unit-test binary compiled successfully on 2026-08-10, but execution
+  remains deferred because this Windows environment exits before test startup
+  with `STATUS_ENTRYPOINT_NOT_FOUND`. Re-run the focused SQL export tests in a
+  clean CI/runtime environment before release.

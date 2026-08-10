@@ -88,6 +88,12 @@ const TABLE_EXPORT_WRITER_CLOSED: &str = "TABLE_EXPORT_WRITER_CLOSED";
 /// keeps memory bounded while allowing one page to be fetched as the previous
 /// page is encoded and flushed to the operating-system cache.
 const TABLE_EXPORT_BUFFERED_PAGES: usize = 2;
+/// Keep SQL exports fast to replay without producing statements so large that
+/// database clients or proxies commonly reject them. This mirrors DBX's
+/// reviewed table-export row grouping while retaining a byte-size guard for
+/// unusually wide rows.
+const SQL_EXPORT_INSERT_BATCH_ROWS: usize = 100;
+const SQL_EXPORT_TARGET_STATEMENT_BYTES: usize = 512 * 1024;
 const PARQUET_MAX_ROW_GROUP_ROWS: usize = 50_000;
 const PARQUET_MAX_ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
 const TABLE_EXPORT_REPORT_PARENT_ID: &str = "table-export-reports-v1";
@@ -975,6 +981,7 @@ async fn table_export_dialect_for_connection(
         return Ok(TableExportDialect {
             kind,
             analytical_type_policy,
+            sql_dialect: sql_export_dialect(&capabilities.driver, kind),
         });
     }
 
@@ -987,9 +994,11 @@ async fn table_export_dialect_for_connection(
         Some("duckdb") => AnalyticalTypePolicy::DuckDb,
         _ => AnalyticalTypePolicy::Native,
     };
+    let kind = table_data_dialect(driver)?;
     Ok(TableExportDialect {
-        kind: table_data_dialect(driver)?,
+        kind,
         analytical_type_policy,
+        sql_dialect: sql_export_dialect(driver, kind),
     })
 }
 
@@ -1517,6 +1526,7 @@ struct TableExportWriterContext {
     export_id: String,
     final_path: PathBuf,
     kind: DatabaseKind,
+    sql_dialect: SqlExportDialect,
     analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
@@ -1549,6 +1559,27 @@ enum AnalyticalTypePolicy {
 struct TableExportDialect {
     kind: DatabaseKind,
     analytical_type_policy: AnalyticalTypePolicy,
+    sql_dialect: SqlExportDialect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlExportDialect {
+    DuckDb,
+    Mysql,
+    Postgres,
+    Sqlite,
+    Standard,
+}
+
+fn sql_export_dialect(driver: &str, kind: DatabaseKind) -> SqlExportDialect {
+    match canonical_driver_name(driver) {
+        Some("postgres") => SqlExportDialect::Postgres,
+        Some("mysql") => SqlExportDialect::Mysql,
+        Some("sqlite") => SqlExportDialect::Sqlite,
+        Some("duckdb") => SqlExportDialect::DuckDb,
+        _ if kind == DatabaseKind::Mysql => SqlExportDialect::Mysql,
+        _ => SqlExportDialect::Standard,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2072,6 +2103,7 @@ fn write_table_export_stream(
         export_id,
         final_path,
         kind,
+        sql_dialect,
         analytical_type_policy,
         schema,
         table,
@@ -2230,6 +2262,23 @@ fn write_table_export_stream(
                             .expect("analytical writer exists after column initialization")
                             .write(&batch)?;
                     }
+                } else if matches!(format, TableExportFormat::Sql) {
+                    for statement in
+                        sql_insert_statements(kind, sql_dialect, &schema, &table, &columns, &rows)
+                    {
+                        if *cancel_rx.borrow() {
+                            return Err(format!(
+                                "{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"
+                            ));
+                        }
+                        writeln!(
+                            text_writer
+                                .as_mut()
+                                .expect("text writer exists for SQL exports"),
+                            "{statement}"
+                        )
+                        .map_err(|error| error.to_string())?;
+                    }
                 } else {
                     for row in &rows {
                         if *cancel_rx.borrow() {
@@ -2273,14 +2322,7 @@ fn write_table_export_stream(
                                 writer.write_all(b"\n").map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Sql => {
-                                writeln!(
-                                    text_writer
-                                        .as_mut()
-                                        .expect("text writer exists for SQL exports"),
-                                    "{}",
-                                    sql_insert_statement(kind, &schema, &table, &column_names, row)
-                                )
-                                .map_err(|error| error.to_string())?;
+                                unreachable!("SQL batches are written outside the row loop")
                             }
                             TableExportFormat::Tsv => {
                                 let line =
@@ -2434,7 +2476,7 @@ fn row_to_object(columns: &[String], row: &[Value]) -> Value {
     Value::Object(object)
 }
 
-fn sql_export_literal(value: &Value) -> String {
+fn sql_export_literal(dialect: SqlExportDialect, value: &Value, data_type: Option<&str>) -> String {
     match value {
         Value::Null => "NULL".to_string(),
         Value::Bool(value) => {
@@ -2445,34 +2487,194 @@ fn sql_export_literal(value: &Value) -> String {
             }
         }
         Value::Number(value) => value.to_string(),
-        Value::String(value) => sql_string_literal(value),
-        Value::Array(_) | Value::Object(_) => {
-            sql_string_literal(&serde_json::to_string(value).unwrap_or_default())
+        Value::String(value) => {
+            if dialect == SqlExportDialect::Mysql
+                && data_type.is_some_and(is_mysql_binary_export_type)
+                && mysql_hex_literal(value)
+            {
+                return value.to_ascii_uppercase();
+            }
+            if dialect == SqlExportDialect::Postgres
+                && data_type.is_some_and(is_postgres_bytea_export_type)
+            {
+                if let Some(hex) = value.strip_prefix("\\x").filter(|hex| is_even_hex(hex)) {
+                    return format!("decode('{}', 'hex')", hex.to_ascii_lowercase());
+                }
+            }
+            if dialect == SqlExportDialect::Sqlite {
+                if let Some(hex) = value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                    .filter(|hex| is_even_hex(hex))
+                    .filter(|_| data_type.is_some_and(is_sqlite_blob_export_type))
+                {
+                    return format!("X'{}'", hex.to_ascii_uppercase());
+                }
+            }
+            sql_string_literal_for_dialect(dialect, value)
         }
+        Value::Array(values) if dialect == SqlExportDialect::Postgres => data_type
+            .filter(|data_type| is_postgres_array_export_type(data_type))
+            .map_or_else(
+                || {
+                    sql_string_literal_for_dialect(
+                        dialect,
+                        &serde_json::to_string(value).unwrap_or_default(),
+                    )
+                },
+                |data_type| postgres_array_export_literal(values, data_type),
+            ),
+        Value::Array(_) | Value::Object(_) => sql_string_literal_for_dialect(
+            dialect,
+            &serde_json::to_string(value).unwrap_or_default(),
+        ),
     }
 }
 
-fn sql_insert_statement(
+fn sql_insert_statements(
     kind: DatabaseKind,
+    dialect: SqlExportDialect,
     schema: &str,
     table: &str,
-    columns: &[String],
+    columns: &[ColumnDef],
+    rows: &[Vec<Value>],
+) -> Vec<String> {
+    if columns.is_empty() || rows.is_empty() {
+        return Vec::new();
+    }
+    let quoted_columns = columns
+        .iter()
+        .map(|column| kind.quote_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let prefix = format!(
+        "INSERT INTO {} ({quoted_columns}) VALUES\n",
+        kind.qualified_table(schema_option(schema), table),
+    );
+    let mut statements = Vec::new();
+    let mut tuples = Vec::with_capacity(SQL_EXPORT_INSERT_BATCH_ROWS);
+    let mut statement_bytes = prefix.len() + 1;
+
+    for row in rows {
+        let values = format_sql_export_row(dialect, columns, row);
+        let tuple_bytes = values.len() + usize::from(!tuples.is_empty()) * 2;
+        if !tuples.is_empty()
+            && (tuples.len() >= SQL_EXPORT_INSERT_BATCH_ROWS
+                || statement_bytes.saturating_add(tuple_bytes) > SQL_EXPORT_TARGET_STATEMENT_BYTES)
+        {
+            statements.push(format!("{prefix}{};", tuples.join(",\n")));
+            tuples.clear();
+            statement_bytes = prefix.len() + 1;
+        }
+        statement_bytes = statement_bytes.saturating_add(values.len());
+        if !tuples.is_empty() {
+            statement_bytes = statement_bytes.saturating_add(2);
+        }
+        tuples.push(values);
+    }
+    if !tuples.is_empty() {
+        statements.push(format!("{prefix}{};", tuples.join(",\n")));
+    }
+    statements
+}
+
+fn format_sql_export_row(
+    dialect: SqlExportDialect,
+    columns: &[ColumnDef],
     row: &[Value],
 ) -> String {
-    let columns = columns
+    let values = columns
         .iter()
-        .map(|column| kind.quote_identifier(column))
+        .enumerate()
+        .map(|(index, column)| {
+            sql_export_literal(
+                dialect,
+                row.get(index).unwrap_or(&Value::Null),
+                Some(&column.data_type),
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    let values = row
-        .iter()
-        .map(sql_export_literal)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO {} ({columns}) VALUES ({values});",
-        kind.qualified_table(schema_option(schema), table),
+    format!("({values})")
+}
+
+fn sql_string_literal_for_dialect(dialect: SqlExportDialect, value: &str) -> String {
+    if dialect != SqlExportDialect::Mysql {
+        return sql_string_literal(value);
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\0' => escaped.push_str("\\0"),
+            '\u{0008}' => escaped.push_str("\\b"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{000c}' => escaped.push_str("\\f"),
+            '\u{001a}' => escaped.push_str("\\Z"),
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("''"),
+            _ => escaped.push(character),
+        }
+    }
+    format!("'{escaped}'")
+}
+
+fn is_mysql_binary_export_type(data_type: &str) -> bool {
+    matches!(
+        data_type
+            .trim()
+            .split(['(', ' ', '\t'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase()
+            .as_str(),
+        "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB"
     )
+}
+
+fn is_postgres_bytea_export_type(data_type: &str) -> bool {
+    data_type.trim().eq_ignore_ascii_case("bytea")
+}
+
+fn is_sqlite_blob_export_type(data_type: &str) -> bool {
+    data_type
+        .trim()
+        .split(['(', ' ', '\t'])
+        .next()
+        .unwrap_or("")
+        .eq_ignore_ascii_case("blob")
+}
+
+fn is_postgres_array_export_type(data_type: &str) -> bool {
+    data_type.trim().ends_with("[]")
+}
+
+fn is_even_hex(value: &str) -> bool {
+    value.len().is_multiple_of(2) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn mysql_hex_literal(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .is_some_and(is_even_hex)
+}
+
+fn postgres_array_export_literal(values: &[Value], data_type: &str) -> String {
+    let data_type = data_type.trim();
+    let element_type = data_type.strip_suffix("[]").unwrap_or(data_type).trim();
+    let elements = values
+        .iter()
+        .map(|value| match value {
+            Value::Array(nested) if element_type.ends_with("[]") => {
+                postgres_array_export_literal(nested, element_type)
+            }
+            _ => sql_export_literal(SqlExportDialect::Postgres, value, Some(element_type)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("ARRAY[{elements}]::{data_type}")
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -7045,6 +7247,7 @@ pub async fn export_table_data(
             table_export_dialect_for_connection(&manager, &connection_id, &driver, format).await?;
         let kind = export_dialect.kind;
         let analytical_type_policy = export_dialect.analytical_type_policy;
+        let sql_dialect = export_dialect.sql_dialect;
         let page_size = page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
@@ -7124,6 +7327,7 @@ pub async fn export_table_data(
                         export_id: writer_export_id,
                         final_path: file_path,
                         kind,
+                        sql_dialect,
                         analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
@@ -10083,7 +10287,7 @@ mod tests {
         query_target, query_target_parameterized, read_csv_import_preview,
         read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
-        sql_insert_statement, summarize_mutation_affected, table_data_dialect,
+        sql_insert_statements, summarize_mutation_affected, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
@@ -10093,11 +10297,11 @@ mod tests {
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
         AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferRequest, TableDataTransferTargetColumn,
+        RelationOperation, SqlExportDialect, StreamingXlsxWriter, TableCsvColumnMapping,
+        TableCsvImportOptions, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
         TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
@@ -10263,25 +10467,120 @@ mod tests {
     #[test]
     fn exports_replayable_sql_insert_statements() {
         assert_eq!(
-            sql_insert_statement(
+            sql_insert_statements(
                 DatabaseKind::Postgres,
+                SqlExportDialect::Postgres,
                 "public",
                 "users",
-                &["id".to_string(), "display name".to_string()],
-                &[json!(7), json!("O'Reilly")],
+                &[
+                    ColumnDef {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                    },
+                    ColumnDef {
+                        name: "display name".to_string(),
+                        data_type: "text".to_string(),
+                    },
+                ],
+                &[vec![json!(7), json!("O'Reilly")]],
             ),
-            r#"INSERT INTO "public"."users" ("id", "display name") VALUES (7, 'O''Reilly');"#
+            vec![
+                r#"INSERT INTO "public"."users" ("id", "display name") VALUES
+(7, 'O''Reilly');"#
+            ]
         );
         assert_eq!(
-            sql_insert_statement(
+            sql_insert_statements(
                 DatabaseKind::Mysql,
+                SqlExportDialect::Mysql,
                 "app",
                 "events",
-                &["payload".to_string(), "active".to_string()],
-                &[json!({"kind": "login"}), json!(true)],
+                &[
+                    ColumnDef {
+                        name: "payload".to_string(),
+                        data_type: "JSON".to_string(),
+                    },
+                    ColumnDef {
+                        name: "active".to_string(),
+                        data_type: "BOOLEAN".to_string(),
+                    },
+                ],
+                &[vec![json!({"kind": "login"}), json!(true)]],
             ),
-            r#"INSERT INTO `app`.`events` (`payload`, `active`) VALUES ('{"kind":"login"}', TRUE);"#
+            vec![
+                r#"INSERT INTO `app`.`events` (`payload`, `active`) VALUES
+('{"kind":"login"}', TRUE);"#
+            ]
         );
+    }
+
+    #[test]
+    fn sql_exports_batch_rows_and_preserve_typed_literals() {
+        let columns = vec![
+            ColumnDef {
+                name: "tags".to_string(),
+                data_type: "text[]".to_string(),
+            },
+            ColumnDef {
+                name: "payload".to_string(),
+                data_type: "bytea".to_string(),
+            },
+        ];
+        let rows = (0..101)
+            .map(|index| vec![json!(["one", format!("item-{index}")]), json!("\\x00ff")])
+            .collect::<Vec<_>>();
+        let statements = sql_insert_statements(
+            DatabaseKind::Postgres,
+            SqlExportDialect::Postgres,
+            "public",
+            "events",
+            &columns,
+            &rows,
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("ARRAY[").count(), 100);
+        assert_eq!(statements[1].matches("ARRAY[").count(), 1);
+        assert!(statements[0].contains("ARRAY['one', 'item-0']::text[]"));
+        assert!(statements[0].contains("decode('00ff', 'hex')"));
+
+        let mysql = sql_insert_statements(
+            DatabaseKind::Mysql,
+            SqlExportDialect::Mysql,
+            "app",
+            "files",
+            &[
+                ColumnDef {
+                    name: "contents".to_string(),
+                    data_type: "BLOB".to_string(),
+                },
+                ColumnDef {
+                    name: "note".to_string(),
+                    data_type: "TEXT".to_string(),
+                },
+            ],
+            &[vec![json!("0x00ff"), json!("line one\nline two\\tail")]],
+        );
+        assert!(mysql[0].contains("(0X00FF, 'line one\\nline two\\\\tail')"));
+
+        let sqlite = sql_insert_statements(
+            DatabaseKind::Postgres,
+            SqlExportDialect::Sqlite,
+            "main",
+            "files",
+            &[
+                ColumnDef {
+                    name: "contents".to_string(),
+                    data_type: "BLOB".to_string(),
+                },
+                ColumnDef {
+                    name: "labels".to_string(),
+                    data_type: "text[]".to_string(),
+                },
+            ],
+            &[vec![json!("0x00ff"), json!(["one", "two"])]],
+        );
+        assert!(sqlite[0].contains("(X'00FF', '[\"one\",\"two\"]')"));
     }
 
     #[test]
@@ -12870,6 +13169,7 @@ WITH DATA;"#
             export_id: "export-test".to_string(),
             final_path,
             kind: DatabaseKind::Postgres,
+            sql_dialect: SqlExportDialect::Postgres,
             analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),
