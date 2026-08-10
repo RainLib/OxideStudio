@@ -34,6 +34,29 @@ function plainSnippetText(value: string) {
     .replace(/\$\d+/g, "");
 }
 
+function inlineCandidateRemainder(text: string, word: string) {
+  if (!word) return text || null;
+  if (/^\s/u.test(text)) return text;
+  const normalizedText = text.toLocaleLowerCase();
+  const normalizedWord = word.toLocaleLowerCase();
+  if (
+    normalizedText.startsWith(normalizedWord) &&
+    text.length > word.length
+  ) {
+    return text.slice(word.length);
+  }
+  const memberSeparator = word.lastIndexOf(".");
+  if (memberSeparator < 0) return null;
+  const memberPrefix = word.slice(memberSeparator + 1);
+  if (
+    normalizedText.startsWith(memberPrefix.toLocaleLowerCase()) &&
+    text.length > memberPrefix.length
+  ) {
+    return text.slice(memberPrefix.length);
+  }
+  return null;
+}
+
 export function localInlineSuggestion(
   prefix: string,
   context: InlineLspContext
@@ -41,16 +64,12 @@ export function localInlineSuggestion(
   const candidates = context.candidates || [];
   if (candidates.length === 0) return "";
   const word = prefix.match(/[\p{L}\p{N}_$@:.?]+$/u)?.[0] || "";
-  const candidate = candidates.find((item) => {
-    const text = plainSnippetText(item.insertText || item.label);
-    return word
-      ? text.toLocaleLowerCase().startsWith(word.toLocaleLowerCase()) &&
-          text.length > word.length
-      : text.length > 0;
-  });
-  if (!candidate) return "";
-  const text = plainSnippetText(candidate.insertText || candidate.label);
-  return word ? text.slice(word.length) : text;
+  for (const candidate of candidates) {
+    const text = plainSnippetText(candidate.insertText || candidate.label);
+    const remainder = inlineCandidateRemainder(text, word);
+    if (remainder) return remainder;
+  }
+  return "";
 }
 
 export function cleanInlineSuggestion(

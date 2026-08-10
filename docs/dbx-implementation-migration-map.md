@@ -208,6 +208,9 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 - [x] 将 DBX `sqlCompletion.ts:HIGH_FREQUENCY_KEYWORDS` 的常用关键字层迁入 bundled LSP；
   该层仅在既有语义分组内排序，并保留 connection-scoped usage ranking 的更高个人优先级。
   标准 completion 与有界 inline candidate 共用同一逻辑，真实 Monaco 接受顺序继续延期验证。
+- [x] 将 popup 与 inline 智能提示收敛到同一候选增强管线；产品函数、窗口/表函数、表级
+  INSERT 代码块、alias、权威 edit、casing、去重和排序不再只存在于 popup。inline 仍限制为
+  32 项，ghost text 能处理限定 member、零宽空格续写和去 tab-stop 的多行 snippet。
 
 ### 7.2 P1：以产品族推进，而不是堆菜单项
 

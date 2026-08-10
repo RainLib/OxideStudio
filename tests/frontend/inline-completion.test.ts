@@ -27,6 +27,30 @@ describe("inline completion helpers", () => {
     ).toBe("OM");
   });
 
+  it("uses shared qualified edits and code-block snippets as local ghost text", () => {
+    expect(
+      localInlineSuggestion("SELECT * FROM users u WHERE u.", {
+        candidates: [{ label: "email", insertText: "email" }],
+      })
+    ).toBe("email");
+    expect(
+      localInlineSuggestion("ins", {
+        candidates: [
+          {
+            label: "insert users",
+            insertText:
+              "INSERT INTO users (\n  email\n)\nVALUES (\n  ${1:email_value}\n);",
+          },
+        ],
+      })
+    ).toBe("ERT INTO users (\n  email\n)\nVALUES (\n  email_value\n);");
+    expect(
+      localInlineSuggestion("SELECT * FROM", {
+        candidates: [{ label: "users", insertText: " users" }],
+      })
+    ).toBe(" users");
+  });
+
   it("cleans fences, repeated prefix, suffix overlap, and line overflow", () => {
     expect(
       cleanInlineSuggestion(
@@ -80,4 +104,3 @@ describe("inline completion helpers", () => {
     expect(cache.get("a", 11)).toBeUndefined();
   });
 });
-

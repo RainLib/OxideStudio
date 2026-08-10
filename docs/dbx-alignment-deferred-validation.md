@@ -1191,3 +1191,18 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 110 added source and packaged LSP protocol coverage only. No database
   was opened; real Monaco ordering and provider/version interaction remain in
   the consolidated validation queue.
+
+## Shared popup and inline completion enrichment
+
+- In a real Monaco/WebView session, compare popup and ghost-text results for
+  qualified members, completed clause keywords, product functions, portable
+  window blocks, ClickHouse/Oracle relation functions and table-aware INSERT
+  snippets. Verify Tab acceptance, next-word acceptance, undo, multi-cursor,
+  Vim, IME and casing preferences do not duplicate or replace existing text.
+- With a controlled slow AI provider, verify local enriched candidates still
+  win deterministically, the 32-item context limit remains bounded, cache keys
+  change with enriched schema context, and cancellation/stale model guards
+  prevent an older response from replacing a newer local continuation.
+- Phase 111 adds source, frontend and packaged subprocess coverage only. No
+  database was opened; live provider timing and real Monaco interaction remain
+  in the consolidated validation queue.

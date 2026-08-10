@@ -2892,6 +2892,97 @@ async fn bundled_sql_lsp_ranks_common_keywords_without_crossing_semantic_groups(
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_inline_context_reuses_enriched_completion_candidates() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let snippet_uri = "file:///oxide/inline-insert-snippet.sql";
+    let window_uri = "file:///oxide/inline-window-snippet.sql";
+    let schema_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [schema(
+                    schema_id,
+                    "app",
+                    "users",
+                    "table",
+                    vec![column("email", "varchar")]
+                )],
+                "fileSchemas": {
+                    (snippet_uri): schema_id,
+                    (window_uri): schema_id
+                },
+                "fileDialects": {
+                    (snippet_uri): "postgres",
+                    (window_uri): "postgres"
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let snippet_sql = "ins";
+    open_document(&mut lsp, snippet_uri, "sql", snippet_sql).await?;
+    let snippet_context = lsp
+        .request(
+            "oxide/inlineCompletionContext",
+            json!({
+                "textDocument": { "uri": snippet_uri },
+                "position": {
+                    "line": 0,
+                    "character": snippet_sql.encode_utf16().count()
+                }
+            }),
+        )
+        .await?;
+    let snippet_items = snippet_context
+        .get("candidates")
+        .and_then(Value::as_array)
+        .context("inline INSERT candidates")?;
+    assert!(snippet_items.iter().any(|item| {
+        item.get("label").and_then(Value::as_str) == Some("insert users")
+            && item
+                .get("insertText")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.contains("INSERT INTO app.users") && text.contains("${1:email_value}")
+                })
+    }));
+
+    let window_sql = "SELECT row_";
+    open_document(&mut lsp, window_uri, "sql", window_sql).await?;
+    let window_context = lsp
+        .request(
+            "oxide/inlineCompletionContext",
+            json!({
+                "textDocument": { "uri": window_uri },
+                "position": {
+                    "line": 0,
+                    "character": window_sql.encode_utf16().count()
+                }
+            }),
+        )
+        .await?;
+    let window_items = window_context
+        .get("candidates")
+        .and_then(Value::as_array)
+        .context("inline window-function candidates")?;
+    assert!(window_items.iter().any(|item| {
+        item.get("label").and_then(Value::as_str) == Some("ROW_NUMBER")
+            && item
+                .get("insertText")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("OVER (PARTITION BY"))
+    }));
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());
