@@ -12,6 +12,10 @@ function config(): LspConfigurationPayload {
       keywordCase: "upper",
       tableAlias: "none",
     },
+    formattingPreferences: {
+      logicalOperatorNewline: "before",
+      fromClauseLayout: "newLine",
+    },
     fileSchemas: {
       "oxide://query/q.postgres.postgres": "schema-public",
     },
@@ -123,6 +127,41 @@ function metadataRichConfig(): LspConfigurationPayload {
 }
 
 describe("LSP configuration dispatch", () => {
+  it("sends formatter-only preference changes", async () => {
+    const previous = config();
+    const changed = config();
+    changed.formattingPreferences = {
+      logicalOperatorNewline: "none",
+      fromClauseLayout: "sameLine",
+    };
+    const lastConfigKey = createLspConfigKey({
+      connectionId: "conn-1",
+      driver: "postgres",
+      lspDialect: "postgres",
+      completionPreferences: previous.completionPreferences,
+      formattingPreferences: previous.formattingPreferences,
+      fileSchemas: previous.fileSchemas,
+      fileDialects: previous.fileDialects,
+      schemaDefinitions: previous.schemas,
+    });
+    const updateConfiguration = vi.fn().mockResolvedValue(undefined);
+
+    const result = await dispatchLspConfiguration({
+      connectionId: "conn-1",
+      driver: "postgres",
+      lspDialect: "postgres",
+      config: changed,
+      lastConfigKey,
+      syncGeneration: 1,
+      getCurrentGeneration: () => 1,
+      updateConfiguration,
+    });
+
+    expect(result.status).toBe("sent");
+    expect(result.configKey).not.toBe(lastConfigKey);
+    expect(updateConfiguration).toHaveBeenCalledWith(changed);
+  });
+
   it("skips stale sync generations before sending", async () => {
     const updateConfiguration = vi.fn();
 

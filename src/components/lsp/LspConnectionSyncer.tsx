@@ -153,6 +153,16 @@ export function LspConnectionSyncer() {
     (state) => state.settings.editor.sqlCompletion.tableAlias
   );
   const completionPreferences = { keywordCase, tableAlias } as const;
+  const logicalOperatorNewline = useSettingsStore(
+    (state) => state.settings.editor.sqlFormatting.logicalOperatorNewline
+  );
+  const fromClauseLayout = useSettingsStore(
+    (state) => state.settings.editor.sqlFormatting.fromClauseLayout
+  );
+  const formattingPreferences = {
+    logicalOperatorNewline,
+    fromClauseLayout,
+  } as const;
   const setSemanticStatus = useLspSemanticStatusStore(
     (state) => state.setStatus,
   );
@@ -912,6 +922,7 @@ export function LspConnectionSyncer() {
                 config: {
                   defaultDialect: lspDialect,
                   completionPreferences,
+                  formattingPreferences,
                   schemas: schemaDefinitions.map((schema) => ({
                     ...schema,
                     tables: [...schema.tables],
@@ -1022,6 +1033,7 @@ export function LspConnectionSyncer() {
           const config = {
             defaultDialect: lspDialect,
             completionPreferences,
+            formattingPreferences,
             schemas: schemaDefinitions,
             // Map document URIs to schema ID
             fileSchemas,
@@ -1135,6 +1147,8 @@ export function LspConnectionSyncer() {
     supportsMetadataSync,
     keywordCase,
     tableAlias,
+    logicalOperatorNewline,
+    fromClauseLayout,
     driverCatalogStatus,
     activeProjectId,
     activeProjectRoot,

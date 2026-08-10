@@ -6,7 +6,7 @@ database target until its relevant queue entries pass.
 
 ## Completed non-database checks (2026-08-10)
 
-- `npm test`: 230 test files and 1,181 tests passed. PostgreSQL remote-content,
+- `npm test`: 230 test files and 1,183 tests passed. PostgreSQL remote-content,
   CSV import, cross-database table view, export progress and generated
   operation-ID mocks now follow the current frontend contract.
 - `npm run build`: strict TypeScript, Vite production build and frontend bundle
@@ -20,6 +20,11 @@ database target until its relevant queue entries pass.
   the saved catalog is not treated as a schema, an explicit schema still wins,
   and an unscoped LSP document binds to a discovered case-preserving `dbo`.
   No SQL Server connection was opened.
+- SQL formatter layout passed the complete bundled LSP suite, Clippy, focused
+  settings/config tests, the strict frontend build, and a real packaged-binary
+  JSON-RPC formatting test. Both document and range formatting share the same
+  linear parser-mask pass; live Monaco selection/undo and large-WebView timing
+  remain deferred and no database was opened.
 - The ChartDB metadata-query catalog unit suite passed for PostgreSQL,
   CockroachDB, MySQL, MariaDB, SQLite, SQL Server, ClickHouse and Oracle query
   contracts; no query was executed against a live database.

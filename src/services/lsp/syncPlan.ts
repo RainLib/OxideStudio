@@ -62,11 +62,17 @@ export type LspCompletionPreferences = {
   tableAlias: "none" | "initials";
 };
 
+export type LspFormattingPreferences = {
+  logicalOperatorNewline: "before" | "after" | "none";
+  fromClauseLayout: "newLine" | "sameLine";
+};
+
 export type LspConfigKeyInput = LspFileMappings & {
   connectionId: string;
   driver: DatabaseDriver;
   lspDialect: string;
   completionPreferences?: LspCompletionPreferences;
+  formattingPreferences?: LspFormattingPreferences;
   schemaDefinitions: LspSchemaDefinition[];
 };
 
@@ -259,6 +265,10 @@ export function createLspConfigKey(input: LspConfigKeyInput) {
     completionPreferences: input.completionPreferences || {
       keywordCase: "upper",
       tableAlias: "none",
+    },
+    formattingPreferences: input.formattingPreferences || {
+      logicalOperatorNewline: "before",
+      fromClauseLayout: "newLine",
     },
     fileSchemas: input.fileSchemas,
     fileDialects: input.fileDialects,

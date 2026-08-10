@@ -1340,6 +1340,44 @@ function EditorSettings({
           updateEditor({ confirmDestructiveSql: !editor.confirmDestructiveSql })
         }
       />
+      <SettingsDivider title="SQL formatting" />
+      <SettingRow label="Logical operators:">
+        <select
+          className={selectClass}
+          value={editor.sqlFormatting.logicalOperatorNewline}
+          onChange={(event) =>
+            updateEditor({
+              sqlFormatting: {
+                ...editor.sqlFormatting,
+                logicalOperatorNewline: event.target
+                  .value as AppSettings["editor"]["sqlFormatting"]["logicalOperatorNewline"],
+              },
+            })
+          }
+        >
+          <option value="before">New line before AND / OR</option>
+          <option value="after">New line after AND / OR</option>
+          <option value="none">Keep on the same line</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="FROM clause:">
+        <select
+          className={selectClass}
+          value={editor.sqlFormatting.fromClauseLayout}
+          onChange={(event) =>
+            updateEditor({
+              sqlFormatting: {
+                ...editor.sqlFormatting,
+                fromClauseLayout: event.target
+                  .value as AppSettings["editor"]["sqlFormatting"]["fromClauseLayout"],
+              },
+            })
+          }
+        >
+          <option value="newLine">First source on a new line</option>
+          <option value="sameLine">First source on the FROM line</option>
+        </select>
+      </SettingRow>
       <SettingsDivider title="SQL completion" />
       <SettingRow label="Automatic suggestions:">
         <select

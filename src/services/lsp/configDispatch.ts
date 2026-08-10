@@ -3,6 +3,7 @@ import {
   createLspConfigKey,
   type LspConfigKeyInput,
   type LspCompletionPreferences,
+  type LspFormattingPreferences,
   type LspFileMappings,
 } from "./syncPlan";
 import type { LspSchemaDefinition } from "./schemaConfig";
@@ -10,6 +11,7 @@ import type { LspSchemaDefinition } from "./schemaConfig";
 export type LspConfigurationPayload = LspFileMappings & {
   defaultDialect: string;
   completionPreferences: LspCompletionPreferences;
+  formattingPreferences: LspFormattingPreferences;
   schemas: LspSchemaDefinition[];
 };
 
@@ -52,6 +54,7 @@ export async function dispatchLspConfiguration(options: {
     driver: options.driver,
     lspDialect: options.lspDialect,
     completionPreferences: options.config.completionPreferences,
+    formattingPreferences: options.config.formattingPreferences,
     fileSchemas: options.config.fileSchemas,
     fileDialects: options.config.fileDialects,
     schemaDefinitions: options.config.schemas,

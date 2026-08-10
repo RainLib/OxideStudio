@@ -31,6 +31,11 @@ export type SqlCompletionSettings = {
   snippets: SqlSnippetSetting[];
 };
 
+export type SqlFormattingSettings = {
+  logicalOperatorNewline: "before" | "after" | "none";
+  fromClauseLayout: "newLine" | "sameLine";
+};
+
 export type WorkbenchToolWindowId =
   | "databaseExplorer"
   | "projectFiles"
@@ -114,6 +119,7 @@ export type AppSettings = {
     minimap: boolean;
     confirmDestructiveSql: boolean;
     sqlCompletion: SqlCompletionSettings;
+    sqlFormatting: SqlFormattingSettings;
     inlineCompletion: InlineCompletionSettings;
     keybindingMode: "standard" | "vim";
     vim: {
@@ -265,6 +271,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       rankByUsage: true,
       appendSpace: true,
       snippets: DEFAULT_SQL_COMMAND_SNIPPETS.map((snippet) => ({ ...snippet })),
+    },
+    sqlFormatting: {
+      logicalOperatorNewline: "before",
+      fromClauseLayout: "newLine",
     },
     inlineCompletion: {
       enabled: false,
@@ -548,6 +558,20 @@ export function normalizeAppSettings(value: unknown): AppSettings {
           raw,
           ["editor", "sqlCompletion", "snippets"],
           defaults.editor.sqlCompletion.snippets,
+        ),
+      },
+      sqlFormatting: {
+        logicalOperatorNewline: enumAt(
+          raw,
+          ["editor", "sqlFormatting", "logicalOperatorNewline"],
+          ["before", "after", "none"],
+          defaults.editor.sqlFormatting.logicalOperatorNewline,
+        ),
+        fromClauseLayout: enumAt(
+          raw,
+          ["editor", "sqlFormatting", "fromClauseLayout"],
+          ["newLine", "sameLine"],
+          defaults.editor.sqlFormatting.fromClauseLayout,
         ),
       },
       inlineCompletion: {

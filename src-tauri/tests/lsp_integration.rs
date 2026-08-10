@@ -2329,6 +2329,66 @@ async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Res
     lsp.shutdown().await
 }
 
+#[tokio::test]
+async fn bundled_sql_lsp_applies_configured_formatter_layout() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let uri = "file:///oxide/postgres-format-layout.sql";
+    let file_dialects = Map::from_iter([(uri.to_string(), json!("postgres"))]);
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "defaultDialect": "postgres",
+                "formattingPreferences": {
+                    "logicalOperatorNewline": "none",
+                    "fromClauseLayout": "sameLine"
+                },
+                "fileDialects": file_dialects
+            }
+        }),
+    )
+    .await?;
+    open_document(
+        &mut lsp,
+        uri,
+        "postgres",
+        "select * from users where active = true and role = 'admin' or role = 'owner'",
+    )
+    .await?;
+
+    let edits = lsp
+        .request(
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 2, "insertSpaces": true }
+            }),
+        )
+        .await?;
+    let formatted = edits
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|edit| edit.get("newText"))
+        .and_then(Value::as_str)
+        .context("missing formatting edit text")?;
+
+    assert!(
+        formatted.contains("FROM users"),
+        "formatted SQL: {formatted}"
+    );
+    assert!(
+        !formatted.contains("\n  AND") && !formatted.contains("\n  OR"),
+        "formatted SQL: {formatted}"
+    );
+    assert!(formatted.contains(" AND ") && formatted.contains(" OR "));
+
+    lsp.shutdown().await
+}
+
 async fn open_document(
     lsp: &mut LspProcess,
     uri: &str,

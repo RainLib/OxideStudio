@@ -173,6 +173,36 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("normalizes SQL formatter layout preferences", () => {
+    expect(DEFAULT_APP_SETTINGS.editor.sqlFormatting).toEqual({
+      logicalOperatorNewline: "before",
+      fromClauseLayout: "newLine",
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          sqlFormatting: {
+            logicalOperatorNewline: "none",
+            fromClauseLayout: "sameLine",
+          },
+        },
+      }).editor.sqlFormatting,
+    ).toEqual({
+      logicalOperatorNewline: "none",
+      fromClauseLayout: "sameLine",
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          sqlFormatting: {
+            logicalOperatorNewline: "around",
+            fromClauseLayout: "compact",
+          },
+        },
+      }).editor.sqlFormatting,
+    ).toEqual(DEFAULT_APP_SETTINGS.editor.sqlFormatting);
+  });
+
   it("persists only an HTTPS credential-free driver catalog location", () => {
     expect(
       normalizeAppSettings({
