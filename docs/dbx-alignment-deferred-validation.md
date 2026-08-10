@@ -79,6 +79,13 @@ database target until its relevant queue entries pass.
   constraint/index documentation from a bounded 8,192-entry/4-MiB FIFO cache;
   individual payloads above 256 KiB remain inline, original opaque data is
   restored, and an evicted identity cannot invalidate the proposal itself.
+- The FK-aware missing-JOIN-condition quick fix passed all 146 bundled LSP
+  library tests, all 14 real subprocess protocol tests, the remaining
+  integration/doc suites and strict Clippy without database access. A protocol
+  fixture proves SQL Server product identity produces bracket-quoted composite
+  edits; the rebuilt packaged binary passed all three application-level JSON-RPC
+  integration tests. Real Monaco lightbulb/edit-preview behavior remains
+  deferred below.
 - The DBX `868f7961e` alias-column regression is covered without database
   access: all 137 LSP library tests and the relational scope matrix pass for
   PostgreSQL, MySQL, SQLite, Hive, ClickHouse and SQL Server-compatible bracket
@@ -690,6 +697,15 @@ explicit deferred validation task rather than an implicit release check.
 
 ## FK-aware JOIN completion and completion hot path
 
+- Trigger the `OXIDE002` lightbulb after a missing `ON`/`USING` condition and
+  verify a unique incoming/outgoing FK is preferred, composite columns retain
+  ordinal pairing, and multiple FKs remain separate choices. The edit must land
+  before WHERE/GROUP/ORDER/another JOIN or the terminating semicolon and preserve
+  PostgreSQL double quotes, MySQL backticks and SQL Server brackets.
+- Repeat with self joins, repeated aliases, absent/stale constraints,
+  cross-schema names and incomplete composite metadata. No guessed equality may
+  be offered; only the non-matching `ON 1 = 0` safety guard is allowed when the
+  exact relation occurrence or full column pairing cannot be proven.
 - Verify outgoing and incoming foreign-key JOIN proposals for single and
   composite keys, multiple FKs to the same target, self references, quoted
   identifiers, cross-schema references and aliases that collide with the
