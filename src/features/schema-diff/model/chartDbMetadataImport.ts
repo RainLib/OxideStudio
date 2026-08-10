@@ -22,7 +22,7 @@ export function parseChartDbMetadataJson(
   targetSchema: string,
 ): ChartDbMetadataParseResult {
   const warnings = new Set<string>();
-  const root = unwrapMetadataJson(JSON.parse(content) as unknown);
+  const root = unwrapMetadataJson(parseMetadataInput(content));
   const metadata = record(root, "Metadata JSON root");
   const tables = records(metadata.tables, "tables");
   const views = records(metadata.views, "views");
@@ -275,6 +275,85 @@ function unwrapMetadataJson(value: unknown): unknown {
     return typeof wrapped === "string" ? JSON.parse(wrapped) : wrapped;
   }
   return value;
+}
+
+function parseMetadataInput(content: string): unknown {
+  const trimmed = content.replace(/^\uFEFF/, "").trim();
+  const direct = parseJsonCandidate(trimmed);
+  if (direct.ok) return direct.value;
+
+  // Some database clients emit an invalid wrapper where the inner JSON value
+  // is quoted but its property quotes are not escaped. Extract only the inner
+  // balanced object after the documented wrapper key and parse it strictly.
+  const wrapped = extractInvalidMetadataWrapper(trimmed);
+  if (wrapped) {
+    const parsed = parseJsonCandidate(wrapped);
+    if (parsed.ok) return parsed.value;
+  }
+
+  // CSV exports (notably Snowflake Snowsight) encode a single JSON field by
+  // surrounding it with quotes and doubling every internal quote. Ignore any
+  // header/prefix around the outermost JSON object, then undo CSV quote
+  // escaping. Legitimate JSON backslash escapes remain untouched.
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const csvCandidate = trimmed.slice(firstBrace, lastBrace + 1).replace(/""/g, '"');
+    const parsed = parseJsonCandidate(csvCandidate);
+    if (parsed.ok) return parsed.value;
+  }
+
+  throw new Error("Metadata input must contain valid JSON or a single-field CSV JSON export.");
+}
+
+function parseJsonCandidate(content: string):
+  | { ok: true; value: unknown }
+  | { ok: false } {
+  if (!content) return { ok: false };
+  try {
+    let value: unknown = JSON.parse(content);
+    // Database consoles sometimes return the entire JSON document as a JSON
+    // string. Decode at most two transport layers to keep work bounded.
+    for (let depth = 0; depth < 2 && typeof value === "string"; depth += 1) {
+      value = JSON.parse(value);
+    }
+    return { ok: true, value };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function extractInvalidMetadataWrapper(content: string): string | null {
+  const key = "metadata_json_to_import";
+  const keyIndex = content.indexOf(key);
+  if (keyIndex < 0) return null;
+  const start = content.indexOf("{", keyIndex + key.length);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < content.length; index += 1) {
+    const character = content[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (character === "{") depth += 1;
+    if (character === "}" && --depth === 0) {
+      return content.slice(start, index + 1);
+    }
+  }
+  return null;
 }
 
 function records(value: unknown, field: string) {

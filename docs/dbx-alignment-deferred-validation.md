@@ -6,7 +6,7 @@ database target until its relevant queue entries pass.
 
 ## Completed non-database checks (2026-08-10)
 
-- `npm test`: 230 test files and 1,175 tests passed. PostgreSQL remote-content,
+- `npm test`: 230 test files and 1,179 tests passed. PostgreSQL remote-content,
   CSV import, cross-database table view, export progress and generated
   operation-ID mocks now follow the current frontend contract.
 - `npm run build`: strict TypeScript, Vite production build and frontend bundle
@@ -66,6 +66,17 @@ database target until its relevant queue entries pass.
   constraint/index documentation from a bounded 8,192-entry/4-MiB FIFO cache;
   individual payloads above 256 KiB remain inline, original opaque data is
   restored, and an evicted identity cannot invalidate the proposal itself.
+- The DBX `868f7961e` alias-column regression is covered without database
+  access: all 137 LSP library tests and the relational scope matrix pass for
+  PostgreSQL, MySQL, SQLite, Hive, ClickHouse and SQL Server-compatible bracket
+  syntax. Display labels and bare-column filtering remain stable while inserted
+  identifiers preserve exact double quotes, backticks, brackets and case,
+  including a requested alias from a correlated outer query.
+- The latest ChartDB metadata-import CSV/embedded-quote behavior (`3442936`)
+  passed seven focused frontend tests. Strict JSON is authoritative; JSON-string
+  transport, single-field CSV doubled quotes and the known invalid wrapper are
+  accepted without changing embedded quotes, while unrelated malformed input
+  still fails and the snapshot stays offline/review-only.
 - The signature-help and built-in function completion alignment suite passed
   without database access: 131 LSP
   library tests, 12 process-protocol tests and 9 schema contract tests. It
@@ -710,11 +721,14 @@ explicit deferred validation task rather than an implicit release check.
   and keep literal escaping intact for quoted schema names.
 - Validate PostgreSQL/MySQL/MariaDB/SQLite/SQL Server/Oracle/ClickHouse and
   CockroachDB metadata-query output against the strict importer, including the
-  valid `metadata_json_to_import` wrapper, composite PK/FK/index ordering,
-  arrays, precision/scale, identity, views, checks and custom-type warnings.
+  valid and known unescaped `metadata_json_to_import` wrappers, single-field CSV
+  doubled-quote output, embedded quoted identifiers, composite PK/FK/index
+  ordering, arrays, precision/scale, identity, views, checks and custom-type
+  warnings.
 - Confirm the 16 MiB browser bound, schema filtering, duplicate handling and
-  missing-table inference. Malformed JSON/wrappers must fail without permissive
-  quote rewriting or partial persistence.
+  missing-table inference. Inputs outside the explicit strict JSON, JSON-string,
+  CSV and documented-wrapper shapes must fail without broad quote rewriting or
+  partial persistence.
 - Saved metadata imports must remain offline/review-only: diagram and live diff
   are allowed, while Apply and direct DDL generation remain disabled.
 

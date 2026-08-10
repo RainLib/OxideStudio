@@ -63,6 +63,58 @@ describe("ChartDB metadata JSON import", () => {
     expect(parsed.relations).toHaveLength(2);
   });
 
+  it("accepts single-field CSV JSON while preserving embedded quotes", () => {
+    const csvMetadata = {
+      ...metadata,
+      indexes: [{
+        schema: "public",
+        table: "orders",
+        name: "orders_cluster",
+        column: 'LINEAR(DIV0("user_id", 500000))',
+        index_type: "CLUSTERING",
+        unique: false,
+        column_position: 1,
+      }],
+    };
+    const csv = `"${JSON.stringify(csvMetadata).replace(/"/g, '""')}"`;
+    const parsed = parseChartDbMetadataJson(csv, "public");
+
+    expect(parsed.relations.find((relation) => relation.name === "orders")?.indexes[0])
+      .toMatchObject({ columns: ['LINEAR(DIV0("user_id", 500000))'] });
+  });
+
+  it("extracts an unescaped metadata_json_to_import wrapper", () => {
+    const invalidWrapper = `[{"metadata_json_to_import": "${JSON.stringify(metadata)}"}]`;
+    const parsed = parseChartDbMetadataJson(invalidWrapper, "public");
+
+    expect(parsed.databaseName).toBe("app");
+    expect(parsed.relations).toHaveLength(2);
+  });
+
+  it("keeps valid JSON escape sequences authoritative", () => {
+    const escaped = {
+      ...metadata,
+      indexes: [{
+        schema: "public",
+        table: "orders",
+        name: "orders_cluster",
+        column: 'LINEAR(DIV0("user_id", 500000))',
+        index_type: "CLUSTERING",
+        unique: false,
+        column_position: 1,
+      }],
+    };
+    const parsed = parseChartDbMetadataJson(JSON.stringify(escaped), "public");
+
+    expect(parsed.relations.find((relation) => relation.name === "orders")?.indexes[0]?.columns)
+      .toEqual(['LINEAR(DIV0("user_id", 500000))']);
+  });
+
+  it("rejects malformed input outside the documented transport shapes", () => {
+    expect(() => parseChartDbMetadataJson('{"tables": [}', "public"))
+      .toThrow("valid JSON or a single-field CSV JSON export");
+  });
+
   it("marks saved metadata baselines as offline", () => {
     const snapshot = createChartDbMetadataSnapshot(
       {
