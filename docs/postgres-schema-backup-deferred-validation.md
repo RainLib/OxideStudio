@@ -10,3 +10,9 @@
 
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully.
 - The focused Rust test binary compilation was started with `cargo test ... --no-run` but exceeded the local 60-second command limit. Neither that test nor a real PostgreSQL restore is recorded as passed.
+
+## Phase 129 -- Functions and procedures
+
+- Restore a schema containing overloaded SQL and PL/pgSQL functions, a procedure, and routines that refer to base relations and views. Confirm `pg_get_functiondef` output restores with the intended owner-independent behavior.
+- Verify the explicit routine count and source-size limits fail before finalizing a file, and cancellation during routine discovery or write removes the partial output.
+- `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. Real PostgreSQL restore and the focused Windows Rust test binary remain deferred.

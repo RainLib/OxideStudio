@@ -103,6 +103,10 @@ const TABLE_IMPORT_REPORT_PARENT_ID: &str = "table-import-reports-v1";
 const TABLE_IMPORT_REPORT_KIND: &str = "TABLE_IMPORT_REPORT";
 const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
 const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
+/// A whole-schema backup must not silently truncate source definitions. Keep
+/// routine discovery bounded, but fail the export if the schema exceeds this
+/// reviewed host-owned limit instead of publishing a partial logical backup.
+const MAX_POSTGRES_BACKUP_ROUTINES: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3262,6 +3266,53 @@ fn order_postgres_views(
         }
     }
     Ok(ordered)
+}
+
+fn postgres_backup_routine_definitions_query(schema: &str) -> String {
+    format!(
+        "SELECT p.proname AS routine_name, pg_get_function_identity_arguments(p.oid) AS identity_arguments, \
+         LEFT(pg_get_functiondef(p.oid), {source_limit}) AS definition \
+         FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {schema} AND p.prokind IN ('f', 'p') \
+         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid) \
+         LIMIT {routine_limit};",
+        schema = postgres_sql_string_literal(schema),
+        source_limit = MAX_POSTGRES_ROUTINE_SOURCE_CHARS + 1,
+        routine_limit = MAX_POSTGRES_BACKUP_ROUTINES + 1,
+    )
+}
+
+fn postgres_backup_routine_definitions(
+    results: &[QueryResult],
+) -> Result<Vec<String>, String> {
+    let rows = results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .collect::<Vec<_>>();
+    if rows.len() > MAX_POSTGRES_BACKUP_ROUTINES {
+        return Err(format!(
+            "PostgreSQL schema contains more than {MAX_POSTGRES_BACKUP_ROUTINES} routines; refusing a partial backup"
+        ));
+    }
+    rows.into_iter()
+        .map(|row| {
+            let name = row.first().and_then(value_to_string).unwrap_or_default();
+            let definition = row
+                .get(2)
+                .and_then(value_to_string)
+                .filter(|definition| !definition.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("PostgreSQL routine {name} has no definition available for backup")
+                })?;
+            if definition.chars().count() > MAX_POSTGRES_ROUTINE_SOURCE_CHARS {
+                return Err(format!(
+                    "PostgreSQL routine {name} exceeds the {MAX_POSTGRES_ROUTINE_SOURCE_CHARS}-character backup limit"
+                ));
+            }
+            Ok(definition.trim().to_string())
+        })
+        .collect()
 }
 
 fn mysql_comment_literal(value: &str) -> String {
@@ -8896,6 +8947,21 @@ pub async fn export_database_sql(
             })
             .transpose()?
             .unwrap_or_default();
+        let routines = if include_structure {
+            let routine_results = manager
+                .query(
+                    &connection_id,
+                    &postgres_backup_routine_definitions_query(schema),
+                    None,
+                    None,
+                    Some(export_id.clone()),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            postgres_backup_routine_definitions(&routine_results)?
+        } else {
+            Vec::new()
+        };
         let final_path = export_file_path(&app, schema, "database_backup", TableExportFormat::Sql)?;
         let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
         let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
@@ -9079,6 +9145,16 @@ pub async fn export_database_sql(
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
             }
         }
+        if include_structure && !routines.is_empty() {
+            writeln!(writer, "\n-- Functions and procedures (created after relations and views)")
+                .map_err(|error| error.to_string())?;
+            for definition in &routines {
+                if *cancel_rx.borrow() {
+                    return Err(format!("{TABLE_EXPORT_CANCELLED}: Export cancelled by the user"));
+                }
+                writeln!(writer, "{definition}").map_err(|error| error.to_string())?;
+            }
+        }
         writeln!(writer, "COMMIT;").map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())?;
         writer.get_ref().sync_all().map_err(|error| error.to_string())?;
@@ -9090,8 +9166,8 @@ pub async fn export_database_sql(
             rows_exported,
             batches,
             omitted_object_kinds: vec![
-                "routines".to_string(), "extensions".to_string(), "grants".to_string(),
-                "sequence ownership".to_string(), "view options".to_string(),
+                "extensions".to_string(), "grants".to_string(), "sequence ownership".to_string(),
+                "view options".to_string(),
                 "materialized view indexes and refresh state".to_string(),
             ],
         })
@@ -11837,6 +11913,7 @@ mod tests {
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         order_postgres_views, overwrite_transfer_verification,
+        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
         postgres_identity_reseed_verification_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
         postgres_view_definition_query, postgres_view_dependency_query,
@@ -13749,6 +13826,34 @@ SELECT id FROM users WHERE active;"#
         )
         .unwrap_err()
         .contains("dependency cycle"));
+    }
+
+    #[test]
+    fn keeps_postgres_routine_backup_complete_and_bounded() {
+        let query = postgres_backup_routine_definitions_query("public");
+        assert!(query.contains("p.prokind IN ('f', 'p')"));
+        assert!(query.contains("LIMIT 1001"));
+
+        let definitions = postgres_backup_routine_definitions(&[QueryResult::rows(
+            Vec::new(),
+            vec![vec![
+                Value::String("calculate_total".to_string()),
+                Value::String("integer".to_string()),
+                Value::String(
+                    "CREATE OR REPLACE FUNCTION public.calculate_total() RETURNS integer LANGUAGE sql AS $$ SELECT 1; $$;"
+                        .to_string(),
+                ),
+            ]],
+        )])
+        .unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert!(definitions[0].starts_with("CREATE OR REPLACE FUNCTION"));
+        assert!(postgres_backup_routine_definitions(&[QueryResult::rows(
+            Vec::new(),
+            vec![vec![Value::String("missing".to_string())]],
+        )])
+        .unwrap_err()
+        .contains("no definition"));
     }
 
     #[test]
