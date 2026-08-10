@@ -31,6 +31,22 @@ const STATEMENT_STARTERS = [
   "DESCRIBE",
 ] as const;
 
+const POSTGRES_STATEMENT_STARTERS = ["CALL", "DO"] as const;
+const MYSQL_STATEMENT_STARTERS = ["CALL", "REPLACE"] as const;
+const ORACLE_STATEMENT_STARTERS = ["MERGE INTO", "DECLARE", "BEGIN"] as const;
+const SQLSERVER_STATEMENT_STARTERS = [
+  "MERGE",
+  "EXEC",
+  "EXECUTE",
+  "BEGIN TRANSACTION",
+] as const;
+const MANTICORE_STATEMENT_STARTERS = [
+  "SHOW TABLES",
+  "SHOW META",
+  "FACET",
+  "CALL",
+] as const;
+
 const SELECT_CONTINUATIONS = [
   "DISTINCT",
   "*",
@@ -99,6 +115,35 @@ function grammarItems(
   }));
 }
 
+function normalizedDriver(driver?: string | null) {
+  const normalized = driver?.trim().toLocaleLowerCase() || "";
+  if (["postgresql", "pgsql"].includes(normalized)) return "postgres";
+  if (normalized === "mariadb") return "mysql";
+  return normalized;
+}
+
+/**
+ * Keep statement-level grammar recommendations product-scoped.  A generic
+ * SQL LSP cannot safely infer whether `DO`, `EXEC`, or Manticore's `FACET`
+ * exists, while the selected connection driver can.
+ */
+function statementStartersForProduct(options: SqlCommandSnippetOptions) {
+  const driver = normalizedDriver(options.driver);
+  const productStarters =
+    ["postgres", "cockroachdb", "yugabytedb", "neon", "supabase", "timescaledb"].includes(driver)
+      ? POSTGRES_STATEMENT_STARTERS
+      : ["mysql", "tidb", "oceanbase", "singlestore"].includes(driver)
+        ? MYSQL_STATEMENT_STARTERS
+        : ["oracle", "oceanbase-oracle"].includes(driver)
+          ? ORACLE_STATEMENT_STARTERS
+          : driver === "sqlserver"
+            ? SQLSERVER_STATEMENT_STARTERS
+            : driver === "manticoresearch"
+              ? MANTICORE_STATEMENT_STARTERS
+              : [];
+  return [...new Set([...STATEMENT_STARTERS, ...productStarters])];
+}
+
 /**
  * Returns only syntactic continuations that are valid at a statement boundary
  * or immediately after a completed SQL clause. It never attempts to guess a
@@ -131,7 +176,7 @@ export function sqlSyntaxFallbackCompletions(
     return [
       ...sqlCommandSnippetCompletions(statement, options),
       ...grammarItems(
-        STATEMENT_STARTERS,
+        statementStartersForProduct(options),
         CompletionItemKind.Keyword,
         "SQL statement",
       ),
