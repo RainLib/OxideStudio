@@ -3531,6 +3531,32 @@ fn postgres_range_type_query(schema: &str) -> String {
     )
 }
 
+/// `typtype = 'm'` is safe to query on PostgreSQL versions that predate
+/// multiranges: it simply matches no rows there.  Keeping this independent of
+/// `pg_range.rngmultitypid` avoids an unsupported catalog-column reference on
+/// PostgreSQL 13 and earlier.
+fn postgres_multirange_type_query(schema: &str) -> String {
+    format!(
+        "SELECT type.typname FROM pg_catalog.pg_type type \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace \
+         WHERE namespace.nspname = {} AND type.typtype = 'm' ORDER BY type.typname;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_multirange_type_names(results: &[QueryResult]) -> Result<Vec<String>, String> {
+    results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .map(|row| {
+            row.first()
+                .and_then(value_to_string)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "PostgreSQL multirange metadata has no type name".to_string())
+        })
+        .collect()
+}
+
 fn postgres_qualified_catalog_name(schema: &str, name: &str) -> String {
     format!(
         "{}.{}",
@@ -9262,6 +9288,17 @@ pub async fn export_database_sql(
                 .await.map_err(|error| error.to_string())?;
             postgres_range_type_ddls(schema, &results)?
         } else { Vec::new() };
+        if include_structure {
+            let results = manager.query(&connection_id, &postgres_multirange_type_query(schema), None, None, Some(export_id.clone()))
+                .await.map_err(|error| error.to_string())?;
+            let multirange_types = postgres_multirange_type_names(&results)?;
+            if !multirange_types.is_empty() {
+                return Err(format!(
+                    "PostgreSQL multirange type(s) are not yet supported by schema backup: {}",
+                    multirange_types.join(", "),
+                ));
+            }
+        }
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -12382,6 +12419,7 @@ mod tests {
         postgres_backup_index_definitions,
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
         postgres_identity_reseed_verification_query,
+        postgres_multirange_type_names, postgres_multirange_type_query,
         postgres_range_type_ddls, postgres_range_type_query,
         postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
         postgres_materialized_view_populated_query, postgres_view_definition_query,
@@ -14378,6 +14416,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         let query = postgres_range_type_query("public");
         assert!(query.contains("JOIN pg_catalog.pg_range range"));
         assert!(query.contains("type.typtype = 'r'"));
+        assert!(postgres_multirange_type_query("public").contains("type.typtype = 'm'"));
 
         let ddls = postgres_range_type_ddls(
             "public",
@@ -14424,6 +14463,15 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         )
         .unwrap_err()
         .contains("restore order"));
+
+        assert_eq!(
+            postgres_multirange_type_names(&[QueryResult::rows(
+                Vec::new(),
+                vec![vec![Value::String("business_hours_multirange".to_string())]],
+            )])
+            .unwrap(),
+            vec!["business_hours_multirange".to_string()]
+        );
     }
 
     #[test]

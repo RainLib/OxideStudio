@@ -32,7 +32,7 @@
 ## Phase 136 -- Range types
 
 - Restore a range type with a built-in subtype, subtype opclass, collation, canonical function, and subtype-diff function. Confirm it is emitted before a dependent table and retains range operators and constraints after restore.
-- Verify a range whose canonical or subtype-diff function is user-defined is rejected before a backup is finalized. Multirange types remain an explicit backup boundary until PostgreSQL-version capability handling is reviewed.
+- Verify a range whose canonical or subtype-diff function is user-defined is rejected before a backup is finalized. A schema containing a multirange is also rejected before finalization; it remains an explicit backup boundary until PostgreSQL-version capability handling is reviewed.
 - `cargo check --manifest-path src-tauri/Cargo.toml` completed successfully. The focused Rust test binary compilation exceeded the local 60-second command limit; no database was opened.
 
 ## Phase 134 -- Enum types
