@@ -15,6 +15,7 @@ use crate::core::{
     protocol::{DatabaseCreateRequest, Response},
     store::MetaStore,
 };
+use oxide_driver_protocol::SchemaMigrationMode;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -293,11 +294,22 @@ fn fallback_external_database_capabilities(
 fn schema_migration_capability_mode(
     driver: &str,
     external_package: bool,
+    signed_mode: Option<SchemaMigrationMode>,
+    has_exact_evidence: bool,
 ) -> SchemaMigrationCapabilityMode {
     if external_package {
-        // External packages currently expose metadata snapshots and read-only
-        // drift review, but not a semantic DDL execution protocol.
-        return SchemaMigrationCapabilityMode::ReviewOnly;
+        if !has_exact_evidence {
+            return SchemaMigrationCapabilityMode::ReviewOnly;
+        }
+        return match signed_mode {
+            Some(SchemaMigrationMode::Transactional) => {
+                SchemaMigrationCapabilityMode::Transactional
+            }
+            Some(SchemaMigrationMode::NonTransactional) => {
+                SchemaMigrationCapabilityMode::NonTransactional
+            }
+            None => SchemaMigrationCapabilityMode::ReviewOnly,
+        };
     }
     match DatabaseKind::from_str(driver) {
         Ok(DatabaseKind::Postgres) => SchemaMigrationCapabilityMode::Transactional,
@@ -335,7 +347,12 @@ fn connection_database_capability_context(
 
     Ok(ConnectionDatabaseCapabilityContext {
         connection_id,
-        schema_migration_mode: schema_migration_capability_mode(&driver, external_package),
+        schema_migration_mode: schema_migration_capability_mode(
+            &driver,
+            external_package,
+            snapshot.semantic_schema_migration_mode,
+            snapshot.has_exact_semantic_schema_migration_evidence,
+        ),
         driver,
         distribution: if external_package {
             "external".to_string()
@@ -1368,6 +1385,8 @@ mod tests {
                 package_version: Some("16.4.1".to_string()),
                 package_capabilities: Some(capabilities.clone()),
                 server_version: Some("16.3".to_string()),
+                semantic_schema_migration_mode: Some(SchemaMigrationMode::Transactional),
+                has_exact_semantic_schema_migration_evidence: false,
             },
         )
         .unwrap();
@@ -1393,6 +1412,8 @@ mod tests {
                 package_version: None,
                 package_capabilities: None,
                 server_version: Some("17.1".to_string()),
+                semantic_schema_migration_mode: None,
+                has_exact_semantic_schema_migration_evidence: false,
             },
         )
         .unwrap();
@@ -1404,6 +1425,8 @@ mod tests {
                 package_version: None,
                 package_capabilities: None,
                 server_version: Some("11.4".to_string()),
+                semantic_schema_migration_mode: None,
+                has_exact_semantic_schema_migration_evidence: false,
             },
         )
         .unwrap();
@@ -1415,6 +1438,41 @@ mod tests {
         assert_eq!(
             mysql.schema_migration_mode,
             SchemaMigrationCapabilityMode::NonTransactional
+        );
+    }
+
+    #[test]
+    fn external_migration_mode_requires_exact_evidence_and_signed_mode() {
+        assert_eq!(
+            schema_migration_capability_mode(
+                "warehouse",
+                true,
+                Some(SchemaMigrationMode::Transactional),
+                false,
+            ),
+            SchemaMigrationCapabilityMode::ReviewOnly
+        );
+        assert_eq!(
+            schema_migration_capability_mode(
+                "warehouse",
+                true,
+                Some(SchemaMigrationMode::Transactional),
+                true,
+            ),
+            SchemaMigrationCapabilityMode::Transactional
+        );
+        assert_eq!(
+            schema_migration_capability_mode(
+                "warehouse",
+                true,
+                Some(SchemaMigrationMode::NonTransactional),
+                true,
+            ),
+            SchemaMigrationCapabilityMode::NonTransactional
+        );
+        assert_eq!(
+            schema_migration_capability_mode("warehouse", true, None, true),
+            SchemaMigrationCapabilityMode::ReviewOnly
         );
     }
 

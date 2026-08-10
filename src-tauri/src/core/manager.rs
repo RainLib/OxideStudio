@@ -82,6 +82,8 @@ pub struct LiveConnectionCapabilitySnapshot {
     pub package_version: Option<String>,
     pub package_capabilities: Option<DatabaseCapabilities>,
     pub server_version: Option<String>,
+    pub semantic_schema_migration_mode: Option<SchemaMigrationMode>,
+    pub has_exact_semantic_schema_migration_evidence: bool,
 }
 
 fn runtime_timestamp_millis() -> u64 {
@@ -283,6 +285,9 @@ impl ConnectionManager {
             .unwrap_or((None, None));
         let package_capabilities = driver.package_capabilities();
         let server_version = driver.server_version().await;
+        let semantic_schema_migration_mode = driver.semantic_schema_migration_mode();
+        let has_exact_semantic_schema_migration_evidence =
+            driver.has_exact_semantic_schema_migration_evidence(server_version.as_deref());
 
         Ok(LiveConnectionCapabilitySnapshot {
             driver_id,
@@ -290,6 +295,8 @@ impl ConnectionManager {
             package_version,
             package_capabilities,
             server_version,
+            semantic_schema_migration_mode,
+            has_exact_semantic_schema_migration_evidence,
         })
     }
 
@@ -1464,6 +1471,8 @@ mod tests {
                 package_version: Some("16.4.1".to_string()),
                 package_capabilities: Some(capabilities),
                 server_version: Some("16.3".to_string()),
+                semantic_schema_migration_mode: None,
+                has_exact_semantic_schema_migration_evidence: false,
             }
         );
     }

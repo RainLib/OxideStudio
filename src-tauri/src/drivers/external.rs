@@ -640,6 +640,12 @@ impl DatabaseDriver for ExternalDriver {
             .map(|contract| contract.mode)
     }
 
+    fn has_exact_semantic_schema_migration_evidence(&self, server_version: Option<&str>) -> bool {
+        !self.agent_read_only
+            && server_version
+                .is_some_and(|version| self.package.has_exact_migration_evidence(version))
+    }
+
     async fn server_version(&self) -> Option<String> {
         self.server_version.lock().await.clone()
     }

@@ -36,6 +36,7 @@ const MAX_DRIVER_CATALOG_BYTES: u64 = 512 * 1024;
 const MAX_DRIVER_CATALOG_ENTRIES: usize = 256;
 const MAX_DRIVER_CATALOG_FIELD_LENGTH: usize = 512;
 const DRIVER_PACKAGE_CACHE_DIRECTORY: &str = "_catalog-cache";
+const DRIVER_PACKAGE_CATALOG_RECEIPT: &str = ".oxide-catalog-receipt.json";
 const MANAGED_JAVA_RUNTIME_MANIFEST: &str = "runtime.json";
 const MANAGED_JAVA_RUNTIME_KIND: &str = "java";
 
@@ -251,6 +252,57 @@ pub struct InstalledDriverPackage {
     pub active: bool,
     pub status: DriverPackageStatus,
     pub status_message: Option<String>,
+    /// Host-written receipt from the exact signed catalog entry used for this
+    /// installation. It is intentionally excluded from renderer responses.
+    #[serde(skip_serializing)]
+    pub(crate) catalog_entry: Option<DriverPackageCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DriverPackageCatalogReceipt {
+    schema_version: u32,
+    entry: DriverPackageCatalogEntry,
+}
+
+impl InstalledDriverPackage {
+    /// Exact migration evidence is narrower than general package compatibility:
+    /// wildcard target records and version-family assumptions never authorize
+    /// a live migration.
+    pub fn has_exact_migration_evidence(&self, server_version: &str) -> bool {
+        let Some(entry) = self.catalog_entry.as_ref() else {
+            return false;
+        };
+        let Some(conformance) = entry.conformance.as_ref() else {
+            return false;
+        };
+        if self.manifest.schema_migration.is_none()
+            || !conformance
+                .migration
+                .iter()
+                .any(|version| version.eq_ignore_ascii_case(server_version.trim()))
+        {
+            return false;
+        }
+        let targets = current_target_aliases();
+        conformance.evidence.iter().any(|evidence| {
+            evidence.driver_id == self.manifest.driver_id
+                && evidence.package_version == self.manifest.package_version
+                && evidence
+                    .entrypoint_sha256
+                    .eq_ignore_ascii_case(&self.manifest.sha256)
+                && evidence
+                    .server_version
+                    .eq_ignore_ascii_case(server_version.trim())
+                && evidence
+                    .operations
+                    .iter()
+                    .any(|operation| operation == "migration")
+                && targets
+                    .iter()
+                    .any(|target| evidence.target.eq_ignore_ascii_case(target))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -724,7 +776,8 @@ impl DatabaseDriverPackageRegistry {
         unpack_driver_package_archive(&archive_path, &unpacked)?;
         let downloaded_manifest = read_manifest(&unpacked.join("manifest.json"))?;
         validate_catalog_manifest_binding(entry, &downloaded_manifest)?;
-        let installed = self.install_from_directory(&unpacked, false)?;
+        let installed =
+            self.install_from_directory_with_catalog_entry(&unpacked, false, Some(entry))?;
         Ok(installed)
     }
 
@@ -732,6 +785,15 @@ impl DatabaseDriverPackageRegistry {
         &self,
         source: &Path,
         activate: bool,
+    ) -> Result<InstalledDriverPackage, String> {
+        self.install_from_directory_with_catalog_entry(source, activate, None)
+    }
+
+    fn install_from_directory_with_catalog_entry(
+        &self,
+        source: &Path,
+        activate: bool,
+        catalog_entry: Option<&DriverPackageCatalogEntry>,
     ) -> Result<InstalledDriverPackage, String> {
         let _guard = self
             .mutation_lock
@@ -745,12 +807,21 @@ impl DatabaseDriverPackageRegistry {
         let source_manifest_path = source.join("manifest.json");
         let source_manifest = read_manifest(&source_manifest_path)?;
         validate_manifest(&source_manifest, &source)?;
+        if let Some(entry) = catalog_entry {
+            validate_catalog_receipt_entry(entry, &source_manifest)?;
+        }
 
         fs::create_dir_all(&self.root)
             .map_err(|error| format!("Cannot create driver package registry: {error}"))?;
         let staging_root = self.root.join(format!(".install-{}", Uuid::new_v4()));
         let install_result = (|| {
             copy_package_tree(&source, &staging_root, 0, &mut PackageCopyBudget::default())?;
+            let receipt_path = staging_root.join(DRIVER_PACKAGE_CATALOG_RECEIPT);
+            if receipt_path.exists() {
+                return Err(format!(
+                    "Driver package contains reserved Host metadata: {DRIVER_PACKAGE_CATALOG_RECEIPT}"
+                ));
+            }
             let staged_manifest_path = staging_root.join("manifest.json");
             let package = inspect_package(
                 &self.root,
@@ -766,6 +837,20 @@ impl DatabaseDriverPackageRegistry {
                 return Err(package
                     .status_message
                     .unwrap_or_else(|| "Driver package failed verification".to_string()));
+            }
+
+            if let Some(entry) = catalog_entry {
+                let receipt = DriverPackageCatalogReceipt {
+                    schema_version: DRIVER_PACKAGE_CATALOG_SCHEMA_VERSION,
+                    entry: entry.clone(),
+                };
+                let encoded = serde_json::to_vec_pretty(&receipt)
+                    .map_err(|error| format!("Cannot encode driver catalog receipt: {error}"))?;
+                if encoded.len() as u64 > MAX_DRIVER_CATALOG_BYTES {
+                    return Err("Driver catalog receipt exceeds the size limit".to_string());
+                }
+                fs::write(&receipt_path, encoded)
+                    .map_err(|error| format!("Cannot write driver catalog receipt: {error}"))?;
             }
 
             let driver_root = self.root.join(&source_manifest.driver_id);
@@ -1003,6 +1088,7 @@ impl DatabaseDriverPackageRegistry {
         }
         verify_entrypoint_digest(&package.entrypoint, &package.manifest.sha256)?;
         verify_package_signature(&package.package_root.join("manifest.json"), &self.trust)?;
+        package.catalog_entry = read_catalog_receipt(&package.package_root, &package.manifest).ok();
         package.entrypoint = fs::canonicalize(&package.entrypoint)
             .map_err(|error| format!("Cannot resolve driver entrypoint: {error}"))?;
         Ok(package)
@@ -1087,6 +1173,39 @@ fn validate_catalog_manifest_binding(
         }
     }
     Ok(())
+}
+
+fn validate_catalog_receipt_entry(
+    entry: &DriverPackageCatalogEntry,
+    manifest: &DriverPackageManifest,
+) -> Result<(), String> {
+    validate_driver_catalog(&DriverPackageCatalog {
+        schema_version: DRIVER_PACKAGE_CATALOG_SCHEMA_VERSION,
+        generated_at: None,
+        packages: vec![entry.clone()],
+    })?;
+    validate_catalog_manifest_binding(entry, manifest)
+}
+
+fn read_catalog_receipt(
+    package_root: &Path,
+    manifest: &DriverPackageManifest,
+) -> Result<DriverPackageCatalogEntry, String> {
+    let path = package_root.join(DRIVER_PACKAGE_CATALOG_RECEIPT);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|_| "Driver package has no signed-catalog receipt".to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_DRIVER_CATALOG_BYTES {
+        return Err("Driver catalog receipt is not a bounded regular file".to_string());
+    }
+    let encoded =
+        fs::read(&path).map_err(|error| format!("Cannot read driver catalog receipt: {error}"))?;
+    let receipt: DriverPackageCatalogReceipt = serde_json::from_slice(&encoded)
+        .map_err(|error| format!("Driver catalog receipt is not valid JSON: {error}"))?;
+    if receipt.schema_version != DRIVER_PACKAGE_CATALOG_SCHEMA_VERSION {
+        return Err("Driver catalog receipt has an unsupported schema version".to_string());
+    }
+    validate_catalog_receipt_entry(&receipt.entry, manifest)?;
+    Ok(receipt.entry)
 }
 
 #[derive(Default)]
@@ -1426,6 +1545,7 @@ fn inspect_package(
     trust: &DriverPackageTrust,
 ) -> Option<InstalledDriverPackage> {
     let manifest = read_manifest(manifest_path).ok()?;
+    let catalog_entry = read_catalog_receipt(package_root, &manifest).ok();
     let entrypoint = package_root.join(&manifest.entrypoint);
     let active = active_version == Some(directory_version);
     let directory_identity_error = if manifest.driver_id != directory_driver_id {
@@ -1472,6 +1592,7 @@ fn inspect_package(
         active,
         status,
         status_message,
+        catalog_entry,
     })
 }
 
@@ -3818,6 +3939,126 @@ mod tests {
         assert!(error.contains("already installed"));
     }
 
+    #[test]
+    fn catalog_install_path_persists_host_owned_receipt() {
+        let source = tempfile::tempdir().unwrap();
+        let registry_root = tempfile::tempdir().unwrap();
+        write_package(source.path(), DRIVER_PROTOCOL_VERSION, None);
+        let source_package = source.path().join("clickhouse").join("1.2.3");
+        let entry = DriverPackageCatalogEntry {
+            driver_id: "clickhouse".to_string(),
+            display_name: "ClickHouse".to_string(),
+            package_version: "1.2.3".to_string(),
+            protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
+            download_url: "https://drivers.example.com/clickhouse-1.2.3.tar.gz".to_string(),
+            archive_sha256: Some("a".repeat(64)),
+            supported_targets: vec![current_target()],
+            server_version_range: Some(">=22".to_string()),
+            release_notes_url: None,
+            connection_url_template: None,
+            capabilities: None,
+            schema_migration: None,
+            conformance: None,
+        };
+        let registry = DatabaseDriverPackageRegistry::allow_unsigned_for_tests(
+            registry_root.path().to_path_buf(),
+        );
+
+        let installed = registry
+            .install_from_directory_with_catalog_entry(&source_package, false, Some(&entry))
+            .unwrap();
+
+        assert_eq!(installed.catalog_entry, Some(entry));
+        assert!(installed
+            .package_root
+            .join(DRIVER_PACKAGE_CATALOG_RECEIPT)
+            .is_file());
+    }
+
+    #[test]
+    fn offline_install_rejects_forged_catalog_receipt_from_package() {
+        let source = tempfile::tempdir().unwrap();
+        let registry_root = tempfile::tempdir().unwrap();
+        write_package(source.path(), DRIVER_PROTOCOL_VERSION, None);
+        let source_package = source.path().join("clickhouse").join("1.2.3");
+        fs::write(
+            source_package.join(DRIVER_PACKAGE_CATALOG_RECEIPT),
+            b"untrusted package-owned receipt",
+        )
+        .unwrap();
+        let registry = DatabaseDriverPackageRegistry::allow_unsigned_for_tests(
+            registry_root.path().to_path_buf(),
+        );
+
+        let error = registry
+            .install_from_directory(&source_package, false)
+            .unwrap_err();
+
+        assert!(error.contains("reserved Host metadata"));
+        assert!(registry.list_installed().is_empty());
+    }
+
+    #[test]
+    fn migration_evidence_requires_exact_server_and_platform() {
+        let directory = tempfile::tempdir().unwrap();
+        write_package(directory.path(), DRIVER_PROTOCOL_VERSION, None);
+        let mut package =
+            DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf())
+                .resolve_active("clickhouse")
+                .unwrap();
+        package.manifest.schema_migration = Some(DriverPackageSchemaMigrationContract {
+            snapshot_version: 1,
+            mode: SchemaMigrationMode::Transactional,
+        });
+        let evidence = DriverPackageConformanceEvidence {
+            schema_version: 1,
+            runner_version: "1.1.0".to_string(),
+            driver_id: package.manifest.driver_id.clone(),
+            package_version: package.manifest.package_version.clone(),
+            entrypoint_sha256: package.manifest.sha256.clone(),
+            target: current_target(),
+            server_version: "24.3.1".to_string(),
+            fixture_id: "clickhouse-migration-v1".to_string(),
+            fixture_sha256: "b".repeat(64),
+            report_url: "https://drivers.example.com/evidence/clickhouse-24.3.1.json".to_string(),
+            report_sha256: "c".repeat(64),
+            operations: vec!["connect".to_string(), "migration".to_string()],
+        };
+        package.catalog_entry = Some(DriverPackageCatalogEntry {
+            driver_id: package.manifest.driver_id.clone(),
+            display_name: package.manifest.display_name.clone(),
+            package_version: package.manifest.package_version.clone(),
+            protocol_version: package.manifest.protocol_version.clone(),
+            download_url: "https://drivers.example.com/clickhouse.tar.gz".to_string(),
+            archive_sha256: Some("a".repeat(64)),
+            supported_targets: package.manifest.supported_targets.clone(),
+            server_version_range: package.manifest.server_version_range.clone(),
+            release_notes_url: None,
+            connection_url_template: None,
+            capabilities: None,
+            schema_migration: package.manifest.schema_migration.clone(),
+            conformance: Some(DriverPackageConformance {
+                connect: vec!["24.3.1".to_string()],
+                migration: vec!["24.3.1".to_string()],
+                evidence: vec![evidence],
+                ..DriverPackageConformance::default()
+            }),
+        });
+
+        assert!(package.has_exact_migration_evidence("24.3.1"));
+        assert!(!package.has_exact_migration_evidence("24.3.2"));
+        package
+            .catalog_entry
+            .as_mut()
+            .unwrap()
+            .conformance
+            .as_mut()
+            .unwrap()
+            .evidence[0]
+            .target = "*".to_string();
+        assert!(!package.has_exact_migration_evidence("24.3.1"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn offline_install_rejects_symlinks_anywhere_in_the_package() {
@@ -4496,6 +4737,7 @@ mod tests {
             active: true,
             status: DriverPackageStatus::Ready,
             status_message: None,
+            catalog_entry: None,
         };
         let registry =
             DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf());

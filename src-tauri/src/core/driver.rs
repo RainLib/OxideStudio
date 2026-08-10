@@ -57,6 +57,12 @@ pub trait DatabaseDriver: Send + Sync {
         None
     }
 
+    /// Whether this exact package, entrypoint, platform and negotiated server
+    /// version has signed runner evidence for semantic migration.
+    fn has_exact_semantic_schema_migration_evidence(&self, _server_version: Option<&str>) -> bool {
+        false
+    }
+
     /// SQL lexer dialect for backend-enforced read-only execution.
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
         None

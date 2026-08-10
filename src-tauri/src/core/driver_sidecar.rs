@@ -387,6 +387,7 @@ mod tests {
             active: true,
             status: DriverPackageStatus::Ready,
             status_message: None,
+            catalog_entry: None,
         };
         assert!(sidecar_command(&package, None)
             .unwrap_err()
