@@ -31,10 +31,11 @@ branch.
 The host protocol now also defines a separate `SchemaObjectMembers` metadata
 request and `schemaObjectMembers` runtime capability. It reaches the external
 driver, connection manager, Tauri command and frontend service, and defaults
-to an empty result unless both descriptor capabilities are signed. A Xugu
-sidecar still needs to implement the catalog query and the Explorer still
-needs a lazy member-row renderer; this contract intentionally does not mark
-ordinary descriptors as expandable.
+to an empty result unless both descriptor capabilities are signed. The
+Explorer now renders a keyboard-accessible lazy member row only for an object
+with `membersExpandable`; it includes loading, empty and retry states. A Xugu
+sidecar still needs to implement the catalog query; this contract intentionally
+does not mark ordinary descriptors as expandable.
 
 ## Editor and data-path comparison
 

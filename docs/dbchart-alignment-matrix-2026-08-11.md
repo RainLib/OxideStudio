@@ -27,13 +27,13 @@ define the SQL LSP, driver, or data-transfer contract of OxideStudio.
 | Table exports | CSV and UTF-8 BOM, JSON, JSONL, TSV, Markdown, SQL INSERT, XLSX, Parquet and Arrow; query filter/sort/scope, cancellation and audit reports. | `src-tauri/src/commands/table.rs`, `src/components/workspace/TableDataView.tsx`. | Build/test coverage; real driver exports deferred. |
 | Explorer export parity | Context menu now lists only capability-approved formats and includes every host encoder. | `src/components/workspace/SchemaSidebar.tsx`. | Frontend build passed. |
 | Data migration | CSV/JSON/XLSX import, mapping/preflight, cross-connection transfer, table data compare and PostgreSQL schema SQL backup. | `TableDataTransferDialog.tsx`, `commands/table.rs`. | Real migration runs deferred. |
-| Xugu type members from DBX | Descriptor and member-query protocol/host routes exist; sidecar catalog query and lazy UI expander are pending. | `docs/dbx-upstream-delta-2026-08-11.md`. | Blocked only on sidecar/UI implementation; no synthetic capability is exposed. |
+| Xugu type members from DBX | Descriptor/member-query protocol and an explicit lazy Explorer renderer exist; sidecar catalog query is pending. | `docs/dbx-upstream-delta-2026-08-11.md`. | Blocked only on sidecar implementation; no synthetic capability is exposed. |
 
 ## Remaining implementation work
 
 1. Implement the Xugu sidecar `SchemaObjects` and `SchemaObjectMembers`
-   requests, then add an explicit keyboard-accessible lazy expander to the
-   Explorer. This is the only confirmed fresh DBX functional delta.
+   requests. The host already provides the keyboard-accessible lazy expander.
+   This is the only confirmed fresh DBX functional delta.
 2. Verify all registered external driver packages declare only their reviewed
    `tableExportFormats` and LSP dialects. This must use package fixtures and
    real-driver validation, not a UI assumption.

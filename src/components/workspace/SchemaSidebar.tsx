@@ -452,6 +452,14 @@ export function SchemaSidebar() {
     useState<string | null>(null);
   const [isSchemaObjectDescriptorsLoading, setIsSchemaObjectDescriptorsLoading] =
     useState(false);
+  const [expandedSchemaObjectMemberKeys, setExpandedSchemaObjectMemberKeys] =
+    useState<string[]>([]);
+  const [schemaObjectMemberStates, setSchemaObjectMemberStates] = useState<
+    Record<
+      string,
+      { loading: boolean; error: boolean; members: SchemaObjectInfo[] }
+    >
+  >({});
   const [isFilterVisible, setIsFilterVisible] = useState(false);
   const [isDataSourceDialogOpen, setIsDataSourceDialogOpen] = useState(false);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
@@ -2944,9 +2952,7 @@ export function SchemaSidebar() {
     };
 
     const renderSchemaObjectDescriptors = () => {
-      if (!isCurrentSchema || !["postgres", "postgresql", "pgsql"].includes(
-        (driver || "").trim().toLowerCase(),
-      )) {
+      if (!isCurrentSchema || activeCapabilities.dataModel !== "relational") {
         return null;
       }
       const isExpanded = expandedObjectGroupKeys.includes(descriptorObjectsKey);
@@ -2986,13 +2992,80 @@ export function SchemaSidebar() {
                   ? ` on ${object.parentName}`
                   : "";
                 const qualifiedName = schema ? `${schema}.${object.name}` : object.name;
+                const memberKey = [
+                  connectionId,
+                  navigationDatabaseName || "",
+                  schema,
+                  object.objectType,
+                  object.name,
+                ].join("\u0000");
+                const membersState = schemaObjectMemberStates[memberKey];
+                const membersExpanded = expandedSchemaObjectMemberKeys.includes(memberKey);
+                const toggleMembers = () => {
+                  if (!object.membersExpandable) return;
+                  // Retry keeps a failed node expanded so the operation does
+                  // not look like a collapse. A successful cached response
+                  // toggles without another round trip.
+                  if (membersExpanded && !membersState?.error) {
+                    setExpandedSchemaObjectMemberKeys((current) =>
+                      current.filter((key) => key !== memberKey),
+                    );
+                    return;
+                  }
+                  if (!membersExpanded) {
+                    setExpandedSchemaObjectMemberKeys((current) => [
+                      ...current,
+                      memberKey,
+                    ]);
+                  }
+                  if (membersState && !membersState.error) return;
+                  setSchemaObjectMemberStates((current) => ({
+                    ...current,
+                    [memberKey]: { loading: true, error: false, members: [] },
+                  }));
+                  void schemaService
+                    .getSchemaObjectMembers(
+                      connectionId,
+                      schema,
+                      object.name,
+                      object.objectType,
+                    )
+                    .then((members) => {
+                      setSchemaObjectMemberStates((current) => ({
+                        ...current,
+                        [memberKey]: { loading: false, error: false, members },
+                      }));
+                    })
+                    .catch(() => {
+                      setSchemaObjectMemberStates((current) => ({
+                        ...current,
+                        [memberKey]: { loading: false, error: true, members: [] },
+                      }));
+                    });
+                };
                 return (
-                  <ContextMenu key={`${objectType}:${object.name}:${object.parentName || ""}`}>
+                  <div key={`${objectType}:${object.name}:${object.parentName || ""}`}>
+                  <ContextMenu>
                     <ContextMenuTrigger asChild>
                       <div
                         className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                         title={`${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`}
                       >
+                        {object.membersExpandable ? (
+                          <button
+                            type="button"
+                            className="-ml-1 -mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                            aria-label={`${membersExpanded ? "Collapse" : "Expand"} ${object.name} members`}
+                            aria-expanded={membersExpanded}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleMembers();
+                            }}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                          >
+                            {membersExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          </button>
+                        ) : null}
                         {objectType === "sequence" ? (
                           <KeyRound size={12} className="shrink-0 text-amber-400/80" />
                         ) : objectType === "trigger" ? (
@@ -3017,6 +3090,28 @@ export function SchemaSidebar() {
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
+                  {object.membersExpandable && membersExpanded && (
+                    <div className="ml-10 border-l border-[hsl(var(--wb-border-subtle))] pl-2">
+                      {membersState?.loading ? (
+                        <div className="py-1 text-[10px] italic wb-muted">Loading members...</div>
+                      ) : membersState?.error ? (
+                        <button type="button" className="wb-text-button h-5 px-1 text-[10px] text-[hsl(var(--wb-danger))]" onClick={toggleMembers}>
+                          Unable to load members; retry
+                        </button>
+                      ) : membersState?.members.length ? (
+                        membersState.members.map((member) => (
+                          <div key={`${member.objectType}:${member.name}`} className="flex min-w-0 items-center gap-1 py-0.5 text-[10px] text-[hsl(var(--wb-text-muted))]" title={member.comment || member.objectType}>
+                            <Folder size={10} className="shrink-0 text-violet-400/70" />
+                            <span className="truncate">{member.name}</span>
+                            <span className="ml-auto shrink-0 uppercase opacity-50">{member.objectType}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="py-1 text-[10px] italic wb-muted">No members found</div>
+                      )}
+                    </div>
+                  )}
+                  </div>
                 );
               })
             ))}
