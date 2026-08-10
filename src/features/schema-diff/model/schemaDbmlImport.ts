@@ -299,6 +299,9 @@ function parseTableBlock(
   const columns: ColumnInfo[] = [];
   const constraints: ConstraintInfo[] = [];
   const indexes: IndexInfo[] = [];
+  const columnPositions = new Map<string, number>();
+  const indexPositions = new Map<string, number>();
+  const constraintNames = new Set<string>();
   const inlineReferences: ParsedRef[] = [];
   let comment: string | undefined;
   const indexBlocks = extractBlocks(body, "indexes", warnings);
@@ -324,8 +327,8 @@ function parseTableBlock(
     const parsedColumn = parseColumn(value, warnings, tableName);
     if (!parsedColumn) continue;
     const { column } = parsedColumn;
-    const existingColumn = columns.findIndex((candidate) => candidate.name === column.name);
-    if (existingColumn >= 0) {
+    const existingColumn = columnPositions.get(column.name);
+    if (existingColumn != null) {
       warnings.add(`${tableName}.${column.name}: later definition overrides an earlier column.`);
       columns[existingColumn] = column;
       for (let index = inlineReferences.length - 1; index >= 0; index -= 1) {
@@ -334,6 +337,7 @@ function parseTableBlock(
         }
       }
     } else {
+      columnPositions.set(column.name, columns.length);
       columns.push(column);
     }
     const inlineReference = parseInlineReferenceSetting(
@@ -352,11 +356,12 @@ function parseTableBlock(
     for (const line of block.body.split(/\r?\n/u)) {
       const index = parseIndex(line.trim(), tableName, warnings);
       if (!index) continue;
-      const existingIndex = indexes.findIndex((candidate) => candidate.name === index.name);
-      if (existingIndex >= 0) {
+      const existingIndex = indexPositions.get(index.name);
+      if (existingIndex != null) {
         warnings.add(`${tableName}.${index.name}: later definition overrides an earlier index.`);
         indexes[existingIndex] = index;
       } else {
+        indexPositions.set(index.name, indexes.length);
         indexes.push(index);
       }
     }
@@ -364,29 +369,35 @@ function parseTableBlock(
 
   for (const column of columns) {
     if (column.is_primary_key) {
+      const name = uniqueName(constraintNames, `${tableName}_pkey`);
       constraints.push({
-        name: uniqueConstraintName(constraints, `${tableName}_pkey`),
+        name,
         constraint_type: "PRIMARY KEY",
         columns: [column.name],
         referenced_columns: [],
       });
+      constraintNames.add(name);
     } else if (column.is_unique) {
+      const name = uniqueName(constraintNames, `${tableName}_${column.name}_key`);
       constraints.push({
-        name: uniqueConstraintName(constraints, `${tableName}_${column.name}_key`),
+        name,
         constraint_type: "UNIQUE",
         columns: [column.name],
         referenced_columns: [],
       });
+      constraintNames.add(name);
     }
   }
   for (const index of indexes) {
     if (index.is_primary || index.is_unique) {
+      const name = uniqueName(constraintNames, index.name);
       constraints.push({
-        name: uniqueConstraintName(constraints, index.name),
+        name,
         constraint_type: index.is_primary ? "PRIMARY KEY" : "UNIQUE",
         columns: index.columns,
         referenced_columns: [],
       });
+      constraintNames.add(name);
     }
   }
 
@@ -864,10 +875,19 @@ function extractBlocks(
       end: closing + 1,
     });
   }
-  return blocks.filter(
-    (block, index) => !blocks.some((parent, parentIndex) =>
-      parentIndex < index && block.start > parent.start && block.end < parent.end),
-  );
+  const topLevel: ExtractedBlock[] = [];
+  let activeParent: ExtractedBlock | undefined;
+  for (const block of blocks) {
+    if (activeParent && block.start >= activeParent.end) activeParent = undefined;
+    if (
+      activeParent
+      && block.start > activeParent.start
+      && block.end < activeParent.end
+    ) continue;
+    topLevel.push(block);
+    activeParent = block;
+  }
+  return topLevel;
 }
 
 function replaceRangesWithWhitespace(
@@ -1061,6 +1081,13 @@ function uniqueConstraintName(constraints: ConstraintInfo[], preferred: string) 
   while (constraints.some((constraint) => constraint.name === `${preferred}_${suffix}`)) {
     suffix += 1;
   }
+  return `${preferred}_${suffix}`;
+}
+
+function uniqueName(names: Set<string>, preferred: string) {
+  if (!names.has(preferred)) return preferred;
+  let suffix = 2;
+  while (names.has(`${preferred}_${suffix}`)) suffix += 1;
   return `${preferred}_${suffix}`;
 }
 

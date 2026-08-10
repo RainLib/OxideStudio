@@ -113,6 +113,7 @@
 - [x] 增加 DBML TablePartial 字段/index 展开、官方冲突优先级、嵌套 cycle/missing 诊断和 expansion/cache 上限。
 - [x] 保留 DBML 混合方言原始类型并贯通 table/column/index comment；表 comment 使用 PostgreSQL/MySQL 语义迁移而非重建。
 - [x] 保留 DBML string/number/boolean/NULL/expression 默认值语义；bare string 标识符导出为字符串，不生成无效 PostgreSQL 默认表达式。
+- [x] DBML 大模型解析移除 block 两两包含判断和宽表 column/index 重复线性查找，保持近线性导入路径并加入 2,000 table 回归夹具。
 - [x] 增加 ChartDB metadata-query JSON 有界导入、聚合和 review-only snapshot diff。
 - [x] 增加 ChartDB 8 类数据库及兼容驱动的 target-scoped metadata query 一键复制。
 - [x] 增加 PostgreSQL/MySQL/SQL Server/SQLite/Oracle DDL 自动识别、独立文件导入和有界 relation/index/constraint baseline 解析。

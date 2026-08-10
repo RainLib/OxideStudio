@@ -441,4 +441,26 @@ describe("schema DBML import", () => {
       definition: "ON DELETE cascade ON UPDATE restrict",
     });
   });
+
+  it("parses large schemas without quadratic block or field lookup", () => {
+    const tableCount = 2_000;
+    const dbml = Array.from(
+      { length: tableCount },
+      (_, index) => `Table public.table_${index} {
+        id bigint [pk]
+        value_${index} text
+        value_${index} varchar(255)
+        indexes {
+          (value_${index}) [name: 'table_${index}_value_idx']
+          (value_${index}) [name: 'table_${index}_value_idx', type: hash]
+        }
+      }`,
+    ).join("\n");
+
+    const parsed = parseSchemaDbml(dbml, "public");
+
+    expect(parsed.relations).toHaveLength(tableCount);
+    expect(parsed.relations[1_999]?.columns[1]?.data_type).toBe("varchar(255)");
+    expect(parsed.relations[1_999]?.indexes[0]?.index_type).toBe("hash");
+  });
 });
