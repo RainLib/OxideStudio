@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 126 -- Monaco metadata hover
+
+- In a real WebView, inspect table hovers for wide composite indexes, multi-kilobyte defaults, quoted identifiers containing Markdown delimiters, pointer/trackpad scrolling, zoom and light/dark themes. Confirm Monaco retains its own accessible tooltip focus/scroll behavior while the bounded metadata payload stays readable.
+
 ## Phase 125 -- full table data compare
 
 - Exercise `compare_table_data_full` against PostgreSQL, MySQL, SQLite/DuckDB and every explicitly opted-in external table-data-transfer package. Verify the count query, deterministic key ordering, null/composite keys, duplicate-key rejection, empty schema handling and independent source/target databases.
