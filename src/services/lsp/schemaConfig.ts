@@ -36,6 +36,7 @@ export type LspTableDefinition = {
     indexed: boolean;
     default_value?: string | null;
     auto_increment?: boolean;
+    generated?: boolean;
     comment: string | null;
     source_location: LspSourceLocation;
   }>;
@@ -159,6 +160,7 @@ export function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
               indexed: column.indexed,
               default_value: column.default_value ?? null,
               auto_increment: column.auto_increment ?? false,
+              generated: column.generated ?? false,
               comment: column.comment ?? null,
               source_location: column.source_location ?? null,
             }))
@@ -272,6 +274,7 @@ function lspColumn(
     indexed: false,
     default_value: null,
     auto_increment: false,
+    generated: false,
     comment,
     source_location: null,
   };
@@ -339,6 +342,7 @@ function lspColumnFromColumnInfo(
     indexed: column.is_indexed ?? false,
     default_value: column.default_value ?? null,
     auto_increment: column.is_auto_increment ?? false,
+    generated: false,
     comment: column.comment || null,
     source_location: null,
   };

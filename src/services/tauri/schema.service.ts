@@ -154,6 +154,18 @@ export async function getColumns(
   });
 }
 
+export async function getGeneratedColumns(
+  connectionId: string,
+  schema: string,
+  table: string
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_generated_columns", {
+    connectionId,
+    schema,
+    table,
+  });
+}
+
 export async function getDatabaseColumns(
   connectionId: string,
   database: string,
@@ -161,6 +173,20 @@ export async function getDatabaseColumns(
   table: string
 ): Promise<ColumnInfo[]> {
   return invokeWithInterceptors<ColumnInfo[]>("get_database_columns", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
+export async function getDatabaseGeneratedColumns(
+  connectionId: string,
+  database: string,
+  schema: string,
+  table: string
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_database_generated_columns", {
     connectionId,
     database,
     schema,
@@ -402,7 +428,9 @@ export const schemaService = {
   getCollections,
   getCollectionsPage,
   getColumns,
+  getGeneratedColumns,
   getDatabaseColumns,
+  getDatabaseGeneratedColumns,
   getIndexes,
   getDatabaseIndexes,
   getConstraints,

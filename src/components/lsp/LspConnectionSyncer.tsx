@@ -66,6 +66,11 @@ import { v4 as uuidv4 } from "uuid";
 const LSP_METADATA_CACHE_TTL_MS = 60_000;
 const LSP_PROGRESS_PUBLISH_INTERVAL_MS = 1_000;
 const LSP_PROGRESS_PUBLISH_BATCHES = 8;
+const EXACT_GENERATED_COLUMN_METADATA_DRIVERS = new Set([
+  "postgres",
+  "mysql",
+  "sqlite",
+]);
 
 type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
 
@@ -532,17 +537,50 @@ export function LspConnectionSyncer() {
     ): Promise<LspTableDefinition> => {
       try {
         const capabilities = await capabilitiesPromise;
-        const metadata = await loadTableMetadata({
-          connectionId: activeConnectionId,
-          driver: connection.driver,
-          databaseName: catalog.databaseName || undefined,
-          schema: catalog.schemaName,
-          table: table.name,
-          includeIndexes: capabilities.supportsTableIndexes,
-          includeConstraints: capabilities.supportsTableConstraints,
-          priority: "background",
+        const generatedColumnsPromise = (EXACT_GENERATED_COLUMN_METADATA_DRIVERS.has(
+          connection.driver
+        )
+          ? catalog.databaseName
+            ? schemaService.getDatabaseGeneratedColumns(
+                activeConnectionId,
+                catalog.databaseName,
+                catalog.schemaName,
+                table.name
+              )
+            : schemaService.getGeneratedColumns(
+                activeConnectionId,
+                catalog.schemaName,
+                table.name
+              )
+          : Promise.resolve([])
+        ).catch((error) => {
+          console.warn(
+            `[LSP] Failed to classify generated columns for ${[
+              catalog.catalogName,
+              catalog.schemaName,
+              table.name,
+            ]
+              .filter(Boolean)
+              .join(".")}:`,
+            error
+          );
+          return null;
         });
+        const [metadata, generatedColumnNames] = await Promise.all([
+          loadTableMetadata({
+            connectionId: activeConnectionId,
+            driver: connection.driver,
+            databaseName: catalog.databaseName || undefined,
+            schema: catalog.schemaName,
+            table: table.name,
+            includeIndexes: capabilities.supportsTableIndexes,
+            includeConstraints: capabilities.supportsTableConstraints,
+            priority: "background",
+          }),
+          generatedColumnsPromise,
+        ]);
         const { columns, indexes, constraints } = metadata;
+        const generatedColumns = new Set(generatedColumnNames ?? []);
 
         return assignSourceLocations(catalog, {
           name: table.name,
@@ -580,6 +618,10 @@ export function LspConnectionSyncer() {
             indexed: !!col.is_indexed,
             default_value: col.default_value ?? null,
             auto_increment: !!col.is_auto_increment,
+            // If exact generated-column discovery fails, suppress INSERT
+            // snippets for this table instead of recommending unsafe writes.
+            generated:
+              generatedColumnNames === null || generatedColumns.has(col.name),
             comment: col.comment || null,
             source_location: [
               objectSourceUri(

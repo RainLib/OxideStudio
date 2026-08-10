@@ -384,6 +384,18 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Get generated columns for a table in an explicitly selected server database.
+    /// Drivers without database-scoped metadata can safely fall back to their
+    /// connection-scoped catalog implementation.
+    async fn get_database_generated_columns(
+        &self,
+        _database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        self.get_generated_columns(schema, table).await
+    }
+
     /// Whether replaying explicit values requires a dialect-owned identity
     /// override clause. The default remains false so external and unrelated
     /// drivers never inherit PostgreSQL syntax from a broad family mapping.

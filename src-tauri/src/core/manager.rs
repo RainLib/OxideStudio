@@ -819,6 +819,19 @@ impl ConnectionManager {
         driver.get_generated_columns(schema, table).await
     }
 
+    pub async fn get_database_generated_columns(
+        &self,
+        id: &str,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_database_generated_columns(database, schema, table)
+            .await
+    }
+
     pub async fn sql_export_requires_identity_override(
         &self,
         id: &str,

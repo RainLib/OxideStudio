@@ -1916,6 +1916,34 @@ impl DatabaseDriver for PostgresDriver {
         })?
     }
 
+    async fn get_database_generated_columns(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        drop(metadata_pool);
+
+        timeout(
+            METADATA_QUERY_TIMEOUT,
+            Self::generated_columns_on_pool(&pool, schema, table),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Timed out loading generated columns from PostgreSQL database '{}', table '{}.{}'",
+                database,
+                schema,
+                table
+            )
+        })?
+    }
+
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let pool = self.get_pool().await?;
         Self::indexes_on_pool(&pool, schema, table).await
