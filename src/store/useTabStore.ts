@@ -71,6 +71,7 @@ import {
 } from "@/lib/editorPatch";
 import { documentTextRevision } from "@/lib/documentRevision";
 import { compileElasticsearchConsoleExecution } from "@/lib/elasticsearchConsole";
+import { isTableCellExpression } from "@/lib/tableCellExpression";
 import type { DataCompareSource } from "@/lib/dataCompare";
 import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
 import type { GitFileDiffPreview } from "@/lib/projectGitDiff";
@@ -2663,6 +2664,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const updates: Array<{
       key: Record<string, unknown>;
       values: Record<string, unknown>;
+      expressions?: Record<string, string>;
     }> = [];
     const submittedEdits = new Map<string, any>();
     const insertedRowIndexes = new Set<number>();
@@ -2675,6 +2677,16 @@ export const useTabStore = create<TabState>((set, get) => ({
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
+            if (isTableCellExpression(val)) {
+              const message =
+                "SQL expressions can only be staged for an existing table row.";
+              set((state) => ({
+                tabs: state.tabs.map((t) =>
+                  t.id === tabId ? { ...t, error: message } : t,
+                ),
+              }));
+              return;
+            }
             values[colName] = val;
             saveableEdits.push([`${rowIndex}:${cIdx}`, val]);
           }
@@ -2694,19 +2706,31 @@ export const useTabStore = create<TabState>((set, get) => ({
         if (!originalRow || resultColumns.length === 0) continue;
 
         const values: Record<string, unknown> = {};
+        const expressions: Record<string, string> = {};
         const saveableEdits: Array<[string, any]> = [];
         for (const [cIdx, val] of Object.entries(rowEdits)) {
           const colName = colDefs[parseInt(cIdx)]?.name;
           if (colName) {
-            values[colName] = val;
+            if (isTableCellExpression(val)) {
+              expressions[colName] = val.expression;
+            } else {
+              values[colName] = val;
+            }
             saveableEdits.push([`${rowIndex}:${cIdx}`, val]);
           }
         }
 
         const key = rowMutationKey(originalRow, resultColumns, keyColumns);
 
-        if (Object.keys(values).length > 0 && key) {
-          updates.push({ key, values });
+        if (
+          (Object.keys(values).length > 0 || Object.keys(expressions).length > 0) &&
+          key
+        ) {
+          updates.push({
+            key,
+            values,
+            ...(Object.keys(expressions).length > 0 ? { expressions } : {}),
+          });
           saveableEdits.forEach(([editKey, value]) =>
             submittedEdits.set(editKey, value),
           );

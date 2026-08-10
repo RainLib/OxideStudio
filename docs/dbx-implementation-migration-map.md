@@ -428,6 +428,17 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - library contract 覆盖 quoted/unquoted collision 与错误 quote 形式；真实 Monaco
   code-action 菜单、各 dialect quote policy 和 live metadata 继续延期验证，本阶段不连接数据库。
 
+## Phase 124：Grid 显式 SQL expression cell
+
+- DBX grid edit adapter、cell generation 与 bulk edit modules → Oxide `ValueEditorDialog`、
+  `DataGrid`、`useTabStore:commitEdits`、`commands/table.rs:build_update_mutation`。
+- Value Editor 将 `Value`、`NULL`、空字符串、未加载/default 与 `Expression` 区分；expression
+  仅面向已有行。网格以 `ƒx` 标记 draft，不将其误用为筛选值、FK 导航值或数值聚合；新行仍通过
+  未发送列取得数据库 default，不能把 expression marker 降级为 JSON 参数。
+- 普通 value 继续以目标列类型参数化。expression 由 UI 初筛，Rust 使用 dialect-aware
+  `validate_sql_filter_expression` 复验，且不允许 value/expression 同列混用；不实现任意 SQL
+  拼接或多语句执行。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

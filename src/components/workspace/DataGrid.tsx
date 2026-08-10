@@ -91,6 +91,7 @@ import {
   type DataGridHoverTooltipState,
 } from "@/features/data-grid";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
+import { isTableCellExpression } from "@/lib/tableCellExpression";
 import type {
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -672,14 +673,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           : sortedIndices[row];
         if (rowKey === undefined) return { value: undefined };
         const editKey = `${rowKey}:${originalColumnIndex}`;
-        const value = pendingEdits.has(editKey)
+        const pendingValue = pendingEdits.has(editKey)
           ? pendingEdits.get(editKey)
           : isNewRow
             ? undefined
             : result.rows[rowKey]?.[originalColumnIndex];
 
         return {
-          value,
+          // An uncommitted expression has no observable scalar value yet, so
+          // never feed it into local numeric aggregates.
+          value: isTableCellExpression(pendingValue) ? undefined : pendingValue,
           dataType: columnMetadata.dataType,
         };
       });
@@ -798,7 +801,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         }
 
         const baseCell = createTypedCell(
-          val,
+          isTableCellExpression(val) ? `ƒx ${val.expression}` : val,
           isEditable,
           isNewRow ? "DEFAULT" : "NOT LOADED",
           resolveRenderedColumnType({
@@ -1060,7 +1063,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const pending = pendingEdits.has(editKey);
         const originalValue =
           rowIndex >= 0 ? result?.rows[rowIndex]?.[columnIndex] : undefined;
-        const value = pending ? pendingEdits.get(editKey) : originalValue;
+        const pendingValue = pending ? pendingEdits.get(editKey) : undefined;
+        const expression = isTableCellExpression(pendingValue)
+          ? pendingValue.expression
+          : undefined;
+        const value = expression === undefined ? (pending ? pendingValue : originalValue) : originalValue;
         const pageOffset =
           activeTab.type === "table"
             ? (activeTab.tablePage || 0) * (activeTab.tablePageSize || 0)
@@ -1086,6 +1093,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           nullable: metadata?.is_nullable !== false,
           pending,
           defaultValue: metadata?.default_value,
+          expression,
+          expressionAllowed: rowIndex >= 0,
         });
       },
       [
@@ -1490,11 +1499,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       if (columnIndex < 0 || rowIndex === undefined) return undefined;
 
       const editKey = `${rowIndex}:${columnIndex}`;
-      return pendingEdits.has(editKey)
+      const value = pendingEdits.has(editKey)
         ? pendingEdits.get(editKey)
         : rowIndex >= 0
           ? result.rows[rowIndex]?.[columnIndex]
           : undefined;
+      // A staged expression is not the cell's current database value, so a
+      // context-menu filter must wait for the reviewed mutation to commit.
+      return isTableCellExpression(value) ? undefined : value;
     }, [
       contextMenu.col,
       contextMenu.row,
@@ -1647,7 +1659,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       const rowWithDrafts = resultRow.map(
         (value: unknown, columnIndex: number) => {
           const key = `${resultRowIndex}:${columnIndex}`;
-          return pendingEdits.has(key) ? pendingEdits.get(key) : value;
+          const pendingValue = pendingEdits.has(key)
+            ? pendingEdits.get(key)
+            : value;
+          // Foreign-key navigation must use a known row identity, never an
+          // expression whose resulting value is not available until commit.
+          return isTableCellExpression(pendingValue) ? value : pendingValue;
         },
       );
 

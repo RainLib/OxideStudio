@@ -1385,3 +1385,14 @@ explicit deferred validation task rather than an implicit release check.
   never remove a qualifier when its unqualified column would be ambiguous.
 - Repeat after a schema refresh and with metadata from PostgreSQL, MySQL and
   SQL Server. Phase 123 is library-only and makes no database connection.
+
+## Grid SQL-expression cell mutation
+
+- With PostgreSQL and MySQL fixtures, stage `CURRENT_TIMESTAMP`, arithmetic,
+  casts and column-aware functions from the value editor; verify preview,
+  undo/cancel, parameter ordering and resulting server values. Confirm that
+  aggregates, context filters and FK navigation do not treat an uncommitted
+  expression as an observed database value.
+- Verify driver error mapping, generated/identity/read-only columns, SQL Server
+  and SQLite dialect contracts, multiline editor behavior, IME and screen-reader
+  focus. Phase 124 performs no database connection.

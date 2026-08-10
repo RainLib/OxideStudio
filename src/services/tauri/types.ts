@@ -905,6 +905,8 @@ export interface SqlSyntaxValidation {
 export interface TableRowUpdate {
   key: Record<string, unknown>;
   values: Record<string, unknown>;
+  /** Explicit SQL expressions for existing rows. Ordinary values remain parameterized. */
+  expressions?: Record<string, string>;
 }
 
 export interface TableRowDelete {

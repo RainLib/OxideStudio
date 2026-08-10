@@ -12,6 +12,7 @@ import {
   Hash,
   LoaderCircle,
   ListTree,
+  Code2,
   ToggleLeft,
   Type,
 } from "lucide-react";
@@ -38,6 +39,10 @@ import {
   type ValueEditorKind,
   type ValueEditorState,
 } from "@/lib/valueEditor";
+import {
+  tableCellExpression,
+  validateTableCellExpression,
+} from "@/lib/tableCellExpression";
 import { cn } from "@/styles/utils";
 import {
   toolbarButtonVariants,
@@ -56,6 +61,8 @@ export interface ValueEditorTarget {
   nullable: boolean;
   pending: boolean;
   defaultValue?: string | null;
+  expression?: string | null;
+  expressionAllowed?: boolean;
 }
 
 interface ValueEditorDialogProps {
@@ -157,6 +164,7 @@ export function ValueEditorDialog({
   const [semanticState, setSemanticState] =
     useState<ValueEditorState>("unloaded");
   const [draft, setDraft] = useState("");
+  const [editMode, setEditMode] = useState<"value" | "expression">("value");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [jsonPresentation, setJsonPresentation] = useState<"text" | "tree">(
@@ -165,8 +173,10 @@ export function ValueEditorDialog({
 
   useEffect(() => {
     if (!open || !target) return;
-    setSemanticState(valueEditorState(target.value));
-    setDraft(valueEditorDraft(target.value, kind));
+    const isExpression = Boolean(target.expression);
+    setSemanticState(isExpression ? "value" : valueEditorState(target.value));
+    setDraft(isExpression ? target.expression || "" : valueEditorDraft(target.value, kind));
+    setEditMode(isExpression ? "expression" : "value");
     setError(null);
     setCopied(false);
     setJsonPresentation("text");
@@ -219,6 +229,7 @@ export function ValueEditorDialog({
   const selectState = (next: ValueEditorState) => {
     if (next === "empty" && !canUseEmpty) return;
     if (next === "null" && !target.nullable) return;
+    if (next !== "value") setEditMode("value");
     setSemanticState(next);
     setError(null);
   };
@@ -247,6 +258,16 @@ export function ValueEditorDialog({
   };
 
   const stageValue = () => {
+    if (editMode === "expression") {
+      const result = validateTableCellExpression(draft);
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      onStageValue(tableCellExpression(result.value));
+      onOpenChange(false);
+      return;
+    }
     const result = parseValueEditorDraft({
       state: semanticState,
       draft,
@@ -325,9 +346,12 @@ export function ValueEditorDialog({
             <button
               type="button"
               className={valueEditorStateButtonVariants({
-                selected: semanticState === "value",
+                selected: semanticState === "value" && editMode === "value",
               })}
-              onClick={() => selectState("value")}
+              onClick={() => {
+                setEditMode("value");
+                selectState("value");
+              }}
               disabled={isReadOnly}
             >
               <span className="mt-0.5 text-[hsl(var(--wb-accent))]">
@@ -340,6 +364,31 @@ export function ValueEditorDialog({
                 </span>
               </span>
             </button>
+            {target.expressionAllowed && (
+              <button
+                type="button"
+                className={valueEditorStateButtonVariants({
+                  selected: editMode === "expression",
+                })}
+                onClick={() => {
+                  setEditMode("expression");
+                  setSemanticState("value");
+                  setDraft(target.expression || "");
+                  setError(null);
+                }}
+                disabled={isReadOnly}
+              >
+                <span className="mt-0.5 text-[hsl(var(--wb-accent))]">
+                  <Code2 size={14} />
+                </span>
+                <span>
+                  <span className="block text-[11px] font-medium">Expression</span>
+                  <span className="mt-0.5 block text-[9px] leading-3 opacity-70">
+                    Explicit SQL only
+                  </span>
+                </span>
+              </button>
+            )}
             <button
               type="button"
               className={valueEditorStateButtonVariants({
@@ -397,8 +446,8 @@ export function ValueEditorDialog({
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2">
               <span className="flex items-center gap-1.5 text-[10px] font-medium text-[hsl(var(--wb-text))]">
-                {kindIcon(kind)}
-                {kindLabel(kind)}
+                {editMode === "expression" ? <Code2 size={13} /> : kindIcon(kind)}
+                {editMode === "expression" ? "SQL expression" : kindLabel(kind)}
               </span>
               <span className="h-3 w-px bg-[hsl(var(--wb-border-subtle))]" />
               <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
@@ -416,7 +465,7 @@ export function ValueEditorDialog({
                 </span>
               )}
               <div className="ml-auto flex items-center gap-1">
-                {kind === "json" && semanticState === "value" && (
+                {editMode === "value" && kind === "json" && semanticState === "value" && (
                   <>
                     <button
                       type="button"
@@ -434,7 +483,7 @@ export function ValueEditorDialog({
                     </button>
                   </>
                 )}
-                {(kind === "json" || kind === "array") &&
+                {editMode === "value" && (kind === "json" || kind === "array") &&
                   semanticState === "value" && (
                     <button
                       type="button"
@@ -482,7 +531,18 @@ export function ValueEditorDialog({
             </div>
 
             <div className="relative min-h-0 flex-1 bg-[hsl(var(--wb-editor))]">
-              {semanticState === "unloaded" ? (
+              {editMode === "expression" ? (
+                <Editor
+                  theme={mode === "dark" ? "vs-dark" : "light"}
+                  language="sql"
+                  value={draft}
+                  onChange={(value) => {
+                    setDraft(value || "");
+                    setError(null);
+                  }}
+                  options={{ ...editorOptions, readOnly: isReadOnly }}
+                />
+              ) : semanticState === "unloaded" ? (
                 <StatePlaceholder
                   icon={<LoaderCircle size={18} />}
                   title="No value is loaded"

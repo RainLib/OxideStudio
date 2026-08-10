@@ -793,6 +793,11 @@ impl TableDataTransferCancellationState {
 pub struct TableRowUpdate {
     pub key: BTreeMap<String, Value>,
     pub values: BTreeMap<String, Value>,
+    /// Explicit grid-expression edits. They are validated as a single SQL
+    /// expression before they can enter a generated SET assignment; regular
+    /// values above always remain bound parameters.
+    #[serde(default)]
+    pub expressions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4446,7 +4451,7 @@ fn build_update_mutation(
     columns: &BTreeMap<String, ColumnInfo>,
     update: &TableRowUpdate,
 ) -> Result<(String, Vec<QueryParameter>), String> {
-    if update.values.is_empty() {
+    if update.values.is_empty() && update.expressions.is_empty() {
         return Err("Update row has no values".to_string());
     }
     if update.key.is_empty() {
@@ -4455,6 +4460,13 @@ fn build_update_mutation(
 
     let mut params = Vec::new();
     let mut assignments = Vec::new();
+    if update
+        .values
+        .keys()
+        .any(|column| update.expressions.contains_key(column))
+    {
+        return Err("A column cannot use both a value and an SQL expression".to_string());
+    }
     for (column_name, value) in &update.values {
         let column = column_for(columns, column_name)?;
         let placeholder = kind.parameter_placeholder(params.len() + 1, &column.data_type);
@@ -4464,6 +4476,30 @@ fn build_update_mutation(
             placeholder
         ));
         params.push(query_parameter(column, value));
+    }
+    for (column_name, expression) in &update.expressions {
+        column_for(columns, column_name)?;
+        let dialect = match kind {
+            DatabaseKind::Postgres => StatementScanDialect::Postgres,
+            DatabaseKind::Mysql => StatementScanDialect::Mysql,
+        };
+        let expression = expression.trim();
+        if expression.len() > 4_096 {
+            return Err("Table cell SQL expressions are limited to 4,096 characters".to_string());
+        }
+        if expression
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("WHERE"))
+        {
+            return Err("Table cell SQL expressions must not start with WHERE".to_string());
+        }
+        validate_sql_filter_expression(expression, dialect)
+            .map_err(|error| format!("Invalid table cell SQL expression: {error}"))?;
+        assignments.push(format!(
+            "{} = {expression}",
+            kind.quote_identifier(column_name)
+        ));
     }
 
     let where_clause = build_key_predicate(kind, columns, &update.key, &mut params)?;
@@ -13189,7 +13225,11 @@ SELECT id FROM users WHERE active;"#
             "public",
             "users",
             &columns,
-            &TableRowUpdate { key, values },
+            &TableRowUpdate {
+                key,
+                values,
+                expressions: BTreeMap::new(),
+            },
         )
         .unwrap();
 
@@ -13198,6 +13238,72 @@ SELECT id FROM users WHERE active;"#
             r#"UPDATE "public"."users" SET "email" = $1::text WHERE "id" = $2::integer;"#
         );
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn builds_table_update_with_an_explicit_validated_expression() {
+        let columns = column_lookup(vec![
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: true,
+                is_indexed: true,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
+            },
+            ColumnInfo {
+                name: "updated_at".to_string(),
+                data_type: "timestamp".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                is_indexed: false,
+                default_value: None,
+                is_auto_increment: false,
+                comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
+            },
+        ]);
+        let update = TableRowUpdate {
+            key: BTreeMap::from([("id".to_string(), json!(7))]),
+            values: BTreeMap::new(),
+            expressions: BTreeMap::from([(
+                "updated_at".to_string(),
+                "CURRENT_TIMESTAMP".to_string(),
+            )]),
+        };
+
+        let (sql, params) =
+            build_update_mutation(DatabaseKind::Postgres, "public", "users", &columns, &update)
+                .unwrap();
+        assert_eq!(
+            sql,
+            r#"UPDATE "public"."users" SET "updated_at" = CURRENT_TIMESTAMP WHERE "id" = $1::integer;"#
+        );
+        assert_eq!(params.len(), 1);
+
+        let unsafe_update = TableRowUpdate {
+            expressions: BTreeMap::from([(
+                "updated_at".to_string(),
+                "CURRENT_TIMESTAMP; DELETE FROM users".to_string(),
+            )]),
+            ..update
+        };
+        assert!(build_update_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &unsafe_update,
+        )
+        .unwrap_err()
+        .contains("statement separators"));
     }
 
     #[test]
