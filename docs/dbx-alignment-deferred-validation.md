@@ -94,7 +94,7 @@ database target until its relevant queue entries pass.
   integration tests. Real Monaco lightbulb/edit-preview behavior remains
   deferred below.
 - The DBX `868f7961e` alias-column regression is covered without database
-  access: all 137 LSP library tests and the relational scope matrix pass for
+  access: all 173 LSP library tests and the relational scope matrix pass for
   PostgreSQL, MySQL, SQLite, Hive, ClickHouse and SQL Server-compatible bracket
   syntax. Display labels and bare-column filtering remain stable while inserted
   identifiers preserve exact double quotes, backticks, brackets and case,
