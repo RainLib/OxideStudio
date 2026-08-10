@@ -3145,6 +3145,8 @@ async fn bundled_sql_lsp_applies_configured_formatter_layout() -> Result<()> {
             "settings": {
                 "defaultDialect": "postgres",
                 "formattingPreferences": {
+                    "keywordCase": "lower",
+                    "functionCase": "upper",
                     "logicalOperatorNewline": "none",
                     "fromClauseLayout": "sameLine"
                 },
@@ -3157,7 +3159,7 @@ async fn bundled_sql_lsp_applies_configured_formatter_layout() -> Result<()> {
         &mut lsp,
         uri,
         "postgres",
-        "select * from users where active = true and role = 'admin' or role = 'owner'",
+        "select Count(id), \"KeepFn\"(id) from users where active = true and role = 'admin' or role = 'owner'",
     )
     .await?;
 
@@ -3178,14 +3180,19 @@ async fn bundled_sql_lsp_applies_configured_formatter_layout() -> Result<()> {
         .context("missing formatting edit text")?;
 
     assert!(
-        formatted.contains("FROM users"),
+        formatted.contains("from users"),
+        "formatted SQL: {formatted}"
+    );
+    assert!(formatted.contains("COUNT(id)"), "formatted SQL: {formatted}");
+    assert!(
+        formatted.contains("\"KeepFn\"(id)"),
         "formatted SQL: {formatted}"
     );
     assert!(
-        !formatted.contains("\n  AND") && !formatted.contains("\n  OR"),
+        !formatted.contains("\n  and") && !formatted.contains("\n  or"),
         "formatted SQL: {formatted}"
     );
-    assert!(formatted.contains(" AND ") && formatted.contains(" OR "));
+    assert!(formatted.contains(" and ") && formatted.contains(" or "));
 
     lsp.shutdown().await
 }

@@ -286,6 +286,27 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - Oxide 本地 product command blocks 在 `sqlCommandSnippets.ts` 使用同一 `functionCase`，但只转换
   未经用户修改的内置模板，以保留用户配置的 SQL 正文。
 
+## Phase 115：格式化大小写单一事实源迁移映射
+
+- DBX `apps/desktop/src/lib/sql/sqlFormatterConfig.ts:41-70,183-195,256-258` 的
+  `keywordCase`/`functionCase` 默认值、规范化和 formatter 参数映射 → Oxide
+  `src/lib/appSettings.ts:SqlFormattingSettings`、设置持久化规范化与
+  `src/services/lsp/syncPlan.ts:LspFormattingPreferences`。
+- DBX `components/editor/SqlFormatterSettingsPanel.vue:99-101,520-544` → Oxide
+  `src/components/settings/SettingsDialog.tsx` 的 SQL formatting 分组；写入时同步旧 completion
+  字段以兼容既有用户配置，但运行时只读取 formatting 字段。
+- DBX `components/editor/QueryEditor.vue:3347-3409,3676-3677,4137-4138` 将 formatter case
+  同时传入 popup、inline 和 SQL template → Oxide `QueryEditor.tsx`、
+  `useCachedSqlCompletionSource.ts` 与 `LspConnectionSyncer.tsx` 共用同一 formatting case。
+- DBX formatter 的独立 keyword/function case → Oxide
+  `vendor/sql-lsp/src/dialects/common.rs:format_sql_pretty_with_keyword_case` 与
+  `apply_formatter_function_case`。后者只改写 Tree-sitter `invocation` 名称，避免触碰 relation、
+  data type、placeholder、字符串、注释和 quoted identifier。
+- `vendor/sql-lsp/src/server.rs` 对全篇与 range formatting 使用同一处理管线；MongoDB、Redis、
+  Elasticsearch 等非 SQL dialect 继续调用自身 formatter，不继承 SQL 大小写设置。
+- 来源 LSP 171 项测试、Clippy 与主项目 bundled subprocess 13 项测试通过；真实 Monaco 和各产品
+  formatter conformance 仍按延期清单统一验证，本阶段未连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

@@ -1277,6 +1277,7 @@ export function QueryEditor({
     metadataRevision: metadataVersion,
     schemaTables,
     sqlCompletion: editorSettings.sqlCompletion,
+    sqlFormatting: editorSettings.sqlFormatting,
     targetSchema: activeTab?.targetSchema,
   });
   const usageScope = completionUsageScope([
@@ -1300,8 +1301,8 @@ export function QueryEditor({
         lspReady ? "ready" : "offline",
         preferredElasticsearchIndex || "",
         editorSettings.sqlCompletion.appendSpace ? "space" : "compact",
-        editorSettings.sqlCompletion.keywordCase,
-        editorSettings.sqlCompletion.functionCase,
+        editorSettings.sqlFormatting.keywordCase,
+        editorSettings.sqlFormatting.functionCase,
         rankByUsage ? "usage" : "alphabetic",
         editorSettings.sqlCompletion.triggerMode,
         JSON.stringify(editorSettings.sqlCompletion.snippets),
@@ -1314,8 +1315,8 @@ export function QueryEditor({
       driver,
       driverCatalogStatus,
       editorSettings.sqlCompletion.appendSpace,
-      editorSettings.sqlCompletion.functionCase,
-      editorSettings.sqlCompletion.keywordCase,
+      editorSettings.sqlFormatting.functionCase,
+      editorSettings.sqlFormatting.keywordCase,
       editorSettings.sqlCompletion.snippets,
       editorSettings.sqlCompletion.triggerMode,
       effectiveConnectionId,
@@ -1410,8 +1411,8 @@ export function QueryEditor({
             const syntax = sqlSyntaxFallbackCompletions(textBeforeCursor, {
               driver: capabilities.driver,
               supportsSqlQuery: capabilities.supportsSqlQuery,
-              keywordCase: editorSettings.sqlCompletion.keywordCase,
-              functionCase: editorSettings.sqlCompletion.functionCase,
+              keywordCase: editorSettings.sqlFormatting.keywordCase,
+              functionCase: editorSettings.sqlFormatting.functionCase,
               snippets: editorSettings.sqlCompletion.snippets,
             }).map((item) => {
               // Use the same completed-keyword replacement semantics as a
@@ -1621,8 +1622,8 @@ export function QueryEditor({
                   sqlSyntaxFallbackCompletions(textBeforeCursor, {
                     driver: capabilities.driver,
                     supportsSqlQuery: capabilities.supportsSqlQuery,
-                    keywordCase: editorSettings.sqlCompletion.keywordCase,
-                    functionCase: editorSettings.sqlCompletion.functionCase,
+                    keywordCase: editorSettings.sqlFormatting.keywordCase,
+                    functionCase: editorSettings.sqlFormatting.functionCase,
                     snippets: editorSettings.sqlCompletion.snippets,
                   }),
                 );
@@ -1912,8 +1913,8 @@ export function QueryEditor({
             : sqlSyntaxFallbackCompletions(bounded.prefix, {
                 driver: capabilities.driver,
                 supportsSqlQuery: capabilities.supportsSqlQuery,
-                keywordCase: editorSettings.sqlCompletion.keywordCase,
-                functionCase: editorSettings.sqlCompletion.functionCase,
+                keywordCase: editorSettings.sqlFormatting.keywordCase,
+                functionCase: editorSettings.sqlFormatting.functionCase,
                 snippets: editorSettings.sqlCompletion.snippets,
               })
                 .filter((item) => item.kind === CompletionItemKind.Snippet)
@@ -2219,7 +2220,8 @@ export function QueryEditor({
     driver,
     editorLanguageId,
     editorSettings.inlineCompletion,
-    editorSettings.sqlCompletion.keywordCase,
+    editorSettings.sqlFormatting.functionCase,
+    editorSettings.sqlFormatting.keywordCase,
     editorSettings.sqlCompletion.snippets,
     inlineCompletionModel,
     inlineCompletionProtocol,

@@ -64,6 +64,8 @@ export type LspCompletionPreferences = {
 };
 
 export type LspFormattingPreferences = {
+  keywordCase: "upper" | "lower" | "preserve";
+  functionCase: "upper" | "lower" | "preserve";
   logicalOperatorNewline: "before" | "after" | "none";
   fromClauseLayout: "newLine" | "sameLine";
 };
@@ -269,6 +271,8 @@ export function createLspConfigKey(input: LspConfigKeyInput) {
       tableAlias: "none",
     },
     formattingPreferences: input.formattingPreferences || {
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "before",
       fromClauseLayout: "newLine",
     },

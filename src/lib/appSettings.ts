@@ -33,6 +33,8 @@ export type SqlCompletionSettings = {
 };
 
 export type SqlFormattingSettings = {
+  keywordCase: "upper" | "lower" | "preserve";
+  functionCase: "upper" | "lower" | "preserve";
   logicalOperatorNewline: "before" | "after" | "none";
   fromClauseLayout: "newLine" | "sameLine";
 };
@@ -278,6 +280,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       snippets: DEFAULT_SQL_COMMAND_SNIPPETS.map((snippet) => ({ ...snippet })),
     },
     sqlFormatting: {
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "before",
       fromClauseLayout: "newLine",
     },
@@ -577,6 +581,28 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ),
       },
       sqlFormatting: {
+        keywordCase: enumAt(
+          raw,
+          ["editor", "sqlFormatting", "keywordCase"],
+          ["upper", "lower", "preserve"],
+          enumAt(
+            raw,
+            ["editor", "sqlCompletion", "keywordCase"],
+            ["upper", "lower", "preserve"],
+            defaults.editor.sqlFormatting.keywordCase,
+          ),
+        ),
+        functionCase: enumAt(
+          raw,
+          ["editor", "sqlFormatting", "functionCase"],
+          ["upper", "lower", "preserve"],
+          enumAt(
+            raw,
+            ["editor", "sqlCompletion", "functionCase"],
+            ["upper", "lower", "preserve"],
+            defaults.editor.sqlFormatting.functionCase,
+          ),
+        ),
         logicalOperatorNewline: enumAt(
           raw,
           ["editor", "sqlFormatting", "logicalOperatorNewline"],

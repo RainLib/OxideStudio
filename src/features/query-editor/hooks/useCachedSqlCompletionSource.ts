@@ -40,6 +40,7 @@ const RELATION_COMPLETION_CONTEXTS = new Set([
 ]);
 
 type SqlCompletionSettings = AppSettings["editor"]["sqlCompletion"];
+type SqlFormattingSettings = AppSettings["editor"]["sqlFormatting"];
 type CompletionCancellationToken = { isCancellationRequested?: boolean };
 type CachedField = { name: string; dataType: string; comment?: string | null };
 
@@ -52,6 +53,7 @@ export type CachedSqlCompletionSourceOptions = {
   metadataRevision: number;
   schemaTables: TableInfo[];
   sqlCompletion: SqlCompletionSettings;
+  sqlFormatting: SqlFormattingSettings;
   targetSchema?: string | null;
 };
 
@@ -298,9 +300,9 @@ export function createCachedSqlCompletionRequest(
         driver: runtime.driver,
         defaultSchema: schema,
         keywordCase:
-          runtime.sqlCompletion.keywordCase === "preserve"
+          runtime.sqlFormatting.keywordCase === "preserve"
             ? undefined
-            : runtime.sqlCompletion.keywordCase,
+            : runtime.sqlFormatting.keywordCase,
       },
     ).map((completion) => ({
       ...completion,

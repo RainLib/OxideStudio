@@ -1351,6 +1351,44 @@ function EditorSettings({
         }
       />
       <SettingsDivider title="SQL formatting" />
+      <SettingRow label="Keyword case:">
+        <select
+          className={selectClass}
+          value={editor.sqlFormatting.keywordCase}
+          onChange={(event) => {
+            const keywordCase = event.target
+              .value as AppSettings["editor"]["sqlFormatting"]["keywordCase"];
+            updateEditor({
+              sqlFormatting: { ...editor.sqlFormatting, keywordCase },
+              sqlCompletion: { ...editor.sqlCompletion, keywordCase },
+            });
+          }}
+          title="Uses the same keyword casing for formatting and SQL suggestions"
+        >
+          <option value="upper">UPPER CASE</option>
+          <option value="lower">lower case</option>
+          <option value="preserve">Preserve source</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Function case:">
+        <select
+          className={selectClass}
+          value={editor.sqlFormatting.functionCase}
+          onChange={(event) => {
+            const functionCase = event.target
+              .value as AppSettings["editor"]["sqlFormatting"]["functionCase"];
+            updateEditor({
+              sqlFormatting: { ...editor.sqlFormatting, functionCase },
+              sqlCompletion: { ...editor.sqlCompletion, functionCase },
+            });
+          }}
+          title="Cases function calls while preserving quoted function names and database object identifiers"
+        >
+          <option value="preserve">Preserve source</option>
+          <option value="upper">UPPER CASE</option>
+          <option value="lower">lower case</option>
+        </select>
+      </SettingRow>
       <SettingRow label="Logical operators:">
         <select
           className={selectClass}
@@ -1406,44 +1444,6 @@ function EditorSettings({
           <option value="positional">Smart SQL positions</option>
           <option value="require-prefix">After typing a name</option>
           <option value="manual">Manual (Ctrl+Space)</option>
-        </select>
-      </SettingRow>
-      <SettingRow label="Keyword case:">
-        <select
-          className={selectClass}
-          value={editor.sqlCompletion.keywordCase}
-          onChange={(event) =>
-            updateEditor({
-              sqlCompletion: {
-                ...editor.sqlCompletion,
-                keywordCase: event.target.value as AppSettings["editor"]["sqlCompletion"]["keywordCase"],
-              },
-            })
-          }
-        >
-          <option value="upper">UPPER CASE</option>
-          <option value="lower">lower case</option>
-          <option value="preserve">Dialect default</option>
-        </select>
-      </SettingRow>
-      <SettingRow label="Function case:">
-        <select
-          className={selectClass}
-          value={editor.sqlCompletion.functionCase}
-          onChange={(event) =>
-            updateEditor({
-              sqlCompletion: {
-                ...editor.sqlCompletion,
-                functionCase: event.target
-                  .value as AppSettings["editor"]["sqlCompletion"]["functionCase"],
-              },
-            })
-          }
-          title="Applies to generated built-in and window functions; database object names keep their original spelling"
-        >
-          <option value="preserve">Dialect default</option>
-          <option value="upper">UPPER CASE</option>
-          <option value="lower">lower case</option>
         </select>
       </SettingRow>
       <SettingRow label="Table alias:">

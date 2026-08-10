@@ -1244,3 +1244,24 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 114 adds settings/config contracts, source and packaged LSP coverage,
   and frontend logic coverage only. No database was opened; server-version
   acceptance and real Monaco/product-package interaction remain deferred.
+
+## Formatter casing as the completion and formatting source of truth
+
+- In a real Monaco/WebView session, apply full-document and range formatting
+  with every independent `keywordCase`/`functionCase` combination. Verify
+  selection, cursor, scroll position and undo restoration, and confirm popup,
+  inline and local command-block casing changes exactly once after a setting
+  update without stale provider output.
+- Cover quoted and schema-qualified functions, mixed-case live/user routines,
+  relation and CTE names, data types, bind/template placeholders, comments,
+  strings, malformed interactive SQL and very large documents. Only unquoted
+  invocation names may follow `functionCase`; protected text must remain exact.
+- Repeat formatter output checks for PostgreSQL, MySQL/MariaDB, SQLite,
+  ClickHouse, Hive and representative compatibility/JDBC packages. Confirm
+  MongoDB, Redis and Elasticsearch formatters remain isolated from SQL casing
+  preferences, and record unsupported dialect differences rather than claiming
+  universal formatter conformance.
+- Phase 115 adds source LSP tests, Clippy, frontend settings/cache tests, a
+  production frontend build and bundled subprocess coverage only. No database
+  was opened; real Monaco interaction, performance and product conformance stay
+  deferred.

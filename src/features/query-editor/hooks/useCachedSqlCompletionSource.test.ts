@@ -50,6 +50,13 @@ const sqlCompletion = {
   snippets: [],
 };
 
+const sqlFormatting = {
+  keywordCase: "upper" as const,
+  functionCase: "preserve" as const,
+  logicalOperatorNewline: "before" as const,
+  fromClauseLayout: "newLine" as const,
+};
+
 describe("cached SQL completion source", () => {
   it("keeps the fallback bounded when offset APIs are unavailable", () => {
     const model = textModel("SELECT * FROM orders");
@@ -96,6 +103,7 @@ describe("cached SQL completion source", () => {
         metadataRevision: 1,
         schemaTables: [],
         sqlCompletion,
+        sqlFormatting,
       },
       { fields: new Map(), joinConstraints: new Map() },
       {

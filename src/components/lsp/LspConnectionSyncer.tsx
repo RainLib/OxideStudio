@@ -154,10 +154,10 @@ export function LspConnectionSyncer() {
     [projectDocuments, projectFileOperations],
   );
   const keywordCase = useSettingsStore(
-    (state) => state.settings.editor.sqlCompletion.keywordCase
+    (state) => state.settings.editor.sqlFormatting.keywordCase
   );
   const functionCase = useSettingsStore(
-    (state) => state.settings.editor.sqlCompletion.functionCase
+    (state) => state.settings.editor.sqlFormatting.functionCase
   );
   const tableAlias = useSettingsStore(
     (state) => state.settings.editor.sqlCompletion.tableAlias
@@ -174,6 +174,8 @@ export function LspConnectionSyncer() {
     (state) => state.settings.editor.sqlFormatting.fromClauseLayout
   );
   const formattingPreferences = {
+    keywordCase,
+    functionCase,
     logicalOperatorNewline,
     fromClauseLayout,
   } as const;
