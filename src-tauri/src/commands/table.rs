@@ -8661,6 +8661,10 @@ pub async fn export_database_sql(
             .map_err(|error| error.to_string())?;
         writeln!(writer, "-- Relation structure: {}; relation data: {}", include_structure, include_data)
             .map_err(|error| error.to_string())?;
+        // PostgreSQL DDL and the generated INSERT statements are transactional.
+        // Keep the backup atomic on restore: a failed relation, row or deferred
+        // FK must not leave a partly restored schema behind.
+        writeln!(writer, "BEGIN;").map_err(|error| error.to_string())?;
         let mut rows_exported = 0_u64;
         let mut batches = 0_u64;
         // PostgreSQL requires a referenced relation to exist when creating a
@@ -8768,6 +8772,7 @@ pub async fn export_database_sql(
                 }
             }
         }
+        writeln!(writer, "COMMIT;").map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())?;
         writer.get_ref().sync_all().map_err(|error| error.to_string())?;
         temporary_file.finalize(&final_path)?;

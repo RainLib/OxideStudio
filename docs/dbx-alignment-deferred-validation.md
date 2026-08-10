@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 133 -- atomic PostgreSQL backup restore
+
+- Restore an export containing an intentional duplicate/conflicting row and an invalid deferred FK into a clean PostgreSQL target. Confirm PostgreSQL rolls back the complete backup transaction; separately verify a successful restore commits its tables, rows and foreign keys together.
+
 ## Phase 132 -- formatting freshness
 
 - In a real Monaco WebView, start document and range formatting, edit the same document before each response returns, and cancel during a slow response. Confirm no stale edit is applied, undo remains one coherent operation, and formatting errors do not affect the current text.
