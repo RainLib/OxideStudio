@@ -1364,3 +1364,14 @@ explicit deferred validation task rather than an implicit release check.
   and different PostgreSQL databases as non-reusable boundaries. Confirm that a
   switch never flashes previous relation rows, filters, metadata, or selection,
   and that undoable table edits are never discarded.
+
+## LSP alias metadata-schema convergence
+
+- With PostgreSQL, MySQL, SQL Server, Hive, and ClickHouse metadata fixtures,
+  use ordinary mixed-case aliases in `SELECT`, `WHERE`, `JOIN`, nested CTEs,
+  derived sources, and correlated queries. Popup, inline completion, hover,
+  code action, and schema inference must resolve the same physical relation.
+- Repeat with double quotes, backticks, SQL Server brackets, aliases differing
+  only by case, non-ASCII identifiers, stale metadata and live schema refresh.
+  Quoted collisions must remain explicit rather than silently selecting a
+  different relation. Phase 122 adds no database connection.

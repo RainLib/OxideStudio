@@ -401,6 +401,20 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - 真实 WebView 的双击、右键菜单、键盘 command palette、Tab restore、multi-window 和
   PostgreSQL 多 database 开关进入延期验证；本阶段不连接数据库。
 
+## Phase 122：LSP alias 到 metadata schema 解析收口
+
+- DBX `lib/sql/semantic/completion.ts:sourceQualifierSql` 与
+  `sqlCompletion.ts:buildReferencedAliasItems` → Oxide
+  `vendor/sql-lsp/src/parser/sql.rs:resolve_relation_alias`、
+  `server.rs:schema_for_table_column_at_position`、
+  `dialects/common.rs:referenced_table_names_at_position`。
+- server-level schema selection 与 scope helper 不再使用只支持精确 key 的旧 alias map；
+  它们复用同一 ordinary-unquoted case-insensitive resolver，保证 popup、inline、schema
+  inference 与 metadata column lookup 不会因为路径不同给出冲突结果。
+- library contract 覆盖 `FROM audit.events EventAlias ... eventalias.`，保持 UTF-16 光标
+  语义。真实 PostgreSQL/MySQL/SQL Server 的 quoted/unquoted collision、case setting 与
+  live metadata refresh 继续在延期队列验证；本阶段不连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

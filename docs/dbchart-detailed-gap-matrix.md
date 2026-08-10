@@ -7,6 +7,7 @@
 > Phase 119 最新审计：ChartDB/DBX 基线未变；对齐 DBX `868f7961e` 的 relation alias 候选排序与原始 `aliasSql` 保留。Oxide 以同一有界 identifier rank 匹配 alias，普通 alias 按 SQL 大小写语义回查 relation，quoted alias collision 保留为独立可接受候选。
 > Phase 120 最新审计：ChartDB 仍停在 `c24936a`；DBX 前进至 `745f24322`，其中唯一功能性增量是 Elasticsearch 滚动索引 grouping 与最小权限索引发现。Oxide 已在 bundled driver、连接配置和 Explorer collection contract 对齐；后续真实 ES 认证/版本矩阵仍延期。
 > Phase 121 最新审计：DBX 前进至 `04580355d`，修复了对象浏览器点击表时绕过 data-tab reuse setting 的问题。Oxide 现以 Tab store 单一入口支持 `same-table`、`always-new`、`active-tab`，并在有 pending edit/执行中的工作区安全降级为新 Tab。
+> Phase 122 LSP 补充：审计既有 alias 对齐后发现 server-level schema selection 仍保留旧的精确 alias map lookup。现已改用 relation alias resolver，因此普通 mixed-case alias 的 `alias.` metadata 补全不会回退到错误 schema；quoted collision 仍保持显式、保守的语义边界。
 
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`
