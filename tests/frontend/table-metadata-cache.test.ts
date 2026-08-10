@@ -43,8 +43,11 @@ vi.mock("@/services/tauri", () => ({
 }));
 
 const identity: TableMetadataIdentity = {
+  projectId: "sqls",
   connectionId: "postgres-1",
   driver: "postgres",
+  driverPackageVersion: null,
+  connectionDatabaseName: null,
   schema: "public",
   table: "users",
 };
@@ -75,15 +78,20 @@ const constraints: ConstraintInfo[] = [
 ];
 
 function cachedResource(overrides: Record<string, unknown> = {}) {
+  const parentId = tableMetadataParentId(identity);
   return {
-    id: "postgres-1:postgres:public:users:TABLE_METADATA_CACHE",
+    id: `${parentId}:TABLE_METADATA_CACHE`,
+    project_id: "sqls",
     connection_id: "postgres-1",
-    parent_id: "postgres-1:postgres:public:users",
+    parent_id: parentId,
     kind: "TABLE_METADATA_CACHE",
     name: "users",
     metadata: {
-      version: 1,
+      version: 3,
+      projectId: "sqls",
       driver: "postgres",
+      driverPackageVersion: null,
+      connectionDatabaseName: null,
       schema: "public",
       table: "users",
       columns,
@@ -113,9 +121,11 @@ function cachedDatabaseResource(
     kind: "TABLE_METADATA_CACHE",
     name: identity.table,
     metadata: {
-      version: 2,
+      version: 3,
       projectId,
       driver: identity.driver,
+      driverPackageVersion: null,
+      connectionDatabaseName: null,
       databaseName,
       schema: identity.schema,
       table: identity.table,
@@ -170,7 +180,7 @@ describe("table metadata cache", () => {
         expect.objectContaining({
           project_id: "sqls",
           kind: "TABLE_METADATA_CACHE",
-          parent_id: "postgres-1:postgres:public:users",
+          parent_id: tableMetadataParentId(identity),
           metadata: expect.objectContaining({
             columns,
             indexes: [],
@@ -272,7 +282,7 @@ describe("table metadata cache", () => {
           project_id: "project-a",
           parent_id: tableMetadataParentId(databaseIdentity),
           metadata: expect.objectContaining({
-            version: 2,
+            version: 3,
             projectId: "project-a",
             databaseName: "analytics",
           }),

@@ -1265,3 +1265,23 @@ explicit deferred validation task rather than an implicit release check.
   production frontend build and bundled subprocess coverage only. No database
   was opened; real Monaco interaction, performance and product conformance stay
   deferred.
+
+## Oracle Agent execution error ranges in Monaco
+
+- Against real Oracle and OceanBase Oracle packages, trigger ORA-00904 and
+  generic Agent failures at offset zero, across multiple lines, after non-ASCII
+  text and inside a selected statement in a multi-statement document. Confirm
+  the package's reported offset convention matches the zero-based execution
+  contract before claiming product conformance.
+- Cover unquoted, quoted, schema-qualified and repeated identifiers. Monaco
+  must underline the nearest complete invalid token, preserve quoted case,
+  expose the original error on hover, and clear the marker after editing,
+  successful rerun, tab/connection switch or stale execution completion.
+- Repeat representative messages through JDBC/ODBC packages and verify a
+  malformed or out-of-range position creates no guessed marker. Structured
+  native PostgreSQL positions must continue using their one-based character
+  contract without regression.
+- Phase 116 adds pure error-model coverage, a green 237-file/1,261-test frontend
+  suite and a production frontend build only. No database was opened; real
+  Agent offsets and Monaco interaction remain in the consolidated validation
+  queue.

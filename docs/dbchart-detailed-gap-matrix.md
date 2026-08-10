@@ -2,6 +2,7 @@
 
 > Phase 104 DBX/LSP 补充：Manticore Search 已对齐 DBX 的完整 31 项产品签名目录；SQLite 保留 `NOW()`，Cloudflare D1 按 DBX 过滤该函数，兼容 parser 不再泄漏产品目录之外的基线函数。
 > Phase 105 对象编辑补充：MySQL/MariaDB 既有 view 保存改用 `ALTER VIEW`；新建仍用 `CREATE VIEW`，PostgreSQL Replace 仍用 `CREATE OR REPLACE VIEW`。
+> Phase 116 最新审计：重新 fetch `main` 后仍为 `c24936a402bb3e24b4858f05282d69a04fcfe25b`，ChartDB 没有新增 SQL LSP、Editor、Grid export 或迁移实现差异；本阶段新增差异来自 DBX `cd78c0ae1` 基线。
 
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`

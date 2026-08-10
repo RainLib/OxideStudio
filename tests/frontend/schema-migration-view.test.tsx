@@ -162,7 +162,7 @@ describe("SchemaDiffView migration confirmation", () => {
     );
 
     expect(apply?.disabled).toBe(false);
-    expect(apply?.title).toContain("each reviewed statement");
+    expect(apply?.title).toContain("preflight/apply");
     await act(async () => apply?.click());
     expect(container.textContent).toContain("Confirm non-transactional migration");
     expect(container.textContent).toContain("may leave earlier statements applied");

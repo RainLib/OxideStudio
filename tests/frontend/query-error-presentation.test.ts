@@ -62,6 +62,8 @@ describe("query error presentation", () => {
       position: 8,
       executionLine: 1,
       executionColumn: 8,
+      documentOffset: 20,
+      documentEndOffset: 21,
       documentLine: 2,
       documentColumn: 8,
       documentExecutionRange: {
@@ -73,6 +75,103 @@ describe("query error presentation", () => {
       table: "users",
     });
     expect(detail.database?.column).toBeUndefined();
+  });
+
+  it("maps Oracle Agent absolute positions to the complete invalid identifier", () => {
+    const executedSql = "SELECT bad.* FROM dual t";
+    const documentSql = `SELECT '🚀';\n${executedSql}`;
+    const sourceStartOffset = documentSql.indexOf(executedSql);
+    const detail = extractQueryExecutionError(
+      new ApiError(
+        'ORA-00904: "BAD": invalid identifier error occur at position: 11',
+        "QUERY_EXECUTION_FAILED",
+        null,
+        {
+          context: {
+            databaseError: { driver: "database" },
+          },
+        },
+      ),
+      executedSql,
+      documentSql,
+      sourceStartOffset,
+    );
+
+    expect(detail.database).toMatchObject({
+      driver: "database",
+      documentOffset: sourceStartOffset + 7,
+      documentEndOffset: sourceStartOffset + 10,
+      documentLine: 2,
+      documentColumn: 8,
+    });
+    expect(
+      documentSql.slice(
+        detail.database?.documentOffset,
+        detail.database?.documentEndOffset,
+      ),
+    ).toBe("bad");
+  });
+
+  it("preserves quoted Oracle identifier casing when selecting an error range", () => {
+    const sql = 'SELECT "X".*, "x".* FROM dual t';
+    const detail = extractQueryExecutionError(
+      new ApiError(
+        'ORA-00904: "x": invalid identifier error occurred at position: 18',
+        "QUERY_EXECUTION_FAILED",
+        null,
+        {
+          context: {
+            databaseError: { driver: "database" },
+          },
+        },
+      ),
+      sql,
+      sql,
+      0,
+    );
+
+    expect(detail.database).toMatchObject({
+      documentOffset: 15,
+      documentEndOffset: 16,
+    });
+    expect(
+      sql.slice(
+        detail.database?.documentOffset,
+        detail.database?.documentEndOffset,
+      ),
+    ).toBe("x");
+  });
+
+  it("accepts zero and rejects malformed Oracle Agent positions", () => {
+    const first = extractQueryExecutionError(
+      new ApiError(
+        "ORA-00900: invalid SQL statement error occur at position: 0",
+        "QUERY_EXECUTION_FAILED",
+        null,
+        { context: { databaseError: { driver: "database" } } },
+      ),
+      "SELEC 1 FROM dual",
+      "SELEC 1 FROM dual",
+      0,
+    );
+    expect(first.database).toMatchObject({
+      documentOffset: 0,
+      documentEndOffset: 1,
+    });
+
+    const invalid = extractQueryExecutionError(
+      new ApiError(
+        "ORA-00900: invalid SQL statement error occur at position: 99",
+        "QUERY_EXECUTION_FAILED",
+        null,
+        { context: { databaseError: { driver: "database" } } },
+      ),
+      "SELECT 1",
+      "SELECT 1",
+      0,
+    );
+    expect(invalid.database?.documentOffset).toBeUndefined();
+    expect(invalid.database?.documentEndOffset).toBeUndefined();
   });
 
   it("presents constraint diagnostics as compact actionable metadata", () => {

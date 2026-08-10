@@ -1,7 +1,7 @@
 # OxideStudio 对照 dbx 的能力差距与演进方案
 
 > 基线日期：2026-08-10
-> DBX 参考提交：`bd08fb630`
+> DBX 参考提交：`cd78c0ae1`
 > 主工程：`C:/HouShuai/project/rust/OxideStudio`
 > 只读参考工程：`sources/dbx`
 
@@ -107,6 +107,8 @@ dbx 仅用于观察交互、能力覆盖和测试组合，不是 OxideStudio 的
    popup/inline completion 共用 `keywordCase`/`functionCase`，并以 Tree-sitter invocation 范围
    隔离函数改写，避免触碰 relation、类型、placeholder、字符串、注释和 quoted function；
    编辑器另提供多选区原子 quote/unquote identifier 与 clipboard→`IN (...)` intention。
+   数据库执行错误标记除原生 PostgreSQL 结构化位置外，现也能把 Oracle Agent 的绝对位置和
+   `ORA-00904` 标识符映射到多语句 Monaco 文档中的完整 UTF-16 range。
    普通 lightbulb 请求不会再计算整文档格式化。仍缺 JOIN/WHERE 重写 preview、
    generated/hidden 列策略、更复杂的结构化多光标编辑、可配置 dialect inspection profile
    和项目级 scratch/console 组织。

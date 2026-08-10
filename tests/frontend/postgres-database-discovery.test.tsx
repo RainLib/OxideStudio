@@ -52,7 +52,13 @@ function identity(
   projectId: string,
   connectionId = "shared-connection"
 ): PostgresDatabaseCatalogIdentity {
-  return { projectId, connectionId, driver: "postgres" };
+  return {
+    projectId,
+    connectionId,
+    driver: "postgres",
+    driverPackageVersion: null,
+    connectionDatabaseName: null,
+  };
 }
 
 const catalogOptions = {
@@ -154,6 +160,8 @@ describe("usePostgresDatabaseDiscovery", () => {
       projectId: "project-a",
       connectionId: "duckdb-connection",
       driver: "duckdb",
+      driverPackageVersion: null,
+      connectionDatabaseName: null,
     });
     expect(state()).toMatchObject({
       connectionId: "duckdb-connection",

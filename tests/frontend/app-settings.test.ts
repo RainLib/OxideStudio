@@ -190,6 +190,8 @@ describe("app settings workbench layout", () => {
 
   it("normalizes SQL formatter layout preferences", () => {
     expect(DEFAULT_APP_SETTINGS.editor.sqlFormatting).toEqual({
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "before",
       fromClauseLayout: "newLine",
     });
@@ -203,6 +205,8 @@ describe("app settings workbench layout", () => {
         },
       }).editor.sqlFormatting,
     ).toEqual({
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "none",
       fromClauseLayout: "sameLine",
     });

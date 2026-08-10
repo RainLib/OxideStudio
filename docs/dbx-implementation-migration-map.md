@@ -307,6 +307,21 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 - 来源 LSP 171 项测试、Clippy 与主项目 bundled subprocess 13 项测试通过；真实 Monaco 和各产品
   formatter conformance 仍按延期清单统一验证，本阶段未连接数据库。
 
+## Phase 116：Oracle Agent 执行错误范围迁移映射
+
+- DBX `apps/desktop/src/lib/sql/sqlDiagnostics.ts:oracleInvalidIdentifierRange` → Oxide
+  `src/lib/queryErrorPresentation.ts:oracleInvalidIdentifierRange`：从 `ORA-00904` 提取标识符，
+  在执行 SQL 中按报告位置选择最近的 Unicode identifier，quoted identifier 保持大小写。
+- DBX `sqlErrorDecorationRange` 对 `error occur(red) at position` 的 zero-based offset 支持 →
+  Oxide `oracleAgentErrorRange`；它只在没有原生 structured position 时回退，畸形和越界值不生成
+  marker，PostgreSQL one-based character position 继续走原契约。
+- DBX CodeMirror decoration → Oxide `extractQueryExecutionError` 将 execution range 加上当前语句
+  `sourceStartOffset`，生成整文档 `documentOffset`/`documentEndOffset`；`QueryEditor.tsx` 的既有
+  `database-query` Monaco owner 消费完整范围，不注册第二套诊断 provider。
+- `tests/frontend/query-error-presentation.test.ts` 覆盖多语句 + emoji UTF-16 偏移、多字符标识符、
+  quoted case、zero offset、越界拒绝和原生 PostgreSQL位置；完整前端 237 文件/1,261 项测试及
+  生产构建通过。本阶段未连接数据库。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：

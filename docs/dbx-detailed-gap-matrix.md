@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-08-10
-> DBX 参考提交：`bd08fb630`
+> DBX 参考提交：`cd78c0ae1`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,7 +9,17 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`27f3ea728` → `bd08fb630`）
+### 最新增量审计（`bd08fb630` → `cd78c0ae1`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `044bedaab` | SQL 保存后增加飞入 Library 的动画与 toolbar 图标 morph | Oxide 已有保存动作、持久化和结果反馈；按紧凑工具型 UI 原则不迁移装饰性飞行动画。后续只在用户无法判断保存去向时增加非阻塞状态反馈，并保持 reduced-motion。 |
+| `3663dc4d7` | 可关闭单个查询结果并释放对应 result session，关闭页签快捷键优先清空结果 | Oxide 已在 `workspaceRuntime.tsx`/`useTabStore.ts:closeResultAt` 支持逐结果关闭；查询结果当前为一次性 materialized payload，不持有 DBX 同类 result session，因此无需复制 session release。后续大结果 streaming/session 化时必须绑定逐结果资源释放。 |
+| `cc7112b24` | IoTDB native agent 内置时区数据 | 属于外置产品运行时打包/conformance，不改变 SQL LSP；Oxide 对 IoTDB 的候选声明不能替代签名 package 与真实时区查询证据，继续进入 driver rollout。 |
+| `a5ce8510e` | MongoDB clone/save 通过 canonical Extended JSON 保留 BSON 类型，并跟踪 clone source/edited columns | Oxide 原生 MongoDB 输出已通过 BSON serde 保留 Extended JSON 形状，但编辑/克隆回写尚未证明 `$date`/`$oid` 等能恢复 BSON 类型；列入 Grid/document lifecycle 高优先级缺口，后续需结构化 clone metadata 与 native round-trip tests。 |
+| `cd78c0ae1` | Grok CLI 通过 ACP 动态发现 reasoning effort | 属于 AI provider adapter，不改变本轮 LSP、迁移和 Grid 数据导出事实源；不迁移到数据库协议层。 |
+
+### 上一增量审计（`27f3ea728` → `bd08fb630`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
@@ -81,6 +91,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | L20 | 本阶段逻辑已对齐，真实 Monaco/AI provider 验证延期：inline 智能候选与代码块 | DBX `lib/sql/sqlCompletion.ts:buildKeywordItems`、`lib/sql/sqlSnippetTemplates.ts`、`components/editor/QueryEditor.vue` 的 completion context/accept 链路 | bundled LSP 的 popup 与 `oxide/inlineCompletionContext` 现共用单一有界增强管线：产品函数、窗口块、ClickHouse/Oracle relation function、metadata-safe INSERT 代码块、alias、completed-keyword/qualified edit、casing、去重和排序不再分叉。inline 最多保留排序后的 32 项，并把权威 text edit 的 `newText` 作为插入事实；本地 ghost text 支持 `u.` member、`FROM` 后零宽空格续写和去 tab-stop 的多行 snippet。 | 延期在真实 Monaco/WebView 验证 popup/ghost 同时出现时的 Tab 优先级、IME、Vim、multi-cursor、undo、AI fallback/cache、慢 provider 取消和 32 项截断；不得让 inline 路径重新查询数据库或维护第二套候选生成器。 |
 | L21 | 本阶段逻辑已对齐，真实 Monaco 验证延期：用户/产品 command snippet 的 popup-inline 一致性 | DBX `lib/sql/sqlSnippetTemplates.ts`、`lib/sql/sqlCompletion.ts`、`components/editor/QueryEditor.vue` 的 snippet 建议与接受链路 | 前端 command snippet 继续由 `sqlCommandSnippetCompletions` 单点处理用户启停/改写、关键字大小写和 Oracle/Manticore/Db2/Dameng 产品隔离；popup 与 inline 现在都从 `sqlSyntaxFallbackCompletions` 消费该事实源。exact trigger 位于独立语义层，LSP 候选保持原顺序，个人 usage 只在同层排序；按插入内容去重并统一截断为 32 项。LSP 尚未 ready/restarting 时，SQL 产品仍可提供本地多行 ghost text，非 SQL 产品不会注入 SQL block。 | 延期在真实 Monaco/WebView 验证用户自定义/禁用 snippet 热更新、产品切换、exact/fuzzy/usage 组合排序、多行 Tab/undo/IME/Vim，以及 LSP restart 窗口内的本地接受行为；不得连接数据库来生成 snippet。 |
 | L22 | 本阶段逻辑已对齐，真实 Monaco/产品格式化验证延期：格式化与补全共享大小写设置 | DBX `apps/desktop/src/lib/sql/sqlFormatterConfig.ts:41-70,183-195,256-258`、`components/editor/SqlFormatterSettingsPanel.vue:99-101,520-544`、`components/editor/QueryEditor.vue:3347-3409,3676-3677,4137-4138` | `SqlFormattingSettings` 现为 `keywordCase`/`functionCase` 的运行时事实源，旧 completion 字段仅承担向后兼容迁移；Settings、popup、inline、本地 command snippet、缓存候选与 `workspace/didChangeConfiguration` 均消费同一值。bundled LSP 对全篇与选区格式化分别应用关键字和函数大小写；函数只改写 Tree-sitter `invocation` 名称，保留 relation、类型、参数/模板占位符、字符串、注释及 quoted function。非 SQL dialect 不受 SQL formatter preference 污染。 | 延期在真实 Monaco/WebView 验证全篇/选区格式化、undo/光标恢复、超大 SQL 响应、quoted/schema-qualified/user routine，以及 PostgreSQL/MySQL/MariaDB/SQLite/ClickHouse/Hive 与兼容/JDBC 产品输出；不得以当前 13 项 packaged protocol test 代替真实产品 conformance。 |
+| L23 | 本阶段逻辑已对齐，真实 Oracle/JDBC 验证延期：执行错误范围提示 | DBX `apps/desktop/src/lib/sql/sqlDiagnostics.ts:oracleInvalidIdentifierRange,sqlErrorDecorationRange`、`components/editor/QueryEditor.vue:sqlErrorDecorationRange`，来源提交 `a1dfc81d4` | `queryErrorPresentation.ts` 在原生 PostgreSQL one-based structured position 之外，识别 Oracle Agent 的 zero-based `error occur(red) at position`；`ORA-00904` 会按消息中的标识符和报告位置选择最近的 Unicode token，并保持 quoted identifier 大小写。range 经当前执行语句的 UTF-16 `sourceStartOffset` 映射回整份多语句文档，`QueryEditor.tsx` 复用现有 `database-query` Monaco marker 并高亮完整 token，而非相邻点号/星号；越界或畸形消息 fail-closed。 | 延期用真实 Oracle/OceanBase Oracle 与 JDBC/ODBC package 验证 Agent offset 口径、非 ASCII/quoted/schema-qualified identifiers、多语句选区、文档编辑后的 marker 清理、hover/Problems 展示和多个错误；本阶段不连接数据库。 |
 
 ## 4. Explorer、metadata 与数据库管理
 

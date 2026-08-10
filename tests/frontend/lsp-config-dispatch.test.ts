@@ -10,9 +10,12 @@ function config(): LspConfigurationPayload {
     defaultDialect: "postgres",
     completionPreferences: {
       keywordCase: "upper",
+      functionCase: "preserve",
       tableAlias: "none",
     },
     formattingPreferences: {
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "before",
       fromClauseLayout: "newLine",
     },
@@ -131,6 +134,8 @@ describe("LSP configuration dispatch", () => {
     const previous = config();
     const changed = config();
     changed.formattingPreferences = {
+      keywordCase: "upper",
+      functionCase: "preserve",
       logicalOperatorNewline: "none",
       fromClauseLayout: "sameLine",
     };
@@ -189,6 +194,8 @@ describe("LSP configuration dispatch", () => {
       connectionId: "conn-1",
       driver: "postgres",
       lspDialect: "postgres",
+      completionPreferences: payload.completionPreferences,
+      formattingPreferences: payload.formattingPreferences,
       fileSchemas: payload.fileSchemas,
       fileDialects: payload.fileDialects,
       schemaDefinitions: payload.schemas,
@@ -226,6 +233,8 @@ describe("LSP configuration dispatch", () => {
       connectionId: "conn-1",
       driver: "postgres",
       lspDialect: "postgres",
+      completionPreferences: previous.completionPreferences,
+      formattingPreferences: previous.formattingPreferences,
       fileSchemas: previous.fileSchemas,
       fileDialects: previous.fileDialects,
       schemaDefinitions: previous.schemas,
@@ -260,6 +269,8 @@ describe("LSP configuration dispatch", () => {
       connectionId: "conn-1",
       driver: "postgres",
       lspDialect: "postgres",
+      completionPreferences: previous.completionPreferences,
+      formattingPreferences: previous.formattingPreferences,
       fileSchemas: previous.fileSchemas,
       fileDialects: previous.fileDialects,
       schemaDefinitions: previous.schemas,

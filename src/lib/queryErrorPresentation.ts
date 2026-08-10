@@ -25,6 +25,7 @@ export interface DatabaseQueryErrorDetail {
   executionLine?: number;
   executionColumn?: number;
   documentOffset?: number;
+  documentEndOffset?: number;
   documentLine?: number;
   documentColumn?: number;
   documentExecutionRange?: {
@@ -90,6 +91,95 @@ function utf16OffsetForDatabasePosition(sql: string, position: number) {
     utf16Offset += character.length;
   }
   return Math.min(utf16Offset, sql.length);
+}
+
+interface SqlErrorRange {
+  from: number;
+  to: number;
+}
+
+function nextUtf16CharacterOffset(text: string, offset: number) {
+  if (offset < 0 || offset >= text.length) {
+    return Math.max(0, Math.min(offset, text.length));
+  }
+  const codePoint = text.codePointAt(offset);
+  return Math.min(
+    text.length,
+    offset + (codePoint !== undefined && codePoint > 0xffff ? 2 : 1),
+  );
+}
+
+function oracleInvalidIdentifierRange(
+  sql: string,
+  message: string,
+  position: number,
+): SqlErrorRange | null {
+  const identifierMatch =
+    /\bORA-00904:\s*"((?:""|[^"])*)"\s*:\s*invalid identifier\b/i.exec(
+      message,
+    );
+  if (!identifierMatch?.[1]) return null;
+
+  const reportedIdentifier = identifierMatch[1].replace(/""/g, '"');
+  const identifierPattern = /"(?:""|[^"])*"|[\p{L}_][\p{L}\p{N}_$#]*/gu;
+  let bestRange: SqlErrorRange | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const match of sql.matchAll(identifierPattern)) {
+    const token = match[0];
+    const tokenStart = match.index;
+    const quoted = token.startsWith('"');
+    const identifier = quoted
+      ? token.slice(1, -1).replace(/""/g, '"')
+      : token;
+    if (
+      quoted
+        ? identifier !== reportedIdentifier
+        : identifier.toUpperCase() !== reportedIdentifier.toUpperCase()
+    ) {
+      continue;
+    }
+
+    const from = tokenStart + (quoted ? 1 : 0);
+    const to = tokenStart + token.length - (quoted ? 1 : 0);
+    const distance =
+      position < from
+        ? from - position
+        : position > to
+          ? position - to
+          : 0;
+    if (distance >= bestDistance) continue;
+    bestDistance = distance;
+    bestRange = { from, to };
+  }
+
+  return bestRange;
+}
+
+/**
+ * Oracle Agent errors expose a zero-based absolute execution offset in their
+ * message instead of the structured one-based database position used by the
+ * native PostgreSQL path. Resolve the named ORA-00904 token when possible so
+ * Monaco highlights the identifier rather than an adjacent dot or star.
+ */
+function oracleAgentErrorRange(
+  sql: string,
+  message: string,
+): SqlErrorRange | null {
+  const positionMatch =
+    /\berror\s+occur(?:red)?\s+at\s+position\s*:\s*(\d+)\b/i.exec(message);
+  if (!positionMatch?.[1]) return null;
+  const position = Number.parseInt(positionMatch[1], 10);
+  if (!Number.isSafeInteger(position) || position < 0 || position >= sql.length) {
+    return null;
+  }
+
+  return (
+    oracleInvalidIdentifierRange(sql, message, position) ?? {
+      from: position,
+      to: nextUtf16CharacterOffset(sql, position),
+    }
+  );
 }
 
 function lineAndColumnAtUtf16Offset(text: string, offset: number) {
@@ -160,9 +250,18 @@ export function extractQueryExecutionError(
     rawDatabaseError.kind === "checkViolation"
       ? rawDatabaseError.kind
       : undefined;
-  const relativeOffset = position
+  const structuredOffset = position
     ? utf16OffsetForDatabasePosition(executedSql, position)
     : undefined;
+  const fallbackRange =
+    structuredOffset === undefined
+      ? oracleAgentErrorRange(executedSql, message)
+      : null;
+  const relativeOffset = structuredOffset ?? fallbackRange?.from;
+  const relativeEndOffset =
+    structuredOffset === undefined
+      ? fallbackRange?.to
+      : nextUtf16CharacterOffset(executedSql, structuredOffset);
   const executionLocation =
     relativeOffset === undefined
       ? null
@@ -177,6 +276,10 @@ export function extractQueryExecutionError(
   const documentOffset =
     relativeOffset !== undefined && validSourceStart !== undefined
       ? Math.min(documentSql.length, validSourceStart + relativeOffset)
+      : undefined;
+  const documentEndOffset =
+    relativeEndOffset !== undefined && validSourceStart !== undefined
+      ? Math.min(documentSql.length, validSourceStart + relativeEndOffset)
       : undefined;
   const documentLocation =
     documentOffset === undefined
@@ -207,6 +310,7 @@ export function extractQueryExecutionError(
       executionLine: executionLocation?.line,
       executionColumn: executionLocation?.column,
       documentOffset,
+      documentEndOffset,
       documentLine: documentLocation?.line,
       documentColumn: documentLocation?.column,
       documentExecutionRange:

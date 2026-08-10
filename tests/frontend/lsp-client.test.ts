@@ -156,6 +156,7 @@ describe("LSP client", () => {
       request: {
         session_key: "postgres:connection-1",
         item: unresolved,
+        request_token: expect.any(String),
       },
     });
     expect(resolved).toMatchObject({

@@ -82,6 +82,7 @@ describe("database dialect capabilities", () => {
       "csv",
       "json",
       "jsonl",
+      "markdown",
       "sql",
       "tsv",
       "xlsx",

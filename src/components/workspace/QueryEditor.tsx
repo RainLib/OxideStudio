@@ -2291,6 +2291,7 @@ export function QueryEditor({
     if (!model) return;
     const databaseError = activeTab?.queryError?.database;
     const documentOffset = databaseError?.documentOffset;
+    const documentEndOffset = databaseError?.documentEndOffset;
     const owner = "database-query";
 
     if (
@@ -2305,7 +2306,10 @@ export function QueryEditor({
 
     const start = model.getPositionAt(documentOffset);
     const end = model.getPositionAt(
-      Math.min(model.getValueLength(), documentOffset + 1),
+      Math.min(
+        model.getValueLength(),
+        Math.max(documentOffset, documentEndOffset ?? documentOffset + 1),
+      ),
     );
     monaco.editor.setModelMarkers(model, owner, [
       {

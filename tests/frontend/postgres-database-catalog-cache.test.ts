@@ -36,6 +36,8 @@ const identity: PostgresDatabaseCatalogIdentity = {
   projectId: "project-a",
   connectionId: "postgres-1",
   driver: "postgres",
+  driverPackageVersion: null,
+  connectionDatabaseName: null,
 };
 
 function cachedResource(
@@ -50,8 +52,10 @@ function cachedResource(
     kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
     name: "PostgreSQL server database catalog",
     metadata: {
-      version: 1,
+      version: 2,
       driver: resourceIdentity.driver,
+      driverPackageVersion: resourceIdentity.driverPackageVersion ?? null,
+      connectionDatabaseName: resourceIdentity.connectionDatabaseName ?? null,
       connectionId: resourceIdentity.connectionId,
       databases,
     },
@@ -78,7 +82,7 @@ describe("PostgreSQL database catalog cache", () => {
     });
     expect(mocks.getResources).toHaveBeenCalledWith(
       "postgres-1",
-      "oxide:server-catalog:postgres-1:postgres",
+      postgresDatabaseCatalogParentId(identity),
       "project-a"
     );
   });
@@ -88,6 +92,8 @@ describe("PostgreSQL database catalog cache", () => {
       projectId: "project-a",
       connectionId: "duckdb-1",
       driver: "duckdb",
+      driverPackageVersion: null,
+      connectionDatabaseName: null,
     };
     mocks.getResources.mockResolvedValue([
       cachedResource(duckdbIdentity, ["memory", "analytics"]),
@@ -100,7 +106,7 @@ describe("PostgreSQL database catalog cache", () => {
     });
     expect(mocks.getResources).toHaveBeenCalledWith(
       "duckdb-1",
-      "oxide:server-catalog:duckdb-1:duckdb",
+      postgresDatabaseCatalogParentId(duckdbIdentity),
       "project-a",
     );
   });
@@ -131,10 +137,10 @@ describe("PostgreSQL database catalog cache", () => {
     expect(mocks.saveResources).toHaveBeenCalledWith(
       [
         expect.objectContaining({
-          id: "oxide:server-catalog:postgres-1:postgres:POSTGRES_DATABASE_CATALOG_CACHE",
+          id: postgresDatabaseCatalogResourceId(identity),
           project_id: "project-a",
           connection_id: "postgres-1",
-          parent_id: "oxide:server-catalog:postgres-1:postgres",
+          parent_id: postgresDatabaseCatalogParentId(identity),
           kind: POSTGRES_DATABASE_CATALOG_CACHE_KIND,
           metadata: expect.objectContaining({
             driver: "postgres",
@@ -220,7 +226,7 @@ describe("PostgreSQL database catalog cache", () => {
 
     expect(mocks.deleteResources).toHaveBeenCalledWith(
       "postgres-1",
-      "oxide:server-catalog:postgres-1:postgres",
+      postgresDatabaseCatalogParentId(identity),
       POSTGRES_DATABASE_CATALOG_CACHE_KIND,
       "project-a"
     );
