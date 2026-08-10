@@ -53,14 +53,17 @@ schema migration 的产品能力。它同时跨越两个连接、两套权限和
    `CREATE <digest>` 确认短语；用户确认后仅创建空表，刷新 metadata 后再进入普通
    transfer preview。该入口只对内置 PostgreSQL、MySQL/MariaDB 与 SQLite Host DDL
    builder 开放；外置 package（包括 DuckDB sidecar）必须先实现独立的 semantic DDL
-   conformance contract。生成计划保留列名、主键和 nullability，但不臆造 identity、
-   sequence、default、FK、check、trigger 或 index。
+   conformance contract。生成计划保留列名、主键和 nullability。只有同产品且 Host DDL
+   builder 明确支持时，auto-increment/identity 才会重建为新的 target-owned generator；
+   源 generator 名称、当前值和 identity mode 不复制。其余 identity 值物化为普通列，default
+   expression 逐列标记 omitted；两者都要求 Review。FK、check、trigger 和 index 不臆造。
 
 ## 后果
 
 - 用户得到从当前 Table Data 视图进入的 target 选择、预览、映射与 exact-token 确认流程。
-- 目标建表只创建经过独立确认的空表；它不会承诺与随后的数据复制跨方言原子，也不会
-  自动复制 identity/sequence/FK 等语义。merge/upsert、无限复制、后台续传或自动
+- 目标建表只创建经过独立确认的空表；它不会承诺与随后的数据复制跨方言原子。同产品
+  支持项只创建新的 target-owned identity，不复制 sequence ownership/current value；跨产品
+  identity、default、FK 等语义不会自动复制。merge/upsert、无限复制、后台续传或自动
   scheduler 仍需要额外处理 key 冲突、依赖顺序、锁、幂等恢复和审计 journal。
 - schema migration 仍使用独立的 snapshot/preflight/apply/post-verify 流程；Data Transfer
   不推断或创建目标表结构。

@@ -1289,6 +1289,16 @@ export function TableDataTransferDialog({
                           <div className="truncate text-[9px] wb-muted">
                             {column.isPrimaryKey ? "primary key · " : ""}
                             {column.isNotNull ? "not null · " : "nullable · "}
+                            {column.identityRetained
+                              ? "new target identity · "
+                              : column.sourceAutoIncrement
+                                ? "identity materialized · "
+                                : ""}
+                            {column.hasSourceDefault
+                              ? column.defaultRetained
+                                ? "default retained · "
+                                : "default omitted · "
+                              : ""}
                             {column.reason}
                           </div>
                         </div>

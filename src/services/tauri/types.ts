@@ -776,6 +776,10 @@ export interface TableDataTransferTargetColumn {
   targetLength?: string | null;
   isPrimaryKey: boolean;
   isNotNull: boolean;
+  sourceAutoIncrement: boolean;
+  identityRetained: boolean;
+  hasSourceDefault: boolean;
+  defaultRetained: boolean;
   compatibility: TableDataTransferCompatibility;
   reason: string;
 }

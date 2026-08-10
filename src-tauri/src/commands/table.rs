@@ -629,6 +629,14 @@ pub struct TableDataTransferTargetColumn {
     pub target_length: Option<String>,
     pub is_primary_key: bool,
     pub is_not_null: bool,
+    #[serde(default)]
+    pub source_auto_increment: bool,
+    #[serde(default)]
+    pub identity_retained: bool,
+    #[serde(default)]
+    pub has_source_default: bool,
+    #[serde(default)]
+    pub default_retained: bool,
     pub compatibility: TableDataTransferCompatibility,
     pub reason: String,
 }
@@ -5886,6 +5894,45 @@ struct TransferTargetColumnsPlan {
     warnings: Vec<String>,
 }
 
+fn review_transfer_compatibility(
+    compatibility: TableDataTransferCompatibility,
+) -> TableDataTransferCompatibility {
+    match compatibility {
+        TableDataTransferCompatibility::Unsupported => compatibility,
+        _ => TableDataTransferCompatibility::Review,
+    }
+}
+
+fn transfer_identity_can_be_retained(
+    source: &ColumnInfo,
+    source_driver: &str,
+    target_driver: &str,
+    target_data_type: &str,
+    visible_primary_key_count: usize,
+) -> bool {
+    if !source.is_auto_increment
+        || source.is_generated == Some(true)
+        || normalized_transfer_driver_id(source_driver)
+            != normalized_transfer_driver_id(target_driver)
+    {
+        return false;
+    }
+    match normalized_transfer_driver_id(target_driver).as_str() {
+        "postgres" => DatabaseKind::Postgres
+            .auto_increment_clause_for_type(target_data_type)
+            .is_ok(),
+        "mysql" => DatabaseKind::Mysql
+            .auto_increment_clause_for_type(target_data_type)
+            .is_ok(),
+        "sqlite" => {
+            source.is_primary_key
+                && visible_primary_key_count == 1
+                && normalize_data_type(target_data_type) == "INTEGER"
+        }
+        _ => false,
+    }
+}
+
 fn build_transfer_target_columns(
     source_columns: &[ColumnInfo],
     source_driver: &str,
@@ -5917,14 +5964,59 @@ fn build_transfer_target_columns(
         .filter(|column| column.is_generated == Some(true) && column.is_hidden != Some(true))
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
+    let visible_primary_key_count = source_columns
+        .iter()
+        .filter(|column| column.is_hidden != Some(true) && column.is_primary_key)
+        .count();
 
     let mut planned = Vec::with_capacity(source_columns.len());
     let mut create_columns = Vec::with_capacity(source_columns.len());
+    let mut retained_identity_columns = Vec::new();
+    let mut omitted_identity_columns = Vec::new();
+    let mut omitted_default_columns = Vec::new();
     for source in source_columns
         .iter()
         .filter(|column| column.is_hidden != Some(true))
     {
         let mapping = transfer_target_column_type(&source.data_type, source_driver, target_driver);
+        let identity_retained = transfer_identity_can_be_retained(
+            source,
+            source_driver,
+            target_driver,
+            &mapping.data_type,
+            visible_primary_key_count,
+        );
+        let has_source_default = source
+            .default_value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let mut compatibility = mapping.compatibility;
+        let mut reasons = vec![mapping.reason];
+        if source.is_auto_increment {
+            if identity_retained {
+                retained_identity_columns.push(source.name.clone());
+                reasons.push(
+                    "Same-product auto-increment semantics are recreated with a target-owned generator; the source generator name and current value are not copied."
+                        .to_string(),
+                );
+                compatibility = review_transfer_compatibility(compatibility);
+            } else {
+                omitted_identity_columns.push(source.name.clone());
+                reasons.push(
+                    "Source auto-increment semantics are not synthesized for this target; values are materialized as an ordinary column."
+                        .to_string(),
+                );
+                compatibility = review_transfer_compatibility(compatibility);
+            }
+        }
+        if has_source_default {
+            omitted_default_columns.push(source.name.clone());
+            reasons.push(
+                "The source default expression is not retained because it has not passed a target-dialect semantic mapping."
+                    .to_string(),
+            );
+            compatibility = review_transfer_compatibility(compatibility);
+        }
         planned.push(TableDataTransferTargetColumn {
             name: source.name.clone(),
             source_data_type: source.data_type.clone(),
@@ -5932,8 +6024,12 @@ fn build_transfer_target_columns(
             target_length: mapping.length.clone(),
             is_primary_key: source.is_primary_key,
             is_not_null: !source.is_nullable,
-            compatibility: mapping.compatibility,
-            reason: mapping.reason,
+            source_auto_increment: source.is_auto_increment,
+            identity_retained,
+            has_source_default,
+            default_retained: false,
+            compatibility,
+            reason: reasons.join(" "),
         });
         create_columns.push(CreateTableColumn {
             name: source.name.clone(),
@@ -5941,9 +6037,7 @@ fn build_transfer_target_columns(
             length: mapping.length,
             is_primary_key: source.is_primary_key,
             is_not_null: !source.is_nullable,
-            // Identity/sequence semantics are deliberately not synthesized:
-            // transfer inserts the reviewed source values explicitly.
-            is_auto_increment: false,
+            is_auto_increment: identity_retained,
             comment: None,
         });
     }
@@ -5958,6 +6052,24 @@ fn build_transfer_target_columns(
         warnings.push(format!(
             "Generated source column(s) are materialized as ordinary target values; generation expressions are not retained: {}.",
             generated_columns.join(", ")
+        ));
+    }
+    if !retained_identity_columns.is_empty() {
+        warnings.push(format!(
+            "Same-product auto-increment column(s) are recreated with new target-owned generators; source generator names/current values are not copied: {}.",
+            retained_identity_columns.join(", ")
+        ));
+    }
+    if !omitted_identity_columns.is_empty() {
+        warnings.push(format!(
+            "Auto-increment semantics cannot be retained by this mapping and the values become ordinary target columns: {}.",
+            omitted_identity_columns.join(", ")
+        ));
+    }
+    if !omitted_default_columns.is_empty() {
+        warnings.push(format!(
+            "Source default expressions are omitted pending target-dialect semantic mapping: {}.",
+            omitted_default_columns.join(", ")
         ));
     }
     Ok(TransferTargetColumnsPlan {
@@ -6072,7 +6184,7 @@ async fn resolve_table_data_transfer_target_plan(
         endpoint_label(&request.target)
     )];
     warnings.push(
-        "Identity, sequence, generated-expression, foreign-key, check, trigger, index, and default expressions are not synthesized. Primary-key and nullability metadata are retained."
+        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators; source sequence names/current values, generated expressions, foreign keys, checks, triggers, indexes, and default expressions are not copied."
             .to_string(),
     );
     warnings.extend(target_columns_plan.warnings);
@@ -11025,6 +11137,10 @@ mod tests {
             target_length: Some("36".to_string()),
             is_primary_key: true,
             is_not_null: true,
+            source_auto_increment: false,
+            identity_retained: false,
+            has_source_default: false,
+            default_retained: false,
             compatibility: TableDataTransferCompatibility::Review,
             reason: "mapped".to_string(),
         }];
@@ -11040,8 +11156,18 @@ mod tests {
             &["CREATE TABLE events_copy (id TEXT);".to_string()],
         )
         .unwrap();
+        let mut identity_columns = columns.clone();
+        identity_columns[0].source_auto_increment = true;
+        identity_columns[0].identity_retained = true;
+        let identity_changed = transfer_target_confirmation_token(
+            &request,
+            &identity_columns,
+            &["CREATE TABLE events_copy (id VARCHAR(36));".to_string()],
+        )
+        .unwrap();
         assert!(first.starts_with("CREATE "));
         assert_ne!(first, changed);
+        assert_ne!(first, identity_changed);
     }
 
     #[async_trait]
@@ -11750,6 +11876,103 @@ mod tests {
                 .unwrap_err()
                 .contains("Target DDL cannot safely decide")
         );
+    }
+
+    #[test]
+    fn transfer_target_recreates_only_supported_same_product_identity() {
+        let mut identity = target_column("id");
+        identity.data_type = "integer".to_string();
+        identity.is_primary_key = true;
+        identity.is_nullable = false;
+        identity.is_auto_increment = true;
+        identity.default_value = Some("nextval('events_id_seq'::regclass)".to_string());
+
+        let postgres = build_transfer_target_columns(
+            &[identity.clone(), target_column("payload")],
+            "postgres",
+            "postgres",
+        )
+        .unwrap();
+        assert!(postgres.columns[0].source_auto_increment);
+        assert!(postgres.columns[0].identity_retained);
+        assert!(postgres.columns[0].has_source_default);
+        assert!(!postgres.columns[0].default_retained);
+        assert_eq!(
+            postgres.columns[0].compatibility,
+            TableDataTransferCompatibility::Review
+        );
+        assert!(postgres.create_columns[0].is_auto_increment);
+        let postgres_ddl = build_create_table_statements(
+            DatabaseKind::Postgres,
+            "public",
+            "events_copy",
+            &postgres.create_columns,
+        )
+        .unwrap();
+        assert!(postgres_ddl
+            .join("\n")
+            .contains("GENERATED BY DEFAULT AS IDENTITY"));
+        assert!(postgres.warnings.iter().any(|warning| {
+            warning.contains("new target-owned generators") && warning.contains("id")
+        }));
+        assert!(postgres.warnings.iter().any(|warning| {
+            warning.contains("default expressions are omitted") && warning.contains("id")
+        }));
+
+        let cross_product =
+            build_transfer_target_columns(&[identity], "postgres", "mysql").unwrap();
+        assert!(!cross_product.columns[0].identity_retained);
+        assert!(!cross_product.create_columns[0].is_auto_increment);
+        assert_eq!(
+            cross_product.columns[0].compatibility,
+            TableDataTransferCompatibility::Review
+        );
+        assert!(cross_product.warnings.iter().any(|warning| {
+            warning.contains("ordinary target columns") && warning.contains("id")
+        }));
+    }
+
+    #[test]
+    fn transfer_target_sqlite_identity_requires_integer_primary_key() {
+        let mut supported = target_column("id");
+        supported.data_type = "integer".to_string();
+        supported.is_primary_key = true;
+        supported.is_auto_increment = true;
+        let retained = build_transfer_target_columns(&[supported], "sqlite", "sqlite").unwrap();
+        assert!(retained.columns[0].identity_retained);
+        assert!(retained.create_columns[0].is_auto_increment);
+        let sqlite_ddl =
+            build_sqlite_create_table_statements("main", "events_copy", &retained.create_columns)
+                .unwrap();
+        assert!(sqlite_ddl
+            .join("\n")
+            .contains("INTEGER PRIMARY KEY AUTOINCREMENT"));
+
+        let mut invalid = target_column("sequence_value");
+        invalid.data_type = "integer".to_string();
+        invalid.is_auto_increment = true;
+        let materialized = build_transfer_target_columns(&[invalid], "sqlite", "sqlite").unwrap();
+        assert!(!materialized.columns[0].identity_retained);
+        assert!(!materialized.create_columns[0].is_auto_increment);
+
+        let mut composite_identity = target_column("tenant_id");
+        composite_identity.data_type = "integer".to_string();
+        composite_identity.is_primary_key = true;
+        composite_identity.is_auto_increment = true;
+        let mut composite_key = target_column("event_id");
+        composite_key.data_type = "integer".to_string();
+        composite_key.is_primary_key = true;
+        let composite =
+            build_transfer_target_columns(&[composite_identity, composite_key], "sqlite", "sqlite")
+                .unwrap();
+        assert!(!composite.columns[0].identity_retained);
+        assert!(!composite.create_columns[0].is_auto_increment);
+        assert!(build_sqlite_create_table_statements(
+            "main",
+            "events_copy",
+            &composite.create_columns,
+        )
+        .is_ok());
     }
 
     #[test]

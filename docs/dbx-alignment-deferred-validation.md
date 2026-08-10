@@ -1003,3 +1003,21 @@ explicit deferred validation task rather than an implicit release check.
   auto-increment, generated/computed, hidden/temporal and ordinary-default
   combinations. The phase's unit and subprocess tests do not replace these
   provider/product checks, and no database was opened during implementation.
+
+## Target-table identity and default review
+
+- For PostgreSQL, MySQL/MariaDB and SQLite, preview a missing transfer target
+  with same-product and cross-product sources. Confirm supported same-product
+  auto-increment columns create a new target-owned generator, while cross-product
+  identities, generated columns and SQLite composite/non-integer primary keys
+  are materialized as ordinary columns and remain Review-only.
+- Verify every source default expression is shown as `default omitted`, changes
+  the per-column compatibility to Review, participates in the confirmation
+  digest, and never appears in generated target DDL. Verify generator names,
+  identity ALWAYS/BY DEFAULT mode, sequence ownership and current values are not
+  claimed as retained.
+- Run generated PostgreSQL/MySQL/SQLite DDL against empty fixtures only in the
+  consolidated database-validation phase. The Windows Rust test binary compiled
+  on 2026-08-10 but exited before the harness with
+  `STATUS_ENTRYPOINT_NOT_FOUND`; Clippy and the strict frontend production build
+  passed, but they are not database conformance evidence.
