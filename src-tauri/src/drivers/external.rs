@@ -18,9 +18,13 @@ use async_trait::async_trait;
 use oxide_driver_protocol::{
     DatabaseCreateRequest as SidecarDatabaseCreateRequest, DriverQueryContext,
     DriverQueryParameter, DriverQueryResult, DriverRequest, DriverResult, MetadataRequest,
-    SecretConnectionConfig,
+    SchemaMigrationApplyRequest, SchemaMigrationApplyResult, SchemaMigrationMode,
+    SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
+    SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
+    SecretConnectionConfig, SemanticSchemaSnapshot,
 };
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +33,19 @@ use tokio::sync::Mutex;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
+const MIGRATION_PLAN_TIMEOUT: Duration = Duration::from_secs(60);
+const MIGRATION_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
+const MIGRATION_APPLY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MIGRATION_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_MIGRATION_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MIGRATION_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_MIGRATION_FINGERPRINT_BYTES: usize = 256;
+const MAX_MIGRATION_PREVIEW_ITEMS: usize = 10_000;
+const MAX_MIGRATION_CHECK_ITEMS: usize = 10_000;
+const MAX_MIGRATION_CHANGE_COUNT: u32 = 100_000;
+const MAX_MIGRATION_WARNINGS: usize = 1_024;
+const MAX_MIGRATION_TEXT_BYTES: usize = 16 * 1024;
+const MAX_MIGRATION_DESCRIPTOR_ITEMS: usize = 200_000;
 
 /// A single connection-scoped sidecar. The sidecar is intentionally not shared
 /// between saved connections, so a driver only receives the one selected secret.
@@ -96,6 +113,33 @@ impl ExternalDriver {
             .request(request, timeout)
             .await
             .map_err(|error| anyhow!(redact_driver_error(&error, &self.url)))
+    }
+
+    async fn require_semantic_schema_migration(&self) -> Result<SchemaMigrationMode> {
+        if self.agent_read_only {
+            return Err(anyhow!(
+                "Agent read-only connections cannot perform semantic schema migration"
+            ));
+        }
+        let contract = self
+            .package
+            .manifest
+            .schema_migration
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow!("External driver package does not provide semantic schema migration")
+            })?;
+        if contract.snapshot_version != 1 {
+            return Err(anyhow!(
+                "External driver package uses an unsupported semantic snapshot version"
+            ));
+        }
+        if !self.capabilities.lock().await.semantic_schema_migration {
+            return Err(anyhow!(
+                "External driver runtime does not provide semantic schema migration"
+            ));
+        }
+        Ok(contract.mode)
     }
 
     async fn query_with_context(
@@ -337,6 +381,216 @@ fn allows_database_creation(
         && runtime_capabilities.database_creation
 }
 
+fn validate_bounded_migration_text(value: &str, label: &str, allow_empty: bool) -> Result<()> {
+    if (!allow_empty && value.is_empty()) || value.len() > MAX_MIGRATION_TEXT_BYTES {
+        return Err(anyhow!("External driver returned an invalid {label}"));
+    }
+    Ok(())
+}
+
+fn validate_migration_token(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_MIGRATION_TOKEN_BYTES {
+        return Err(anyhow!("External driver returned an invalid {label}"));
+    }
+    Ok(())
+}
+
+fn validate_migration_fingerprint(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() || value.len() > MAX_MIGRATION_FINGERPRINT_BYTES {
+        return Err(anyhow!("External driver returned an invalid {label}"));
+    }
+    Ok(())
+}
+
+fn validate_migration_warnings(warnings: &[String]) -> Result<()> {
+    if warnings.len() > MAX_MIGRATION_WARNINGS
+        || warnings
+            .iter()
+            .any(|warning| warning.len() > MAX_MIGRATION_TEXT_BYTES)
+    {
+        return Err(anyhow!(
+            "External driver returned invalid semantic migration warnings"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_semantic_snapshot(snapshot: &SemanticSchemaSnapshot, label: &str) -> Result<()> {
+    if snapshot.snapshot_version != 1 {
+        return Err(anyhow!("{label} uses an unsupported snapshot version"));
+    }
+    validate_migration_fingerprint(&snapshot.fingerprint, &format!("{label} fingerprint"))?;
+    if snapshot.namespace.is_empty() || snapshot.namespace.len() > 256 {
+        return Err(anyhow!("{label} contains an invalid namespace"));
+    }
+    if snapshot
+        .database
+        .as_ref()
+        .is_some_and(|database| database.is_empty() || database.len() > 256)
+    {
+        return Err(anyhow!("{label} contains an invalid database"));
+    }
+    if !snapshot.descriptor.is_object() {
+        return Err(anyhow!("{label} descriptor must be an object"));
+    }
+    let serialized = serde_json::to_vec(snapshot)
+        .map_err(|_| anyhow!("{label} cannot be encoded as a semantic snapshot"))?;
+    if serialized.len() > MAX_MIGRATION_SNAPSHOT_BYTES {
+        return Err(anyhow!("{label} exceeds the semantic snapshot size limit"));
+    }
+
+    let mut pending = vec![&snapshot.descriptor];
+    let mut item_count = 0usize;
+    while let Some(value) = pending.pop() {
+        item_count = item_count.saturating_add(1);
+        if item_count > MAX_MIGRATION_DESCRIPTOR_ITEMS {
+            return Err(anyhow!("{label} descriptor contains too many items"));
+        }
+        match value {
+            serde_json::Value::Array(items) => {
+                if items.len() > 20_000 {
+                    return Err(anyhow!("{label} descriptor array is too large"));
+                }
+                pending.extend(items);
+            }
+            serde_json::Value::Object(items) => {
+                for (key, value) in items {
+                    let normalized = key.replace('_', "").to_ascii_lowercase();
+                    if matches!(
+                        normalized.as_str(),
+                        "ddl" | "sql" | "sourcesql" | "statement" | "statements"
+                    ) {
+                        return Err(anyhow!(
+                            "{label} descriptor must not contain Host SQL or DDL"
+                        ));
+                    }
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_migration_plan_result(
+    request: &SchemaMigrationPlanRequest,
+    expected_mode: SchemaMigrationMode,
+    result: &SchemaMigrationPlanResult,
+) -> Result<()> {
+    validate_migration_token(&result.plan_id, "semantic migration plan id")?;
+    validate_migration_token(&result.plan_token, "semantic migration plan token")?;
+    validate_migration_fingerprint(
+        &result.target_fingerprint,
+        "semantic migration target fingerprint",
+    )?;
+    if result.target_fingerprint != request.target.fingerprint || result.mode != expected_mode {
+        return Err(anyhow!(
+            "External driver returned a semantic migration plan outside its signed target contract"
+        ));
+    }
+    if result.change_count > MAX_MIGRATION_CHANGE_COUNT
+        || result.blocked_change_count > result.change_count
+        || result.preview.len() > MAX_MIGRATION_PREVIEW_ITEMS
+        || result.preview.len() > result.change_count as usize
+    {
+        return Err(anyhow!(
+            "External driver returned invalid semantic migration plan counts"
+        ));
+    }
+    let mut preview_ids = HashSet::with_capacity(result.preview.len());
+    for change in &result.preview {
+        validate_migration_token(&change.id, "semantic migration preview id")?;
+        validate_bounded_migration_text(&change.kind, "semantic migration preview kind", false)?;
+        validate_bounded_migration_text(&change.label, "semantic migration preview label", false)?;
+        validate_bounded_migration_text(
+            &change.summary,
+            "semantic migration preview summary",
+            true,
+        )?;
+        if !matches!(change.risk.as_str(), "safe" | "review" | "destructive")
+            || !preview_ids.insert(&change.id)
+        {
+            return Err(anyhow!(
+                "External driver returned an invalid semantic migration preview"
+            ));
+        }
+    }
+    validate_migration_warnings(&result.warnings)
+}
+
+fn validate_schema_migration_preflight_result(
+    request: &SchemaMigrationPreflightRequest,
+    result: &SchemaMigrationPreflightResult,
+) -> Result<()> {
+    validate_migration_token(&result.plan_id, "semantic migration plan id")?;
+    validate_migration_token(
+        &result.preflight_token,
+        "semantic migration preflight token",
+    )?;
+    validate_migration_fingerprint(
+        &result.target_fingerprint,
+        "semantic migration target fingerprint",
+    )?;
+    if result.target_fingerprint != request.target_fingerprint
+        || result.checks.len() > MAX_MIGRATION_CHECK_ITEMS
+    {
+        return Err(anyhow!(
+            "External driver returned an invalid semantic migration preflight"
+        ));
+    }
+    let mut check_ids = HashSet::with_capacity(result.checks.len());
+    for check in &result.checks {
+        validate_migration_token(&check.id, "semantic migration preflight check id")?;
+        validate_bounded_migration_text(
+            &check.label,
+            "semantic migration preflight check label",
+            false,
+        )?;
+        validate_bounded_migration_text(
+            &check.status,
+            "semantic migration preflight check status",
+            false,
+        )?;
+        validate_bounded_migration_text(
+            &check.observed,
+            "semantic migration preflight observation",
+            true,
+        )?;
+        if !check_ids.insert(&check.id) {
+            return Err(anyhow!(
+                "External driver returned duplicate semantic migration preflight checks"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_migration_apply_result(result: &SchemaMigrationApplyResult) -> Result<()> {
+    validate_migration_token(&result.plan_id, "semantic migration plan id")?;
+    validate_migration_token(&result.apply_token, "semantic migration apply token")?;
+    if result.committed_change_count > MAX_MIGRATION_CHANGE_COUNT {
+        return Err(anyhow!(
+            "External driver returned an invalid semantic migration apply count"
+        ));
+    }
+    validate_migration_warnings(&result.warnings)
+}
+
+fn validate_schema_migration_verify_result(result: &SchemaMigrationVerifyResult) -> Result<()> {
+    validate_migration_token(&result.plan_id, "semantic migration plan id")?;
+    validate_migration_fingerprint(
+        &result.target_fingerprint_after,
+        "semantic migration verification fingerprint",
+    )?;
+    if result.remaining_change_count > MAX_MIGRATION_CHANGE_COUNT {
+        return Err(anyhow!(
+            "External driver returned an invalid semantic migration verification count"
+        ));
+    }
+    validate_migration_warnings(&result.warnings)
+}
+
 #[async_trait]
 impl DatabaseDriver for ExternalDriver {
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
@@ -372,6 +626,18 @@ impl DatabaseDriver for ExternalDriver {
 
     fn package_capabilities(&self) -> Option<crate::core::dialect::DatabaseCapabilities> {
         self.package.manifest.capabilities.clone()
+    }
+
+    fn semantic_schema_migration_mode(&self) -> Option<SchemaMigrationMode> {
+        if self.agent_read_only {
+            return None;
+        }
+        self.package
+            .manifest
+            .schema_migration
+            .as_ref()
+            .filter(|contract| contract.snapshot_version == 1)
+            .map(|contract| contract.mode)
     }
 
     async fn server_version(&self) -> Option<String> {
@@ -671,6 +937,132 @@ impl DatabaseDriver for ExternalDriver {
                 "External driver returned an invalid database creation response"
             )),
         }
+    }
+
+    async fn plan_schema_migration(
+        &self,
+        request: SchemaMigrationPlanRequest,
+    ) -> Result<SchemaMigrationPlanResult> {
+        let mode = self.require_semantic_schema_migration().await?;
+        validate_semantic_snapshot(&request.source, "Source schema")?;
+        validate_semantic_snapshot(&request.target, "Target schema")?;
+        let result = match self
+            .request(
+                DriverRequest::PlanSchemaMigration {
+                    connection_id: self.connection_id.clone(),
+                    request: request.clone(),
+                },
+                MIGRATION_PLAN_TIMEOUT,
+            )
+            .await?
+        {
+            DriverResult::SchemaMigrationPlan(result) => result,
+            _ => {
+                return Err(anyhow!(
+                    "External driver returned an invalid semantic migration plan response"
+                ));
+            }
+        };
+        validate_schema_migration_plan_result(&request, mode, &result)?;
+        Ok(result)
+    }
+
+    async fn preflight_schema_migration(
+        &self,
+        request: SchemaMigrationPreflightRequest,
+    ) -> Result<SchemaMigrationPreflightResult> {
+        self.require_semantic_schema_migration().await?;
+        validate_migration_token(&request.plan_token, "semantic migration plan token")?;
+        validate_migration_fingerprint(
+            &request.target_fingerprint,
+            "semantic migration target fingerprint",
+        )?;
+        let result = match self
+            .request(
+                DriverRequest::PreflightSchemaMigration {
+                    connection_id: self.connection_id.clone(),
+                    request: request.clone(),
+                },
+                MIGRATION_PREFLIGHT_TIMEOUT,
+            )
+            .await?
+        {
+            DriverResult::SchemaMigrationPreflight(result) => result,
+            _ => {
+                return Err(anyhow!(
+                    "External driver returned an invalid semantic migration preflight response"
+                ));
+            }
+        };
+        validate_schema_migration_preflight_result(&request, &result)?;
+        Ok(result)
+    }
+
+    async fn apply_schema_migration(
+        &self,
+        request: SchemaMigrationApplyRequest,
+    ) -> Result<SchemaMigrationApplyResult> {
+        self.require_semantic_schema_migration().await?;
+        validate_migration_token(&request.plan_token, "semantic migration plan token")?;
+        validate_migration_token(
+            &request.preflight_token,
+            "semantic migration preflight token",
+        )?;
+        validate_migration_fingerprint(
+            &request.target_fingerprint,
+            "semantic migration target fingerprint",
+        )?;
+        let result = match self
+            .request(
+                DriverRequest::ApplySchemaMigration {
+                    connection_id: self.connection_id.clone(),
+                    request,
+                },
+                MIGRATION_APPLY_TIMEOUT,
+            )
+            .await?
+        {
+            DriverResult::SchemaMigrationApply(result) => result,
+            _ => {
+                return Err(anyhow!(
+                    "External driver returned an invalid semantic migration apply response"
+                ));
+            }
+        };
+        validate_schema_migration_apply_result(&result)?;
+        Ok(result)
+    }
+
+    async fn verify_schema_migration(
+        &self,
+        request: SchemaMigrationVerifyRequest,
+    ) -> Result<SchemaMigrationVerifyResult> {
+        self.require_semantic_schema_migration().await?;
+        validate_migration_token(&request.plan_token, "semantic migration plan token")?;
+        validate_migration_token(&request.apply_token, "semantic migration apply token")?;
+        validate_migration_fingerprint(
+            &request.expected_source_fingerprint,
+            "semantic migration expected source fingerprint",
+        )?;
+        let result = match self
+            .request(
+                DriverRequest::VerifySchemaMigration {
+                    connection_id: self.connection_id.clone(),
+                    request,
+                },
+                MIGRATION_VERIFY_TIMEOUT,
+            )
+            .await?
+        {
+            DriverResult::SchemaMigrationVerify(result) => result,
+            _ => {
+                return Err(anyhow!(
+                    "External driver returned an invalid semantic migration verification response"
+                ));
+            }
+        };
+        validate_schema_migration_verify_result(&result)?;
+        Ok(result)
     }
 
     async fn cancel_query(&self, query_id: &str) -> Result<bool> {
@@ -1005,6 +1397,52 @@ impl DatabaseDriver for ExternalDriver {
 mod tests {
     use super::*;
 
+    fn migration_request() -> SchemaMigrationPlanRequest {
+        SchemaMigrationPlanRequest {
+            source: SemanticSchemaSnapshot {
+                snapshot_version: 1,
+                fingerprint: "source-fingerprint".to_string(),
+                database: Some("app".to_string()),
+                namespace: "public".to_string(),
+                descriptor: serde_json::json!({
+                    "relations": [{
+                        "name": "users",
+                        "columns": [{ "name": "id", "type": "integer" }]
+                    }]
+                }),
+            },
+            target: SemanticSchemaSnapshot {
+                snapshot_version: 1,
+                fingerprint: "target-fingerprint".to_string(),
+                database: Some("app".to_string()),
+                namespace: "public".to_string(),
+                descriptor: serde_json::json!({ "relations": [] }),
+            },
+        }
+    }
+
+    fn migration_plan_result() -> SchemaMigrationPlanResult {
+        SchemaMigrationPlanResult {
+            plan_id: "plan-1".to_string(),
+            plan_token: "opaque-plan-token".to_string(),
+            target_fingerprint: "target-fingerprint".to_string(),
+            mode: SchemaMigrationMode::Transactional,
+            change_count: 1,
+            blocked_change_count: 0,
+            requires_review: false,
+            requires_destructive: false,
+            preview: vec![oxide_driver_protocol::SchemaMigrationPreviewChange {
+                id: "change-1".to_string(),
+                kind: "createTable".to_string(),
+                label: "Create users".to_string(),
+                risk: "safe".to_string(),
+                reversible: true,
+                summary: "Creates the users relation".to_string(),
+            }],
+            warnings: Vec::new(),
+        }
+    }
+
     #[test]
     fn external_sql_packages_use_their_declared_lsp_dialect_for_statement_scanning() {
         assert_eq!(
@@ -1062,5 +1500,93 @@ mod tests {
         capabilities.supports_create_database = false;
         runtime.database_creation = true;
         assert!(!allows_database_creation(Some(&capabilities), &runtime));
+    }
+
+    #[test]
+    fn semantic_migration_snapshots_reject_host_sql_and_ddl() {
+        let mut request = migration_request();
+        validate_semantic_snapshot(&request.source, "Source schema")
+            .expect("descriptor-only snapshot should pass");
+
+        request.source.descriptor = serde_json::json!({
+            "relations": [],
+            "source_sql": "DROP TABLE users"
+        });
+        let error = validate_semantic_snapshot(&request.source, "Source schema")
+            .expect_err("Host SQL must never cross the sidecar migration boundary");
+        assert!(error
+            .to_string()
+            .contains("must not contain Host SQL or DDL"));
+    }
+
+    #[test]
+    fn semantic_migration_plan_is_bound_to_target_and_signed_mode() {
+        let request = migration_request();
+        let result = migration_plan_result();
+        validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::Transactional,
+            &result,
+        )
+        .expect("matching plan should pass");
+
+        let mut wrong_target = result.clone();
+        wrong_target.target_fingerprint = "another-target".to_string();
+        assert!(validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::Transactional,
+            &wrong_target,
+        )
+        .is_err());
+
+        assert!(validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::NonTransactional,
+            &result,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_migration_plan_rejects_duplicate_preview_ids_and_oversized_warnings() {
+        let request = migration_request();
+        let mut duplicate = migration_plan_result();
+        duplicate.change_count = 2;
+        duplicate.preview.push(duplicate.preview[0].clone());
+        assert!(validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::Transactional,
+            &duplicate,
+        )
+        .is_err());
+
+        let mut oversized_warning = migration_plan_result();
+        oversized_warning.warnings = vec!["x".repeat(MAX_MIGRATION_TEXT_BYTES + 1)];
+        assert!(validate_schema_migration_plan_result(
+            &request,
+            SchemaMigrationMode::Transactional,
+            &oversized_warning,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_migration_preflight_is_bound_to_requested_target() {
+        let request = SchemaMigrationPreflightRequest {
+            plan_token: "opaque-plan-token".to_string(),
+            target_fingerprint: "target-fingerprint".to_string(),
+        };
+        let mut result = SchemaMigrationPreflightResult {
+            plan_id: "plan-1".to_string(),
+            preflight_token: "opaque-preflight-token".to_string(),
+            target_fingerprint: request.target_fingerprint.clone(),
+            ready: true,
+            checks: Vec::new(),
+        };
+        validate_schema_migration_preflight_result(&request, &result)
+            .expect("matching preflight should pass");
+
+        result.target_fingerprint = "stale-target".to_string();
+        assert!(validate_schema_migration_preflight_result(&request, &result).is_err());
     }
 }

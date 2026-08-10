@@ -259,6 +259,10 @@ explicit deferred validation task rather than an implicit release check.
   target fingerprints, plan/preflight/apply token swaps, blocked preflight,
   missing review/destructive/non-transactional approval, partial-apply reports
   and post-apply drift. Until then the product remains review-only.
+- Re-run the Host-side semantic migration boundary tests on a Windows runner
+  with the complete native test runtime. The current workstation compiled the
+  test binary successfully, but Windows exited before the test harness started
+  with `STATUS_ENTRYPOINT_NOT_FOUND`; this does not qualify as passed evidence.
 - With a live external sidecar, verify the Driver Manager refreshes its
   process-health summary after an unexpected sidecar exit without exposing
   connection names, URLs, stderr, SQL, or credentials.

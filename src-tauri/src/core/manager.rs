@@ -5,6 +5,11 @@ use super::protocol::{
 use super::ssh::SshTunnel;
 use super::{dialect::DatabaseCapabilities, driver::DatabaseDriver};
 use anyhow::{anyhow, Result};
+use oxide_driver_protocol::{
+    SchemaMigrationApplyRequest, SchemaMigrationApplyResult, SchemaMigrationMode,
+    SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
+    SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -444,6 +449,13 @@ impl ConnectionManager {
         Ok(self.get_driver(id).await?.package_capabilities())
     }
 
+    pub async fn semantic_schema_migration_mode(
+        &self,
+        id: &str,
+    ) -> Result<Option<SchemaMigrationMode>> {
+        Ok(self.get_driver(id).await?.semantic_schema_migration_mode())
+    }
+
     /// Whether the live connection is owned by an independently installed
     /// package. Mutation planners use this boundary when a newer semantic
     /// operation has not yet been added to the signed sidecar protocol.
@@ -523,6 +535,50 @@ impl ConnectionManager {
     pub async fn create_database(&self, id: &str, request: DatabaseCreateRequest) -> Result<()> {
         let driver = self.get_driver(id).await?;
         driver.create_database(request).await
+    }
+
+    pub async fn plan_schema_migration(
+        &self,
+        id: &str,
+        request: SchemaMigrationPlanRequest,
+    ) -> Result<SchemaMigrationPlanResult> {
+        self.get_driver(id)
+            .await?
+            .plan_schema_migration(request)
+            .await
+    }
+
+    pub async fn preflight_schema_migration(
+        &self,
+        id: &str,
+        request: SchemaMigrationPreflightRequest,
+    ) -> Result<SchemaMigrationPreflightResult> {
+        self.get_driver(id)
+            .await?
+            .preflight_schema_migration(request)
+            .await
+    }
+
+    pub async fn apply_schema_migration(
+        &self,
+        id: &str,
+        request: SchemaMigrationApplyRequest,
+    ) -> Result<SchemaMigrationApplyResult> {
+        self.get_driver(id)
+            .await?
+            .apply_schema_migration(request)
+            .await
+    }
+
+    pub async fn verify_schema_migration(
+        &self,
+        id: &str,
+        request: SchemaMigrationVerifyRequest,
+    ) -> Result<SchemaMigrationVerifyResult> {
+        self.get_driver(id)
+            .await?
+            .verify_schema_migration(request)
+            .await
     }
 
     pub async fn query_parameterized(

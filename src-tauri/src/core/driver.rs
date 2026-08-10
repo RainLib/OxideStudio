@@ -9,6 +9,11 @@ use super::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use oxide_driver_protocol::{
+    SchemaMigrationApplyRequest, SchemaMigrationApplyResult, SchemaMigrationMode,
+    SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
+    SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
+};
 
 fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
     anyhow!("{feature} is not implemented for this driver")
@@ -43,6 +48,12 @@ pub trait DatabaseDriver: Send + Sync {
     /// Exposing this through the live connection keeps snapshot/export policy
     /// tied to the exact package that was actually launched.
     fn package_capabilities(&self) -> Option<DatabaseCapabilities> {
+        None
+    }
+
+    /// Signed execution mode for target-owned semantic schema migration.
+    /// Native drivers and packages without the contract return `None`.
+    fn semantic_schema_migration_mode(&self) -> Option<SchemaMigrationMode> {
         None
     }
 
@@ -97,6 +108,44 @@ pub trait DatabaseDriver: Send + Sync {
     /// external sidecars must explicitly advertise and implement it.
     async fn create_database(&self, _request: DatabaseCreateRequest) -> Result<()> {
         Err(unsupported_driver_feature("Database creation"))
+    }
+
+    /// Ask the target driver to plan a migration from bounded semantic
+    /// snapshots. Host-generated SQL is deliberately absent from this API.
+    async fn plan_schema_migration(
+        &self,
+        _request: SchemaMigrationPlanRequest,
+    ) -> Result<SchemaMigrationPlanResult> {
+        Err(unsupported_driver_feature(
+            "Semantic schema migration planning",
+        ))
+    }
+
+    async fn preflight_schema_migration(
+        &self,
+        _request: SchemaMigrationPreflightRequest,
+    ) -> Result<SchemaMigrationPreflightResult> {
+        Err(unsupported_driver_feature(
+            "Semantic schema migration preflight",
+        ))
+    }
+
+    async fn apply_schema_migration(
+        &self,
+        _request: SchemaMigrationApplyRequest,
+    ) -> Result<SchemaMigrationApplyResult> {
+        Err(unsupported_driver_feature(
+            "Semantic schema migration apply",
+        ))
+    }
+
+    async fn verify_schema_migration(
+        &self,
+        _request: SchemaMigrationVerifyRequest,
+    ) -> Result<SchemaMigrationVerifyResult> {
+        Err(unsupported_driver_feature(
+            "Semantic schema migration verification",
+        ))
     }
 
     /// Execute a parameterized mutation and return rows affected.
