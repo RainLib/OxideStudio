@@ -93,6 +93,7 @@ const TABLE_EXPORT_BUFFERED_PAGES: usize = 2;
 /// reviewed table-export row grouping while retaining a byte-size guard for
 /// unusually wide rows.
 const SQL_EXPORT_INSERT_BATCH_ROWS: usize = 100;
+const SQL_EXPORT_MAX_INSERT_BATCH_ROWS: usize = 1_000;
 const SQL_EXPORT_TARGET_STATEMENT_BYTES: usize = 512 * 1024;
 const PARQUET_MAX_ROW_GROUP_ROWS: usize = 50_000;
 const PARQUET_MAX_ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
@@ -1528,6 +1529,7 @@ struct TableExportWriterContext {
     kind: DatabaseKind,
     sql_dialect: SqlExportDialect,
     override_system_value: bool,
+    sql_insert_batch_rows: usize,
     analytical_type_policy: AnalyticalTypePolicy,
     schema: String,
     table: String,
@@ -2106,6 +2108,7 @@ fn write_table_export_stream(
         kind,
         sql_dialect,
         override_system_value,
+        sql_insert_batch_rows,
         analytical_type_policy,
         schema,
         table,
@@ -2266,11 +2269,14 @@ fn write_table_export_stream(
                     }
                 } else if matches!(format, TableExportFormat::Sql) {
                     for statement in sql_insert_statements(
-                        kind,
-                        sql_dialect,
-                        override_system_value,
-                        &schema,
-                        &table,
+                        SqlInsertExportOptions {
+                            kind,
+                            dialect: sql_dialect,
+                            override_system_value,
+                            batch_rows: sql_insert_batch_rows,
+                            schema: &schema,
+                            table: &table,
+                        },
                         &columns,
                         &rows,
                     ) {
@@ -2539,12 +2545,18 @@ fn sql_export_literal(dialect: SqlExportDialect, value: &Value, data_type: Optio
     }
 }
 
-fn sql_insert_statements(
+#[derive(Debug, Clone, Copy)]
+struct SqlInsertExportOptions<'a> {
     kind: DatabaseKind,
     dialect: SqlExportDialect,
     override_system_value: bool,
-    schema: &str,
-    table: &str,
+    batch_rows: usize,
+    schema: &'a str,
+    table: &'a str,
+}
+
+fn sql_insert_statements(
+    options: SqlInsertExportOptions<'_>,
     columns: &[ColumnDef],
     rows: &[Vec<Value>],
 ) -> Vec<String> {
@@ -2553,27 +2565,33 @@ fn sql_insert_statements(
     }
     let quoted_columns = columns
         .iter()
-        .map(|column| kind.quote_identifier(&column.name))
+        .map(|column| options.kind.quote_identifier(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let identity_override = if override_system_value && dialect == SqlExportDialect::Postgres {
-        " OVERRIDING SYSTEM VALUE"
-    } else {
-        ""
-    };
+    let identity_override =
+        if options.override_system_value && options.dialect == SqlExportDialect::Postgres {
+            " OVERRIDING SYSTEM VALUE"
+        } else {
+            ""
+        };
     let prefix = format!(
         "INSERT INTO {} ({quoted_columns}){identity_override} VALUES\n",
-        kind.qualified_table(schema_option(schema), table),
+        options
+            .kind
+            .qualified_table(schema_option(options.schema), options.table),
     );
     let mut statements = Vec::new();
-    let mut tuples = Vec::with_capacity(SQL_EXPORT_INSERT_BATCH_ROWS);
+    let batch_rows = options
+        .batch_rows
+        .clamp(1, SQL_EXPORT_MAX_INSERT_BATCH_ROWS);
+    let mut tuples = Vec::with_capacity(batch_rows);
     let mut statement_bytes = prefix.len() + 1;
 
     for row in rows {
-        let values = format_sql_export_row(dialect, columns, row);
+        let values = format_sql_export_row(options.dialect, columns, row);
         let tuple_bytes = values.len() + usize::from(!tuples.is_empty()) * 2;
         if !tuples.is_empty()
-            && (tuples.len() >= SQL_EXPORT_INSERT_BATCH_ROWS
+            && (tuples.len() >= batch_rows
                 || statement_bytes.saturating_add(tuple_bytes) > SQL_EXPORT_TARGET_STATEMENT_BYTES)
         {
             statements.push(format!("{prefix}{};", tuples.join(",\n")));
@@ -2590,6 +2608,16 @@ fn sql_insert_statements(
         statements.push(format!("{prefix}{};", tuples.join(",\n")));
     }
     statements
+}
+
+fn sql_export_insert_batch_rows(requested: Option<usize>) -> Result<usize, String> {
+    let rows = requested.unwrap_or(SQL_EXPORT_INSERT_BATCH_ROWS);
+    if !(1..=SQL_EXPORT_MAX_INSERT_BATCH_ROWS).contains(&rows) {
+        return Err(format!(
+            "SQL INSERT batch size must be between 1 and {SQL_EXPORT_MAX_INSERT_BATCH_ROWS} rows"
+        ));
+    }
+    Ok(rows)
 }
 
 fn filter_sql_export_batch(
@@ -7265,6 +7293,7 @@ pub async fn export_table_data(
     sort: Option<TableSort>,
     page_size: Option<u32>,
     max_rows: Option<u64>,
+    sql_insert_batch_size: Option<usize>,
 ) -> Result<Response<TableExportResult>, String> {
     let mut cancel_rx = cancellation.register(&export_id, &connection_id).await?;
     let started_at = current_table_timestamp_millis();
@@ -7322,6 +7351,11 @@ pub async fn export_table_data(
             TableExportFormat::Arrow | TableExportFormat::Parquet
         );
         let sql_export = matches!(format, TableExportFormat::Sql);
+        let sql_insert_batch_rows = if sql_export {
+            sql_export_insert_batch_rows(sql_insert_batch_size)?
+        } else {
+            SQL_EXPORT_INSERT_BATCH_ROWS
+        };
         let metadata_required = structured_filters.is_some()
             || requested_sort.is_some()
             || analytical_export
@@ -7415,6 +7449,7 @@ pub async fn export_table_data(
                         kind,
                         sql_dialect,
                         override_system_value,
+                        sql_insert_batch_rows,
                         analytical_type_policy,
                         schema: writer_schema,
                         table: writer_table,
@@ -10384,8 +10419,8 @@ mod tests {
         query_target, query_target_parameterized, read_csv_import_preview,
         read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
-        sql_insert_statements, summarize_mutation_affected, table_data_dialect,
-        table_data_transfer_batch_plan, table_data_transfer_dialect,
+        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
+        table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
         transfer_target_confirmation_token, transfer_type_mapping_assessment,
@@ -10394,15 +10429,16 @@ mod tests {
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
         AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, SqlExportDialect, StreamingXlsxWriter, TableCsvColumnMapping,
-        TableCsvImportOptions, TableDataTransferBatchPlanRequest,
+        RelationOperation, SqlExportDialect, SqlInsertExportOptions, StreamingXlsxWriter,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataTransferBatchPlanRequest,
         TableDataTransferCancellationState, TableDataTransferColumnMapping,
         TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
         TableDataTransferMode, TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
         TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
-        MAX_TRANSFER_OVERWRITE_ROWS,
+        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -10565,11 +10601,14 @@ mod tests {
     fn exports_replayable_sql_insert_statements() {
         assert_eq!(
             sql_insert_statements(
-                DatabaseKind::Postgres,
-                SqlExportDialect::Postgres,
-                false,
-                "public",
-                "users",
+                SqlInsertExportOptions {
+                    kind: DatabaseKind::Postgres,
+                    dialect: SqlExportDialect::Postgres,
+                    override_system_value: false,
+                    batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    schema: "public",
+                    table: "users",
+                },
                 &[
                     ColumnDef {
                         name: "id".to_string(),
@@ -10589,11 +10628,14 @@ mod tests {
         );
         assert_eq!(
             sql_insert_statements(
-                DatabaseKind::Mysql,
-                SqlExportDialect::Mysql,
-                false,
-                "app",
-                "events",
+                SqlInsertExportOptions {
+                    kind: DatabaseKind::Mysql,
+                    dialect: SqlExportDialect::Mysql,
+                    override_system_value: false,
+                    batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                    schema: "app",
+                    table: "events",
+                },
                 &[
                     ColumnDef {
                         name: "payload".to_string(),
@@ -10667,22 +10709,28 @@ mod tests {
         let rows = [vec![json!(42)]];
 
         let overridden = sql_insert_statements(
-            DatabaseKind::Postgres,
-            SqlExportDialect::Postgres,
-            true,
-            "public",
-            "users",
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Postgres,
+                dialect: SqlExportDialect::Postgres,
+                override_system_value: true,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                schema: "public",
+                table: "users",
+            },
             &columns,
             &rows,
         );
         assert!(overridden[0].contains(") OVERRIDING SYSTEM VALUE VALUES"));
 
         let mysql = sql_insert_statements(
-            DatabaseKind::Mysql,
-            SqlExportDialect::Mysql,
-            true,
-            "app",
-            "users",
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Mysql,
+                dialect: SqlExportDialect::Mysql,
+                override_system_value: true,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                schema: "app",
+                table: "users",
+            },
             &columns,
             &rows,
         );
@@ -10705,11 +10753,14 @@ mod tests {
             .map(|index| vec![json!(["one", format!("item-{index}")]), json!("\\x00ff")])
             .collect::<Vec<_>>();
         let statements = sql_insert_statements(
-            DatabaseKind::Postgres,
-            SqlExportDialect::Postgres,
-            false,
-            "public",
-            "events",
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Postgres,
+                dialect: SqlExportDialect::Postgres,
+                override_system_value: false,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                schema: "public",
+                table: "events",
+            },
             &columns,
             &rows,
         );
@@ -10721,11 +10772,14 @@ mod tests {
         assert!(statements[0].contains("decode('00ff', 'hex')"));
 
         let mysql = sql_insert_statements(
-            DatabaseKind::Mysql,
-            SqlExportDialect::Mysql,
-            false,
-            "app",
-            "files",
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Mysql,
+                dialect: SqlExportDialect::Mysql,
+                override_system_value: false,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                schema: "app",
+                table: "files",
+            },
             &[
                 ColumnDef {
                     name: "contents".to_string(),
@@ -10741,11 +10795,14 @@ mod tests {
         assert!(mysql[0].contains("(0X00FF, 'line one\\nline two\\\\tail')"));
 
         let sqlite = sql_insert_statements(
-            DatabaseKind::Postgres,
-            SqlExportDialect::Sqlite,
-            false,
-            "main",
-            "files",
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Postgres,
+                dialect: SqlExportDialect::Sqlite,
+                override_system_value: false,
+                batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
+                schema: "main",
+                table: "files",
+            },
             &[
                 ColumnDef {
                     name: "contents".to_string(),
@@ -10759,6 +10816,34 @@ mod tests {
             &[vec![json!("0x00ff"), json!(["one", "two"])]],
         );
         assert!(sqlite[0].contains("(X'00FF', '[\"one\",\"two\"]')"));
+    }
+
+    #[test]
+    fn sql_export_batch_size_is_configurable_with_a_hard_upper_bound() {
+        assert_eq!(sql_export_insert_batch_rows(None).unwrap(), 100);
+        assert_eq!(sql_export_insert_batch_rows(Some(25)).unwrap(), 25);
+        assert!(sql_export_insert_batch_rows(Some(0)).is_err());
+        assert!(sql_export_insert_batch_rows(Some(SQL_EXPORT_MAX_INSERT_BATCH_ROWS + 1)).is_err());
+
+        let rows = (0..26).map(|value| vec![json!(value)]).collect::<Vec<_>>();
+        let statements = sql_insert_statements(
+            SqlInsertExportOptions {
+                kind: DatabaseKind::Postgres,
+                dialect: SqlExportDialect::Postgres,
+                override_system_value: false,
+                batch_rows: 25,
+                schema: "public",
+                table: "events",
+            },
+            &[ColumnDef {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+            }],
+            &rows,
+        );
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches('(').count(), 26);
+        assert_eq!(statements[1].matches('(').count(), 2);
     }
 
     #[test]
@@ -13352,6 +13437,7 @@ WITH DATA;"#
             kind: DatabaseKind::Postgres,
             sql_dialect: SqlExportDialect::Postgres,
             override_system_value: false,
+            sql_insert_batch_rows: SQL_EXPORT_INSERT_BATCH_ROWS,
             analytical_type_policy: AnalyticalTypePolicy::Native,
             schema: "public".to_string(),
             table: "users".to_string(),

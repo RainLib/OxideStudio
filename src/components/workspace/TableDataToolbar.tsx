@@ -26,6 +26,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
@@ -63,7 +67,7 @@ interface TableDataToolbarProps {
   onExportCsvBom: () => void;
   onExportJson: () => void;
   onExportJsonl: () => void;
-  onExportSql: () => void;
+  onExportSql: (batchSize: number) => void;
   onExportTsv: () => void;
   onExportXlsx: () => void;
   onExportParquet: () => void;
@@ -333,10 +337,30 @@ export function TableDataToolbar({
               </DropdownMenuItem>
             )}
             {supportsExport("sql") && (
-              <DropdownMenuItem className="wb-menu-item" onSelect={onExportSql}>
-                <FileCode2 className="mr-2 h-3.5 w-3.5" />
-                Export SQL INSERT statements
-              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className="wb-menu-item">
+                  <FileCode2 className="mr-2 h-3.5 w-3.5" />
+                  Export SQL INSERT statements
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent className="wb-menu-content min-w-48">
+                    {[25, 100, 250, 500, 1000].map((batchSize) => (
+                      <DropdownMenuItem
+                        key={batchSize}
+                        className="wb-menu-item"
+                        onSelect={() => onExportSql(batchSize)}
+                      >
+                        <span>{batchSize.toLocaleString()} rows / statement</span>
+                        {batchSize === 100 && (
+                          <span className="ml-auto pl-3 text-[10px] wb-muted">
+                            Recommended
+                          </span>
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

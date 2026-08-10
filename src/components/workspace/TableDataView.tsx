@@ -838,6 +838,7 @@ export function TableDataView() {
   const handleExport = async (
     format: TableExportFormat,
     encoding: TableExportEncoding = "utf8",
+    sqlInsertBatchSize?: number,
   ) => {
     if (
       !tabConnectionId ||
@@ -877,7 +878,12 @@ export function TableDataView() {
         activeTab.schemaName,
         activeTab.tableName,
         format,
-        { exportId, projectId: activeProjectId, encoding },
+        {
+          exportId,
+          projectId: activeProjectId,
+          encoding,
+          sqlInsertBatchSize,
+        },
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
         sort,
@@ -1636,7 +1642,7 @@ export function TableDataView() {
         onExportCsvBom={() => void handleExport("csv", "utf8Bom")}
         onExportJson={() => void handleExport("json")}
         onExportJsonl={() => void handleExport("jsonl")}
-        onExportSql={() => void handleExport("sql")}
+        onExportSql={(batchSize) => void handleExport("sql", "utf8", batchSize)}
         onExportTsv={() => void handleExport("tsv")}
         onExportXlsx={() => void handleExport("xlsx")}
         onExportParquet={() => void handleExport("parquet", "binary")}

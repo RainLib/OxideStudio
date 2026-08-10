@@ -313,6 +313,9 @@ explicit deferred validation task rather than an implicit release check.
 - Export explicit values from PostgreSQL 10+ `GENERATED ALWAYS AS IDENTITY`
   and `BY DEFAULT` tables. Only the former must use `OVERRIDING SYSTEM VALUE`;
   pre-10 servers and non-PostgreSQL drivers must never receive that clause.
+- Exercise every SQL export batch choice (25/100/250/500/1,000) with narrow
+  and wide rows. Row limits must split at the selected size, the 512 KiB byte
+  cap must still split earlier, and invalid IPC values must publish no file.
 - Use a provider that initiates `workspace/configuration`,
   `workspace/workspaceFolders`, progress, message, workspace-edit and unknown
   requests. Confirm every request receives a matching numeric or string id,

@@ -57,6 +57,8 @@ export interface TableExportOptions {
   exportId?: string;
   projectId?: string;
   encoding?: TableExportEncoding;
+  /** SQL INSERT rows per statement. The host enforces 1..1,000 and a 512 KiB byte cap. */
+  sqlInsertBatchSize?: number;
 }
 
 export interface TableImportOptions {
@@ -157,6 +159,7 @@ export async function exportTableData(
     sort,
     pageSize,
     maxRows,
+    sqlInsertBatchSize: options.sqlInsertBatchSize,
   });
 }
 
