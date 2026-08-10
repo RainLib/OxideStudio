@@ -4,6 +4,10 @@
 
 - Restore an export containing an intentional duplicate/conflicting row and an invalid deferred FK into a clean PostgreSQL target. Confirm PostgreSQL rolls back the complete backup transaction; separately verify a successful restore commits its tables, rows and foreign keys together.
 
+## Phase 134 -- PostgreSQL sequence backup and replay
+
+- Export a schema containing quoted sequence names, positive and negative increments, `CYCLE`, a never-read sequence, and `serial`/explicit `nextval(...)` defaults. Restore into a clean PostgreSQL target and confirm sequence DDL is emitted before tables, successful data restore retains the source `last_value`, and the next generated value matches PostgreSQL semantics. Verify structure-only and data-only scopes separately, and record the intentional absence of sequence `OWNED BY`, comments, grants, and ownership metadata.
+
 ## Phase 132 -- formatting freshness
 
 - In a real Monaco WebView, start document and range formatting, edit the same document before each response returns, and cancel during a slow response. Confirm no stale edit is applied, undo remains one coherent operation, and formatting errors do not affect the current text.

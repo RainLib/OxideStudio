@@ -989,7 +989,7 @@ export function TableDataView() {
         ? "relation structure only"
         : "relation data only (the target structure must already exist)";
     const confirmed = window.confirm(
-      `Back up all base relations in schema "${activeTab.schemaName}" to one SQL file?\n\nThis export includes ${scopeLabel} and restores in one PostgreSQL transaction. Foreign keys are applied after data. Views, materialized views, routines, sequences, extensions, and grants are not included.`,
+      `Back up all base relations in schema "${activeTab.schemaName}" to one SQL file?\n\nThis export includes ${scopeLabel} and restores in one PostgreSQL transaction. Sequences are created before relation defaults and their values are restored after data; foreign keys are applied last. Views, materialized views, routines, extensions, grants, and sequence ownership are not included.`,
     );
     if (!confirmed) return;
 

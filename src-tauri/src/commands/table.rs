@@ -1324,6 +1324,104 @@ fn value_to_export_string(value: &Value) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresExportSequence {
+    name: String,
+    data_type: String,
+    start_value: String,
+    min_value: String,
+    max_value: String,
+    increment_by: String,
+    cycle: bool,
+    cache_size: String,
+    last_value: Option<String>,
+}
+
+fn postgres_sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn postgres_sequence_integer(
+    value: Option<&Value>,
+    field: &str,
+    name: &str,
+) -> Result<String, String> {
+    let value = value
+        .filter(|value| !value.is_null())
+        .map(value_to_export_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("PostgreSQL sequence {name} has no {field}"))?;
+    value
+        .parse::<i128>()
+        .map_err(|_| format!("PostgreSQL sequence {name} has an invalid {field}"))?;
+    Ok(value)
+}
+
+fn postgres_sequence_from_row(row: &[Value]) -> Result<PostgresExportSequence, String> {
+    let name = row
+        .first()
+        .and_then(value_to_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "PostgreSQL sequence metadata has no sequence name".to_string())?;
+    let data_type = row
+        .get(1)
+        .and_then(value_to_string)
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "smallint" | "integer" | "bigint"))
+        .ok_or_else(|| format!("PostgreSQL sequence {name} has an unsupported data type"))?;
+    let cycle = row
+        .get(6)
+        .and_then(value_to_string)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "t" | "yes" | "y" | "1"
+            )
+        })
+        .ok_or_else(|| format!("PostgreSQL sequence {name} has no cycle setting"))?;
+    let last_value = row
+        .get(8)
+        .filter(|value| !value.is_null())
+        .map(|value| postgres_sequence_integer(Some(value), "last value", &name))
+        .transpose()?;
+    Ok(PostgresExportSequence {
+        name: name.clone(),
+        data_type,
+        start_value: postgres_sequence_integer(row.get(2), "start value", &name)?,
+        min_value: postgres_sequence_integer(row.get(3), "minimum value", &name)?,
+        max_value: postgres_sequence_integer(row.get(4), "maximum value", &name)?,
+        increment_by: postgres_sequence_integer(row.get(5), "increment", &name)?,
+        cycle,
+        cache_size: postgres_sequence_integer(row.get(7), "cache size", &name)?,
+        last_value,
+    })
+}
+
+fn postgres_sequence_ddl(schema: &str, sequence: &PostgresExportSequence) -> String {
+    format!(
+        "CREATE SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} CACHE {} {};",
+        DatabaseKind::Postgres.qualified_table(Some(schema), &sequence.name),
+        sequence.data_type,
+        sequence.start_value,
+        sequence.increment_by,
+        sequence.min_value,
+        sequence.max_value,
+        sequence.cache_size,
+        if sequence.cycle { "CYCLE" } else { "NO CYCLE" },
+    )
+}
+
+fn postgres_sequence_setval_sql(schema: &str, sequence: &PostgresExportSequence) -> Option<String> {
+    sequence.last_value.as_ref().map(|last_value| {
+        let qualified = DatabaseKind::Postgres.qualified_table(Some(schema), &sequence.name);
+        format!(
+            "SELECT pg_catalog.setval({}::regclass, {}, true);",
+            postgres_sql_string_literal(&qualified),
+            last_value
+        )
+    })
+}
+
 fn csv_escape(value: &Value) -> String {
     let value = value_to_export_string(value);
     if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
@@ -8653,6 +8751,37 @@ pub async fn export_database_sql(
             .into_iter()
             .filter(|table| !object_type_is_view(table.table_type.as_deref()))
             .collect::<Vec<_>>();
+        // `serial` and `nextval(...)` defaults require the referenced sequence
+        // to exist before CREATE TABLE is replayed.  Read the bounded catalog
+        // metadata once and use it for DDL before relations plus state after
+        // data, rather than inferring sequences from column default text.
+        let sequence_metadata_sql = format!(
+            "SELECT sequencename, data_type, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value \
+             FROM pg_catalog.pg_sequences WHERE schemaname = {} ORDER BY sequencename",
+            postgres_sql_string_literal(schema),
+        );
+        let sequence_results = manager
+            .query(
+                &connection_id,
+                &sequence_metadata_sql,
+                None,
+                None,
+                Some(export_id.clone()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let sequences = sequence_results
+            .into_iter()
+            .next()
+            .map(|result| {
+                result
+                    .rows
+                    .iter()
+                    .map(|row| postgres_sequence_from_row(row))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let final_path = export_file_path(&app, schema, "database_backup", TableExportFormat::Sql)?;
         let mut temporary_file = ExportTemporaryFile::create(&final_path)?;
         let file = File::create(&temporary_file.path).map_err(|error| error.to_string())?;
@@ -8665,6 +8794,14 @@ pub async fn export_database_sql(
         // Keep the backup atomic on restore: a failed relation, row or deferred
         // FK must not leave a partly restored schema behind.
         writeln!(writer, "BEGIN;").map_err(|error| error.to_string())?;
+        if include_structure && !sequences.is_empty() {
+            writeln!(writer, "\n-- Sequences (created before relation defaults)")
+                .map_err(|error| error.to_string())?;
+            for sequence in &sequences {
+                writeln!(writer, "{}", postgres_sequence_ddl(schema, sequence))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let mut rows_exported = 0_u64;
         let mut batches = 0_u64;
         // PostgreSQL requires a referenced relation to exist when creating a
@@ -8752,6 +8889,19 @@ pub async fn export_database_sql(
                 }
             }
         }
+        if include_data {
+            let sequence_state = sequences
+                .iter()
+                .filter_map(|sequence| postgres_sequence_setval_sql(schema, sequence))
+                .collect::<Vec<_>>();
+            if !sequence_state.is_empty() {
+                writeln!(writer, "\n-- Sequence state (restored after relation data)")
+                    .map_err(|error| error.to_string())?;
+                for statement in sequence_state {
+                    writeln!(writer, "{statement}").map_err(|error| error.to_string())?;
+                }
+            }
+        }
         if include_structure && !foreign_key_constraints.is_empty() {
             writeln!(writer, "\n-- Foreign-key constraints (applied after relation data)")
                 .map_err(|error| error.to_string())?;
@@ -8784,7 +8934,7 @@ pub async fn export_database_sql(
             batches,
             omitted_object_kinds: vec![
                 "views".to_string(), "materialized views".to_string(), "routines".to_string(),
-                "sequences".to_string(), "extensions".to_string(), "grants".to_string(),
+                "extensions".to_string(), "grants".to_string(), "sequence ownership".to_string(),
             ],
         })
     }.await;
@@ -11529,6 +11679,7 @@ mod tests {
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         overwrite_transfer_verification, postgres_identity_reseed_verification_query,
+        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
         postgres_view_definition_query, preview_metadata_required, query_target,
         query_target_parameterized, read_csv_import_preview, read_json_import_preview,
         relation_operation_allowed, resolve_csv_import_columns,
@@ -15343,5 +15494,46 @@ WITH DATA;"#
             data_compare_key(&values, &columns),
             "\"a\\u001fb\"\u{001f}7"
         );
+    }
+
+    #[test]
+    fn postgres_sequence_export_is_replayable_and_quoted() {
+        let sequence = postgres_sequence_from_row(&[
+            json!("Order Seq"),
+            json!("bigint"),
+            json!(100),
+            json!(-100),
+            json!(9223372036854775807_i64),
+            json!(-2),
+            json!(true),
+            json!(7),
+            json!(88),
+        ])
+        .unwrap();
+        assert_eq!(
+            postgres_sequence_ddl("public", &sequence),
+            "CREATE SEQUENCE \"public\".\"Order Seq\" AS bigint START WITH 100 INCREMENT BY -2 MINVALUE -100 MAXVALUE 9223372036854775807 CACHE 7 CYCLE;"
+        );
+        assert_eq!(
+            postgres_sequence_setval_sql("public", &sequence).as_deref(),
+            Some("SELECT pg_catalog.setval('\"public\".\"Order Seq\"'::regclass, 88, true);")
+        );
+    }
+
+    #[test]
+    fn postgres_sequence_export_rejects_untrusted_numeric_metadata() {
+        let error = postgres_sequence_from_row(&[
+            json!("sequence"),
+            json!("integer"),
+            json!("1; DROP SCHEMA public"),
+            json!(1),
+            json!(10),
+            json!(1),
+            json!(false),
+            json!(1),
+            Value::Null,
+        ])
+        .unwrap_err();
+        assert!(error.contains("invalid start value"));
     }
 }
