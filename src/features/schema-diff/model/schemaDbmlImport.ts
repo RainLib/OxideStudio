@@ -18,6 +18,10 @@ export type SchemaDbmlParseResult = {
 const OFFLINE_DBML_WARNING = "OFFLINE_DBML_REVIEW_ONLY";
 const MAX_DBML_ENUM_VALUES = 4_096;
 const MAX_DBML_ENUM_VALUE_LENGTH = 4_096;
+const MAX_DBML_PARTIAL_DEPTH = 32;
+const MAX_DBML_PARTIAL_INJECTIONS = 256;
+const MAX_DBML_EXPANDED_TABLE_LENGTH = 2 * 1_024 * 1_024;
+const MAX_DBML_PARTIAL_CACHE_LENGTH = 8 * 1_024 * 1_024;
 
 /**
  * Parses the portable DBML subset used by the OxideStudio exporter. The result
@@ -35,6 +39,9 @@ export function parseSchemaDbml(
   const pendingReferences: ParsedRef[] = [];
   const tableBlocks = extractBlocks(source, "Table", warnings);
   const enumBlocks = extractBlocks(source, "Enum", warnings);
+  const partialBlocks = extractBlocks(source, "TablePartial", warnings);
+  const partials = parseTablePartials(partialBlocks, targetSchema, warnings);
+  const expandPartials = createTablePartialExpander(partials, warnings);
 
   for (const block of enumBlocks) {
     const path = parseIdentifierPath(removeTrailingSettings(block.header));
@@ -84,7 +91,7 @@ export function parseSchemaDbml(
     const parsed = parseTableBlock(
       tableName,
       schemaName || targetSchema,
-      block.body,
+      expandPartials(block.body, tableName),
       warnings,
     );
     relations.set(tableName, parsed.relation);
@@ -152,6 +159,134 @@ export function isSchemaDbmlSnapshot(snapshot: SchemaSnapshot) {
   return snapshot.warnings.includes(OFFLINE_DBML_WARNING);
 }
 
+type TablePartialDefinition = {
+  name: string;
+  body: string;
+};
+
+function parseTablePartials(
+  blocks: ExtractedBlock[],
+  targetSchema: string,
+  warnings: Set<string>,
+) {
+  const partials = new Map<string, TablePartialDefinition>();
+  for (const block of blocks) {
+    const bareHeader = removeTrailingSettings(block.header);
+    const path = parseIdentifierPath(bareHeader);
+    const name = path[path.length - 1] || "";
+    const schemaName = path.length > 1 ? path[path.length - 2] || "" : targetSchema;
+    if (!name || path.length > 2) {
+      warnings.add("A TablePartial block with an unsupported identifier was ignored.");
+      continue;
+    }
+    if (schemaName && targetSchema && schemaName !== targetSchema) {
+      warnings.add(
+        `${schemaName}.${name}: skipped because a schema snapshot can only contain ${targetSchema}.`,
+      );
+      continue;
+    }
+    if (partials.has(name)) {
+      warnings.add(`Duplicate TablePartial ${name}; the later definition was ignored.`);
+      continue;
+    }
+    if (bareHeader !== block.header.trim()) {
+      warnings.add(
+        `${name}: TablePartial table settings are review-only and were omitted.`,
+      );
+    }
+    partials.set(name, { name, body: block.body });
+  }
+  return partials;
+}
+
+function createTablePartialExpander(
+  partials: Map<string, TablePartialDefinition>,
+  warnings: Set<string>,
+) {
+  const cache = new Map<string, string>();
+  let cachedLength = 0;
+
+  const expandPartial = (name: string, stack: string[]): string => {
+    const cached = cache.get(name);
+    if (cached != null) return cached;
+    const partial = partials.get(name);
+    if (!partial) return "";
+    if (cachedLength >= MAX_DBML_PARTIAL_CACHE_LENGTH) {
+      warnings.add(
+        `TablePartial expansion cache was limited to ${MAX_DBML_PARTIAL_CACHE_LENGTH} characters.`,
+      );
+      cache.set(name, "");
+      return "";
+    }
+    if (stack.includes(name)) {
+      warnings.add(`TablePartial cycle was ignored: ${[...stack, name].join(" -> ")}.`);
+      return "";
+    }
+    if (stack.length >= MAX_DBML_PARTIAL_DEPTH) {
+      warnings.add(`TablePartial ${name} exceeded the ${MAX_DBML_PARTIAL_DEPTH}-level expansion limit.`);
+      return "";
+    }
+    const expanded = expandBody(partial.body, partial.name, [...stack, name]);
+    if (cachedLength + expanded.length > MAX_DBML_PARTIAL_CACHE_LENGTH) {
+      warnings.add(
+        `TablePartial ${name} exceeded the remaining bounded expansion cache and was ignored.`,
+      );
+      cache.set(name, "");
+      return "";
+    }
+    cachedLength += expanded.length;
+    cache.set(name, expanded);
+    return expanded;
+  };
+
+  const expandBody = (body: string, owner: string, stack: string[]) => {
+    const localLines: string[] = [];
+    const injectedBodies: string[] = [];
+    let injectionCount = 0;
+    let expandedLength = body.length;
+    for (const line of body.split(/\r?\n/u)) {
+      const injection = parsePartialInjection(line);
+      if (!injection) {
+        localLines.push(line);
+        continue;
+      }
+      injectionCount += 1;
+      if (injectionCount > MAX_DBML_PARTIAL_INJECTIONS) {
+        warnings.add(
+          `${owner}: TablePartial injections were limited to ${MAX_DBML_PARTIAL_INJECTIONS}.`,
+        );
+        continue;
+      }
+      if (!partials.has(injection)) {
+        warnings.add(`${owner}: TablePartial ${injection} was not found.`);
+        continue;
+      }
+      const expanded = expandPartial(injection, stack);
+      if (expandedLength + expanded.length > MAX_DBML_EXPANDED_TABLE_LENGTH) {
+        warnings.add(
+          `${owner}: expanded TablePartial content exceeded ${MAX_DBML_EXPANDED_TABLE_LENGTH} characters and was truncated.`,
+        );
+        continue;
+      }
+      expandedLength += expanded.length;
+      injectedBodies.push(expanded);
+    }
+    // DBML conflict priority is independent of injection position: local table
+    // definitions override every partial, and the last injected partial wins.
+    return [...injectedBodies, localLines.join("\n")].filter(Boolean).join("\n");
+  };
+
+  return (body: string, tableName: string) => expandBody(body, tableName, []);
+}
+
+function parsePartialInjection(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("~")) return "";
+  const source = removeTrailingSettings(trimmed.slice(1).trim());
+  const path = parseIdentifierPath(source);
+  return path.length === 1 ? path[0] || "" : "";
+}
+
 function parseTableBlock(
   tableName: string,
   schemaName: string,
@@ -177,11 +312,18 @@ function parseTableBlock(
     const parsedColumn = parseColumn(value, warnings, tableName);
     if (!parsedColumn) continue;
     const { column } = parsedColumn;
-    if (columns.some((candidate) => candidate.name === column.name)) {
-      warnings.add(`${tableName}.${column.name}: duplicate column was ignored.`);
-      continue;
+    const existingColumn = columns.findIndex((candidate) => candidate.name === column.name);
+    if (existingColumn >= 0) {
+      warnings.add(`${tableName}.${column.name}: later definition overrides an earlier column.`);
+      columns[existingColumn] = column;
+      for (let index = inlineReferences.length - 1; index >= 0; index -= 1) {
+        if (inlineReferences[index]?.originColumn === column.name) {
+          inlineReferences.splice(index, 1);
+        }
+      }
+    } else {
+      columns.push(column);
     }
-    columns.push(column);
     const inlineReference = parseInlineReferenceSetting(
       schemaName,
       tableName,
@@ -192,36 +334,47 @@ function parseTableBlock(
       warnings,
     );
     if (inlineReference) inlineReferences.push(inlineReference);
-    if (column.is_primary_key) {
-      constraints.push({
-        name: `${tableName}_pkey`,
-        constraint_type: "PRIMARY KEY",
-        columns: [column.name],
-        referenced_columns: [],
-      });
-    } else if (column.is_unique) {
-      constraints.push({
-        name: `${tableName}_${column.name}_key`,
-        constraint_type: "UNIQUE",
-        columns: [column.name],
-        referenced_columns: [],
-      });
-    }
   }
 
   for (const block of indexBlocks) {
     for (const line of block.body.split(/\r?\n/u)) {
       const index = parseIndex(line.trim(), tableName, warnings);
       if (!index) continue;
-      indexes.push(index);
-      if (index.is_primary || index.is_unique) {
-        constraints.push({
-          name: uniqueConstraintName(constraints, index.name),
-          constraint_type: index.is_primary ? "PRIMARY KEY" : "UNIQUE",
-          columns: index.columns,
-          referenced_columns: [],
-        });
+      const existingIndex = indexes.findIndex((candidate) => candidate.name === index.name);
+      if (existingIndex >= 0) {
+        warnings.add(`${tableName}.${index.name}: later definition overrides an earlier index.`);
+        indexes[existingIndex] = index;
+      } else {
+        indexes.push(index);
       }
+    }
+  }
+
+  for (const column of columns) {
+    if (column.is_primary_key) {
+      constraints.push({
+        name: uniqueConstraintName(constraints, `${tableName}_pkey`),
+        constraint_type: "PRIMARY KEY",
+        columns: [column.name],
+        referenced_columns: [],
+      });
+    } else if (column.is_unique) {
+      constraints.push({
+        name: uniqueConstraintName(constraints, `${tableName}_${column.name}_key`),
+        constraint_type: "UNIQUE",
+        columns: [column.name],
+        referenced_columns: [],
+      });
+    }
+  }
+  for (const index of indexes) {
+    if (index.is_primary || index.is_unique) {
+      constraints.push({
+        name: uniqueConstraintName(constraints, index.name),
+        constraint_type: index.is_primary ? "PRIMARY KEY" : "UNIQUE",
+        columns: index.columns,
+        referenced_columns: [],
+      });
     }
   }
 
@@ -413,6 +566,7 @@ type ParsedRef = {
   targetSchema: string;
   targetTable: string;
   targetColumns: string[];
+  originColumn?: string;
   definition?: string;
 };
 
@@ -449,6 +603,7 @@ function parseInlineReferenceSetting(
     targetSchema: referenced.schema,
     targetTable: referenced.table,
     targetColumns: referenced.columns,
+    originColumn: columnName,
     definition: referenceActionDefinition(deleteAction, updateAction),
   };
 }
@@ -683,7 +838,9 @@ function replaceRangesWithWhitespace(
   ranges: Array<[number, number]>,
 ) {
   if (ranges.length === 0) return source;
-  const characters = [...source];
+  // Block offsets are UTF-16 string indices. Keep code units here so an emoji
+  // before an indexes block cannot shift the replacement range.
+  const characters = source.split("");
   for (const [start, end] of ranges) {
     for (let index = start; index < end; index += 1) {
       if (characters[index] !== "\n" && characters[index] !== "\r") {

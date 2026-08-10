@@ -660,6 +660,12 @@ explicit deferred validation task rather than an implicit release check.
   the offline fingerprint and appear only as Manual Review schema-object drift;
   cross-schema enum blocks must be rejected. Value notes/settings must remain a
   visible lossy warning until the snapshot model can represent them directly.
+- Import TablePartial fixtures with fields, defaults, inline refs and indexes.
+  Confirm local table definitions override all partials, the last injected
+  partial overrides earlier partials, and an overridden inline ref does not
+  survive its field. Exercise missing partials, nested cycles, more than 32
+  levels/256 injections, oversized expansion and Unicode before index blocks;
+  each must remain bounded and diagnostic without changing review-only safety.
 - Confirm the 8 MiB browser limit, saved-source label and offline sentinel.
   Imported DBML must enter snapshot diff and must never enable Apply or become
   direct executable migration input.

@@ -209,6 +209,108 @@ describe("schema DBML import", () => {
     expect(first.fingerprint).not.toBe(second.fingerprint);
   });
 
+  it("expands TablePartial fields and indexes using DBML conflict priority", () => {
+    const parsed = parseSchemaDbml(
+      `
+        TablePartial base_fields [headerColor: #ff0000] {
+          id bigint [pk]
+          status text
+          Note: '😀 common fields'
+          indexes {
+            status [name: 'users_status_idx']
+          }
+        }
+        TablePartial latest_fields {
+          status varchar(32) [not null]
+          created_at timestamp
+          indexes {
+            status [unique, name: 'users_status_idx']
+          }
+        }
+        Table public.users {
+          status uuid
+          ~base_fields
+          ~latest_fields
+          indexes {
+            status [name: 'users_status_idx', type: hash]
+          }
+        }
+      `,
+      "public",
+    );
+
+    const users = parsed.relations[0];
+    expect(users?.columns).toEqual([
+      expect.objectContaining({ name: "id", data_type: "bigint", is_primary_key: true }),
+      expect.objectContaining({ name: "status", data_type: "uuid", is_nullable: true }),
+      expect.objectContaining({ name: "created_at", data_type: "timestamp" }),
+    ]);
+    expect(users?.indexes).toEqual([
+      expect.objectContaining({
+        name: "users_status_idx",
+        is_unique: false,
+        index_type: "hash",
+      }),
+    ]);
+    expect(parsed.warnings.join(" ")).toContain("TablePartial table settings");
+    expect(parsed.warnings.join(" ")).toContain("later definition overrides");
+  });
+
+  it("uses the last injected partial when no local field overrides it", () => {
+    const parsed = parseSchemaDbml(
+      `
+        TablePartial first { status text }
+        TablePartial second { status bigint }
+        Table jobs {
+          ~first
+          ~second
+        }
+      `,
+      "public",
+    );
+    expect(parsed.relations[0]?.columns).toEqual([
+      expect.objectContaining({ name: "status", data_type: "bigint" }),
+    ]);
+  });
+
+  it("drops overridden partial inline refs and bounds missing or cyclic partials", () => {
+    const parsed = parseSchemaDbml(
+      `
+        TablePartial owner_link {
+          owner_id bigint [ref: > users.id]
+        }
+        TablePartial cycle_a {
+          ~cycle_b
+          from_a text
+        }
+        TablePartial cycle_b {
+          ~cycle_a
+          from_b text
+        }
+        Table users { id bigint [pk] }
+        Table projects {
+          ~owner_link
+          ~cycle_a
+          ~missing_partial
+          owner_id uuid
+        }
+      `,
+      "public",
+    );
+
+    const projects = parsed.relations.find((relation) => relation.name === "projects");
+    expect(projects?.columns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "owner_id", data_type: "uuid" }),
+      expect.objectContaining({ name: "from_a" }),
+      expect.objectContaining({ name: "from_b" }),
+    ]));
+    expect(projects?.constraints.some((constraint) =>
+      constraint.constraint_type === "FOREIGN KEY"
+    )).toBe(false);
+    expect(parsed.warnings.join(" ")).toContain("TablePartial cycle was ignored");
+    expect(parsed.warnings.join(" ")).toContain("missing_partial was not found");
+  });
+
   it("rejects tables outside the target snapshot schema", () => {
     const parsed = parseSchemaDbml(
       'Table "audit"."events" {\n  "id" bigint [pk]\n}\n',
