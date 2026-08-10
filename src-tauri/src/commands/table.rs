@@ -3454,6 +3454,37 @@ fn postgres_domain_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<Str
     }).collect())
 }
 
+fn postgres_composite_type_query(schema: &str) -> String {
+    format!(
+        "SELECT type.typname, attribute.attname, pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) \
+         FROM pg_catalog.pg_type type \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace \
+         JOIN pg_catalog.pg_class class ON class.oid = type.typrelid AND class.relkind = 'c' \
+         JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = class.oid \
+         WHERE namespace.nspname = {} AND type.typtype = 'c' AND attribute.attnum > 0 AND NOT attribute.attisdropped \
+         ORDER BY type.typname, attribute.attnum;",
+        postgres_sql_string_literal(schema),
+    )
+}
+
+fn postgres_composite_type_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
+    let mut fields = BTreeMap::<String, Vec<(String, String)>>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "PostgreSQL composite type metadata has no name".to_string())?;
+        let field = row.get(1).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("PostgreSQL composite type {name} has an unnamed attribute"))?;
+        let field_type = row.get(2).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("PostgreSQL composite type {name}.{field} has no type"))?;
+        fields.entry(name).or_default().push((field, field_type));
+    }
+    Ok(fields.into_iter().map(|(name, fields)| format!(
+        "CREATE TYPE {} AS ({});",
+        DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+        fields.into_iter().map(|(field, field_type)| format!("{} {}", DatabaseKind::Postgres.quote_identifier(&field), field_type)).collect::<Vec<_>>().join(", "),
+    )).collect())
+}
+
 fn mysql_comment_literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
@@ -9080,6 +9111,11 @@ pub async fn export_database_sql(
                 .await.map_err(|error| error.to_string())?;
             postgres_domain_ddls(schema, &domain_results)?
         } else { Vec::new() };
+        let composite_types = if include_structure {
+            let results = manager.query(&connection_id, &postgres_composite_type_query(schema), None, None, Some(export_id.clone()))
+                .await.map_err(|error| error.to_string())?;
+            postgres_composite_type_ddls(schema, &results)?
+        } else { Vec::new() };
         // `serial` and `nextval(...)` defaults require the referenced sequence
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
@@ -9177,6 +9213,13 @@ pub async fn export_database_sql(
             writeln!(writer, "\n-- Domains (created before dependent relations)")
                 .map_err(|error| error.to_string())?;
             for ddl in &domains {
+                writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
+            }
+        }
+        if include_structure && !composite_types.is_empty() {
+            writeln!(writer, "\n-- Composite types (created before dependent relations)")
+                .map_err(|error| error.to_string())?;
+            for ddl in &composite_types {
                 writeln!(writer, "{ddl}").map_err(|error| error.to_string())?;
             }
         }
