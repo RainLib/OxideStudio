@@ -184,6 +184,7 @@ import {
   useQueryExecutionController,
   useQueryTransactionController,
 } from "@/features/query-editor";
+import { isCompletionRequestCurrent } from "@/features/query-editor/model/completionRequestGuard";
 
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
 
@@ -1339,6 +1340,16 @@ export function QueryEditor({
         ) => {
           if (!monaco) return { suggestions: [] };
           const completionStartedAt = performance.now();
+          // Metadata/FK fallback work can outlive an LSP response. Capture
+          // this before either branch starts so no older cursor revision can
+          // publish a late merged completion list.
+          const initialModelVersion = model.getVersionId();
+          const isInitialCompletionCurrent = () =>
+            isCompletionRequestCurrent({
+              model,
+              modelVersion: initialModelVersion,
+              token,
+            });
           const textBeforeCursor = boundedSqlCompletionTextBeforeCursor(
             monaco,
             model,
@@ -1387,6 +1398,7 @@ export function QueryEditor({
           const cachedSuggestions = cachedCompletion.suggestions;
           const fallbackSuggestions = async () => {
             const cached = await cachedSuggestions();
+            if (!isInitialCompletionCurrent()) return [];
             const word = model.getWordUntilPosition(position);
             const range = new monaco.Range(
               position.lineNumber,
@@ -1493,7 +1505,7 @@ export function QueryEditor({
           try {
             const uri = model.uri.toString();
             if (!isCurrentLspModelUri(uri)) return { suggestions: [] };
-            const modelVersion = model.getVersionId();
+            const modelVersion = initialModelVersion;
             const requestGeneration =
               (completionRequestGenerationRef.current.get(uri) || 0) + 1;
             completionRequestGenerationRef.current.set(uri, requestGeneration);
@@ -1563,12 +1575,13 @@ export function QueryEditor({
               completionList.resolveProvider,
             );
 
-            if (
-              token?.isCancellationRequested ||
-              model.getVersionId() !== modelVersion ||
-              completionRequestGenerationRef.current.get(uri) !==
-                requestGeneration
-            ) {
+            if (!isCompletionRequestCurrent({
+              model,
+              modelVersion,
+              token,
+              currentGeneration: completionRequestGenerationRef.current.get(uri),
+              requestGeneration,
+            })) {
               const reason = token?.isCancellationRequested
                 ? "cancelled"
                 : model.getVersionId() !== modelVersion
@@ -1673,13 +1686,32 @@ export function QueryEditor({
               driver: completionDriver,
               nextCharacter,
             });
+            const cachedMetadata = await cachedMetadataSuggestions();
+            if (!isCompletionRequestCurrent({
+              model,
+              modelVersion,
+              token,
+              currentGeneration: completionRequestGenerationRef.current.get(uri),
+              requestGeneration,
+            })) {
+              return result([], "discarded", "metadataChanged");
+            }
             const suggestionsWithMetadata = mergeCompletionFallbackSuggestions(
               suggestions,
-              await cachedMetadataSuggestions(),
+              cachedMetadata,
             );
+            const cachedJoins = await cachedJoinSuggestions();
+            if (
+              token?.isCancellationRequested ||
+              model.getVersionId() !== modelVersion ||
+              completionRequestGenerationRef.current.get(uri) !==
+                requestGeneration
+            ) {
+              return result([], "discarded", "joinMetadataChanged");
+            }
             const suggestionsWithSmartJoins =
               mergeCompletionFallbackSuggestions(
-                await cachedJoinSuggestions(),
+                cachedJoins,
                 suggestionsWithMetadata,
               );
 

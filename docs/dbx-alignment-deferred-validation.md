@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 127 -- completion merge race
+
+- In a real Monaco WebView, delay metadata and foreign-key requests while typing, switching tabs/connections, cancelling completion, and accepting a snippet. Verify stale merged suggestions never reopen or replace the active list; test slow remote catalog refreshes, IME and inline/popup coexistence.
+
 ## Phase 126 -- Monaco metadata hover
 
 - In a real WebView, inspect table hovers for wide composite indexes, multi-kilobyte defaults, quoted identifiers containing Markdown delimiters, pointer/trackpad scrolling, zoom and light/dark themes. Confirm Monaco retains its own accessible tooltip focus/scroll behavior while the bounded metadata payload stays readable.
