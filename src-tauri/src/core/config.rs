@@ -77,6 +77,8 @@ pub struct SavedConnection {
     pub database: Option<String>,
     pub connection_url: Option<String>,
     pub ssl_mode: Option<String>,
+    #[serde(default)]
+    pub index_grouping_pattern: Option<String>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub tags: Option<Vec<String>>,
     pub icon: Option<String>,

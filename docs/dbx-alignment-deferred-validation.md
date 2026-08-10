@@ -1339,3 +1339,17 @@ explicit deferred validation task rather than an implicit release check.
   following `.` trigger, filtering, undo, IME, Vim, multi-cursor, cancellation,
   and slow metadata behavior. Phase 119 covers LSP library and dialect contracts
   only; no database was opened.
+
+## Elasticsearch index grouping and least-privilege discovery
+
+- Run Elasticsearch 6.8, 7.17, and 8.x fixtures with `_cat/indices` available,
+  denied with 401/403 while `_resolve/index/*` remains available, and denied
+  until `_alias` is the final available route. Verify that only visible indices
+  and data streams appear; hidden `.` indices must not leak through any path.
+- Configure valid, empty, `off`, and invalid grouping patterns. Check that
+  grouped rolling collections use a safe `*` name, aggregate only known counts,
+  preserve ordinary index names, and continue to map fields/query requests
+  correctly. Exercise Kibana proxy and direct HTTP(S) connection URLs.
+- Re-run the focused Rust test executable after repairing the Windows incremental
+  target/DLL entry-point environment. Phase 120 source checks and frontend URL
+  contract tests pass; no live Elasticsearch cluster was opened.

@@ -1005,6 +1005,8 @@ export interface SavedConnection {
   database?: string;
   connectionUrl?: string;
   sslMode?: string;
+  /** Optional regex that collapses rolling Elasticsearch index names into a `*` pattern. */
+  indexGroupingPattern?: string;
   sshTunnel?: SshTunnelConfig;
   tags?: string[];
   icon?: string;

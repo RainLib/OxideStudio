@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
 import { useSchemaStore } from "./useSchemaStore";
 import {
+  applyElasticsearchIndexGroupingPattern,
   buildConnectionUrl,
   normalizeConnectionUrlForDriver,
 } from "@/lib/connectionUrlParser";
@@ -88,24 +89,29 @@ interface ConnectionState {
 }
 
 function connectionUrlForConfig(config: ConnectionConfig) {
-  if (config.connectionUrl && config.connectionUrl.trim()) {
-    return normalizeConnectionUrlForDriver(config.driver, config.connectionUrl, {
+  const connectionUrl = config.connectionUrl && config.connectionUrl.trim()
+    ? normalizeConnectionUrlForDriver(config.driver, config.connectionUrl, {
       // A connection pinned to an external package may use JDBC's nested
       // scheme (`jdbc:oracle:...`). Preserve it instead of rewriting it for
       // a bundled driver that happens to share the product name.
       preserveJdbcPrefix: Boolean(config.driverPackageVersion),
+    })
+    : buildConnectionUrl({
+      driver: config.driver,
+      host: config.host,
+      port: config.port,
+      user: config.user,
+      password: config.password,
+      database: config.database,
+      sslMode: config.sslMode || "disable",
     });
-  }
 
-  return buildConnectionUrl({
-    driver: config.driver,
-    host: config.host,
-    port: config.port,
-    user: config.user,
-    password: config.password,
-    database: config.database,
-    sslMode: config.sslMode || "disable",
-  });
+  return config.driver === "elasticsearch"
+    ? applyElasticsearchIndexGroupingPattern(
+        connectionUrl,
+        config.indexGroupingPattern,
+      )
+    : connectionUrl;
 }
 
 function enabledSshTunnel(config: ConnectionConfig) {

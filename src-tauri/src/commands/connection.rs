@@ -191,6 +191,7 @@ fn config_connection_from_store(
             database: None,
             connection_url: None,
             ssl_mode: None,
+            index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
             icon: None,

@@ -596,6 +596,8 @@ export function ConnectionForm({
             password: parsed.password || "",
             database: parsed.database || "",
             sslMode: parsed.sslMode,
+            indexGroupingPattern:
+              parsed.queryParams?.indexGroupingPattern || "",
           }
         : { connectionUrl: value },
     );
@@ -1156,6 +1158,36 @@ export function ConnectionForm({
                 }
               />
               </>
+              )}
+
+              {selectedConnection.driver === "elasticsearch" && (
+                <>
+                  <label
+                    className={labelClass}
+                    htmlFor="connection-elasticsearch-index-grouping"
+                  >
+                    Index grouping
+                  </label>
+                  <div>
+                    <input
+                      id="connection-elasticsearch-index-grouping"
+                      value={selectedConnection.indexGroupingPattern || ""}
+                      onChange={(event) =>
+                        updateField(
+                          "indexGroupingPattern",
+                          event.target.value,
+                        )
+                      }
+                      className={fieldClass}
+                      placeholder="Optional regex, e.g. [-_.@]\\d{4}[-_.]?\\d{2}.*$"
+                      spellCheck={false}
+                    />
+                    <p className="mt-1 text-[10px] wb-muted">
+                      Collapses matching rolling-index suffixes into <code>*</code>.
+                      Leave blank to show every index.
+                    </p>
+                  </div>
+                </>
               )}
 
               {availableDriverPackages.length > 0 && (

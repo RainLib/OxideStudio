@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyElasticsearchIndexGroupingPattern,
   buildConnectionUrl,
   normalizeConnectionUrlForDriver,
   parseConnectionUrl,
@@ -52,6 +53,24 @@ describe("Elasticsearch connection URLs", () => {
     expect(url.protocol).toBe("https:");
     expect(url.searchParams.has("ssl")).toBe(false);
     expect(url.searchParams.get("request_cache")).toBe("true");
+  });
+
+  it("adds or clears the optional rolling-index grouping pattern", () => {
+    const grouped = new URL(
+      applyElasticsearchIndexGroupingPattern(
+        "https://search.example.test:9200?request_cache=true",
+        "[-_.@]\\d{4}[-_.]?\\d{2}.*$",
+      ),
+    );
+    expect(grouped.searchParams.get("request_cache")).toBe("true");
+    expect(grouped.searchParams.get("indexGroupingPattern")).toBe(
+      "[-_.@]\\d{4}[-_.]?\\d{2}.*$",
+    );
+
+    const cleared = new URL(
+      applyElasticsearchIndexGroupingPattern(grouped.toString(), "  "),
+    );
+    expect(cleared.searchParams.has("indexGroupingPattern")).toBe(false);
   });
 });
 

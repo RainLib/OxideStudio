@@ -98,6 +98,32 @@ export function normalizeConnectionUrlForDriver(
   return url;
 }
 
+/**
+ * Carries the optional Elasticsearch index grouping pattern to the bundled
+ * driver without ever putting it in a request path. Invalid/manual URLs stay
+ * untouched so the connection form remains recoverable while the user edits.
+ */
+export function applyElasticsearchIndexGroupingPattern(
+  connectionUrl: string,
+  pattern: string | undefined,
+) {
+  const normalizedPattern = pattern?.trim() || "";
+  try {
+    const url = new URL(connectionUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (key.toLowerCase() === "indexgroupingpattern") {
+        url.searchParams.delete(key);
+      }
+    }
+    if (normalizedPattern) {
+      url.searchParams.set("indexGroupingPattern", normalizedPattern);
+    }
+    return url.toString();
+  } catch {
+    return connectionUrl;
+  }
+}
+
 function getQueryParam(
   queryParams: Record<string, string>,
   names: readonly string[],

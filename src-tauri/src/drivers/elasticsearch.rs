@@ -5,9 +5,10 @@ use crate::core::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use percent_encoding::percent_decode_str;
+use regex::Regex;
 use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -19,6 +20,7 @@ pub struct ElasticsearchDriver {
     mapping_types: Mutex<HashMap<String, String>>,
     active_index: Mutex<Option<String>>,
     connected: Mutex<bool>,
+    index_grouping: Option<Regex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,7 @@ impl ElasticsearchDriver {
     pub fn new(url: &str) -> Result<Self> {
         let mut base_url = normalize_elasticsearch_base_url(url)?;
         let auth = extract_basic_auth(&mut base_url)?;
+        let index_grouping = elasticsearch_index_grouping_pattern(&base_url);
         let client_builder = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30));
@@ -56,6 +59,7 @@ impl ElasticsearchDriver {
             mapping_types: Mutex::new(HashMap::new()),
             active_index: Mutex::new(None),
             connected: Mutex::new(false),
+            index_grouping,
         })
     }
 
@@ -173,6 +177,17 @@ impl ElasticsearchDriver {
     }
 
     async fn send_request_unchecked(&self, request: &ElasticsearchRequest) -> Result<(u16, Value)> {
+        let (status, body) = self.send_request_response(request).await?;
+        if !status.is_success() {
+            return Err(elasticsearch_response_error(status, &body));
+        }
+        Ok((status.as_u16(), body))
+    }
+
+    async fn send_request_response(
+        &self,
+        request: &ElasticsearchRequest,
+    ) -> Result<(StatusCode, Value)> {
         let url = self
             .base_url
             .join(request.path.trim_start_matches('/'))
@@ -212,11 +227,7 @@ impl ElasticsearchDriver {
             serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text))
         };
 
-        if !status.is_success() {
-            return Err(elasticsearch_response_error(status, &body));
-        }
-
-        Ok((status.as_u16(), body))
+        Ok((status, body))
     }
 }
 
@@ -287,8 +298,19 @@ impl DatabaseDriver for ElasticsearchDriver {
             path: "/_cat/indices?format=json&h=index,docs.count".to_string(),
             body: None,
         };
-        let (_, body) = self.send_request(&request).await?;
-        Ok(elasticsearch_indices_to_collections(body))
+        self.ensure_connected().await?;
+        let (status, body) = self.send_request_response(&request).await?;
+        let collections = if status.is_success() {
+            elasticsearch_indices_to_collections(body)
+        } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            self.list_collections_via_index_metadata().await?
+        } else {
+            return Err(elasticsearch_response_error(status, &body));
+        };
+        Ok(group_elasticsearch_collections(
+            collections,
+            self.index_grouping.as_ref(),
+        ))
     }
 
     async fn get_columns(&self, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
@@ -325,6 +347,38 @@ impl DatabaseDriver for ElasticsearchDriver {
         self.ensure_connected().await?;
         *self.active_index.lock().await = validate_elasticsearch_index_context(schema)?;
         Ok(())
+    }
+}
+
+impl ElasticsearchDriver {
+    /// `_cat/indices` requires cluster `monitor` access. Least-privilege
+    /// accounts often only have index metadata/read rights, so use `_resolve`
+    /// first and `_alias` as a compatibility fallback rather than presenting
+    /// an empty Explorer tree.
+    async fn list_collections_via_index_metadata(&self) -> Result<Vec<CollectionInfo>> {
+        let resolve_request = ElasticsearchRequest {
+            method: Method::GET,
+            path: "/_resolve/index/*".to_string(),
+            body: None,
+        };
+        let (status, body) = self.send_request_response(&resolve_request).await?;
+        if status.is_success() {
+            return Ok(elasticsearch_resolve_to_collections(&body));
+        }
+        if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(elasticsearch_response_error(status, &body));
+        }
+
+        let alias_request = ElasticsearchRequest {
+            method: Method::GET,
+            path: "/_alias".to_string(),
+            body: None,
+        };
+        let (status, body) = self.send_request_response(&alias_request).await?;
+        if status.is_success() {
+            return Ok(elasticsearch_alias_to_collections(&body));
+        }
+        Err(elasticsearch_response_error(status, &body))
     }
 }
 
@@ -923,13 +977,15 @@ fn elasticsearch_table_result(value: &Value) -> Option<QueryResult> {
 }
 
 fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
-    value
+    let mut collections: Vec<CollectionInfo> = value
         .as_array()
         .map(|indices| {
             indices
                 .iter()
                 .filter_map(|index| {
-                    let name = index.get("index").and_then(Value::as_str)?.to_string();
+                    let name = normalize_elasticsearch_collection_name(
+                        index.get("index").and_then(Value::as_str)?.to_string(),
+                    )?;
                     let document_count = index
                         .get("docs.count")
                         .and_then(Value::as_str)
@@ -943,7 +999,94 @@ fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    collections.sort_by(|left: &CollectionInfo, right| left.name.cmp(&right.name));
+    collections.dedup_by(|left, right| left.name == right.name);
+    collections
+}
+
+fn elasticsearch_index_grouping_pattern(url: &Url) -> Option<Regex> {
+    let pattern = url
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("indexGroupingPattern"))
+        .map(|(_, value)| value.trim().to_string())?;
+    if pattern.is_empty()
+        || pattern.eq_ignore_ascii_case("off")
+        || pattern.eq_ignore_ascii_case("none")
+        || pattern.eq_ignore_ascii_case("false")
+    {
+        return None;
+    }
+    Regex::new(&pattern).ok()
+}
+
+fn normalize_elasticsearch_collection_name(name: String) -> Option<String> {
+    let name = name.trim().to_string();
+    (!name.is_empty() && !name.starts_with('.')).then_some(name)
+}
+
+fn elasticsearch_resolve_to_collections(value: &Value) -> Vec<CollectionInfo> {
+    let names = value
+        .get("indices")
+        .into_iter()
+        .chain(value.get("data_streams"))
+        .filter_map(Value::as_array)
+        .flat_map(|items| items.iter())
+        .filter_map(|item| item.get("name").and_then(Value::as_str))
+        .map(str::to_string);
+    elasticsearch_collection_names(names)
+}
+
+fn elasticsearch_alias_to_collections(value: &Value) -> Vec<CollectionInfo> {
+    elasticsearch_collection_names(
+        value
+            .as_object()
+            .into_iter()
+            .flat_map(|objects| objects.keys().cloned()),
+    )
+}
+
+fn elasticsearch_collection_names(names: impl IntoIterator<Item = String>) -> Vec<CollectionInfo> {
+    let mut names = names
+        .into_iter()
+        .filter_map(normalize_elasticsearch_collection_name)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| CollectionInfo {
+            name,
+            namespace: Some("default".to_string()),
+            collection_type: Some("index".to_string()),
+            document_count: None,
+        })
+        .collect()
+}
+
+fn group_elasticsearch_collections(
+    collections: Vec<CollectionInfo>,
+    pattern: Option<&Regex>,
+) -> Vec<CollectionInfo> {
+    let Some(pattern) = pattern else {
+        return collections;
+    };
+    let mut groups = BTreeMap::<String, CollectionInfo>::new();
+    for mut collection in collections {
+        let grouped_name = pattern.replace(&collection.name, "${1}*").into_owned();
+        collection.name = grouped_name.clone();
+        groups
+            .entry(grouped_name)
+            .and_modify(|existing| {
+                existing.document_count = match (existing.document_count, collection.document_count)
+                {
+                    (Some(left), Some(right)) => Some(left.saturating_add(right)),
+                    _ => None,
+                };
+            })
+            .or_insert(collection);
+    }
+    groups.into_values().collect()
 }
 
 fn elasticsearch_mapping_to_columns(value: &Value, index: &str, major: u8) -> Vec<ColumnInfo> {
@@ -1046,6 +1189,74 @@ fn elasticsearch_mapping_type(mapping: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_rolling_index_collections_and_preserves_document_counts() {
+        let pattern = Regex::new(r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$").unwrap();
+        let collections = elasticsearch_indices_to_collections(json!([
+            { "index": ".security-7", "docs.count": "1" },
+            { "index": "logs-2026.08.10", "docs.count": "7" },
+            { "index": "logs-2026.08.11", "docs.count": "11" },
+            { "index": "orders-2026.08.10", "docs.count": "3" }
+        ]));
+
+        let grouped = group_elasticsearch_collections(collections, Some(&pattern));
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|collection| (collection.name.as_str(), collection.document_count))
+                .collect::<Vec<_>>(),
+            vec![("logs*", Some(18)), ("orders*", Some(3))]
+        );
+    }
+
+    #[test]
+    fn resolves_visible_indices_and_data_streams_without_cluster_monitor() {
+        let collections = elasticsearch_resolve_to_collections(&json!({
+            "indices": [{ "name": "logs-2026.08.11" }, { "name": ".kibana" }],
+            "data_streams": [{ "name": "metrics-prod" }]
+        }));
+
+        assert_eq!(
+            collections
+                .iter()
+                .map(|collection| collection.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["logs-2026.08.11", "metrics-prod"]
+        );
+
+        let aliases = elasticsearch_alias_to_collections(&json!({
+            ".security": {},
+            "logs-2026.08.11": {},
+            "orders": {}
+        }));
+        assert_eq!(
+            aliases
+                .iter()
+                .map(|collection| collection.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["logs-2026.08.11", "orders"]
+        );
+    }
+
+    #[test]
+    fn reads_optional_index_grouping_pattern_from_connection_url() {
+        let url = normalize_elasticsearch_base_url(
+            "http://localhost:9200?indexGroupingPattern=%5B-_%5D%5Cd%2B&ssl=disable",
+        )
+        .unwrap();
+        assert_eq!(
+            elasticsearch_index_grouping_pattern(&url)
+                .as_ref()
+                .map(|pattern| pattern.as_str()),
+            Some("[-_]\\d+")
+        );
+        assert!(elasticsearch_index_grouping_pattern(
+            &normalize_elasticsearch_base_url("http://localhost:9200?indexGroupingPattern=off")
+                .unwrap()
+        )
+        .is_none());
+    }
 
     #[test]
     fn parses_json_body_as_default_search() {

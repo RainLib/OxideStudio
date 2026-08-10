@@ -370,6 +370,22 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
   候选、fuzzy alias 与 `alias.` 到 metadata column 的解析。真实服务端 quotation/case setting、
   IME/Monaco 接受和中文 live metadata 继续进入统一延期队列。
 
+## Phase 120：Elasticsearch 索引分组与最小权限发现迁移映射
+
+- DBX `crates/dbx-core/src/db/elasticsearch_driver.rs`、
+  `apps/desktop/src/lib/connection/elasticsearchKibanaProxy.ts`、
+  `ConnectionDialog.vue`（`901f5ca3d`）→ Oxide
+  `src-tauri/src/drivers/elasticsearch.rs`、
+  `src/components/connection/ConnectionForm.tsx`、
+  `src/store/useConnectionStore.ts`。
+- 连接表单新增可选 `indexGroupingPattern`。它经已持久化的 connection config 进入 URL query，
+  bundled driver 只在建立 client 时读取；不会透传到 Elasticsearch request path 或日志。
+- Explorer 先使用 `_cat/indices`；401/403 时按 `_resolve/index/*`、`_alias` 依次降级，
+  因此仅有 index metadata/read 权限的账号仍可得到可见 index/data stream。内部 `.` 索引被过滤，
+  collection 名称去重排序。正则分组将时间序列尾部折为 `*` 并聚合已知 document count。
+- 真实 Elasticsearch 6/7/8、Kibana proxy、受限 role、data stream/wildcard mapping、非法正则、
+  group 后 Console/LSP field completion 与大索引列表性能继续延期验证；本阶段不连接集群。
+
 ## 9. 文档维护规则
 
 当某项能力状态发生变化时：
