@@ -1021,3 +1021,19 @@ explicit deferred validation task rather than an implicit release check.
   on 2026-08-10 but exited before the harness with
   `STATUS_ENTRYPOINT_NOT_FOUND`; Clippy and the strict frontend production build
   passed, but they are not database conformance evidence.
+
+## Oracle system values and product code blocks
+
+- In a real Monaco/WebView session bound to Oracle and OceanBase Oracle, type
+  prefixes for `SYSDATE`, `SYSTIMESTAMP`, `SESSIONTIMEZONE`, `DBTIMEZONE`,
+  `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `USER` and `UID` in
+  SELECT, predicate, CASE and INSERT-value expressions. Accepting an item must
+  insert the bare value with no `()` and preserve undo/cursor behavior.
+- Confirm the same values stay absent from PostgreSQL, generic JDBC and other
+  compatibility profiles, and stay absent in relation targets, comments,
+  literals and qualified-column completion. A live same-name routine must keep
+  metadata precedence.
+- Accept the Oracle-family `merge` and `plsql` snippets with upper/lower keyword
+  settings and tab through every placeholder. Confirm Oracle aliases contain no
+  `AS`, a same-id user snippet overrides the built-in, and other products never
+  receive these blocks. No database was opened during Phase 101 implementation.

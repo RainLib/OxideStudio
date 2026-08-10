@@ -2348,6 +2348,49 @@ async fn bundled_sql_lsp_labels_implicit_insert_values() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bundled_sql_lsp_inserts_oracle_system_values_without_parentheses() -> Result<()> {
+    let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
+        return Ok(());
+    };
+    lsp.initialize().await?;
+
+    let uri = "file:///oxide/oracle-system-value.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "defaultDialect": "oracle",
+                "fileDialects": { (uri): "oracle" }
+            }
+        }),
+    )
+    .await?;
+    let sql = "SELECT sys";
+    open_document(&mut lsp, uri, "oracle", sql).await?;
+
+    let completion =
+        completion_items_at(&mut lsp, uri, 0, sql.encode_utf16().count() as u32).await?;
+    let items = completion
+        .as_array()
+        .or_else(|| completion.get("items").and_then(Value::as_array))
+        .context("Oracle completion response did not contain items")?;
+    let sysdate = items
+        .iter()
+        .find(|item| item.get("label").and_then(Value::as_str) == Some("SYSDATE"))
+        .context("bundled LSP did not expose Oracle SYSDATE")?;
+    assert_eq!(
+        sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE")
+    );
+    assert_eq!(
+        sysdate.get("insertTextFormat").and_then(Value::as_u64),
+        Some(1)
+    );
+
+    lsp.shutdown().await
+}
+
+#[tokio::test]
 async fn bundled_sql_lsp_isolates_a_new_query_block_without_a_semicolon() -> Result<()> {
     let Some(mut lsp) = LspProcess::spawn_bundled().await? else {
         return Ok(());

@@ -26,6 +26,11 @@ export type SqlSnippetSetting = {
 };
 
 const SQL_SNIPPET_KEYWORDS = [
+  "WHEN NOT MATCHED THEN",
+  "WHEN MATCHED THEN",
+  "WHEN OTHERS THEN",
+  "MERGE INTO",
+  "UPDATE SET",
   "ALTER TABLE",
   "CREATE TABLE",
   "CREATE INDEX",
@@ -63,6 +68,11 @@ const SQL_SNIPPET_KEYWORDS = [
   "COMMIT",
   "ROLLBACK",
   "EXPLAIN",
+  "DECLARE",
+  "BEGIN",
+  "EXCEPTION",
+  "RAISE",
+  "USING",
   "SHOW TABLES",
   "SHOW META",
   "MATCH",
@@ -320,10 +330,46 @@ export const MANTICORE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
   },
 ];
 
+/** Oracle-family blocks that must not leak into generic parser profiles. */
+export const ORACLE_SQL_COMMAND_SNIPPETS: readonly SqlSnippetSetting[] = [
+  {
+    id: "builtin-oracle-merge",
+    prefix: "merge",
+    label: "merge rows",
+    detail: "Oracle MERGE template without AS aliases",
+    body: "MERGE INTO ${1:target_table} ${2:t}\nUSING ${3:source_table} ${4:s}\nON (${5:t.id = s.id})\nWHEN MATCHED THEN\n  UPDATE SET ${6:t.value = s.value}\nWHEN NOT MATCHED THEN\n  INSERT (${7:id, value})\n  VALUES (${8:s.id, s.value});",
+    enabled: true,
+  },
+  {
+    id: "builtin-oracle-plsql",
+    prefix: "plsql",
+    label: "PL/SQL block",
+    detail: "Oracle anonymous PL/SQL block with exception handling",
+    body: "DECLARE\n  ${1:variable_name} ${2:VARCHAR2(100)};\nBEGIN\n  ${3:statement};\nEXCEPTION\n  WHEN OTHERS THEN\n    ${4:RAISE};\nEND;\n/",
+    enabled: true,
+  },
+];
+
 const BUILTIN_SQL_COMMAND_SNIPPETS = [
   ...DEFAULT_SQL_COMMAND_SNIPPETS,
   ...MANTICORE_SQL_COMMAND_SNIPPETS,
+  ...ORACLE_SQL_COMMAND_SNIPPETS,
 ];
+
+const ORACLE_SNIPPET_DRIVERS = new Set(["oracle", "oceanbase-oracle"]);
+
+function appendProductSnippets(
+  configuredSnippets: readonly SqlSnippetSetting[],
+  productSnippets: readonly SqlSnippetSetting[],
+) {
+  return [
+    ...configuredSnippets,
+    ...productSnippets.filter(
+      (candidate) =>
+        !configuredSnippets.some((snippet) => snippet.id === candidate.id),
+    ),
+  ];
+}
 
 function isUnmodifiedBuiltinSnippet(snippet: SqlSnippetSetting) {
   const defaultSnippet = BUILTIN_SQL_COMMAND_SNIPPETS.find(
@@ -370,16 +416,13 @@ export function sqlCommandSnippetCompletions(
   const prefix = trimmed.toLowerCase();
   const driver = normalizeDriver(options.driver);
   const configuredSnippets = options.snippets ?? DEFAULT_SQL_COMMAND_SNIPPETS;
-  const snippets =
+  const productSnippets =
     driver === "manticoresearch"
-      ? [
-          ...configuredSnippets,
-          ...MANTICORE_SQL_COMMAND_SNIPPETS.filter(
-            (candidate) =>
-              !configuredSnippets.some((snippet) => snippet.id === candidate.id),
-          ),
-        ]
-      : configuredSnippets;
+      ? MANTICORE_SQL_COMMAND_SNIPPETS
+      : ORACLE_SNIPPET_DRIVERS.has(driver)
+        ? ORACLE_SQL_COMMAND_SNIPPETS
+        : [];
+  const snippets = appendProductSnippets(configuredSnippets, productSnippets);
   return snippets
     .map((snippet, index) => ({
       snippet,

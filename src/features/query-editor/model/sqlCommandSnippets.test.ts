@@ -83,4 +83,41 @@ describe("sqlCommandSnippetCompletions", () => {
       sqlCommandSnippetCompletions("meta", { driver: "postgres" }),
     ).toEqual([]);
   });
+
+  it("adds Oracle-family MERGE and PL/SQL blocks without leaking them", () => {
+    expect(
+      sqlCommandSnippetCompletions("merge", { driver: "oracle" })[0],
+    ).toMatchObject({
+      label: "merge rows",
+      insertText:
+        "MERGE INTO ${1:target_table} ${2:t}\nUSING ${3:source_table} ${4:s}\nON (${5:t.id = s.id})\nWHEN MATCHED THEN\n  UPDATE SET ${6:t.value = s.value}\nWHEN NOT MATCHED THEN\n  INSERT (${7:id, value})\n  VALUES (${8:s.id, s.value});",
+    });
+    expect(
+      sqlCommandSnippetCompletions("plsql", {
+        driver: "oceanbase-oracle",
+        keywordCase: "lower",
+      })[0]?.insertText,
+    ).toContain("declare\n  ${1:variable_name} ${2:VARCHAR2(100)};");
+    expect(
+      sqlCommandSnippetCompletions("merge", { driver: "postgres" }),
+    ).toEqual([]);
+  });
+
+  it("allows an explicit Oracle product snippet override", () => {
+    const [item] = sqlCommandSnippetCompletions("merge", {
+      driver: "oracle",
+      snippets: [
+        {
+          id: "builtin-oracle-merge",
+          prefix: "merge",
+          label: "custom merge",
+          detail: "Custom Oracle merge",
+          body: "MERGE CUSTOM ${1:body}",
+          enabled: true,
+        },
+      ],
+    });
+    expect(item?.label).toBe("custom merge");
+    expect(item?.insertText).toBe("MERGE CUSTOM ${1:body}");
+  });
 });
