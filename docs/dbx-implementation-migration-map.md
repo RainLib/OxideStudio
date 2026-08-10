@@ -471,3 +471,4 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 
 阶段 130：受限 PostgreSQL relation backup 已在 Table Grid 的 SQL 导出菜单暴露，可显式选择 structure + data、structure-only 或 data-only（后者提示目标结构须已存在）。为避免 catalog 枚举顺序造成建表失败，外键在全部 relation/data 后统一 `ALTER TABLE ... ADD CONSTRAINT`；点击前确认明确写出其他对象覆盖边界，长任务复用同一取消/进度/文件揭示通道；不对非 PostgreSQL 或 cross-database/object preview 显示入口。
 阶段 131：将 completion/hover 的防过期原则延伸到 signature help 与 inlay hints。请求前捕获 Monaco model version，异步 LSP 返回后检查 cancellation/version；编辑过内容的函数参数/INSERT 列提示被丢弃，服务异常退化为空结果而不扰乱编辑器。
+阶段 132：格式化 provider 也成为 request-bound 编辑操作。文档/选区格式化返回 edits 前都校验 Monaco model version 与 cancellation，任何过期或失败响应都返回空 edits，不能将旧文本补丁应用到用户的新输入。

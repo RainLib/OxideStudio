@@ -114,13 +114,25 @@ export function registerLspCoreProviders({
       },
     }),
     monaco.languages.registerDocumentFormattingEditProvider(editorLanguageId, {
-      provideDocumentFormattingEdits: async (model: any, options: any) => {
+      provideDocumentFormattingEdits: async (
+        model: any,
+        options: any,
+        token?: { isCancellationRequested?: boolean },
+      ) => {
         if (!handlesModel(model)) return [];
-        const edits = await lspClient.formatDocument(
-          documentUri,
-          options.tabSize || 2,
-          options.insertSpaces !== false,
-        );
+        const modelVersion = providerModelVersion(model);
+        let edits;
+        try {
+          edits = await lspClient.formatDocument(
+            documentUri,
+            options.tabSize || 2,
+            options.insertSpaces !== false,
+          );
+        } catch (error) {
+          console.error("[LSP] Document formatting failed:", error);
+          return [];
+        }
+        if (!providerRequestIsCurrent(model, modelVersion, token)) return [];
         return edits.map((edit) => ({
           range: toMonacoRange(monaco, edit.range),
           text: edit.newText,
@@ -134,23 +146,32 @@ export function registerLspCoreProviders({
           model: any,
           range: any,
           options: any,
+          token?: { isCancellationRequested?: boolean },
         ) => {
           if (!handlesModel(model)) return [];
-          const edits = await lspClient.formatRange(
-            documentUri,
-            {
-              start: {
-                line: range.startLineNumber - 1,
-                character: range.startColumn - 1,
+          const modelVersion = providerModelVersion(model);
+          let edits;
+          try {
+            edits = await lspClient.formatRange(
+              documentUri,
+              {
+                start: {
+                  line: range.startLineNumber - 1,
+                  character: range.startColumn - 1,
+                },
+                end: {
+                  line: range.endLineNumber - 1,
+                  character: range.endColumn - 1,
+                },
               },
-              end: {
-                line: range.endLineNumber - 1,
-                character: range.endColumn - 1,
-              },
-            },
-            options.tabSize || 2,
-            options.insertSpaces !== false,
-          );
+              options.tabSize || 2,
+              options.insertSpaces !== false,
+            );
+          } catch (error) {
+            console.error("[LSP] Range formatting failed:", error);
+            return [];
+          }
+          if (!providerRequestIsCurrent(model, modelVersion, token)) return [];
           return edits.map((edit) => ({
             range: toMonacoRange(monaco, edit.range),
             text: edit.newText,

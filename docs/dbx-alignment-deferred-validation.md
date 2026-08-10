@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 132 -- formatting freshness
+
+- In a real Monaco WebView, start document and range formatting, edit the same document before each response returns, and cancel during a slow response. Confirm no stale edit is applied, undo remains one coherent operation, and formatting errors do not affect the current text.
+
 ## Phase 131 -- signature and inlay freshness
 
 - In a real Monaco WebView, delay signature-help and inlay-hint responses while typing inside nested calls and INSERT values. Confirm cancelled or stale responses never replace the current parameter/column hints, and server errors leave the editor usable.

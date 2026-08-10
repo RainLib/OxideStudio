@@ -41,6 +41,8 @@ function coordinatorFixture() {
     getReferences: vi.fn(async () => []),
     rename: vi.fn(async () => null),
     getCodeActions: vi.fn(async () => []),
+    formatDocument: vi.fn(async () => []),
+    formatRange: vi.fn(async () => []),
     getSignatureHelp: vi.fn(async () => null),
     getInlayHints: vi.fn(async () => []),
   } as unknown as LspClient;
@@ -203,5 +205,43 @@ describe("LSP core provider coordinator", () => {
 
     await expect(signature).resolves.toBeNull();
     await expect(hints).resolves.toMatchObject({ hints: [] });
+  });
+
+  it("does not return formatting edits for a changed model", async () => {
+    const { lspClient, providers } = coordinatorFixture();
+    let version = 3;
+    let resolveDocument!: (value: any[]) => void;
+    let resolveRange!: (value: any[]) => void;
+    vi.mocked(lspClient.formatDocument).mockReturnValue(
+      new Promise((resolve) => {
+        resolveDocument = resolve;
+      }),
+    );
+    vi.mocked(lspClient.formatRange).mockReturnValue(
+      new Promise((resolve) => {
+        resolveRange = resolve;
+      }),
+    );
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getVersionId: () => version,
+    };
+    const documentEdits = providers.get("format").provideDocumentFormattingEdits(
+      model,
+      { tabSize: 2, insertSpaces: true },
+      { isCancellationRequested: false },
+    );
+    const rangeEdits = providers.get("rangeFormat").provideDocumentRangeFormattingEdits(
+      model,
+      { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
+      { tabSize: 2, insertSpaces: true },
+      { isCancellationRequested: false },
+    );
+    version = 4;
+    resolveDocument([{ newText: "SELECT 1", range: {} }]);
+    resolveRange([{ newText: "SELECT 1", range: {} }]);
+
+    await expect(documentEdits).resolves.toEqual([]);
+    await expect(rangeEdits).resolves.toEqual([]);
   });
 });
