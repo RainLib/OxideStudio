@@ -12,6 +12,7 @@ pub struct LspState(pub Arc<Mutex<HashMap<String, Arc<LspServerManager>>>>);
 const DEFAULT_LSP_SESSION_KEY: &str = "default";
 const MAX_LSP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LSP_COMPLETION_ITEM_BYTES: usize = 256 * 1024;
+const MAX_LSP_COMPLETION_ITEMS: usize = 2_000;
 
 fn normalize_session_key(session_key: Option<&str>) -> String {
     let trimmed = session_key.unwrap_or(DEFAULT_LSP_SESSION_KEY).trim();
@@ -386,6 +387,28 @@ fn parse_completion_item(item: &Value, defaults: Option<&Value>) -> Option<Compl
     })
 }
 
+fn parse_bounded_completion_items(
+    items: &[Value],
+    defaults: Option<&Value>,
+) -> (Vec<CompletionItem>, bool) {
+    let mut incomplete = items.len() > MAX_LSP_COMPLETION_ITEMS;
+    let mut parsed = Vec::with_capacity(items.len().min(MAX_LSP_COMPLETION_ITEMS));
+    for item in items.iter().take(MAX_LSP_COMPLETION_ITEMS) {
+        let within_item_limit = serde_json::to_vec(item)
+            .is_ok_and(|encoded| encoded.len() <= MAX_LSP_COMPLETION_ITEM_BYTES);
+        if !within_item_limit {
+            incomplete = true;
+            continue;
+        }
+        if let Some(item) = parse_completion_item(item, defaults) {
+            parsed.push(item);
+        } else {
+            incomplete = true;
+        }
+    }
+    (parsed, incomplete)
+}
+
 fn merge_completion_item_values(original: Value, resolved: Value) -> Value {
     match (original, resolved) {
         (Value::Object(mut original), Value::Object(resolved)) => {
@@ -582,27 +605,24 @@ pub async fn lsp_get_completions(
                 .unwrap_or(false);
             let items_array = if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
                 tracing::debug!("Found LSP CompletionList with {} items", items.len());
-                items.clone()
+                items.as_slice()
             } else if let Some(items) = result.as_array() {
                 tracing::debug!(
                     "Found direct LSP completion array with {} items",
                     items.len()
                 );
-                items.clone()
+                items.as_slice()
             } else {
                 tracing::warn!("Unexpected LSP completion response format");
-                vec![]
+                &[]
             };
 
-            let items: Vec<CompletionItem> = items_array
-                .iter()
-                .filter_map(|item| parse_completion_item(item, defaults))
-                .collect();
+            let (items, bridge_incomplete) = parse_bounded_completion_items(items_array, defaults);
 
             tracing::debug!("Parsed {} LSP completion items", items.len());
             Ok(CompletionResponse {
                 items,
-                is_incomplete,
+                is_incomplete: is_incomplete || bridge_incomplete,
                 resolve_provider,
             })
         }
@@ -1151,6 +1171,24 @@ mod tests {
                 },
             }))
         );
+    }
+
+    #[test]
+    fn completion_items_are_bounded_and_report_incomplete_results() {
+        let items = (0..=MAX_LSP_COMPLETION_ITEMS)
+            .map(|index| serde_json::json!({ "label": format!("item_{index}") }))
+            .collect::<Vec<_>>();
+        let (parsed, incomplete) = parse_bounded_completion_items(&items, None);
+        assert_eq!(parsed.len(), MAX_LSP_COMPLETION_ITEMS);
+        assert!(incomplete);
+
+        let oversized = serde_json::json!({
+            "label": "oversized",
+            "documentation": "x".repeat(MAX_LSP_COMPLETION_ITEM_BYTES)
+        });
+        let (parsed, incomplete) = parse_bounded_completion_items(&[oversized], None);
+        assert!(parsed.is_empty());
+        assert!(incomplete);
     }
 
     #[test]

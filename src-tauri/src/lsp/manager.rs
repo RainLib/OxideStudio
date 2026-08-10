@@ -11,6 +11,17 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use super::protocol::*;
 
 type ResponseSender = oneshot::Sender<Result<Value>>;
+const MAX_LSP_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+
+fn validate_lsp_message_size(bytes: usize) -> Result<()> {
+    anyhow::ensure!(bytes > 0, "LSP message is empty");
+    anyhow::ensure!(
+        bytes <= MAX_LSP_MESSAGE_BYTES,
+        "LSP message exceeds the {} MiB transport limit",
+        MAX_LSP_MESSAGE_BYTES / (1024 * 1024)
+    );
+    Ok(())
+}
 
 /// Outgoing message type (Request or Notification)
 enum LspOutgoingMessage {
@@ -174,15 +185,18 @@ impl LspServerManager {
                     continue;
                 }
 
-                let content_length: usize = line
+                let content_length = line
                     .trim()
                     .split(':')
                     .nth(1)
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-
-                if content_length == 0 {
-                    continue;
+                    .and_then(|s| s.trim().parse::<usize>().ok());
+                let Some(content_length) = content_length else {
+                    tracing::error!("LSP returned an invalid Content-Length header");
+                    break;
+                };
+                if let Err(error) = validate_lsp_message_size(content_length) {
+                    tracing::error!("Rejecting LSP response: {error}");
+                    break;
                 }
 
                 // Read empty line
@@ -286,6 +300,13 @@ impl LspServerManager {
                         continue;
                     }
                 };
+                if let Err(error) = validate_lsp_message_size(json.len()) {
+                    tracing::error!("Rejecting outgoing LSP message: {error}");
+                    if let Some(tx) = response_tx_opt {
+                        let _ = tx.send(Err(error));
+                    }
+                    continue;
+                }
 
                 // Format LSP message with Content-Length header
                 let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
@@ -543,7 +564,7 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 mod tests {
     use super::{
         cancel_request_notification, completion_client_capabilities,
-        server_supports_completion_resolve,
+        server_supports_completion_resolve, validate_lsp_message_size, MAX_LSP_MESSAGE_BYTES,
     };
 
     #[test]
@@ -600,5 +621,13 @@ mod tests {
         assert!(!server_supports_completion_resolve(
             &serde_json::Value::Null
         ));
+    }
+
+    #[test]
+    fn lsp_transport_rejects_empty_and_oversized_messages() {
+        assert!(validate_lsp_message_size(1).is_ok());
+        assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES).is_ok());
+        assert!(validate_lsp_message_size(0).is_err());
+        assert!(validate_lsp_message_size(MAX_LSP_MESSAGE_BYTES + 1).is_err());
     }
 }

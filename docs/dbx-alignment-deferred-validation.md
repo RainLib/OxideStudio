@@ -296,6 +296,11 @@ explicit deferred validation task rather than an implicit release check.
   with list-level `data` and per-item overrides. `completionItem/resolve` must
   receive the inherited or overridden opaque identity unchanged, while a
   provider that does not advertise resolve must never receive the request.
+- Use a controlled provider to return 2,001 completion items, one item larger
+  than 256 KiB, and inbound/outbound frames around the 32 MiB transport bound.
+  The bridge must cap renderer work, mark truncated completion incomplete,
+  reject oversized frames without allocating their declared body, and leave
+  pending requests in a terminal error state rather than hanging.
 - In Monaco, accept zero-, fixed-, optional-, variadic- and ClickHouse
   multi-group built-in function candidates with each keyword/function casing
   preference. Confirm tab stops, closing parentheses, retriggered signature
