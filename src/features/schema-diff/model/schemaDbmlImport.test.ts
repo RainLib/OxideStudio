@@ -5,6 +5,7 @@ import {
   isSchemaDbmlSnapshot,
   parseSchemaDbml,
 } from "./schemaDbmlImport";
+import { enumDescriptorValues } from "./schemaEnumDescriptor";
 import type { SchemaSnapshot } from "@/services/tauri/types";
 
 const snapshot: SchemaSnapshot = {
@@ -19,6 +20,14 @@ const snapshot: SchemaSnapshot = {
   schemaName: "public",
   capturedAt: 1,
   warnings: [],
+  schemaObjects: [
+    {
+      name: "order_status",
+      objectType: "ENUM TYPE",
+      description: 'Enum values: ["draft","in progress","done"]',
+    },
+    { name: "order_number_seq", objectType: "SEQUENCE" },
+  ],
   relations: [
     {
       name: "users",
@@ -110,6 +119,12 @@ describe("schema DBML import", () => {
       referenced_table: "users",
       referenced_columns: ["id"],
     });
+    expect(parsed.schemaObjects).toHaveLength(1);
+    expect(enumDescriptorValues(parsed.schemaObjects[0]?.description)).toEqual([
+      "draft",
+      "in progress",
+      "done",
+    ]);
   });
 
   it("marks imported snapshots as offline and review-only", () => {
@@ -130,6 +145,68 @@ describe("schema DBML import", () => {
     expect(isSchemaDbmlSnapshot(imported)).toBe(true);
     expect(imported.warnings).toContain("OFFLINE_DBML_REVIEW_ONLY");
     expect(imported.relations).toHaveLength(2);
+    expect(imported.schemaObjects).toHaveLength(1);
+  });
+
+  it("imports enum values, drops value notes with warnings, and preserves column references", () => {
+    const parsed = parseSchemaDbml(
+      `
+        Enum public.order_status {
+          draft [note: 'Not submitted']
+          "in progress"
+          "done"
+          "done"
+        }
+
+        Table public.orders {
+          id bigint [pk]
+          status public.order_status [not null]
+        }
+      `,
+      "public",
+    );
+
+    expect(enumDescriptorValues(parsed.schemaObjects[0]?.description)).toEqual([
+      "draft",
+      "in progress",
+      "done",
+    ]);
+    expect(parsed.relations[0]?.columns.find((column) => column.name === "status")?.data_type)
+      .toBe("public.order_status");
+    expect(parsed.warnings.join(" ")).toContain("settings and notes");
+    expect(parsed.warnings.join(" ")).toContain("duplicate enum value");
+  });
+
+  it("rejects enum definitions outside the target snapshot schema", () => {
+    const parsed = parseSchemaDbml(
+      'Enum "audit"."event_state" {\n  queued\n}\nTable public.events {\n  id bigint\n}',
+      "public",
+    );
+    expect(parsed.schemaObjects).toEqual([]);
+    expect(parsed.warnings.join(" ")).toContain("audit.event_state");
+  });
+
+  it("includes enum descriptors in the DBML snapshot fingerprint", () => {
+    const identity = {
+      projectId: "project",
+      connectionId: "connection",
+      connectionName: "Local",
+      driver: "postgres" as const,
+      schemaName: "public",
+    };
+    const first = createSchemaDbmlSnapshot(
+      identity,
+      "schema.dbml",
+      "Enum state { open }\nTable jobs { id bigint }",
+      1,
+    );
+    const second = createSchemaDbmlSnapshot(
+      identity,
+      "schema.dbml",
+      "Enum state { closed }\nTable jobs { id bigint }",
+      1,
+    );
+    expect(first.fingerprint).not.toBe(second.fingerprint);
   });
 
   it("rejects tables outside the target snapshot schema", () => {

@@ -2,6 +2,7 @@ import type {
   ConstraintInfo,
   SchemaSnapshot,
 } from "@/services/tauri/types";
+import { enumDescriptorValues } from "./schemaEnumDescriptor";
 
 export type SchemaDbmlArtifact = {
   content: string;
@@ -22,6 +23,14 @@ function quotedText(value: string) {
 
 function expression(value: string) {
   return `\`${value.replace(/`/g, "\\`")}\``;
+}
+
+function enumValue(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function isEnumObject(object: NonNullable<SchemaSnapshot["schemaObjects"]>[number]) {
+  return /\benum\b/iu.test(object.objectType);
 }
 
 function isForeignKey(constraint: ConstraintInfo) {
@@ -73,6 +82,23 @@ export function serializeSchemaSnapshotToDbml(
     `}`,
     "",
   ];
+
+  const schemaObjects = snapshot.schemaObjects || [];
+  const enumObjects = schemaObjects.filter(isEnumObject);
+  for (const enumObject of enumObjects) {
+    const values = enumDescriptorValues(enumObject.description);
+    if (!values) {
+      warnings.add(
+        `${enumObject.name}: enum values are unavailable; exported as an empty review-only Enum block.`,
+      );
+    }
+    lines.push(
+      `Enum ${qualifiedRelation(snapshot.schemaName, enumObject.name)} {`,
+      ...(values || []).map((value) => `  ${enumValue(value)}`),
+      "}",
+      "",
+    );
+  }
 
   for (const relation of snapshot.relations) {
     lines.push(
@@ -157,10 +183,10 @@ export function serializeSchemaSnapshotToDbml(
       `${routineCount} routine signature(s) are excluded from DBML.`,
     );
   }
-  const schemaObjectCount = snapshot.schemaObjects?.length || 0;
+  const schemaObjectCount = schemaObjects.length - enumObjects.length;
   if (schemaObjectCount > 0) {
     warnings.add(
-      `${schemaObjectCount} non-relation schema object descriptor(s) are excluded from DBML.`,
+      `${schemaObjectCount} non-enum schema object descriptor(s) are excluded from DBML.`,
     );
   }
 

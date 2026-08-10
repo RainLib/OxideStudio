@@ -655,6 +655,11 @@ explicit deferred validation task rather than an implicit release check.
   including array types, defaults, named/composite indexes and composite FKs.
   Malformed settings, duplicate tables/columns, missing FK sources and
   cross-schema tables must produce diagnostics rather than guessed metadata.
+- Round-trip same-schema Enum blocks with bare/quoted values, spaces, embedded
+  quotes, duplicate values and enum-typed columns. Enum descriptors must affect
+  the offline fingerprint and appear only as Manual Review schema-object drift;
+  cross-schema enum blocks must be rejected. Value notes/settings must remain a
+  visible lossy warning until the snapshot model can represent them directly.
 - Confirm the 8 MiB browser limit, saved-source label and offline sentinel.
   Imported DBML must enter snapshot diff and must never enable Apply or become
   direct executable migration input.

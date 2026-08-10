@@ -2,17 +2,22 @@ import type {
   ColumnInfo,
   ConstraintInfo,
   IndexInfo,
+  SchemaObjectSnapshot,
   SchemaRelationSnapshot,
   SchemaSnapshot,
 } from "@/services/tauri/types";
 import type { SchemaSnapshotIdentity } from "@/services/schemaSnapshotStore";
+import { enumDescriptorDescription } from "./schemaEnumDescriptor";
 
 export type SchemaDbmlParseResult = {
   relations: SchemaRelationSnapshot[];
+  schemaObjects: SchemaObjectSnapshot[];
   warnings: string[];
 };
 
 const OFFLINE_DBML_WARNING = "OFFLINE_DBML_REVIEW_ONLY";
+const MAX_DBML_ENUM_VALUES = 4_096;
+const MAX_DBML_ENUM_VALUE_LENGTH = 4_096;
 
 /**
  * Parses the portable DBML subset used by the OxideStudio exporter. The result
@@ -26,8 +31,37 @@ export function parseSchemaDbml(
   const warnings = new Set<string>();
   const source = stripComments(dbml, warnings);
   const relations = new Map<string, SchemaRelationSnapshot>();
+  const schemaObjects = new Map<string, SchemaObjectSnapshot>();
   const pendingReferences: ParsedRef[] = [];
   const tableBlocks = extractBlocks(source, "Table", warnings);
+  const enumBlocks = extractBlocks(source, "Enum", warnings);
+
+  for (const block of enumBlocks) {
+    const path = parseIdentifierPath(removeTrailingSettings(block.header));
+    const enumName = path[path.length - 1] || "";
+    const schemaName = path.length > 1 ? path[path.length - 2] || "" : targetSchema;
+    if (!enumName) {
+      warnings.add("An Enum block with an unsupported identifier was ignored.");
+      continue;
+    }
+    if (schemaName && targetSchema && schemaName !== targetSchema) {
+      warnings.add(
+        `${schemaName}.${enumName}: skipped because a schema snapshot can only contain ${targetSchema}.`,
+      );
+      continue;
+    }
+    const key = `ENUM TYPE:${enumName}`;
+    if (schemaObjects.has(key)) {
+      warnings.add(`Duplicate Enum ${enumName}; the later definition was ignored.`);
+      continue;
+    }
+    const values = parseEnumValues(block.body, enumName, warnings);
+    schemaObjects.set(key, {
+      name: enumName,
+      objectType: "ENUM TYPE",
+      description: enumDescriptorDescription(values),
+    });
+  }
 
   for (const block of tableBlocks) {
     const path = parseIdentifierPath(removeTrailingSettings(block.header));
@@ -73,6 +107,9 @@ export function parseSchemaDbml(
     relations: [...relations.values()].sort((left, right) =>
       left.name.localeCompare(right.name),
     ),
+    schemaObjects: [...schemaObjects.values()].sort((left, right) =>
+      left.name.localeCompare(right.name)
+    ),
     warnings: [...warnings].sort(),
   };
 }
@@ -84,7 +121,12 @@ export function createSchemaDbmlSnapshot(
   capturedAt = Date.now(),
 ): SchemaSnapshot {
   const parsed = parseSchemaDbml(dbml, identity.schemaName);
-  const fingerprint = stableFingerprint(identity, sourceName, parsed.relations);
+  const fingerprint = stableFingerprint(
+    identity,
+    sourceName,
+    parsed.relations,
+    parsed.schemaObjects,
+  );
   return {
     version: 1,
     id: `dbml-${capturedAt}-${fingerprint.slice(-8)}`,
@@ -97,6 +139,7 @@ export function createSchemaDbmlSnapshot(
     schemaName: identity.schemaName,
     capturedAt,
     relations: parsed.relations,
+    schemaObjects: parsed.schemaObjects,
     warnings: [
       OFFLINE_DBML_WARNING,
       `Source: ${sourceName.trim() || "Imported DBML"}`,
@@ -209,6 +252,63 @@ function parseTableBlock(
     },
     inlineReferences,
   };
+}
+
+function parseEnumValues(
+  body: string,
+  enumName: string,
+  warnings: Set<string>,
+) {
+  const values: string[] = [];
+  const seen = new Set<string>();
+  for (const line of body.split(/\r?\n/u)) {
+    const source = line.trim();
+    if (!source || /^Note\s*:/iu.test(source)) continue;
+    const valueSource = removeTrailingSettings(source);
+    if (valueSource !== source) {
+      warnings.add(`${enumName}: enum value settings and notes are review-only and were omitted.`);
+    }
+    const token = readEnumValue(valueSource);
+    if (!token || token.end !== valueSource.length) {
+      warnings.add(`${enumName}: unsupported enum value ${enumValuePreview(valueSource)} was ignored.`);
+      continue;
+    }
+    if (token.value.length > MAX_DBML_ENUM_VALUE_LENGTH) {
+      warnings.add(`${enumName}: an enum value exceeded ${MAX_DBML_ENUM_VALUE_LENGTH} characters and was ignored.`);
+      continue;
+    }
+    if (seen.has(token.value)) {
+      warnings.add(`${enumName}.${enumValuePreview(token.value)}: duplicate enum value was ignored.`);
+      continue;
+    }
+    if (values.length >= MAX_DBML_ENUM_VALUES) {
+      warnings.add(`${enumName}: enum values were limited to ${MAX_DBML_ENUM_VALUES} entries.`);
+      break;
+    }
+    seen.add(token.value);
+    values.push(token.value);
+  }
+  if (values.length === 0) {
+    warnings.add(`Enum ${enumName} has no supported values and remains descriptor-only.`);
+  }
+  return values;
+}
+
+function enumValuePreview(value: string) {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= 120 ? compact : `${compact.slice(0, 117)}...`;
+}
+
+function readEnumValue(value: string) {
+  const token = readIdentifier(value, 0);
+  if (token) return token;
+  if (!value.startsWith("'")) return null;
+  for (let index = 1; index < value.length; index += 1) {
+    if (value[index] === "'" && value[index - 1] !== "\\") {
+      return { value: unquote(value.slice(0, index + 1)), end: index + 1 };
+    }
+  }
+  return null;
 }
 
 function parseColumn(
@@ -774,14 +874,17 @@ function stableFingerprint(
   identity: SchemaSnapshotIdentity,
   sourceName: string,
   relations: SchemaRelationSnapshot[],
+  schemaObjects: SchemaObjectSnapshot[],
 ) {
-  const input = JSON.stringify([
+  const payload: unknown[] = [
     identity.driver,
     identity.databaseName || null,
     identity.schemaName,
     sourceName,
     relations,
-  ]);
+  ];
+  if (schemaObjects.length > 0) payload.push(schemaObjects);
+  const input = JSON.stringify(payload);
   let hash = 0x811c9dc5;
   for (let index = 0; index < input.length; index += 1) {
     hash ^= input.charCodeAt(index);
