@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mergeCompletionFallbackSuggestions } from "./completionFallback";
+import { sqlSyntaxFallbackCompletions } from "./sqlSyntaxFallback";
 
 describe("mergeCompletionFallbackSuggestions", () => {
   it("keeps function overloads with distinct signatures", () => {
@@ -50,5 +51,22 @@ describe("mergeCompletionFallbackSuggestions", () => {
         ],
       ).filter((item) => item.label === "date_trunc"),
     ).toHaveLength(2);
+  });
+
+  it("keeps a distinct SQL code block beside a non-empty semantic result", () => {
+    const merged = mergeCompletionFallbackSuggestions(
+      [{ label: "orders", detail: "public.orders" }],
+      sqlSyntaxFallbackCompletions("join", { driver: "postgres" }),
+    );
+
+    expect(merged).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "orders" }),
+        expect.objectContaining({
+          label: "join tables",
+          insertText: "JOIN ${1:table} ON ${2:left_column} = ${3:right_column}",
+        }),
+      ]),
+    );
   });
 });
