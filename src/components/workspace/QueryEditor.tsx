@@ -1344,12 +1344,7 @@ export function QueryEditor({
           // this before either branch starts so no older cursor revision can
           // publish a late merged completion list.
           const initialModelVersion = model.getVersionId();
-          const isInitialCompletionCurrent = () =>
-            isCompletionRequestCurrent({
-              model,
-              modelVersion: initialModelVersion,
-              token,
-            });
+          const completionUri = model.uri.toString();
           const textBeforeCursor = boundedSqlCompletionTextBeforeCursor(
             monaco,
             model,
@@ -1385,6 +1380,30 @@ export function QueryEditor({
               return { suggestions: [] };
             }
           }
+          if (!isCurrentLspModelUri(completionUri)) {
+            return { suggestions: [] };
+          }
+          // Advance the generation for every accepted request, including the
+          // cache-only path used while LSP is restarting. A model version does
+          // not change when the user reopens completion at the same cursor, so
+          // version checks alone cannot prevent an older fallback from
+          // replacing a newer list.
+          const requestGeneration =
+            (completionRequestGenerationRef.current.get(completionUri) || 0) +
+            1;
+          completionRequestGenerationRef.current.set(
+            completionUri,
+            requestGeneration,
+          );
+          const isCompletionCurrent = () =>
+            isCompletionRequestCurrent({
+              model,
+              modelVersion: initialModelVersion,
+              token,
+              currentGeneration:
+                completionRequestGenerationRef.current.get(completionUri),
+              requestGeneration,
+            });
           const cachedCompletion = createCachedSqlCompletionRequest({
             completionDriver,
             model,
@@ -1398,7 +1417,7 @@ export function QueryEditor({
           const cachedSuggestions = cachedCompletion.suggestions;
           const fallbackSuggestions = async () => {
             const cached = await cachedSuggestions();
-            if (!isInitialCompletionCurrent()) return [];
+            if (!isCompletionCurrent()) return [];
             const word = model.getWordUntilPosition(position);
             const range = new monaco.Range(
               position.lineNumber,
@@ -1503,12 +1522,8 @@ export function QueryEditor({
             return { suggestions, incomplete };
           };
           try {
-            const uri = model.uri.toString();
-            if (!isCurrentLspModelUri(uri)) return { suggestions: [] };
+            const uri = completionUri;
             const modelVersion = initialModelVersion;
-            const requestGeneration =
-              (completionRequestGenerationRef.current.get(uri) || 0) + 1;
-            completionRequestGenerationRef.current.set(uri, requestGeneration);
 
             const identity = extractLspDocumentIdentity(uri);
             const isElasticsearchDocument =

@@ -1,5 +1,9 @@
 # DBX alignment: deferred validation queue
 
+## Phase 129 -- fallback completion generation
+
+- In a real Monaco WebView, make two completion requests at the same cursor while the first cached-metadata read is delayed; repeat with LSP unavailable and with a forced LSP error. Confirm only the newest request can publish a fallback list and that cancellation leaves the active list untouched.
+
 ## Phase 127 -- completion merge race
 
 - In a real Monaco WebView, delay metadata and foreign-key requests while typing, switching tabs/connections, cancelling completion, and accepting a snippet. Verify stale merged suggestions never reopen or replace the active list; test slow remote catalog refreshes, IME and inline/popup coexistence.

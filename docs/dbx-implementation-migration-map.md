@@ -467,3 +467,4 @@ crates/dbx-core/src/{agent_catalog,agent_tools,agent_runtime}.rs
 
 - LSP completion already rejected a stale server response, but its subsequent cached field and FK JOIN enrichment was asynchronous and could publish after the user had edited the Monaco model. `completionRequestGuard.ts` now binds every live/cache merge to cancellation, the captured model version and request generation. A stale result is discarded instead of inserting an out-of-date column, relation or code block.
 - This aligns with DBX's editor lifecycle principle (late completion work must not win over current input) while preserving Oxide's Monaco-specific owner/model gates. It applies to both live LSP and startup/error fallback paths.
+阶段 129：DBX 的 completion request 生命周期原则继续用于 Monaco fallback。每一个通过 trigger gate 的请求（包括 LSP 尚未就绪或报错时的 cache-only fallback）都先取得 document-scoped generation；缓存读取完成后同时校验 model version、取消 token 与 generation，因而在同一光标位置连续重新打开补全也不会让旧的 fallback 覆盖新的候选列表。
