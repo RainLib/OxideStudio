@@ -14,20 +14,19 @@ OxideStudio 需要让 Chat、Plan、Agent 使用同一套上下文、模型、�
 - TypeScript Deep Agents 负责编排、上下文治理、todo、只读子代理和中断。
 - Rust 是数据库、模型、凭据、工具策略、批准、持久化和 sidecar 生命周期的唯一可信边界。
 - 页面动作使用稳定语义 target，不允许模型操作 DOM selector。
-- 应用内助手不通过 MCP 反向调用自己；MCP/CLI 只服务外部客户端。
+- 公开的 `oxide-agent mcp stdio` 只服务外部客户端并严格只读；Codex CLI / CodeBuddy CLI Provider 只能通过 Desktop 创建的短期私有 MCP bridge 调用当前 Turn 的冻结工具清单。
 
 ## 2. 当前生产架构
 
 ```text
 React turn UI
-   ↕ Tauri commands + events
-Rust AgentHostManager / model gateway / tool policy / encrypted store
-   ↕ JSON-RPC 2.0 + Content-Length framing over stdio
-signed Node 22 TypeScript sidecar
-   └─ deepagents@1.10.8 via deepagents/node
+   ↕ Tauri commands + unified AgentHostEvent
+Rust AgentHostManager / tool broker / approval / encrypted store
+   ├─ OpenAI Compatible → signed Node 22 Deep Agents sidecar → Rust model gateway
+   └─ Codex / CodeBuddy CLI → isolated JSONL runtime → private token-bound MCP bridge
 ```
 
-生产环境的 Chat、Plan、Agent 已统一进入该 host。旧 `AssistantRuntime`、planner 和前端 MCP/CLI 代码仍作为迁移期兼容与契约测试资产存在，但生产 UI 不会静默降级到它们；开发时只有显式设置 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 才启用旧 UI。
+生产环境的 Chat、Plan、Agent 均进入 Rust `AgentHostManager`。OpenAI Compatible Provider 继续由 Deep Agents sidecar 编排；Codex CLI 与 CodeBuddy CLI 由 Rust 直接监督，并投影为相同事件和审批 UI。旧 `AssistantRuntime`、planner 和前端 MCP/CLI 代码仍作为迁移期兼容与契约测试资产存在，但生产 UI 不会静默降级到它们；开发时只有显式设置 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 才启用旧 UI。CLI Provider 的安全边界见 [ADR-0022](decisions/0022-cli-agent-provider-bridge.md)。
 
 不采用以下方案：
 
@@ -53,6 +52,8 @@ sidecar 固定 Node 22 与 `deepagents@1.10.8`。构建先经 esbuild，再由�
 - `src-tauri/src/agent/model.rs`：OpenAI-compatible complete/stream 请求、usage/tool-call 归一化、超时、取消和响应大小限制。
 - `src-tauri/src/agent/store.rs`：项目级 thread/checkpoint/artifact 与 LangGraph checkpoint/pending writes 加密存储。
 - `src-tauri/src/agent/protocol.rs` 与 `src-tauri/src/commands/agent.rs`：Rust 侧契约和最小 Tauri command surface。
+- `src-tauri/src/ai_cli/`：Codex / CodeBuddy 安装发现、模型与 effort 探测、隔离进程、JSONL 方言映射、超时、取消和有界诊断。
+- `src-tauri/src/agent/bridge.rs` 与 `src-tauri/src/bin/oxide_agent/bridge_mcp.rs`：每 Turn 随机 endpoint/token 的私有工具桥；没有 Desktop 活动身份时立即失败。
 
 `AgentHostManager` 在 Tauri setup 时只创建无副作用状态。没有配置 provider 时不启动 sidecar；首次 AI 请求时懒启动。sidecar 缺失、协议不兼容、签名/打包错误或崩溃只会让 Assistant 进入 unavailable，不得阻塞应用主界面和数据库工作台。
 

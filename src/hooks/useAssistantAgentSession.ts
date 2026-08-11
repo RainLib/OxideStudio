@@ -25,6 +25,7 @@ import {
   type AgentRequestMetadata,
   type AgentStartTurnRequest,
 } from "@/services/tauri/agent-host.service";
+import type { AiProviderKind } from "@/services/tauri/ai.service";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   projectFilesService,
@@ -114,6 +115,7 @@ export type AssistantAgentSession = {
 export function useAssistantAgentSession(
   projectId: string,
   providerConfigured = false,
+  providerKind?: AiProviderKind,
 ): AssistantAgentSession {
   const [turns, setTurns] = useState<AssistantTurn[]>([]);
   const [availability, setAvailability] =
@@ -124,6 +126,7 @@ export function useAssistantAgentSession(
     useState<AgentContextMetrics | null>(null);
   const projectIdRef = useRef(projectId);
   const providerConfiguredRef = useRef(providerConfigured);
+  const providerKindRef = useRef(providerKind);
   const turnsRef = useRef<AssistantTurn[]>([]);
   const threadIdRef = useRef(createAgentId(`thread:${projectId}`));
   const resumeRequestsRef = useRef(new Map<string, AgentStartTurnRequest>());
@@ -185,7 +188,10 @@ export function useAssistantAgentSession(
   const refreshStatus = useCallback(async () => {
     try {
       const configured = providerConfiguredRef.current;
-      const status = await agentHostService.getStatus(configured);
+      const status = await agentHostService.getStatus(
+        configured,
+        providerKindRef.current,
+      );
       const checking =
         configured &&
         !status.available &&
@@ -211,6 +217,7 @@ export function useAssistantAgentSession(
   }, [handleCommandError]);
 
   providerConfiguredRef.current = providerConfigured;
+  providerKindRef.current = providerKind;
 
   useEffect(() => {
     const previousProjectId = projectIdRef.current;
@@ -308,12 +315,35 @@ export function useAssistantAgentSession(
         );
         const resumableTurns = restoredTurns.map((turn) => {
           if (!assistantTurnIsActive(turn)) return turn;
-          const canResume = requestByTurn.has(turn.id);
+          const source = requestByTurn.get(turn.id);
+          const canResume = Boolean(source);
+          const cliProvider =
+            source?.provider.kind === "codex-cli" ||
+            source?.provider.kind === "codebuddy-cli";
+          const mutationResultUnknown = turn.process.some(
+            (item) =>
+              item.kind === "tool" &&
+              item.toolName === "query.executeApproved" &&
+              item.status === "running",
+          );
+          if (mutationResultUnknown) {
+            requestByTurn.delete(turn.id);
+            return {
+              ...turn,
+              status: "failed" as const,
+              error:
+                "OxideStudio restarted while a database change was active. Verify the target manually; automatic retry is disabled.",
+              errorDetail: null,
+              updatedAt: Date.now(),
+            };
+          }
           return {
             ...turn,
             status: "paused" as const,
-            error: canResume
-              ? "OxideStudio restarted while this task was running. Resume from its encrypted checkpoint when you are ready."
+            error: cliProvider
+              ? "The CLI was interrupted when OxideStudio restarted. Retry manually to start a fresh CLI turn; it will not replay automatically."
+              : canResume
+                ? "OxideStudio restarted while this task was running. Resume from its encrypted checkpoint when you are ready."
               : "OxideStudio restarted while this task was running. Start the request again to continue safely.",
             errorDetail: null,
             updatedAt: Date.now(),
@@ -393,7 +423,7 @@ export function useAssistantAgentSession(
 
   useEffect(() => {
     void refreshStatus();
-  }, [providerConfigured, refreshStatus]);
+  }, [providerConfigured, providerKind, refreshStatus]);
 
   useEffect(() => {
     let disposed = false;
@@ -711,7 +741,15 @@ export function useAssistantAgentSession(
         updatedAt: Date.now(),
       }));
       try {
-        const handle = await agentHostService.resumeTurn(request);
+        const cliProvider =
+          request.provider.kind === "codex-cli" ||
+          request.provider.kind === "codebuddy-cli";
+        const handle = cliProvider
+          ? await agentHostService.startTurn({
+              ...request,
+              resumeCheckpoint: undefined,
+            })
+          : await agentHostService.resumeTurn(request);
         if (!handle.accepted) {
           throw new Error("Agent Host rejected resume.");
         }
@@ -1270,6 +1308,25 @@ export function reduceAgentHostEvent(
           totalTokens:
             (turn.modelUsage?.totalTokens ?? 0) + event.totalTokens,
         },
+      };
+    case "provider.activity":
+      return {
+        ...turn,
+        ...common,
+        process: upsertAssistantProcessItem(
+          turn.process,
+          processItem(event, "commentary", {
+            id: `provider:${event.provider}`,
+            title: event.label,
+            detail: event.detail,
+            status:
+              event.status === "error"
+                ? "failed"
+                : event.status === "completed"
+                  ? "completed"
+                  : "running",
+          }),
+        ),
       };
     case "answer.delta": {
       const visibleProgress = event.reset ? turn.draft.trim() : "";

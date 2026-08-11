@@ -106,6 +106,24 @@ type PersistedAiSettings = Partial<AiSettingsValues> & {
   enabled?: boolean;
 };
 
+export function migratePersistedAiSettings(
+  persisted: unknown,
+  version: number,
+): Partial<AiSettingsValues> {
+  const state = (persisted || {}) as PersistedAiSettings;
+  if (version >= 2) return state;
+  return {
+    ...state,
+    provider: state.provider || "openai-compatible",
+    inlineBaseUrl: state.inlineBaseUrl || state.baseUrl || DEFAULT_AI_BASE_URL,
+    inlineCompletionModel:
+      state.inlineCompletionModel || state.model || DEFAULT_AI_MODEL,
+    inlineTimeoutMs: state.inlineTimeoutMs || 4_000,
+    codexCliProfileId: DEFAULT_CODEX_CLI_PROFILE_ID,
+    codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
+  };
+}
+
 export const useAiSettingsStore = create<AiSettingsState>()(
   persist(
     (set, get) => ({
@@ -175,20 +193,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     {
       name: "oxide-ai-settings",
       version: 2,
-      migrate: (persisted, version) => {
-        const state = (persisted || {}) as PersistedAiSettings;
-        if (version >= 2) return state as AiSettingsState;
-        return {
-          ...state,
-          provider: state.provider || "openai-compatible",
-          inlineBaseUrl: state.inlineBaseUrl || state.baseUrl || DEFAULT_AI_BASE_URL,
-          inlineCompletionModel:
-            state.inlineCompletionModel || state.model || DEFAULT_AI_MODEL,
-          inlineTimeoutMs: state.inlineTimeoutMs || 4_000,
-          codexCliProfileId: DEFAULT_CODEX_CLI_PROFILE_ID,
-          codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
-        } as AiSettingsState;
-      },
+      migrate: migratePersistedAiSettings,
       partialize: (state) => ({
         enabled: state.enabled,
         provider: state.provider,

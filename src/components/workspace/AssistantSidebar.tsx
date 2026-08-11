@@ -48,7 +48,11 @@ import {
   type AgentTextAttachment,
   type AgentToolManifestEntry,
 } from "@/services/tauri/agent-host.service";
-import type { AiProviderConfig } from "@/services/tauri/ai.service";
+import {
+  aiService,
+  type AiCliDetectionResult,
+  type AiProviderConfig,
+} from "@/services/tauri/ai.service";
 import { ArrowDown, Sparkles, X } from "lucide-react";
 import {
   AssistantPendingChangesPanel,
@@ -178,7 +182,11 @@ function AgentHostAssistantSidebar() {
   const selectedText = activeTab?.editorSelection?.text || null;
   const modelConfig = assistantProviderConfig();
   const providerConfigured = Boolean(modelConfig);
-  const session = useAssistantAgentSession(activeProjectId, providerConfigured);
+  const session = useAssistantAgentSession(
+    activeProjectId,
+    providerConfigured,
+    modelConfig?.kind,
+  );
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -189,6 +197,10 @@ function AgentHostAssistantSidebar() {
   const [dismissedAuthIssueId, setDismissedAuthIssueId] = useState<
     string | null
   >(null);
+  const [cliDetection, setCliDetection] = useState<
+    AiCliDetectionResult | "checking" | null
+  >(null);
+  const [cliDetectionRevision, setCliDetectionRevision] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoFollowConversationRef = useRef(true);
   const providerFingerprintRef = useRef(
@@ -278,6 +290,10 @@ function AgentHostAssistantSidebar() {
   const contextProviderLabel = modelConfig
     ? providerDestinationLabel(modelConfig)
     : null;
+  const cliProviderFingerprint =
+    modelConfig && modelConfig.kind !== "openai-compatible"
+      ? JSON.stringify(modelConfig)
+      : null;
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
     [attachments, message],
@@ -358,7 +374,33 @@ function AgentHostAssistantSidebar() {
     hostCapabilities: session.hostStatus?.capabilities ?? null,
     hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
+    cliDetection,
   });
+
+  useEffect(() => {
+    if (!modelConfig || modelConfig.kind === "openai-compatible") {
+      setCliDetection(null);
+      return;
+    }
+    let disposed = false;
+    setCliDetection("checking");
+    void aiService
+      .detectCliProvider(modelConfig)
+      .then((result) => {
+        if (!disposed) setCliDetection(result);
+      })
+      .catch((error) => {
+        if (disposed) return;
+        setCliDetection({
+          provider: modelConfig.kind,
+          available: false,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [cliDetectionRevision, cliProviderFingerprint]);
 
   useEffect(() => {
     const fingerprint = JSON.stringify(modelConfig);
@@ -652,6 +694,46 @@ function AgentHostAssistantSidebar() {
         }}
       />
 
+      {contextProviderLabel && (
+        <div
+          className="flex h-7 shrink-0 items-center gap-1.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-[10px] text-[hsl(var(--wb-text-muted))]"
+          data-assistant-provider
+          title={contextProviderLabel}
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              cliDetection !== "checking" &&
+                (!cliDetection || cliDetection.available) &&
+                session.availability === "available"
+                ? "bg-emerald-400"
+                : cliDetection === "checking" ||
+                    session.availability === "checking"
+                  ? "bg-amber-400"
+                  : "bg-red-400",
+            )}
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate">
+            {cliDetection && cliDetection !== "checking"
+              ? `${contextProviderLabel} · ${cliDetection.message}`
+              : contextProviderLabel}
+          </span>
+          {cliDetection &&
+            cliDetection !== "checking" &&
+            !cliDetection.available && (
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-[hsl(var(--wb-text))]"
+                onClick={() => setCliDetectionRevision((value) => value + 1)}
+              >
+                Retry
+              </button>
+            )}
+          {session.isBusy && <span>Active</span>}
+        </div>
+      )}
+
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[hsl(var(--wb-editor))]">
         <div
           ref={scrollContainerRef}
@@ -867,6 +949,7 @@ function resolveModelUiState({
   hostCapabilities,
   hostInstalledTools,
   authenticationError,
+  cliDetection,
 }: {
   enabled: boolean;
   baseUrl: string;
@@ -877,6 +960,7 @@ function resolveModelUiState({
   hostCapabilities: string[] | null;
   hostInstalledTools: string[] | null;
   authenticationError: string | null;
+  cliDetection: AiCliDetectionResult | "checking" | null;
 }): {
   modelStatus: AssistantModelStatus;
   submissionBlockReason: string | null;
@@ -890,6 +974,22 @@ function resolveModelUiState({
         : "Choose a model identifier before sending a request.";
     return {
       modelStatus: { kind: "missing", label: "AI setup required", detail },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (cliDetection === "checking") {
+    const detail = "Detecting the configured CLI executable.";
+    return {
+      modelStatus: { kind: "checking", label: "Detecting CLI", detail },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (cliDetection && !cliDetection.available) {
+    const detail = cliDetection.message;
+    return {
+      modelStatus: { kind: "unavailable", label: "CLI unavailable", detail },
       submissionBlockReason: detail,
     };
   }
@@ -988,7 +1088,7 @@ function resolveModelUiState({
 }
 
 function isAuthenticationError(message: string) {
-  return /\b401\b|unauthori[sz]ed|authentication\s+failed|incorrect\s+(?:api[- ]?)?key|invalid\s+(?:api[- ]?)?key/iu.test(
+  return /\b401\b|unauthori[sz]ed|not\s+authenticated|not\s+logged\s+in|sign\s+in|authentication\s+failed|incorrect\s+(?:api[- ]?)?key|invalid\s+(?:api[- ]?)?key/iu.test(
     message,
   );
 }
@@ -1023,6 +1123,7 @@ function providerDestinationLabel(
   if (provider.kind === "codebuddy-cli") {
     return `${provider.model} · CodeBuddy Code CLI`;
   }
+
   try {
     const hostname = new URL(
       "baseUrl" in provider ? provider.baseUrl : "",

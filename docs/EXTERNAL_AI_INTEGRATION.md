@@ -2,7 +2,9 @@
 
 OxideStudio 提供独立的 Rust 可执行程序 `oxide-agent`。外部 AI 直接调用它即可，不需要接入应用内的 Deep Agents，也不要求 OxideStudio 界面保持打开。
 
-推荐优先使用 MCP；客户端不支持 MCP 时，再使用 CLI。当前两个入口共享同一套只读工具、项目/连接授权和结果限制。
+推荐优先使用 MCP；客户端不支持 MCP 时，再使用 CLI。当前两个公开入口共享同一套只读工具、项目/连接授权和结果限制。
+
+> 安全边界：本页介绍的公开 `oxide-agent mcp stdio` 与 `oxide-agent tools call` 始终只读，不能通过 `_meta.approved`、`approved: true`、命令参数或环境变量自行获得写权限。应用内 Codex CLI / CodeBuddy CLI Provider 使用的是隐藏的 `oxide-agent mcp bridge`，它必须持有 OxideStudio Desktop 为单个 Turn 生成的短期 endpoint/token，写入仍由 Desktop 发起批准、签发一次性 lease 并在 Rust 中二次校验。该私有模式不是外部集成接口。
 
 ## 1. 准备可执行文件
 

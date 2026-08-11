@@ -54,16 +54,23 @@ pub struct CliJsonlOutput {
 }
 
 pub fn validate_configured_program(value: Option<&str>, default_program: &str) -> Result<String> {
-    let value = value.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(default_program);
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_program);
     if value.contains('\0') || value.contains('\n') || value.contains('\r') {
-        return Err(anyhow!("CLI executable path contains unsupported characters"));
+        return Err(anyhow!(
+            "CLI executable path contains unsupported characters"
+        ));
     }
     if !is_path_like(value)
         && !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(anyhow!("CLI executable must be a path or command name without arguments"));
+        return Err(anyhow!(
+            "CLI executable must be a path or command name without arguments"
+        ));
     }
     Ok(value.to_string())
 }
@@ -80,7 +87,11 @@ pub async fn resolve_command(
     if is_path_like(&configured) {
         let path = expand_tilde(&configured);
         if !path.is_file() {
-            return Err(anyhow!("{} executable was not found at {}", provider.display_name(), path.display()));
+            return Err(anyhow!(
+                "{} executable was not found at {}",
+                provider.display_name(),
+                path.display()
+            ));
         }
         return command_for_path(provider, path);
     }
@@ -204,7 +215,10 @@ fn common_cli_directories() -> Vec<PathBuf> {
             directories.push(user.join(".local/bin"));
             let nvm = user.join("AppData/Roaming/nvm");
             if let Ok(entries) = std::fs::read_dir(nvm) {
-                let mut versions = entries.flatten().map(|entry| entry.path()).collect::<Vec<_>>();
+                let mut versions = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>();
                 versions.sort_by(|left, right| right.cmp(left));
                 directories.extend(versions);
             }
@@ -212,7 +226,10 @@ fn common_cli_directories() -> Vec<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        directories.extend([PathBuf::from("/usr/local/bin"), PathBuf::from("/opt/homebrew/bin")]);
+        directories.extend([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ]);
         if let Some(home) = env::var_os("HOME") {
             directories.push(PathBuf::from(home).join(".local/bin"));
         }
@@ -221,14 +238,19 @@ fn common_cli_directories() -> Vec<PathBuf> {
 }
 
 fn is_path_like(value: &str) -> bool {
-    Path::new(value).is_absolute() || value.contains('/') || value.contains('\\') || value.starts_with('~')
+    Path::new(value).is_absolute()
+        || value.contains('/')
+        || value.contains('\\')
+        || value.starts_with('~')
 }
 
 fn expand_tilde(value: &str) -> PathBuf {
     if value == "~" || value.starts_with("~/") || value.starts_with("~\\") {
         let home = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
         if let Some(home) = home {
-            let suffix = value.trim_start_matches('~').trim_start_matches(['/', '\\']);
+            let suffix = value
+                .trim_start_matches('~')
+                .trim_start_matches(['/', '\\']);
             return PathBuf::from(home).join(suffix);
         }
     }
@@ -275,18 +297,29 @@ pub async fn run_captured(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let mut child = command.spawn().with_context(|| format!("failed to start {}", spec.program))?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start {}", spec.program))?;
     if let Some(mut child_stdin) = child.stdin.take() {
         if let Some(stdin) = stdin {
             if stdin.len() > MAX_PROMPT_BYTES {
                 return Err(anyhow!("CLI input exceeds the 2 MiB limit"));
             }
-            child_stdin.write_all(stdin).await.context("failed to write CLI input")?;
+            child_stdin
+                .write_all(stdin)
+                .await
+                .context("failed to write CLI input")?;
         }
         child_stdin.shutdown().await.ok();
     }
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("CLI stdout is unavailable"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("CLI stderr is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("CLI stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("CLI stderr is unavailable"))?;
     let stdout_task = tokio::spawn(read_bounded(stdout));
     let stderr_task = tokio::spawn(read_bounded(stderr));
     let status = match tokio::time::timeout(timeout, child.wait()).await {
@@ -347,15 +380,29 @@ where
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     apply_environment(&mut command, environment);
-    let mut child = command.spawn().with_context(|| format!("failed to start {}", spec.program))?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start {}", spec.program))?;
     if let Some(mut child_stdin) = child.stdin.take() {
-        child_stdin.write_all(stdin).await.context("failed to write CLI input")?;
+        child_stdin
+            .write_all(stdin)
+            .await
+            .context("failed to write CLI input")?;
         child_stdin.shutdown().await.ok();
     }
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("CLI stdout is unavailable"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("CLI stderr is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("CLI stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("CLI stderr is unavailable"))?;
     let stderr_task = tokio::spawn(read_bounded(stderr));
-    let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_JSONL_LINE_BYTES));
+    let mut lines = FramedRead::new(
+        stdout,
+        LinesCodec::new_with_max_length(MAX_JSONL_LINE_BYTES),
+    );
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let mut parsed_events = 0usize;
@@ -383,7 +430,10 @@ where
             }
         }
     }
-    let status = child.wait().await.context("failed to wait for CLI process")?;
+    let status = child
+        .wait()
+        .await
+        .context("failed to wait for CLI process")?;
     let stderr = stderr_task.await.context("CLI stderr task failed")??;
     Ok(CliJsonlOutput {
         success: status.success(),
@@ -394,16 +444,13 @@ where
 }
 
 pub fn bounded_diagnostic(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .take(2_000)
-        .collect::<String>()
+    value.trim().chars().take(2_000).collect::<String>()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     #[test]
     fn rejects_command_lines_disguised_as_executable_names() {
@@ -415,5 +462,121 @@ mod tests {
     #[test]
     fn diagnostics_are_bounded() {
         assert_eq!(bounded_diagnostic(&"x".repeat(3_000)).len(), 2_000);
+    }
+
+    #[tokio::test]
+    async fn fake_cli_streams_jsonl_and_collects_stderr() {
+        let fixture = fake_cli_fixture(false);
+        let values = Arc::new(StdMutex::new(Vec::new()));
+        let captured = Arc::clone(&values);
+        let (_cancellation, receiver) = watch::channel(false);
+        let output = run_jsonl_process(
+            &fixture.spec,
+            &[],
+            &BTreeMap::new(),
+            fixture.directory.path(),
+            b"test prompt",
+            Duration::from_secs(5),
+            receiver,
+            move |value| captured.lock().unwrap().push(value),
+        )
+        .await
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.parsed_events, 2);
+        assert!(output.stderr.contains("fixture diagnostic"));
+        assert_eq!(values.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fake_cli_timeout_terminates_the_process() {
+        let fixture = fake_cli_fixture(true);
+        let (_cancellation, receiver) = watch::channel(false);
+        let error = run_jsonl_process(
+            &fixture.spec,
+            &[],
+            &BTreeMap::new(),
+            fixture.directory.path(),
+            b"test prompt",
+            Duration::from_millis(50),
+            receiver,
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn fake_cli_cancellation_terminates_the_process() {
+        let fixture = fake_cli_fixture(true);
+        let (cancellation, receiver) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = cancellation.send(true);
+        });
+        let error = run_jsonl_process(
+            &fixture.spec,
+            &[],
+            &BTreeMap::new(),
+            fixture.directory.path(),
+            b"test prompt",
+            Duration::from_secs(5),
+            receiver,
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    struct FakeCliFixture {
+        directory: TempDir,
+        spec: CliCommandSpec,
+    }
+
+    fn fake_cli_fixture(wait: bool) -> FakeCliFixture {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let (script, body) = {
+            let script = directory.path().join("fake-cli.cmd");
+            let wait_command = if wait {
+                "@ping -n 6 127.0.0.1 >nul\r\n"
+            } else {
+                ""
+            };
+            let body = format!(
+                "@echo {{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}\r\n@echo {{\"type\":\"result\",\"subtype\":\"success\"}}\r\n@echo fixture diagnostic 1>&2\r\n{wait_command}"
+            );
+            (script, body)
+        };
+        #[cfg(unix)]
+        let (script, body) = {
+            let script = directory.path().join("fake-cli.sh");
+            let wait_command = if wait { "sleep 5\n" } else { "" };
+            let body = format!(
+                "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\nprintf '%s\\n' 'fixture diagnostic' >&2\n{wait_command}"
+            );
+            (script, body)
+        };
+        std::fs::write(&script, body).unwrap();
+        #[cfg(windows)]
+        let spec = CliCommandSpec {
+            program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
+            prefix_args: vec![
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                script.to_string_lossy().into_owned(),
+            ],
+            resolved_path: Some(script.to_string_lossy().into_owned()),
+        };
+        #[cfg(unix)]
+        let spec = CliCommandSpec {
+            program: "/bin/sh".to_string(),
+            prefix_args: vec![script.to_string_lossy().into_owned()],
+            resolved_path: Some(script.to_string_lossy().into_owned()),
+        };
+        FakeCliFixture { directory, spec }
     }
 }

@@ -136,7 +136,7 @@ describe("TableDataTransferDialog", () => {
     expect(mocks.getSchemas).not.toHaveBeenCalled();
     expect(mocks.getTables).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("Database");
-    expect(document.body.textContent).toContain("Transfer mode");
+    expect(document.body.textContent).toContain("Copy mode");
   });
 
   it("only advertises drivers with the backend's verified transfer dialect", () => {

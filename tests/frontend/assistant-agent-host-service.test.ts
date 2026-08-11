@@ -343,6 +343,51 @@ describe("Agent Host Tauri service", () => {
     expect(unlisten).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts bounded CLI provider activity without raw reasoning", async () => {
+    let callback: ((event: { payload: unknown }) => void) | undefined;
+    mocks.listen.mockImplementation(async (_channel, next) => {
+      callback = next;
+      return vi.fn();
+    });
+    const listener = vi.fn();
+    await agentHostService.listen(listener);
+
+    callback?.({
+      payload: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        sequence: 1,
+        occurredAt: 99,
+        type: "provider.activity",
+        provider: "codex-cli",
+        status: "running",
+        label: "Codex completed a reasoning step",
+      },
+    });
+    callback?.({
+      payload: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        sequence: 2,
+        occurredAt: 100,
+        type: "provider.activity",
+        provider: "unknown-cli",
+        status: "running",
+        label: "unsafe",
+        reasoning: "raw chain of thought",
+      },
+    });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "provider.activity",
+        provider: "codex-cli",
+        label: "Codex completed a reasoning step",
+      }),
+    );
+  });
+
   it("clears encrypted state only for the requested project", async () => {
     mocks.invokeRawCommand
       .mockResolvedValueOnce({

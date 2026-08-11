@@ -5,7 +5,8 @@ use crate::{
         AgentArtifactReadResult, AgentArtifactSearchRequest, AgentArtifactSearchResult,
         AgentCancelTurnRequest, AgentContextMetrics, AgentConversationSnapshot,
         AgentConversationSnapshotSaveRequest, AgentHostManager, AgentHostStatus,
-        AgentProjectStateCleared, AgentTextAttachment, AgentTurnAccepted, AgentTurnRequest,
+        AgentProjectStateCleared, AgentProviderKind, AgentTextAttachment, AgentTurnAccepted,
+        AgentTurnRequest,
     },
     core::protocol::CommandError,
 };
@@ -189,8 +190,11 @@ pub async fn agent_approve_action(
 pub async fn agent_get_status(
     manager: State<'_, AgentHostManager>,
     provider_configured: Option<bool>,
+    provider_kind: Option<AgentProviderKind>,
 ) -> Result<AgentHostStatus, CommandError> {
-    Ok(manager.status(provider_configured.unwrap_or(false)).await)
+    Ok(manager
+        .status(provider_configured.unwrap_or(false), provider_kind)
+        .await)
 }
 
 #[tauri::command]

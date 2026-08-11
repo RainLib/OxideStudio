@@ -7,6 +7,35 @@ import { reduceAgentHostEvent } from "@/hooks/useAssistantAgentSession";
 import type { AgentHostEvent } from "@/services/tauri/agent-host.service";
 
 describe("assistant turn projection", () => {
+  it("projects CLI activity as bounded process commentary", () => {
+    const turn = reduceAgentHostEvent(
+      createAssistantTurn({
+        id: "turn-1",
+        requestId: "request-1",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Inspect users",
+        now: 10,
+      }),
+      event("provider.activity", 1, {
+        provider: "codebuddy-cli",
+        status: "running",
+        label: "CodeBuddy completed a reasoning step",
+      }),
+    );
+
+    expect(turn.process).toContainEqual(
+      expect.objectContaining({
+        id: "provider:codebuddy-cli",
+        kind: "commentary",
+        title: "CodeBuddy completed a reasoning step",
+        status: "running",
+      }),
+    );
+    expect(JSON.stringify(turn)).not.toContain("chain of thought");
+  });
+
   it("keeps process and tool activity out of conversation history", () => {
     const base = createAssistantTurn({
       id: "turn-1",

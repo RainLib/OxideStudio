@@ -266,7 +266,7 @@ Schema Diagram 复用同一完整 snapshot，不从可变 Explorer tree 重建�
 
 ### 5.6 AI 工具链
 
-生产 Chat、Plan、Agent 统一由签名 Node 22 `deepagents@1.10.8` sidecar 编排。React 通过 `agent_start_turn`、`agent_resume_turn`、`agent_cancel_turn`、`agent_answer_clarification`、`agent_approve_action`、`agent_get_status` 和 `agent://event` 与 Rust 通信；旧 `AssistantRuntime` 只在显式 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 的开发场景启用。完整边界见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md)。
+生产 Chat、Plan、Agent 统一进入 Rust `AgentHostManager`。OpenAI Compatible Provider 由签名 Node 22 `deepagents@1.10.8` sidecar 编排；Codex CLI / CodeBuddy CLI 由 Rust 在独立临时工作目录中启动，通过有界 JSONL 和当前 Turn 的私有 MCP bridge 运行。React 继续只通过 `agent_start_turn`、`agent_resume_turn`、`agent_cancel_turn`、`agent_answer_clarification`、`agent_approve_action`、`agent_get_status` 和统一的 `agent://event` 与 Rust 通信；旧 `AssistantRuntime` 只在显式 `VITE_ASSISTANT_LEGACY_RUNTIME=1` 的开发场景启用。完整边界见 [ADR-0012](decisions/0012-deep-agents-desktop-runtime-boundary.md) 与 [ADR-0022](decisions/0022-cli-agent-provider-bridge.md)。
 
 Rust `AgentHostManager` 在 setup 时不启动进程，首次已配置 AI 请求才懒启动 sidecar。双方先通过 protocol/version/capability handshake，再使用 4 MiB 上限的 `Content-Length` JSON-RPC。request/thread/turn/context/deadline 贯穿 model、tool、checkpoint 和 artifact 回调；sidecar 缺失或崩溃只让 Assistant unavailable，不影响工作台首屏。
 

@@ -9,9 +9,9 @@ use crate::{
             AgentArtifactSearchRequest, AgentArtifactSearchResult, AgentCancelTurnRequest,
             AgentContextCompactionMetrics, AgentContextMetrics, AgentConversationSnapshot,
             AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentModelUsageMetrics,
-            AgentProfile, AgentProjectStateCleared, AgentProviderConfig, AgentToolManifestEntry,
-            AgentTurnAccepted, AgentTurnRequest, ApprovalDecision, ArtifactReadRequest,
-            ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
+            AgentProfile, AgentProjectStateCleared, AgentProviderConfig, AgentProviderKind,
+            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnRequest, ApprovalDecision,
+            ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
             GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
             GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
             GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
@@ -31,6 +31,12 @@ use crate::{
             MAX_SHELL_TIMEOUT_MS,
         },
         store::{AgentStore, StoredGraphCheckpoint, StoredGraphWrite},
+    },
+    ai_cli::{
+        agent::{
+            classify_cli_error, prepare_cli_run, CliAgentError, CliAgentEvent, CliAgentEventParser,
+        },
+        CliProviderKind,
     },
     core::{
         config::{ConfigManager, ConnectionEnvironment, SavedConnection as ConfigSavedConnection},
@@ -240,10 +246,12 @@ struct AgentHostInner {
     lifecycle: RwLock<Lifecycle>,
     process: RwLock<Option<Arc<HostProcess>>>,
     start_lock: Mutex<()>,
+    turn_transition_lock: Mutex<()>,
     pending: Mutex<HashMap<String, PendingResponse>>,
     inbound_cancellations: Mutex<HashMap<String, InboundCancellation>>,
     providers: RwLock<HashMap<TurnKey, AgentProviderConfig>>,
     turns: RwLock<HashMap<TurnKey, ActiveTurn>>,
+    cli_turns: Mutex<HashMap<TurnKey, CliTurnHandle>>,
     event_sequences: RwLock<HashMap<TurnKey, u64>>,
     clarifications: RwLock<HashMap<String, PendingClarification>>,
     approvals: RwLock<HashMap<String, PendingApproval>>,
@@ -254,6 +262,7 @@ struct AgentHostInner {
     connected_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
     mutation_connections: ConnectionManager,
     connected_mutation_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
+    mutation_turn_states: RwLock<HashMap<TurnKey, MutationTurnState>>,
     connection_lock: Mutex<()>,
     mutation_connection_lock: Mutex<()>,
     context_metrics_lock: Mutex<()>,
@@ -268,6 +277,12 @@ struct HostProcess {
     // Retaining Child makes kill_on_drop effective when a failed generation is replaced.
     _child: Mutex<Child>,
     binary_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct CliTurnHandle {
+    generation: u64,
+    cancellation: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -412,6 +427,13 @@ struct ApprovedQueryReview {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutationTurnState {
+    Started,
+    Completed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextMetricsUpdate {
     Compaction {
         input_tokens: u64,
@@ -474,10 +496,12 @@ impl AgentHostManager {
                 }),
                 process: RwLock::new(None),
                 start_lock: Mutex::new(()),
+                turn_transition_lock: Mutex::new(()),
                 pending: Mutex::new(HashMap::new()),
                 inbound_cancellations: Mutex::new(HashMap::new()),
                 providers: RwLock::new(HashMap::new()),
                 turns: RwLock::new(HashMap::new()),
+                cli_turns: Mutex::new(HashMap::new()),
                 event_sequences: RwLock::new(HashMap::new()),
                 clarifications: RwLock::new(HashMap::new()),
                 approvals: RwLock::new(HashMap::new()),
@@ -488,6 +512,7 @@ impl AgentHostManager {
                 connected_targets: RwLock::new(HashMap::new()),
                 mutation_connections: ConnectionManager::new(),
                 connected_mutation_targets: RwLock::new(HashMap::new()),
+                mutation_turn_states: RwLock::new(HashMap::new()),
                 connection_lock: Mutex::new(()),
                 mutation_connection_lock: Mutex::new(()),
                 context_metrics_lock: Mutex::new(()),
@@ -598,7 +623,11 @@ impl AgentHostManager {
         self.inner.export_artifact(request).await
     }
 
-    pub async fn status(&self, provider_configured: bool) -> AgentHostStatus {
+    pub async fn status(
+        &self,
+        provider_configured: bool,
+        provider_kind: Option<AgentProviderKind>,
+    ) -> AgentHostStatus {
         if !provider_configured {
             return AgentHostStatus {
                 state: "skipped".to_string(),
@@ -609,6 +638,33 @@ impl AgentHostManager {
                 binary_path: None,
                 storage_mode: "not-initialized".to_string(),
                 last_error: None,
+            };
+        }
+        if matches!(
+            provider_kind,
+            Some(AgentProviderKind::CodexCli | AgentProviderKind::CodebuddyCli)
+        ) {
+            let binary = find_oxide_agent_cli_binary(&self.inner.app);
+            let available = binary.is_some();
+            return AgentHostStatus {
+                state: if available { "ready" } else { "unavailable" }.to_string(),
+                available,
+                protocol_version: AGENT_HOST_PROTOCOL_VERSION,
+                capabilities: vec![
+                    "chat".to_string(),
+                    "plan".to_string(),
+                    "agent".to_string(),
+                    "cli-provider".to_string(),
+                    "tool-proxy".to_string(),
+                    "approval".to_string(),
+                    "interrupt-safe".to_string(),
+                ],
+                installed_tools: installed_host_tool_names(),
+                binary_path: binary.map(|path| path.to_string_lossy().into_owned()),
+                storage_mode: "encrypted-desktop".to_string(),
+                last_error: (!available).then(|| {
+                    "The bundled oxide-agent private bridge executable is unavailable".to_string()
+                }),
             };
         }
         self.inner.prewarm().await;
@@ -629,6 +685,15 @@ impl AgentHostInner {
         let key = TurnKey::from_metadata(&request.metadata);
         let active = ActiveTurn::from_request(&request);
         let mut provider = request.provider.clone();
+        let cli_provider = matches!(
+            provider.kind,
+            AgentProviderKind::CodexCli | AgentProviderKind::CodebuddyCli
+        );
+        if cli_provider && resume {
+            return Err(anyhow!(
+                "CLI turns interrupted by an application restart are never replayed automatically; start a new turn to retry safely"
+            ));
+        }
         if provider.kind == crate::agent::protocol::AgentProviderKind::OpenaiCompatible
             && provider
                 .api_key
@@ -647,6 +712,7 @@ impl AgentHostInner {
             }
         }
 
+        let turn_transition = self.turn_transition_lock.lock().await;
         self.clear_turn(&key).await;
 
         self.store
@@ -657,14 +723,35 @@ impl AgentHostInner {
             )
             .await
             .context("failed to persist encrypted agent thread")?;
-        self.providers.write().await.insert(key.clone(), provider);
+        self.providers
+            .write()
+            .await
+            .insert(key.clone(), provider.clone());
         self.turns.write().await.insert(key.clone(), active);
+
+        if cli_provider {
+            if let Err(error) = self
+                .launch_cli_turn(key.clone(), request.clone(), provider)
+                .await
+            {
+                self.clear_turn(&key).await;
+                return Err(error);
+            }
+            drop(turn_transition);
+            return Ok(AgentTurnAccepted {
+                request_id: request.metadata.request_id,
+                thread_id: request.metadata.thread_id,
+                turn_id: request.metadata.turn_id,
+                accepted: true,
+            });
+        }
 
         let method = if resume {
             HOST_RESUME_TURN_METHOD
         } else {
             HOST_START_TURN_METHOD
         };
+        drop(turn_transition);
         let result = self
             .invoke_with_restart(method, request.sidecar_params(), request.metadata.deadline)
             .await;
@@ -681,6 +768,406 @@ impl AgentHostInner {
         })
     }
 
+    async fn launch_cli_turn(
+        self: &Arc<Self>,
+        key: TurnKey,
+        request: AgentTurnRequest,
+        provider: AgentProviderConfig,
+    ) -> Result<()> {
+        let manager = AgentHostManager {
+            inner: Arc::clone(self),
+        };
+        let bridge = manager
+            .start_private_bridge(request.metadata.clone())
+            .await
+            .context("failed to start the private CLI tool bridge")?;
+        let prepared = prepare_cli_run(&self.app, &request, &provider, bridge)
+            .await
+            .context("failed to prepare the CLI provider")?;
+        let provider_kind = prepared.provider;
+        let (cancellation, cancellation_receiver) = watch::channel(false);
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        self.cli_turns
+            .lock()
+            .await
+            .insert(
+                key.clone(),
+                CliTurnHandle {
+                    generation,
+                    cancellation,
+                },
+            );
+        let inner = Arc::clone(self);
+        tokio::spawn(async move {
+            inner
+                .run_cli_turn(
+                    key,
+                    request.metadata,
+                    request.project_id,
+                    provider_kind,
+                    generation,
+                    prepared,
+                    cancellation_receiver,
+                )
+                .await;
+        });
+        Ok(())
+    }
+
+    async fn run_cli_turn(
+        self: Arc<Self>,
+        key: TurnKey,
+        metadata: RequestMetadata,
+        project_id: String,
+        provider: CliProviderKind,
+        generation: u64,
+        prepared: crate::ai_cli::agent::PreparedCliRun,
+        cancellation: watch::Receiver<bool>,
+    ) {
+        self.emit_cli_event(
+            &key,
+            &metadata,
+            "turn.status",
+            json!({"status":"starting","label":format!("Starting {}", provider.display_name())}),
+        )
+        .await;
+        self.emit_cli_event(
+            &key,
+            &metadata,
+            "provider.activity",
+            json!({
+                "provider":provider.as_str(),
+                "status":"starting",
+                "label":format!("Launching {} in an isolated workspace", provider.display_name()),
+            }),
+        )
+        .await;
+
+        let (events_sender, mut events_receiver) = mpsc::unbounded_channel();
+        let runner = tokio::spawn(prepared.run(cancellation.clone(), events_sender));
+        let mut parser = CliAgentEventParser::new(provider);
+        let mut terminal_error: Option<CliAgentError> = None;
+        while let Some(raw_event) = events_receiver.recv().await {
+            if !self.cli_generation_is_current(&key, generation).await {
+                continue;
+            }
+            for event in parser.parse(&raw_event) {
+                match event {
+                    CliAgentEvent::TextDelta(content) => {
+                        self.emit_cli_event(
+                            &key,
+                            &metadata,
+                            "answer.delta",
+                            json!({"content":content,"reset":false}),
+                        )
+                        .await;
+                    }
+                    CliAgentEvent::Activity { status, label } => {
+                        self.emit_cli_event(
+                            &key,
+                            &metadata,
+                            "provider.activity",
+                            json!({
+                                "provider":provider.as_str(),
+                                "status":status,
+                                "label":label,
+                            }),
+                        )
+                        .await;
+                    }
+                    CliAgentEvent::ToolStarted { call_id, tool_name } => {
+                        self.emit_cli_event(
+                            &key,
+                            &metadata,
+                            "tool.started",
+                            json!({
+                                "callId":call_id,
+                                "toolName":tool_name,
+                                "label":format!("Running {tool_name}"),
+                            }),
+                        )
+                        .await;
+                    }
+                    CliAgentEvent::ToolFinished {
+                        call_id,
+                        tool_name,
+                        success,
+                        detail,
+                    } => {
+                        self.emit_cli_event(
+                            &key,
+                            &metadata,
+                            "tool.finished",
+                            json!({
+                                "callId":call_id,
+                                "toolName":tool_name,
+                                "label":format!("Finished {tool_name}"),
+                                "success":success,
+                                "detail":detail,
+                            }),
+                        )
+                        .await;
+                    }
+                    CliAgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        let total_tokens = input_tokens.saturating_add(output_tokens);
+                        let occurred_at = now_millis();
+                        let project_metrics = self
+                            .record_context_metrics(
+                                &project_id,
+                                ContextMetricsUpdate::ModelUsage {
+                                    calls: 1,
+                                    input_tokens,
+                                    output_tokens,
+                                    total_tokens,
+                                },
+                                occurred_at,
+                            )
+                            .await
+                            .ok();
+                        self.emit_cli_event_at(
+                            &key,
+                            &metadata,
+                            "model.usage",
+                            json!({
+                                "calls":1,
+                                "inputTokens":input_tokens,
+                                "outputTokens":output_tokens,
+                                "totalTokens":total_tokens,
+                                "projectMetrics":project_metrics,
+                            }),
+                            occurred_at,
+                        )
+                        .await;
+                    }
+                    CliAgentEvent::Error(error) => terminal_error = Some(error),
+                    CliAgentEvent::End => {}
+                }
+            }
+        }
+
+        let result = match runner.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow!("CLI runtime task failed: {error}")),
+        };
+        let cancelled = *cancellation.borrow();
+        let turn_transition = self.turn_transition_lock.lock().await;
+        if !self.cli_generation_is_current(&key, generation).await {
+            return;
+        }
+        let pending_mutation = parser.has_pending_mutation();
+        let host_mutation_state = self
+            .mutation_turn_states
+            .read()
+            .await
+            .get(&key)
+            .copied();
+        let mutation_result_unknown = parser.mutation_result_unknown()
+            || host_mutation_state == Some(MutationTurnState::Unknown)
+            || (pending_mutation && host_mutation_state == Some(MutationTurnState::Started));
+        let terminal_error = terminal_error.or_else(|| match result {
+            Ok(ref output) if !output.success => Some(classify_cli_error(provider, &output.stderr)),
+            Ok(ref output) if output.parsed_events == 0 => Some(CliAgentError {
+                code: "cli_protocol_error",
+                message: "CLI exited without any JSONL events".to_string(),
+                retryable: true,
+            }),
+            Ok(_) if !parser.saw_terminal() => Some(CliAgentError {
+                code: "cli_protocol_error",
+                message: "CLI JSONL stream ended without a terminal event".to_string(),
+                retryable: true,
+            }),
+            Err(ref error) if !cancelled => Some(classify_cli_error(provider, &error.to_string())),
+            _ => None,
+        });
+
+        if mutation_result_unknown {
+            self.emit_cli_failure(
+                &key,
+                &metadata,
+                provider,
+                CliAgentError {
+                    code: "mutation_result_unknown",
+                    message: "The database operation did not return a trusted completion receipt. Verify the target manually; this turn cannot be retried automatically.".to_string(),
+                    retryable: false,
+                },
+            )
+            .await;
+            self.emit_cli_event(
+                &key,
+                &metadata,
+                "turn.status",
+                json!({"status":"failed","label":"Database result requires manual verification"}),
+            )
+            .await;
+        } else if cancelled {
+            if pending_mutation {
+                self.emit_cli_failure(
+                    &key,
+                    &metadata,
+                    provider,
+                    CliAgentError {
+                        code: "mutation_result_unknown",
+                        message: "The CLI was interrupted while a database change was active. Verify the target manually; this turn cannot be retried automatically.".to_string(),
+                        retryable: false,
+                    },
+                )
+                .await;
+                self.emit_cli_event(
+                    &key,
+                    &metadata,
+                    "turn.status",
+                    json!({"status":"failed","label":"Database result requires manual verification"}),
+                )
+                .await;
+            } else {
+                self.emit_cli_event(
+                    &key,
+                    &metadata,
+                    "turn.status",
+                    json!({"status":"cancelled","label":format!("{} cancelled", provider.display_name())}),
+                )
+                .await;
+            }
+        } else if let Some(error) = terminal_error {
+            let error = if pending_mutation {
+                CliAgentError {
+                    code: "mutation_result_unknown",
+                    message: "The CLI ended while a database change was active. Verify the target manually; this turn cannot be retried automatically.".to_string(),
+                    retryable: false,
+                }
+            } else {
+                error
+            };
+            self.emit_cli_failure(&key, &metadata, provider, error)
+                .await;
+            self.emit_cli_event(
+                &key,
+                &metadata,
+                "turn.status",
+                json!({"status":"failed","label":format!("{} stopped", provider.display_name())}),
+            )
+            .await;
+        } else {
+            let final_text = parser.final_text().to_string();
+            self.emit_cli_event(
+                &key,
+                &metadata,
+                "final.answer",
+                json!({"content":final_text,"artifacts":[]}),
+            )
+            .await;
+            self.emit_cli_event(
+                &key,
+                &metadata,
+                "provider.activity",
+                json!({
+                    "provider":provider.as_str(),
+                    "status":"completed",
+                    "label":format!("{} completed", provider.display_name()),
+                }),
+            )
+            .await;
+            self.emit_cli_event(
+                &key,
+                &metadata,
+                "turn.status",
+                json!({"status":"completed","label":"Completed"}),
+            )
+            .await;
+        }
+        self.cli_turns.lock().await.remove(&key);
+        self.clear_turn(&key).await;
+        drop(turn_transition);
+    }
+
+    async fn cli_generation_is_current(&self, key: &TurnKey, generation: u64) -> bool {
+        self.cli_turns
+            .lock()
+            .await
+            .get(key)
+            .is_some_and(|handle| handle.generation == generation)
+    }
+
+    async fn emit_cli_failure(
+        &self,
+        key: &TurnKey,
+        metadata: &RequestMetadata,
+        provider: CliProviderKind,
+        error: CliAgentError,
+    ) {
+        self.emit_cli_event(
+            key,
+            metadata,
+            "provider.activity",
+            json!({
+                "provider":provider.as_str(),
+                "status":"error",
+                "label":format!("{} needs attention", provider.display_name()),
+                "detail":error.message.clone(),
+            }),
+        )
+        .await;
+        self.emit_cli_event(
+            key,
+            metadata,
+            "failure",
+            json!({
+                "code":error.code,
+                "message":error.message,
+                "retryable":error.retryable,
+            }),
+        )
+        .await;
+    }
+
+    async fn emit_cli_event(
+        &self,
+        key: &TurnKey,
+        metadata: &RequestMetadata,
+        event_type: &str,
+        payload: Value,
+    ) {
+        self.emit_cli_event_at(key, metadata, event_type, payload, now_millis())
+            .await;
+    }
+
+    async fn emit_cli_event_at(
+        &self,
+        key: &TurnKey,
+        metadata: &RequestMetadata,
+        event_type: &str,
+        payload: Value,
+        occurred_at: i64,
+    ) {
+        let sequence = {
+            let mut sequences = self.event_sequences.write().await;
+            let sequence = sequences.entry(key.clone()).or_insert(0);
+            *sequence = sequence.saturating_add(1);
+            *sequence
+        };
+        let mut event = payload.as_object().cloned().unwrap_or_default();
+        event.insert("type".to_string(), Value::String(event_type.to_string()));
+        event.insert(
+            "threadId".to_string(),
+            Value::String(metadata.thread_id.clone()),
+        );
+        event.insert(
+            "turnId".to_string(),
+            Value::String(metadata.turn_id.clone()),
+        );
+        event.insert("sequence".to_string(), json!(sequence));
+        event.insert("occurredAt".to_string(), json!(occurred_at));
+        if let Err(error) = self
+            .app
+            .emit(AGENT_HOST_EVENT_CHANNEL, Value::Object(event))
+        {
+            tracing::warn!("failed to emit CLI agent event: {error}");
+        }
+    }
+
     async fn cancel_turn(
         self: &Arc<Self>,
         request: AgentCancelTurnRequest,
@@ -688,6 +1175,10 @@ impl AgentHostInner {
         request.metadata.validate().map_err(anyhow::Error::msg)?;
         let key = TurnKey::from_metadata(&request.metadata);
         self.validate_active(&request.metadata).await?;
+        if let Some(handle) = self.cli_turns.lock().await.get(&key).cloned() {
+            let _ = handle.cancellation.send(true);
+            return Ok(AgentActionAccepted { accepted: true });
+        }
         let result = self
             .invoke_with_restart(
                 HOST_CANCEL_TURN_METHOD,
@@ -719,6 +1210,11 @@ impl AgentHostInner {
             return Err(anyhow!("clarification answers exceed the allowed bounds"));
         }
         let key = TurnKey::from_metadata(&request.metadata);
+        if self.cli_turns.lock().await.contains_key(&key) {
+            return Err(anyhow!(
+                "CLI turns do not support in-place clarification resume; cancel this turn and start a new request with the answer"
+            ));
+        }
         let pending_matches = self
             .clarifications
             .read()
@@ -3270,6 +3766,9 @@ impl AgentHostInner {
         );
         let timeout = tool_deadline_duration(turn, &request.tool_name, request.metadata.deadline)?;
         let started_at = Instant::now();
+        let turn_key = TurnKey::from_metadata(&request.metadata);
+        self.set_mutation_turn_state(&turn_key, MutationTurnState::Started)
+            .await;
         let execute = async {
             if let Some(database) = target
                 .database
@@ -3298,15 +3797,20 @@ impl AgentHostInner {
             }
         };
         let result = match tokio::time::timeout(timeout, execute).await {
-            Ok(result) => result.map_err(|error| SidecarRequestError {
-                code: -32_069,
-                message: bounded_text(&error.to_string(), 2_000),
-                data: Some(json!({
-                    "kind":"mutation_execution_failed",
-                    "recoverable":false,
-                    "manualVerificationRequired":true,
-                })),
-            })?,
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                self.set_mutation_turn_state(&turn_key, MutationTurnState::Unknown)
+                    .await;
+                return Err(SidecarRequestError {
+                    code: -32_069,
+                    message: bounded_text(&error.to_string(), 2_000),
+                    data: Some(json!({
+                        "kind":"mutation_execution_failed",
+                        "recoverable":false,
+                        "manualVerificationRequired":true,
+                    })),
+                });
+            }
             Err(_) => {
                 let _ = self
                     .mutation_connections
@@ -3325,6 +3829,8 @@ impl AgentHostInner {
                     result_unknown = true,
                     "approved Agent database operation timed out"
                 );
+                self.set_mutation_turn_state(&turn_key, MutationTurnState::Unknown)
+                    .await;
                 return Err(SidecarRequestError {
                     code: -32_067,
                     message: "The approved database operation timed out after it was sent; verify the target manually before retrying".to_string(),
@@ -3336,6 +3842,8 @@ impl AgentHostInner {
                 });
             }
         };
+        self.set_mutation_turn_state(&turn_key, MutationTurnState::Completed)
+            .await;
         tracing::info!(
             target: "oxide_agent_mutation_audit",
             project_id = %turn.project_id,
@@ -3364,6 +3872,16 @@ impl AgentHostInner {
             }
         }))
         .map_err(SidecarRequestError::from_json)
+    }
+
+    async fn set_mutation_turn_state(&self, key: &TurnKey, state: MutationTurnState) {
+        let turns = self.turns.read().await;
+        if turns.contains_key(key) {
+            self.mutation_turn_states
+                .write()
+                .await
+                .insert(key.clone(), state);
+        }
     }
 
     fn ensure_agent_mutation_target(
@@ -4197,6 +4715,9 @@ impl AgentHostInner {
     }
 
     async fn clear_turn(&self, key: &TurnKey) {
+        if let Some(handle) = self.cli_turns.lock().await.remove(key) {
+            let _ = handle.cancellation.send(true);
+        }
         self.providers.write().await.remove(key);
         self.turns.write().await.remove(key);
         self.event_sequences.write().await.remove(key);
@@ -4228,6 +4749,7 @@ impl AgentHostInner {
             .write()
             .await
             .retain(|_, preflight| preflight.key != *key);
+        self.mutation_turn_states.write().await.remove(key);
     }
 
     async fn reset_failed_generation(&self, generation: Option<u64>, message: &str) {
@@ -4539,6 +5061,39 @@ fn find_agent_binary(app: &AppHandle) -> Option<PathBuf> {
     let target = env!("TAURI_ENV_TARGET_TRIPLE");
     let target_extension = if cfg!(windows) { ".exe" } else { "" };
     candidates.push(development_dir.join(format!("oxide-agent-host-{target}{target_extension}")));
+    candidates.into_iter().find(|path| is_regular_file(path))
+}
+
+fn find_oxide_agent_cli_binary(app: &AppHandle) -> Option<PathBuf> {
+    let executable = if cfg!(windows) {
+        "oxide-agent.exe"
+    } else {
+        "oxide-agent"
+    };
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("OXIDE_AGENT_BINARY") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            candidates.push(parent.join(executable));
+            candidates.push(parent.join("resources").join(executable));
+        }
+    }
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join(executable));
+        candidates.push(resources.join("binaries").join(executable));
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest.join("target").join("debug").join(executable));
+    candidates.push(manifest.join("target").join("release").join(executable));
+    let target = env!("TAURI_ENV_TARGET_TRIPLE");
+    let extension = if cfg!(windows) { ".exe" } else { "" };
+    candidates.push(
+        manifest
+            .join("binaries")
+            .join(format!("oxide-agent-{target}{extension}")),
+    );
     candidates.into_iter().find(|path| is_regular_file(path))
 }
 

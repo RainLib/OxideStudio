@@ -36,8 +36,8 @@ describe("query editor table hover", () => {
       indexes: [{ name: "ix_orders_created", columns: ["created_at"], is_unique: false, is_primary: false }],
     });
 
-    expect(markdown).toContain("`public.orders`");
+    expect(markdown).toContain("`public`.`orders`");
     expect(markdown).toContain("PK · UNIQUE · NOT NULL · AUTO");
-    expect(markdown).toContain("`ix_orders_created` (created_at)");
+    expect(markdown).toContain("`ix_orders_created` (`created_at`)");
   });
 });

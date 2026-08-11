@@ -4,6 +4,7 @@ import type { AiToolPermission, JsonSchema } from "@/ai/tools/types";
 import type {
   AiCliProviderConfig,
   AiHttpProviderConfig,
+  AiProviderKind,
 } from "./ai.service";
 import { invokeRawCommand } from "./client";
 
@@ -321,6 +322,12 @@ export type AgentHostEvent =
       outputTokens: number;
       totalTokens: number;
     })
+  | (AgentEventBase<"provider.activity"> & {
+      provider: "codex-cli" | "codebuddy-cli";
+      status: "starting" | "running" | "completed" | "error";
+      label: string;
+      detail?: string;
+    })
   | (AgentEventBase<"answer.delta"> & {
       content: string;
       reset: boolean;
@@ -339,10 +346,14 @@ export type AgentHostEvent =
 export type AgentHostEventListener = (event: AgentHostEvent) => void;
 
 export const agentHostService = {
-  getStatus: async (providerConfigured = false): Promise<AgentHostStatus> => {
+  getStatus: async (
+    providerConfigured = false,
+    providerKind?: AiProviderKind,
+  ): Promise<AgentHostStatus> => {
     return normalizeAgentHostStatus(
       await invokeRawCommand<AgentHostStatus>("agent_get_status", {
         providerConfigured,
+        ...(providerKind ? { providerKind } : {}),
       }),
     );
   },
@@ -697,6 +708,17 @@ function isAgentHostEvent(value: unknown): value is AgentHostEvent {
         typeof event.inputTokens === "number" &&
         typeof event.outputTokens === "number" &&
         typeof event.totalTokens === "number"
+      );
+    case "provider.activity":
+      return (
+        (event.provider === "codex-cli" ||
+          event.provider === "codebuddy-cli") &&
+        typeof event.status === "string" &&
+        ["starting", "running", "completed", "error"].includes(
+          event.status,
+        ) &&
+        typeof event.label === "string" &&
+        (event.detail === undefined || typeof event.detail === "string")
       );
     case "answer.delta":
       return typeof event.content === "string" && typeof event.reset === "boolean";

@@ -13,5 +13,5 @@ pub use protocol::{
     AgentArtifactReadResult, AgentArtifactSearchRequest, AgentArtifactSearchResult,
     AgentCancelTurnRequest, AgentContextMetrics, AgentConversationSnapshot,
     AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentProjectStateCleared,
-    AgentTextAttachment, AgentTurnAccepted, AgentTurnRequest,
+    AgentProviderKind, AgentTextAttachment, AgentTurnAccepted, AgentTurnRequest,
 };

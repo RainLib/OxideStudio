@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod codebuddy;
 pub mod codex;
 pub mod runtime;

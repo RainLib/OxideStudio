@@ -124,6 +124,7 @@ describe("AI settings", () => {
     });
 
     expect(mocks.testProvider).toHaveBeenCalledWith({
+      kind: "openai-compatible",
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-test",
       apiKey: undefined,

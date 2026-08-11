@@ -4,6 +4,8 @@
 - Date: 2026-07-15
 - Scope: Chat/Plan/Agent orchestration, process isolation, persistence, security, and packaging
 
+> 2026-08-11 amendment: this ADR remains authoritative for the OpenAI Compatible route. Codex CLI and CodeBuddy CLI now enter the same Rust `AgentHostManager` through the private, token-bound bridge defined by [ADR-0022](0022-cli-agent-provider-bridge.md); they do not enter the Deep Agents sidecar.
+
 ## Context
 
 OxideStudio needs resumable long-running AI turns, context compaction, subagent isolation, typed progress, clarification and approval interrupts. Keeping that loop in React tied task lifetime to the WebView and duplicated orchestration semantics between Chat, Plan and Agent.
