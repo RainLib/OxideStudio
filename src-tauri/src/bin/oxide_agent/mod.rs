@@ -1,3 +1,4 @@
+mod bridge_mcp;
 mod catalog;
 mod cli;
 mod mcp;

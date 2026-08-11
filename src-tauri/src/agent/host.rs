@@ -33,7 +33,7 @@ use crate::{
         store::{AgentStore, StoredGraphCheckpoint, StoredGraphWrite},
     },
     core::{
-        config::{ConfigManager, SavedConnection as ConfigSavedConnection},
+        config::{ConfigManager, ConnectionEnvironment, SavedConnection as ConfigSavedConnection},
         dialect::{
             all_database_capabilities, canonical_driver_name, database_capabilities_for_driver,
             DatabaseCapabilities, DatabaseKind,
@@ -46,10 +46,13 @@ use crate::{
         protocol::{ExplainPlanMode, QueryResult},
         provider_secret::load_provider_secret,
         ssh::SshTunnel,
-        statement::{validate_read_only_sql, StatementScanDialect},
+        statement::{
+            execution_statement_kind, split_sql_statements, validate_read_only_sql, StatementKind,
+            StatementScanDialect,
+        },
         store::{MetaStore, SavedConnection as StoreSavedConnection},
     },
-    drivers::connect_agent_read_only_preferred_driver,
+    drivers::{connect_agent_read_only_preferred_driver, connect_preferred_driver},
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{
@@ -120,11 +123,12 @@ enum RustHostTool {
     MetadataDescribeObject,
     QueryRunReadOnly,
     QueryExplain,
+    QueryExecuteApproved,
     ShellExecute,
 }
 
 impl RustHostTool {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::ProjectListFiles,
         Self::ProjectReadFile,
         Self::ProjectWriteFile,
@@ -137,6 +141,7 @@ impl RustHostTool {
         Self::MetadataDescribeObject,
         Self::QueryRunReadOnly,
         Self::QueryExplain,
+        Self::QueryExecuteApproved,
         Self::ShellExecute,
     ];
 
@@ -154,13 +159,14 @@ impl RustHostTool {
             Self::MetadataDescribeObject => "metadata.describeObject",
             Self::QueryRunReadOnly => "query.runReadOnly",
             Self::QueryExplain => "query.explain",
+            Self::QueryExecuteApproved => "query.executeApproved",
             Self::ShellExecute => "shell.execute",
         }
     }
 
     const fn permissions(self) -> &'static [&'static str] {
         match self {
-            Self::ProjectWriteFile => &["write"],
+            Self::ProjectWriteFile | Self::QueryExecuteApproved => &["write"],
             Self::ShellExecute => &["external"],
             _ => &["read"],
         }
@@ -241,11 +247,15 @@ struct AgentHostInner {
     event_sequences: RwLock<HashMap<TurnKey, u64>>,
     clarifications: RwLock<HashMap<String, PendingClarification>>,
     approvals: RwLock<HashMap<String, PendingApproval>>,
+    approval_waiters: Mutex<HashMap<String, oneshot::Sender<BridgeApprovalDecision>>>,
     leases: RwLock<HashMap<String, ApprovalGrant>>,
     command_preflights: RwLock<HashMap<String, PendingCommandPreflight>>,
     agent_connections: ConnectionManager,
     connected_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
+    mutation_connections: ConnectionManager,
+    connected_mutation_targets: RwLock<HashMap<String, ConnectedAgentTarget>>,
     connection_lock: Mutex<()>,
+    mutation_connection_lock: Mutex<()>,
     context_metrics_lock: Mutex<()>,
     cleanup_started: AtomicBool,
     next_request_id: AtomicU64,
@@ -315,6 +325,7 @@ struct TurnKey {
 #[derive(Clone)]
 struct ActiveTurn {
     project_id: String,
+    profile: AgentProfile,
     checkpoint_thread_id: String,
     context_version: String,
     prompt: String,
@@ -333,6 +344,7 @@ struct PendingClarification {
     expires_at: i64,
 }
 
+#[derive(Clone)]
 struct PendingApproval {
     key: TurnKey,
     call_id: String,
@@ -340,7 +352,19 @@ struct PendingApproval {
     tool_name: String,
     policy_digest: Option<String>,
     confirmation_phrase: Option<String>,
+    origin: ApprovalOrigin,
     expires_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalOrigin {
+    Sidecar,
+    PrivateBridge,
+}
+
+enum BridgeApprovalDecision {
+    Approved(String),
+    Rejected,
 }
 
 struct ApprovalGrant {
@@ -377,6 +401,14 @@ struct ResolvedAgentConnection {
     config_digest: String,
     database: Option<String>,
     namespace: String,
+}
+
+#[derive(Debug, Clone)]
+struct ApprovedQueryReview {
+    operation_type: String,
+    destructive: bool,
+    confirmation_phrase: Option<String>,
+    summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,11 +481,15 @@ impl AgentHostManager {
                 event_sequences: RwLock::new(HashMap::new()),
                 clarifications: RwLock::new(HashMap::new()),
                 approvals: RwLock::new(HashMap::new()),
+                approval_waiters: Mutex::new(HashMap::new()),
                 leases: RwLock::new(HashMap::new()),
                 command_preflights: RwLock::new(HashMap::new()),
                 agent_connections: ConnectionManager::new(),
                 connected_targets: RwLock::new(HashMap::new()),
+                mutation_connections: ConnectionManager::new(),
+                connected_mutation_targets: RwLock::new(HashMap::new()),
                 connection_lock: Mutex::new(()),
+                mutation_connection_lock: Mutex::new(()),
                 context_metrics_lock: Mutex::new(()),
                 cleanup_started: AtomicBool::new(false),
                 next_request_id: AtomicU64::new(1),
@@ -489,6 +525,34 @@ impl AgentHostManager {
         request: AgentApproveActionRequest,
     ) -> Result<AgentActionAccepted> {
         self.inner.approve_action(request).await
+    }
+
+    pub(crate) async fn private_bridge_tools(
+        &self,
+        metadata: &RequestMetadata,
+    ) -> Result<Vec<AgentToolManifestEntry>> {
+        self.inner.private_bridge_tools(metadata).await
+    }
+
+    pub(crate) async fn invoke_private_bridge_tool(
+        &self,
+        metadata: &RequestMetadata,
+        call_id: String,
+        tool_name: String,
+        input: Value,
+    ) -> Result<Value> {
+        self.inner
+            .invoke_private_bridge_tool(metadata, call_id, tool_name, input)
+            .await
+            .map_err(|error| anyhow!(error.message))
+    }
+
+    pub async fn start_private_bridge(
+        &self,
+        metadata: RequestMetadata,
+    ) -> Result<crate::agent::bridge::PrivateBridgeSession> {
+        self.inner.validate_active(&metadata).await?;
+        crate::agent::bridge::PrivateBridgeSession::start(self.clone(), metadata).await
     }
 
     pub async fn clear_project_state(&self, project_id: &str) -> Result<AgentProjectStateCleared> {
@@ -713,6 +777,7 @@ impl AgentHostInner {
                     tool_name: pending.tool_name.clone(),
                     policy_digest: pending.policy_digest.clone(),
                     confirmation_phrase: pending.confirmation_phrase.clone(),
+                    origin: pending.origin,
                     expires_at: pending.expires_at,
                 })
         }
@@ -757,6 +822,30 @@ impl AgentHostInner {
                 Some(lease)
             }
         };
+
+        if pending.origin == ApprovalOrigin::PrivateBridge {
+            let waiter = self
+                .approval_waiters
+                .lock()
+                .await
+                .remove(&request.approval_id)
+                .ok_or_else(|| {
+                    anyhow!("the private tool call is no longer waiting for approval")
+                })?;
+            let decision = match lease.as_ref() {
+                Some(lease) => BridgeApprovalDecision::Approved(lease.clone()),
+                None => BridgeApprovalDecision::Rejected,
+            };
+            if waiter.send(decision).is_err() {
+                if let Some(lease) = lease.as_ref() {
+                    self.leases.write().await.remove(lease);
+                }
+                return Err(anyhow!(
+                    "the private tool call ended before approval was resolved"
+                ));
+            }
+            return Ok(AgentActionAccepted { accepted: true });
+        }
 
         let params = self
             .graph_resume_params(
@@ -1186,6 +1275,267 @@ impl AgentHostInner {
             ));
         }
         Ok(turn)
+    }
+
+    async fn private_bridge_tools(
+        &self,
+        metadata: &RequestMetadata,
+    ) -> Result<Vec<AgentToolManifestEntry>> {
+        let turn = self.validate_active(metadata).await?;
+        let mut tools = turn.tools.into_values().collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(tools)
+    }
+
+    async fn invoke_private_bridge_tool(
+        self: &Arc<Self>,
+        metadata: &RequestMetadata,
+        call_id: String,
+        tool_name: String,
+        input: Value,
+    ) -> std::result::Result<Value, SidecarRequestError> {
+        if call_id.trim().is_empty() || call_id.chars().count() > 240 {
+            return Err(SidecarRequestError::invalid_params(
+                "private bridge callId must contain 1 to 240 characters",
+            ));
+        }
+        if !input.is_object() {
+            return Err(SidecarRequestError::invalid_params(
+                "private bridge tool input must be a JSON object",
+            ));
+        }
+        if contains_approval_claim(&input) {
+            return Err(SidecarRequestError::security(anyhow!(
+                "CLI callers cannot provide approval fields or leases"
+            )));
+        }
+        let turn = self
+            .validate_active(metadata)
+            .await
+            .map_err(SidecarRequestError::security)?;
+        let tool = turn.tools.get(&tool_name).ok_or_else(|| {
+            SidecarRequestError::security(anyhow!(
+                "tool is not present in the frozen turn manifest"
+            ))
+        })?;
+        let input_digest_value = input_digest(&input);
+        let key = TurnKey::from_metadata(metadata);
+        let mut policy_digest = None;
+        let mut approval_title = format!("Approve {}", bounded_text(&tool_name, 120));
+        let mut approval_summary = format!(
+            "Approve one digest-bound invocation of {}.",
+            bounded_text(&tool_name, 120)
+        );
+        let mut approval_risk = tool
+            .permissions
+            .iter()
+            .find(|permission| matches!(permission.as_str(), "destructive" | "external" | "write"))
+            .cloned()
+            .unwrap_or_else(|| "write".to_string());
+        let mut confirmation_phrase = None;
+        let mut findings = None;
+
+        if tool_name == RustHostTool::ShellExecute.name() {
+            let result = self.shell_policy_for_input(&turn, &input).await?;
+            if result.decision == CommandPolicyDecision::Block {
+                return Err(SidecarRequestError {
+                    code: -32_053,
+                    message: "command policy blocked shell execution".to_string(),
+                    data: Some(json!({
+                        "kind":"command_policy_block",
+                        "recoverable":false,
+                        "preflight":result,
+                    })),
+                });
+            }
+            let cache_key = command_preflight_cache_key(&key, &call_id, &result.policy_digest);
+            self.command_preflights.write().await.insert(
+                cache_key,
+                PendingCommandPreflight {
+                    key: key.clone(),
+                    call_id: call_id.clone(),
+                    input_digest: input_digest_value.clone(),
+                    tool_name: tool_name.clone(),
+                    result: result.clone(),
+                    expires_at: turn.deadline,
+                },
+            );
+            approval_title = "Approve shell command".to_string();
+            approval_summary = result.summary.clone();
+            confirmation_phrase = result
+                .confirmation
+                .as_ref()
+                .map(|value| value.phrase.clone());
+            findings = Some(
+                serde_json::to_value(&result.findings).unwrap_or_else(|_| Value::Array(Vec::new())),
+            );
+            policy_digest = Some(result.policy_digest);
+            approval_risk = "external".to_string();
+        } else if tool_name == RustHostTool::QueryExecuteApproved.name() {
+            if turn.profile != AgentProfile::Agent {
+                return Err(SidecarRequestError::security(anyhow!(
+                    "database mutations are available only in Agent mode"
+                )));
+            }
+            let query = required_input_text(&input, "query", 200_000)?;
+            let target = self.resolve_connection(&turn, &input).await?;
+            self.ensure_agent_mutation_target(&turn, &target)?;
+            let review = self.review_approved_query(&target, &query)?;
+            approval_title = if review.destructive {
+                "Approve destructive database operation".to_string()
+            } else {
+                "Approve database write".to_string()
+            };
+            approval_summary = review.summary;
+            approval_risk = if review.destructive {
+                "destructive".to_string()
+            } else {
+                "write".to_string()
+            };
+            confirmation_phrase = review.confirmation_phrase;
+            policy_digest = Some(mutation_policy_digest(
+                &target,
+                &input_digest_value,
+                &review.operation_type,
+            ));
+        }
+
+        let mut approval_lease = None;
+        if tool_requires_approval(&tool_name, &tool.permissions) {
+            let approval_id = format!("bridge-{}", random_token(18));
+            let (sender, receiver) = oneshot::channel();
+            self.approval_waiters
+                .lock()
+                .await
+                .insert(approval_id.clone(), sender);
+            self.approvals.write().await.insert(
+                approval_id.clone(),
+                PendingApproval {
+                    key: key.clone(),
+                    call_id: call_id.clone(),
+                    input_digest: input_digest_value.clone(),
+                    tool_name: tool_name.clone(),
+                    policy_digest: policy_digest.clone(),
+                    confirmation_phrase: confirmation_phrase.clone(),
+                    origin: ApprovalOrigin::PrivateBridge,
+                    expires_at: turn.deadline,
+                },
+            );
+            self.emit_private_bridge_approval(
+                metadata,
+                &approval_id,
+                &call_id,
+                &tool_name,
+                &input_digest_value,
+                &approval_title,
+                &approval_risk,
+                &approval_summary,
+                policy_digest.as_deref(),
+                findings,
+                confirmation_phrase.as_deref(),
+            )
+            .await;
+            let remaining = turn.deadline.saturating_sub(now_millis()).max(1) as u64;
+            let decision = tokio::time::timeout(Duration::from_millis(remaining), receiver).await;
+            match decision {
+                Ok(Ok(BridgeApprovalDecision::Approved(lease))) => approval_lease = Some(lease),
+                Ok(Ok(BridgeApprovalDecision::Rejected)) => {
+                    return Err(SidecarRequestError {
+                        code: -32_050,
+                        message: "The user rejected this tool call".to_string(),
+                        data: Some(json!({"kind":"approval_rejected","recoverable":false})),
+                    });
+                }
+                Ok(Err(_)) | Err(_) => {
+                    self.approvals.write().await.remove(&approval_id);
+                    self.approval_waiters.lock().await.remove(&approval_id);
+                    return Err(SidecarRequestError {
+                        code: -32_050,
+                        message: "The tool approval expired or the turn was cancelled".to_string(),
+                        data: Some(json!({"kind":"approval_expired","recoverable":false})),
+                    });
+                }
+            }
+        }
+
+        self.handle_tool_invoke(
+            serde_json::to_value(ToolInvokeRequest {
+                metadata: metadata.clone(),
+                call_id,
+                tool_name,
+                input,
+                input_digest: input_digest_value,
+                approval_lease,
+                policy_digest,
+            })
+            .map_err(SidecarRequestError::from_json)?,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_private_bridge_approval(
+        &self,
+        metadata: &RequestMetadata,
+        approval_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        input_digest_value: &str,
+        title: &str,
+        risk: &str,
+        summary: &str,
+        policy_digest: Option<&str>,
+        findings: Option<Value>,
+        confirmation_phrase: Option<&str>,
+    ) {
+        let key = TurnKey::from_metadata(metadata);
+        let sequence = {
+            let mut sequences = self.event_sequences.write().await;
+            let sequence = sequences.entry(key).or_insert(0);
+            *sequence = sequence.saturating_add(1);
+            *sequence
+        };
+        let mut event = json!({
+            "type":"approval",
+            "requestId":metadata.request_id,
+            "threadId":metadata.thread_id,
+            "turnId":metadata.turn_id,
+            "contextVersion":metadata.context_version,
+            "deadline":metadata.deadline,
+            "sequence":sequence,
+            "occurredAt":now_millis(),
+            "approvalId":approval_id,
+            "callId":call_id,
+            "inputDigest":input_digest_value,
+            "toolName":tool_name,
+            "title":bounded_text(title, 240),
+            "risk":risk,
+            "summary":bounded_text(summary, 2_000),
+        });
+        if let Some(object) = event.as_object_mut() {
+            if let Some(policy_digest) = policy_digest {
+                object.insert(
+                    "policyDigest".to_string(),
+                    Value::String(policy_digest.to_string()),
+                );
+            }
+            if let Some(findings) = findings {
+                object.insert("findings".to_string(), findings);
+            }
+            if let Some(phrase) = confirmation_phrase {
+                object.insert(
+                    "confirmation".to_string(),
+                    json!({
+                        "kind":"phrase",
+                        "phrase":phrase,
+                        "prompt":format!("Type {phrase} to confirm this high-risk operation."),
+                    }),
+                );
+            }
+        }
+        if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
+            tracing::warn!("failed to emit private bridge approval: {error}");
+        }
     }
 
     async fn extend_active_deadline(&self, metadata: &RequestMetadata) -> Result<ActiveTurn> {
@@ -1861,6 +2211,7 @@ impl AgentHostInner {
             SidecarRequestError::security(anyhow!("tool is not present in the turn manifest"))
         })?;
 
+        let mut lease_policy_digest = None;
         let command_preflight = if request.tool_name == RustHostTool::ShellExecute.name() {
             let result = self.shell_policy_for_input(&turn, &request.input).await?;
             let requested_digest = request.policy_digest.as_deref().ok_or_else(|| {
@@ -1884,7 +2235,24 @@ impl AgentHostInner {
                     })),
                 });
             }
+            lease_policy_digest = Some(result.policy_digest.clone());
             Some(result)
+        } else if request.tool_name == RustHostTool::QueryExecuteApproved.name() {
+            let query = required_input_text(&request.input, "query", 200_000)?;
+            let target = self.resolve_connection(&turn, &request.input).await?;
+            self.ensure_agent_mutation_target(&turn, &target)?;
+            let review = self.review_approved_query(&target, &query)?;
+            let current_policy =
+                mutation_policy_digest(&target, &expected_digest, &review.operation_type);
+            if let Some(requested_policy) = request.policy_digest.as_deref() {
+                if !constant_time_text_eq(requested_policy, &current_policy) {
+                    return Err(SidecarRequestError::security(anyhow!(
+                        "the database target changed after approval; review the operation again"
+                    )));
+                }
+                lease_policy_digest = Some(current_policy);
+            }
+            None
         } else {
             if request.policy_digest.is_some() {
                 return Err(SidecarRequestError::security(anyhow!(
@@ -1910,9 +2278,7 @@ impl AgentHostInner {
                 &request.call_id,
                 &expected_digest,
                 &request.tool_name,
-                command_preflight
-                    .as_ref()
-                    .map(|result| result.policy_digest.as_str()),
+                lease_policy_digest.as_deref(),
             )
             .await
             .map_err(SidecarRequestError::security)?;
@@ -2145,6 +2511,7 @@ impl AgentHostInner {
             }
             RustHostTool::QueryRunReadOnly => self.execute_read_only_query(turn, request).await,
             RustHostTool::QueryExplain => self.execute_explain_query(turn, request).await,
+            RustHostTool::QueryExecuteApproved => self.execute_approved_query(turn, request).await,
             RustHostTool::ShellExecute => {
                 let store = self.app.try_state::<MetaStore>().ok_or_else(|| {
                     SidecarRequestError::tool("project metadata store is unavailable")
@@ -2539,6 +2906,123 @@ impl AgentHostInner {
         Ok(())
     }
 
+    async fn ensure_mutation_connection(
+        &self,
+        project_id: &str,
+        target: &ResolvedAgentConnection,
+    ) -> std::result::Result<(), SidecarRequestError> {
+        self.ensure_trusted_mutation_adapter(target)?;
+        let is_current = self
+            .connected_mutation_targets
+            .read()
+            .await
+            .get(&target.id)
+            .is_some_and(|connected| {
+                connected.project_id == project_id
+                    && connected.config_digest == target.config_digest
+            });
+        if is_current && self.mutation_connections.ping(&target.id).await.is_ok() {
+            return Ok(());
+        }
+
+        let _guard = self.mutation_connection_lock.lock().await;
+        let is_current = self
+            .connected_mutation_targets
+            .read()
+            .await
+            .get(&target.id)
+            .is_some_and(|connected| {
+                connected.project_id == project_id
+                    && connected.config_digest == target.config_digest
+            });
+        if is_current && self.mutation_connections.ping(&target.id).await.is_ok() {
+            return Ok(());
+        }
+
+        let url = connection_url_from_config(&target.capabilities, &target.config)
+            .map_err(SidecarRequestError::security)?;
+        let (connection_url, tunnel) =
+            SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let registry = self
+            .app
+            .try_state::<DatabaseDriverPackageRegistry>()
+            .ok_or_else(|| {
+                SidecarRequestError::tool("database driver package registry is unavailable")
+            })?;
+        let driver = connect_preferred_driver(
+            &registry,
+            &target.driver,
+            &connection_url,
+            format!("agent-mutation-{}", target.id),
+            target.config.driver_package_version.as_deref(),
+        )
+        .await
+        .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        if let Err(error) = driver.ping().await {
+            let _ = driver.disconnect().await;
+            if let Some(tunnel) = tunnel {
+                tunnel.shutdown().await;
+            }
+            return Err(SidecarRequestError::tool(format!(
+                "database mutation connection test failed: {error}"
+            )));
+        }
+        self.mutation_connections
+            .replace_connection_with_tunnel(target.id.clone(), driver, tunnel)
+            .await
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        self.connected_mutation_targets.write().await.insert(
+            target.id.clone(),
+            ConnectedAgentTarget {
+                project_id: project_id.to_string(),
+                config_digest: target.config_digest.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    fn ensure_trusted_mutation_adapter(
+        &self,
+        target: &ResolvedAgentConnection,
+    ) -> std::result::Result<(), SidecarRequestError> {
+        let requested = target.driver.trim();
+        let normalized = requested.to_ascii_lowercase();
+        let canonical = canonical_driver_name(requested).unwrap_or(normalized.as_str());
+        let registry = self
+            .app
+            .try_state::<DatabaseDriverPackageRegistry>()
+            .ok_or_else(|| {
+                SidecarRequestError::tool("database driver package registry is unavailable")
+            })?;
+        let external_selected = target
+            .config
+            .driver_package_version
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || registry.list_installed().into_iter().any(|package| {
+                package.active && package.manifest.driver_id.eq_ignore_ascii_case(canonical)
+            });
+        if external_selected
+            || !matches!(
+                canonical,
+                "postgres" | "mysql" | "sqlite" | "mongodb" | "redis" | "elasticsearch"
+            )
+        {
+            return Err(SidecarRequestError {
+                code: -32_068,
+                message: "This driver does not expose a reviewed Agent mutation adapter; generate a script for manual execution instead".to_string(),
+                data: Some(json!({
+                    "kind":"agent_mutation_unsupported",
+                    "recoverable":false,
+                    "driver":bounded_text(canonical, 80),
+                })),
+            });
+        }
+        Ok(())
+    }
+
     async fn execute_metadata_list(
         &self,
         turn: &ActiveTurn,
@@ -2760,6 +3244,203 @@ impl AgentHostInner {
             .clamp(1, MAX_TOOL_RESULT_ROWS as u64) as usize;
         truncate_query_rows(&mut results, requested_limit);
         serde_json::to_value(results).map_err(SidecarRequestError::from_json)
+    }
+
+    async fn execute_approved_query(
+        &self,
+        turn: &ActiveTurn,
+        request: &ToolInvokeRequest,
+    ) -> std::result::Result<Value, SidecarRequestError> {
+        if turn.profile != AgentProfile::Agent {
+            return Err(SidecarRequestError::security(anyhow!(
+                "query.executeApproved is available only in Agent mode"
+            )));
+        }
+        let query = required_input_text(&request.input, "query", 200_000)?;
+        let target = self.resolve_connection(turn, &request.input).await?;
+        self.ensure_agent_mutation_target(turn, &target)?;
+        let review = self.review_approved_query(&target, &query)?;
+        self.ensure_mutation_connection(&turn.project_id, &target)
+            .await?;
+
+        let query_id = format!(
+            "agent-mutation-{}-{}",
+            bounded_identifier(&request.metadata.turn_id, 80),
+            bounded_identifier(&request.call_id, 80)
+        );
+        let timeout = tool_deadline_duration(turn, &request.tool_name, request.metadata.deadline)?;
+        let started_at = Instant::now();
+        let execute = async {
+            if let Some(database) = target
+                .database
+                .as_deref()
+                .filter(|_| target.capabilities.supports_database_catalogs)
+            {
+                self.mutation_connections
+                    .query_database_with_context(
+                        &target.id,
+                        database,
+                        &query,
+                        non_empty(&target.namespace),
+                        Some(&query_id),
+                    )
+                    .await
+            } else {
+                self.mutation_connections
+                    .query(
+                        &target.id,
+                        &query,
+                        non_empty(&target.namespace).map(ToString::to_string),
+                        None,
+                        Some(query_id.clone()),
+                    )
+                    .await
+            }
+        };
+        let result = match tokio::time::timeout(timeout, execute).await {
+            Ok(result) => result.map_err(|error| SidecarRequestError {
+                code: -32_069,
+                message: bounded_text(&error.to_string(), 2_000),
+                data: Some(json!({
+                    "kind":"mutation_execution_failed",
+                    "recoverable":false,
+                    "manualVerificationRequired":true,
+                })),
+            })?,
+            Err(_) => {
+                let _ = self
+                    .mutation_connections
+                    .cancel_query(&target.id, &query_id)
+                    .await;
+                tracing::warn!(
+                    target: "oxide_agent_mutation_audit",
+                    project_id = %turn.project_id,
+                    turn_id = %request.metadata.turn_id,
+                    call_id = %request.call_id,
+                    input_digest = %request.input_digest,
+                    operation_type = %review.operation_type,
+                    connection_id = %target.id,
+                    database = ?target.database,
+                    duration_ms = started_at.elapsed().as_millis() as u64,
+                    result_unknown = true,
+                    "approved Agent database operation timed out"
+                );
+                return Err(SidecarRequestError {
+                    code: -32_067,
+                    message: "The approved database operation timed out after it was sent; verify the target manually before retrying".to_string(),
+                    data: Some(json!({
+                        "kind":"mutation_result_unknown",
+                        "recoverable":false,
+                        "manualVerificationRequired":true,
+                    })),
+                });
+            }
+        };
+        tracing::info!(
+            target: "oxide_agent_mutation_audit",
+            project_id = %turn.project_id,
+            turn_id = %request.metadata.turn_id,
+            call_id = %request.call_id,
+            input_digest = %request.input_digest,
+            operation_type = %review.operation_type,
+            destructive = review.destructive,
+            connection_id = %target.id,
+            database = ?target.database,
+            duration_ms = started_at.elapsed().as_millis() as u64,
+            result_unknown = false,
+            "approved Agent database operation completed"
+        );
+        serde_json::to_value(json!({
+            "connectionId": target.id,
+            "database": target.database,
+            "namespace": target.namespace,
+            "operationType": review.operation_type,
+            "inputDigest": request.input_digest,
+            "results": result,
+            "mutationReceipt": {
+                "callId": request.call_id,
+                "completed": true,
+                "manualVerificationRequired": false,
+            }
+        }))
+        .map_err(SidecarRequestError::from_json)
+    }
+
+    fn ensure_agent_mutation_target(
+        &self,
+        turn: &ActiveTurn,
+        target: &ResolvedAgentConnection,
+    ) -> std::result::Result<(), SidecarRequestError> {
+        let frozen_connection = turn
+            .tab_connection_id
+            .as_deref()
+            .or(turn.connection_id.as_deref())
+            .ok_or_else(|| {
+                SidecarRequestError::security(anyhow!(
+                    "Agent writes require a connection frozen into the current workspace turn"
+                ))
+            })?;
+        if frozen_connection != target.id {
+            return Err(SidecarRequestError::security(anyhow!(
+                "the mutation target differs from the connection frozen into this turn"
+            )));
+        }
+        match target.config.environment {
+            ConnectionEnvironment::Development | ConnectionEnvironment::Staging => {}
+            ConnectionEnvironment::Unclassified => {
+                return Err(SidecarRequestError {
+                    code: -32_066,
+                    message: "AI writes are disabled until this connection is explicitly classified as development or staging".to_string(),
+                    data: Some(json!({"kind":"unclassified_connection_write_blocked","recoverable":false})),
+                });
+            }
+            ConnectionEnvironment::Production => {
+                return Err(SidecarRequestError {
+                    code: -32_066,
+                    message: "AI writes are always disabled for production connections".to_string(),
+                    data: Some(
+                        json!({"kind":"production_connection_write_blocked","recoverable":false}),
+                    ),
+                });
+            }
+        }
+        let protected = target.config.production_databases.iter().any(|protected| {
+            let protected = protected.trim();
+            protected == "*"
+                || target
+                    .database
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(protected))
+                || (!target.namespace.is_empty()
+                    && target.namespace.eq_ignore_ascii_case(protected))
+        });
+        if protected {
+            return Err(SidecarRequestError {
+                code: -32_066,
+                message: "AI writes are disabled for this protected database or namespace"
+                    .to_string(),
+                data: Some(json!({"kind":"protected_database_write_blocked","recoverable":false})),
+            });
+        }
+        self.ensure_trusted_mutation_adapter(target)
+    }
+
+    fn review_approved_query(
+        &self,
+        target: &ResolvedAgentConnection,
+        query: &str,
+    ) -> std::result::Result<ApprovedQueryReview, SidecarRequestError> {
+        let canonical = canonical_driver_name(&target.driver)
+            .unwrap_or(target.driver.trim())
+            .to_ascii_lowercase();
+        let dialect = match canonical.as_str() {
+            "mysql" => Some(StatementScanDialect::Mysql),
+            "sqlite" | "postgres" => Some(StatementScanDialect::Postgres),
+            _ if target.capabilities.supports_sql_query => Some(StatementScanDialect::Postgres),
+            _ => None,
+        };
+        review_approved_query_input(&target.driver, dialect, query, &target.id)
+            .map_err(SidecarRequestError::invalid_params)
     }
 
     async fn execute_explain_query(
@@ -3353,66 +4034,88 @@ impl AgentHostInner {
                 {
                     return;
                 }
-                let (policy_digest, confirmation_phrase) =
-                    if tool_name == RustHostTool::ShellExecute.name() {
-                        let Some(requested_policy_digest) = object
-                            .get("policyDigest")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                        else {
-                            return;
-                        };
-                        let preflight = self
-                            .command_preflights
-                            .read()
-                            .await
-                            .get(&command_preflight_cache_key(
-                                &key,
-                                &call_id,
-                                &requested_policy_digest,
-                            ))
-                            .filter(|preflight| {
-                                preflight.key == key
-                                    && preflight.call_id == call_id
-                                    && constant_time_text_eq(
-                                        &preflight.input_digest,
-                                        &normalized_digest(&input_digest_value),
-                                    )
-                                    && preflight.tool_name == tool_name
-                                    && preflight.expires_at >= now_millis()
-                                    && preflight.result.decision != CommandPolicyDecision::Block
-                            })
-                            .cloned();
-                        let Some(preflight) = preflight else {
-                            return;
-                        };
-                        object.insert(
-                            "findings".to_string(),
-                            serde_json::to_value(&preflight.result.findings)
-                                .unwrap_or_else(|_| Value::Array(Vec::new())),
-                        );
-                        object.insert(
-                            "summary".to_string(),
-                            Value::String(preflight.result.summary.clone()),
-                        );
-                        if let Some(confirmation) = preflight.result.confirmation.as_ref() {
-                            object.insert(
-                                "confirmation".to_string(),
-                                serde_json::to_value(confirmation).unwrap_or(Value::Null),
-                            );
-                        } else {
-                            object.remove("confirmation");
-                        }
-                        (
-                            Some(preflight.result.policy_digest),
-                            preflight.result.confirmation.map(|value| value.phrase),
-                        )
-                    } else {
-                        object.remove("policyDigest");
-                        object.remove("findings");
-                        object.remove("confirmation");
-                        (None, None)
+                let (policy_digest, confirmation_phrase) = if tool_name
+                    == RustHostTool::ShellExecute.name()
+                {
+                    let Some(requested_policy_digest) = object
+                        .get("policyDigest")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    else {
+                        return;
                     };
+                    let preflight = self
+                        .command_preflights
+                        .read()
+                        .await
+                        .get(&command_preflight_cache_key(
+                            &key,
+                            &call_id,
+                            &requested_policy_digest,
+                        ))
+                        .filter(|preflight| {
+                            preflight.key == key
+                                && preflight.call_id == call_id
+                                && constant_time_text_eq(
+                                    &preflight.input_digest,
+                                    &normalized_digest(&input_digest_value),
+                                )
+                                && preflight.tool_name == tool_name
+                                && preflight.expires_at >= now_millis()
+                                && preflight.result.decision != CommandPolicyDecision::Block
+                        })
+                        .cloned();
+                    let Some(preflight) = preflight else {
+                        return;
+                    };
+                    object.insert(
+                        "findings".to_string(),
+                        serde_json::to_value(&preflight.result.findings)
+                            .unwrap_or_else(|_| Value::Array(Vec::new())),
+                    );
+                    object.insert(
+                        "summary".to_string(),
+                        Value::String(preflight.result.summary.clone()),
+                    );
+                    if let Some(confirmation) = preflight.result.confirmation.as_ref() {
+                        object.insert(
+                            "confirmation".to_string(),
+                            serde_json::to_value(confirmation).unwrap_or(Value::Null),
+                        );
+                    } else {
+                        object.remove("confirmation");
+                    }
+                    (
+                        Some(preflight.result.policy_digest),
+                        preflight.result.confirmation.map(|value| value.phrase),
+                    )
+                } else if tool_name == RustHostTool::QueryExecuteApproved.name() {
+                    let phrase = "EXECUTE DATABASE CHANGE".to_string();
+                    object.remove("policyDigest");
+                    object.remove("findings");
+                    object.insert("risk".to_string(), Value::String("destructive".to_string()));
+                    object.insert(
+                            "summary".to_string(),
+                            Value::String(
+                                "Approve one exact, digest-bound database operation. The Desktop will revalidate the frozen target and input immediately before execution."
+                                    .to_string(),
+                            ),
+                        );
+                    object.insert(
+                            "confirmation".to_string(),
+                            json!({
+                                "kind":"phrase",
+                                "phrase":phrase,
+                                "prompt":"Type EXECUTE DATABASE CHANGE to confirm this database operation.",
+                            }),
+                        );
+                    (None, Some(phrase))
+                } else {
+                    object.remove("policyDigest");
+                    object.remove("findings");
+                    object.remove("confirmation");
+                    (None, None)
+                };
                 self.approvals.write().await.insert(
                     approval_id,
                     PendingApproval {
@@ -3422,6 +4125,7 @@ impl AgentHostInner {
                         tool_name,
                         policy_digest,
                         confirmation_phrase,
+                        origin: ApprovalOrigin::Sidecar,
                         expires_at: active.deadline,
                     },
                 );
@@ -3500,10 +4204,22 @@ impl AgentHostInner {
             .write()
             .await
             .retain(|_, pending| pending.key != *key);
-        self.approvals
-            .write()
-            .await
-            .retain(|_, pending| pending.key != *key);
+        let approval_ids = {
+            let mut approvals = self.approvals.write().await;
+            let ids = approvals
+                .iter()
+                .filter(|(_, pending)| pending.key == *key)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            approvals.retain(|_, pending| pending.key != *key);
+            ids
+        };
+        if !approval_ids.is_empty() {
+            let mut waiters = self.approval_waiters.lock().await;
+            for approval_id in approval_ids {
+                waiters.remove(&approval_id);
+            }
+        }
         self.leases
             .write()
             .await
@@ -3600,6 +4316,7 @@ impl ActiveTurn {
     fn from_request(request: &AgentTurnRequest) -> Self {
         Self {
             project_id: request.project_id.clone(),
+            profile: request.profile,
             checkpoint_thread_id: expected_graph_thread_id(request),
             context_version: request.metadata.context_version.clone(),
             prompt: request.prompt.clone(),
@@ -4123,6 +4840,243 @@ fn read_only_transaction_script(kind: DatabaseKind, sql: &str) -> String {
         DatabaseKind::Mysql => "START TRANSACTION READ ONLY;",
     };
     format!("{begin}\n{}\n;\nROLLBACK;", sql.trim())
+}
+
+fn review_approved_query_input(
+    driver: &str,
+    dialect: Option<StatementScanDialect>,
+    query: &str,
+    connection_id: &str,
+) -> std::result::Result<ApprovedQueryReview, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("query is required".to_string());
+    }
+    let canonical = canonical_driver_name(driver)
+        .unwrap_or(driver.trim())
+        .to_ascii_lowercase();
+    let (operation_type, destructive) = if let Some(dialect) = dialect {
+        let statements = split_sql_statements(query, dialect);
+        if statements.len() != 1 {
+            return Err(
+                "query.executeApproved requires exactly one complete SQL statement".to_string(),
+            );
+        }
+        if validate_read_only_sql(statements[0], dialect).is_ok() {
+            return Err("Read-only SQL must use query.runReadOnly".to_string());
+        }
+        let kind = execution_statement_kind(statements[0]);
+        if matches!(
+            kind,
+            StatementKind::Begin
+                | StatementKind::Start
+                | StatementKind::Commit
+                | StatementKind::Rollback
+                | StatementKind::Savepoint
+                | StatementKind::Release
+                | StatementKind::Set
+                | StatementKind::Use
+        ) {
+            return Err(
+                "Transaction and session control statements are forbidden for Agent execution"
+                    .to_string(),
+            );
+        }
+        let destructive = matches!(
+            kind,
+            StatementKind::Create
+                | StatementKind::Alter
+                | StatementKind::Drop
+                | StatementKind::Truncate
+                | StatementKind::Comment
+                | StatementKind::Rename
+        );
+        (kind.as_str().to_string(), destructive)
+    } else {
+        if validate_native_read_only_query(&canonical, query).is_ok() {
+            return Err("Read-only native operations must use query.runReadOnly".to_string());
+        }
+        match canonical.as_str() {
+            "mongodb" => review_mongodb_mutation(query)?,
+            "redis" => review_redis_mutation(query)?,
+            "elasticsearch" => review_elasticsearch_mutation(query)?,
+            _ => {
+                return Err(format!(
+                    "query.executeApproved is unsupported for driver {}",
+                    bounded_text(&canonical, 80)
+                ));
+            }
+        }
+    };
+    let confirmation_phrase = destructive.then(|| format!("EXECUTE {operation_type}"));
+    Ok(ApprovedQueryReview {
+        summary: format!(
+            "Approve one {operation_type} operation on connection {}. The exact input is digest-bound and can be executed once.",
+            bounded_text(connection_id, 80)
+        ),
+        operation_type,
+        destructive,
+        confirmation_phrase,
+    })
+}
+
+fn mutation_policy_digest(
+    target: &ResolvedAgentConnection,
+    input_digest_value: &str,
+    operation_type: &str,
+) -> String {
+    input_digest(&json!({
+        "policy":"oxide-agent-approved-query-v1",
+        "projectId":target.config.project_id,
+        "connectionId":target.id,
+        "connectionConfigDigest":target.config_digest,
+        "database":target.database,
+        "namespace":target.namespace,
+        "environment":target.config.environment,
+        "protectedDatabases":target.config.production_databases,
+        "inputDigest":input_digest_value,
+        "operationType":operation_type,
+    }))
+}
+
+fn review_mongodb_mutation(query: &str) -> std::result::Result<(String, bool), String> {
+    let value: Value = serde_json::from_str(query)
+        .map_err(|_| "MongoDB mutation must be one valid JSON object".to_string())?;
+    let object = value.as_object().ok_or_else(|| {
+        "MongoDB mutation must contain exactly one JSON command object".to_string()
+    })?;
+    if contains_native_transaction_control(&value) {
+        return Err("MongoDB transaction and session controls are forbidden".to_string());
+    }
+    let operations = object
+        .keys()
+        .filter_map(|key| {
+            let normalized = key.to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "insertone"
+                    | "insertmany"
+                    | "updateone"
+                    | "updatemany"
+                    | "replaceone"
+                    | "deleteone"
+                    | "deletemany"
+                    | "findoneandupdate"
+                    | "findoneandreplace"
+                    | "findoneanddelete"
+                    | "drop"
+                    | "dropdatabase"
+                    | "create"
+                    | "createindexes"
+                    | "dropindexes"
+                    | "renamecollection"
+                    | "command"
+            )
+            .then_some(normalized)
+        })
+        .collect::<Vec<_>>();
+    if operations.len() != 1 {
+        return Err("MongoDB mutation must contain exactly one recognized operation".to_string());
+    }
+    let operation = operations[0].to_ascii_uppercase();
+    let destructive = matches!(
+        operations[0].as_str(),
+        "deleteone"
+            | "deletemany"
+            | "findoneanddelete"
+            | "drop"
+            | "dropdatabase"
+            | "dropindexes"
+            | "renamecollection"
+    );
+    Ok((operation, destructive))
+}
+
+fn review_redis_mutation(query: &str) -> std::result::Result<(String, bool), String> {
+    let commands = query
+        .split(['\n', '\r', ';'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    if commands.len() != 1 {
+        return Err("Redis Agent execution requires exactly one command".to_string());
+    }
+    let operation = commands[0]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if operation.is_empty()
+        || matches!(
+            operation.as_str(),
+            "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH" | "SELECT"
+        )
+    {
+        return Err(
+            "Redis transaction, watch, and database-selection commands are forbidden".to_string(),
+        );
+    }
+    let destructive = matches!(
+        operation.as_str(),
+        "DEL" | "UNLINK" | "FLUSHALL" | "FLUSHDB" | "RENAME" | "RENAMENX"
+    );
+    Ok((operation, destructive))
+}
+
+fn review_elasticsearch_mutation(query: &str) -> std::result::Result<(String, bool), String> {
+    let request_lines = query
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let method = parts.next()?.to_ascii_uppercase();
+            matches!(
+                method.as_str(),
+                "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
+            )
+            .then(|| (method, parts.next().unwrap_or_default().to_string()))
+        })
+        .collect::<Vec<_>>();
+    if request_lines.len() != 1 || request_lines[0].1.trim().is_empty() {
+        return Err(
+            "Elasticsearch Agent execution requires exactly one Kibana-style request".to_string(),
+        );
+    }
+    if request_lines[0].1.contains("://") {
+        return Err("Elasticsearch request paths must be relative".to_string());
+    }
+    let (method, path) = &request_lines[0];
+    let normalized_path = path.to_ascii_lowercase();
+    let destructive = method == "DELETE"
+        || normalized_path.contains("_delete_by_query")
+        || normalized_path.contains("_close")
+        || normalized_path.contains("_forcemerge");
+    Ok((format!("{method} REQUEST"), destructive))
+}
+
+fn contains_native_transaction_control(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            matches!(
+                normalized.as_str(),
+                "starttransaction"
+                    | "committransaction"
+                    | "aborttransaction"
+                    | "transaction"
+                    | "session"
+                    | "lsid"
+                    | "autocommit"
+            ) || contains_native_transaction_control(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_native_transaction_control),
+        _ => false,
+    }
 }
 
 fn validate_native_read_only_query(driver: &str, query: &str) -> std::result::Result<(), String> {
@@ -5013,6 +5967,24 @@ fn input_digest(value: &Value) -> String {
     let bytes = serde_json::to_vec(&canonical_json(value)).unwrap_or_default();
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn contains_approval_claim(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            matches!(
+                normalized.as_str(),
+                "approved" | "approval" | "approvallease" | "approvaltoken" | "isapproved"
+            ) || contains_approval_claim(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_approval_claim),
+        _ => false,
+    }
 }
 
 fn normalized_digest(value: &str) -> String {
@@ -5980,5 +6952,91 @@ mod tests {
         truncate_query_rows(&mut results, 3);
         assert_eq!(results[0].rows.len(), 2);
         assert_eq!(results[1].rows.len(), 1);
+    }
+
+    #[test]
+    fn approved_query_review_requires_one_mutation_and_blocks_transaction_control() {
+        let update = review_approved_query_input(
+            "postgres",
+            Some(StatementScanDialect::Postgres),
+            "UPDATE accounts SET active = false WHERE id = 7",
+            "connection",
+        )
+        .unwrap();
+        assert_eq!(update.operation_type, "UPDATE");
+        assert!(!update.destructive);
+        assert!(update.confirmation_phrase.is_none());
+
+        let drop = review_approved_query_input(
+            "postgres",
+            Some(StatementScanDialect::Postgres),
+            "DROP TABLE obsolete_accounts",
+            "connection",
+        )
+        .unwrap();
+        assert!(drop.destructive);
+        assert_eq!(drop.confirmation_phrase.as_deref(), Some("EXECUTE DROP"));
+
+        for forbidden in [
+            "SELECT * FROM accounts",
+            "BEGIN",
+            "COMMIT",
+            "UPDATE accounts SET active = false; DELETE FROM accounts",
+        ] {
+            assert!(review_approved_query_input(
+                "postgres",
+                Some(StatementScanDialect::Postgres),
+                forbidden,
+                "connection",
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn approved_native_review_rejects_batches_and_session_controls() {
+        assert!(review_approved_query_input("redis", None, "SET flag 1", "redis").is_ok());
+        assert!(review_approved_query_input("redis", None, "MULTI", "redis").is_err());
+        assert!(review_approved_query_input("redis", None, "SET a 1; SET b 2", "redis").is_err());
+
+        let mongo = review_approved_query_input(
+            "mongodb",
+            None,
+            r#"{"deleteOne":{"filter":{"id":1}},"collection":"users"}"#,
+            "mongo",
+        )
+        .unwrap();
+        assert!(mongo.destructive);
+        assert!(review_approved_query_input(
+            "mongodb",
+            None,
+            r#"{"commitTransaction":1}"#,
+            "mongo",
+        )
+        .is_err());
+
+        assert!(
+            review_approved_query_input("elasticsearch", None, "DELETE users/_doc/1", "elastic",)
+                .unwrap()
+                .destructive
+        );
+        assert!(review_approved_query_input(
+            "elasticsearch",
+            None,
+            "PUT users/_doc/1\n{}\nDELETE users/_doc/2",
+            "elastic",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn approval_fields_are_rejected_recursively() {
+        assert!(contains_approval_claim(&json!({"approved":true})));
+        assert!(contains_approval_claim(
+            &json!({"meta":{"approvalLease":"caller"}})
+        ));
+        assert!(!contains_approval_claim(
+            &json!({"query":"UPDATE t SET approved = true"})
+        ));
     }
 }

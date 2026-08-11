@@ -1,5 +1,5 @@
 use crate::oxide_agent::{
-    catalog, mcp,
+    bridge_mcp, catalog, mcp,
     policy::Grant,
     runtime::ToolRuntime,
     store::{resolve_data_dir, HeadlessStore},
@@ -40,6 +40,9 @@ enum Command {
 enum McpCommand {
     /// Serve MCP 2025-11-25 over stdin/stdout.
     Stdio(ScopeArgs),
+    /// Internal Desktop-authenticated MCP bridge. Not a public integration surface.
+    #[command(hide = true)]
+    Bridge,
 }
 
 #[derive(Debug, Subcommand)]
@@ -86,6 +89,9 @@ impl Cli {
                 let runtime = scope.runtime().await?;
                 mcp::serve_stdio(runtime).await
             }
+            Command::Mcp {
+                command: McpCommand::Bridge,
+            } => bridge_mcp::serve_stdio().await,
             Command::Tools {
                 command: ToolsCommand::List,
             } => print_json(&catalog::all()),
