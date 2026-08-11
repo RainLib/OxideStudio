@@ -253,6 +253,8 @@ export interface TabData {
   elasticsearchVariables?: Record<string, string>;
   filters?: any[];
   results: QueryResult[] | null;
+  /** SQL revision that produced the currently displayed query results. */
+  resultSql?: string;
   explainPlan?: ExplainPlan | null;
   queryOutputView?: "results" | "plan";
   isExecuting: boolean;
@@ -2320,6 +2322,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isExecuting: false,
                 runningQueryId: null,
                 results: results || null,
+                resultSql: sqlToRun,
                 activeResultIndex: 0,
                 queryError: null,
               }

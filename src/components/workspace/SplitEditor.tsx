@@ -9,6 +9,7 @@ import {
 } from "react";
 import { cn } from "@/lib/utils";
 import { useTabStore } from "@/store/useTabStore";
+import { useShallow } from "zustand/react/shallow";
 import {
   adjacentEditorGroup,
   editorGroupInDirection,
@@ -85,20 +86,23 @@ function SplitNodeView({
 }
 
 export function SplitEditor() {
-  const tabs = useTabStore((state) => state.tabs);
+  const queryTabIdList = useTabStore(
+    useShallow((state) =>
+      state.tabs.filter((tab) => tab.type === "query").map((tab) => tab.id),
+    ),
+  );
   const globalActiveTabId = useTabStore((state) => state.activeTabId);
   const setActiveTab = useTabStore((state) => state.setActiveTab);
   const { root, activeGroup, setActiveGroup, setGroupTab, closeGroup, reset } =
     useEditorGroupStore();
-  const queryTabs = tabs.filter((tab) => tab.type === "query");
-  const queryTabIds = new Set(queryTabs.map((tab) => tab.id));
+  const queryTabIds = new Set(queryTabIdList);
   const fallbackTabId =
     (globalActiveTabId && queryTabIds.has(globalActiveTabId)
       ? globalActiveTabId
-      : queryTabs[0]?.id) || null;
+      : queryTabIdList[0]) || null;
 
   useEffect(() => {
-    if (queryTabs.length === 0) {
+    if (queryTabIdList.length === 0) {
       reset();
       return;
     }
@@ -107,7 +111,7 @@ export function SplitEditor() {
         setGroupTab(group.id, fallbackTabId);
       }
     }
-  }, [fallbackTabId, queryTabs.length, reset, root, setGroupTab]);
+  }, [fallbackTabId, queryTabIdList.length, reset, root, setGroupTab]);
 
   useEffect(() => {
     if (globalActiveTabId && queryTabIds.has(globalActiveTabId)) {

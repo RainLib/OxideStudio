@@ -5,6 +5,7 @@ import {
 import { AGENT_HOST_ONLY_TOOLS } from "@/ai/tools/agentHostTools";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useShallow } from "zustand/react/shallow";
 import { resolveAssistantMode } from "@/ai/assistant/modes";
 import { boundedConversationHistory } from "@/ai/assistant/chatContext";
 import {
@@ -140,8 +141,18 @@ function AgentHostAssistantSidebar() {
       })(),
   );
   const activeNamespace = useSchemaStore((state) => state.currentSchema);
-  const { tabs, activeTabId } = useTabStore();
-  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const activeTab = useTabStore(
+    useShallow((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+      return tab
+        ? {
+            title: tab.title,
+            databaseName: tab.databaseName,
+            editorSelection: tab.editorSelection,
+          }
+        : null;
+    }),
+  );
   const composeRequest = useAssistantComposerStore((state) => state.request);
   const consumeComposeRequest = useAssistantComposerStore(
     (state) => state.consumeRequest,

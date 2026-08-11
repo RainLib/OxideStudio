@@ -76,7 +76,6 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       rankByUsage: false,
       usageScope: "postgres",
       recordUsageCommand: "record",
-      appendSpace: false,
     });
 
     expect(suggestion?.label).toEqual({
@@ -113,7 +112,6 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       rankByUsage: false,
       usageScope: "postgres-scope",
       recordUsageCommand: "record",
-      appendSpace: true,
       driver: "postgres",
     });
 
@@ -124,7 +122,7 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
     });
   });
 
-  it("never appends client whitespace to authoritative server text edits", () => {
+  it("never appends client whitespace to any language-server insertion", () => {
     const suggestions = lspCompletionItemsToMonacoSuggestions({
       monaco,
       ownerKey: "owner-1",
@@ -152,12 +150,11 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       rankByUsage: false,
       usageScope: "postgres-scope",
       recordUsageCommand: "record",
-      appendSpace: true,
       driver: "postgres",
     });
 
     expect(suggestions[0]?.insertText).toBe("SELECT");
-    expect(suggestions[1]?.insertText).toBe("FROM ");
+    expect(suggestions[1]?.insertText).toBe("FROM");
   });
 
   it("attaches only server items and applies lazy resolve fields", () => {
@@ -186,7 +183,6 @@ describe("lspCompletionItemsToMonacoSuggestions", () => {
       rankByUsage: false,
       usageScope: "postgres-scope",
       recordUsageCommand: "record",
-      appendSpace: false,
       requestUri: "oxide://postgres/editor.sql",
       requestModelVersion: 7,
     });

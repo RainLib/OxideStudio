@@ -15,10 +15,8 @@ import {
   toMonacoRange,
 } from "./lspMonacoAdapter";
 import {
-  appendSqlCompletionSpace,
   shouldChainSqlCompletionAfterAccept,
   sqlFunctionCompletionInsertion,
-  sqlCompletionItemType,
 } from "./sqlCompletionInsertion";
 
 export interface LspCompletionPresentationOptions {
@@ -31,7 +29,6 @@ export interface LspCompletionPresentationOptions {
   rankByUsage: boolean;
   usageScope: string;
   recordUsageCommand: string;
-  appendSpace: boolean;
   driver?: string;
   nextCharacter?: string;
   /** The document revision that produced these lazy-resolvable candidates. */
@@ -158,7 +155,6 @@ export function lspCompletionItemsToMonacoSuggestions({
   rankByUsage,
   usageScope,
   recordUsageCommand,
-  appendSpace,
   driver,
   nextCharacter,
   requestUri,
@@ -172,18 +168,13 @@ export function lspCompletionItemsToMonacoSuggestions({
       item,
       completedContextKeyword,
     );
-    // A server textEdit is an authoritative edit contract. Client whitespace
-    // preferences only apply to plain insertText/label proposals.
-    const spacedInsertText = item.textEdit
-      ? serverInsertText
-      : appendSqlCompletionSpace(serverInsertText, {
-          enabled: appendSpace,
-          itemType: sqlCompletionItemType(item),
-          nextCharacter,
-        });
+    // Every LSP insertion is server-owned, including a plain insertText or
+    // label fallback. Client whitespace preferences are reserved for Oxide's
+    // built-in grammar completions so accepting a semantic item never mutates
+    // the text advertised by the language server.
     const functionInsertion = sqlFunctionCompletionInsertion(
       item,
-      spacedInsertText,
+      serverInsertText,
       nextCharacter,
     );
     const chainCompletion = shouldChainSqlCompletionAfterAccept(

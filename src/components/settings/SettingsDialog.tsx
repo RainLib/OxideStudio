@@ -1477,8 +1477,8 @@ function EditorSettings({
         }
       />
       <CheckboxLabel
-        label="Insert a space after completed SQL names and keywords"
-        detail="Skips functions, snippets, properties, schemas, and punctuation boundaries"
+        label="Insert a space after built-in SQL completions"
+        detail="Language-server text stays exact; applies only to local names and keywords"
         checked={editor.sqlCompletion.appendSpace}
         onChange={() =>
           updateEditor({

@@ -27,6 +27,7 @@ import {
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
+import { useShallow } from "zustand/react/shallow";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTheme } from "@/theme/useTheme";
@@ -220,9 +221,42 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     },
     ref,
   ) {
+    const activeTabId = useTabStore((state) => state.activeTabId);
+    const activeTab = useTabStore(
+      useShallow((state) => {
+        const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+        return tab
+          ? {
+              id: tab.id,
+              title: tab.title,
+              type: tab.type,
+              connectionId: tab.connectionId,
+              databaseName: tab.databaseName,
+              schemaName: tab.schemaName,
+              tableName: tab.tableName,
+              queryLanguage: tab.queryLanguage,
+              results: tab.results,
+              resultSql: tab.resultSql,
+              activeResultIndex: tab.activeResultIndex,
+              error: tab.error,
+              queryError: tab.queryError,
+              isExecuting: tab.isExecuting,
+              gridState: tab.gridState,
+              pendingEdits: tab.pendingEdits,
+              newRowsCount: tab.newRowsCount,
+              visualFilters: tab.visualFilters,
+              columnWidths: tab.columnWidths,
+              columnOrder: tab.columnOrder,
+              hiddenColumns: tab.hiddenColumns,
+              frozenColumnCount: tab.frozenColumnCount,
+              tableColumns: tab.tableColumns,
+              tablePage: tab.tablePage,
+              tablePageSize: tab.tablePageSize,
+            }
+          : null;
+      }),
+    );
     const {
-      tabs,
-      activeTabId,
       setGridFilter,
       setGridSort,
       setCellEdit,
@@ -240,7 +274,27 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setFilterMode,
       setVisualFilters,
       setSqlFilter,
-    } = useTabStore();
+    } = useTabStore(
+      useShallow((state) => ({
+        setGridFilter: state.setGridFilter,
+        setGridSort: state.setGridSort,
+        setCellEdit: state.setCellEdit,
+        setBulkCellEdit: state.setBulkCellEdit,
+        setColumnWidth: state.setColumnWidth,
+        setColumnOrder: state.setColumnOrder,
+        setColumnHidden: state.setColumnHidden,
+        setFrozenColumnCount: state.setFrozenColumnCount,
+        restoreColumnLayout: state.restoreColumnLayout,
+        showAllColumns: state.showAllColumns,
+        deleteRows: state.deleteRows,
+        runTabQuery: state.runTabQuery,
+        findOrCreateTableTab: state.findOrCreateTableTab,
+        loadTablePage: state.loadTablePage,
+        setFilterMode: state.setFilterMode,
+        setVisualFilters: state.setVisualFilters,
+        setSqlFilter: state.setSqlFilter,
+      })),
+    );
     const connections = useConnectionStore((state) => state.connections);
     const dataGridSettings = useSettingsStore(
       (state) => state.settings.dataGrid,
@@ -253,7 +307,6 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       zoomPercent ?? dataGridSettings.zoomPercent,
     );
     const gridScale = viewMetrics.scale;
-    const activeTab = tabs.find((t) => t.id === activeTabId);
     const queueQueryErrorFix = useAssistantComposerStore(
       (state) => state.queueQueryErrorFix,
     );
@@ -349,7 +402,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         schemaName: activeTab.schemaName,
         tableName: activeTab.tableName,
         queryLanguage: activeTab.queryLanguage,
-        sql: activeTab.sql,
+        sql: activeTab.resultSql,
       };
       const layoutKey = gridLayoutKey(scope);
       if (!layoutKey) return;

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Monaco } from "@monaco-editor/react";
 import { getLspDocumentUri } from "@/services/lsp";
 import {
+  LSP_DOCUMENT_CHANGE_DEBOUNCE_MS,
   useLspDocumentLifecycle,
   type LspDocumentLifecycleClient,
 } from "./useLspDocumentLifecycle";
@@ -69,6 +70,7 @@ describe("useLspDocumentLifecycle", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    vi.useRealTimers();
   });
 
   it("opens once and sends ordered changes for the active virtual document", async () => {
@@ -90,10 +92,42 @@ describe("useLspDocumentLifecycle", () => {
     expect(controller.openedDocumentsRef.current.has(uriOne)).toBe(true);
     expect(controller.documentVersionsRef.current.get(uriOne)).toBe(1);
 
+    vi.useFakeTimers();
     await renderController({ ...options, activeDocumentText: "select 2" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LSP_DOCUMENT_CHANGE_DEBOUNCE_MS);
+    });
     await eventually(() => expect(lspClient.didChange).toHaveBeenCalledTimes(1));
     expect(lspClient.didChange).toHaveBeenCalledWith(uriOne, "select 2", 2);
     expect(controller.documentTextsRef.current.get(uriOne)).toBe("select 2");
+  });
+
+  it("coalesces rapid editor revisions into the latest LSP change", async () => {
+    const lspClient = client();
+    const options: ControllerOptions = {
+      activeTabId: "tab-1",
+      activeDocumentText: "select 1",
+      canUseLsp: true,
+      documentLanguageId: "sql",
+      documentUri: uriOne,
+      lspClient,
+      lspReady: true,
+      lspSessionKey: "session-1",
+      tabs: [{ id: "tab-1", type: "query" }],
+    };
+
+    await renderController(options);
+    await eventually(() => expect(lspClient.didOpen).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+
+    await renderController({ ...options, activeDocumentText: "select 12" });
+    await renderController({ ...options, activeDocumentText: "select 123" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LSP_DOCUMENT_CHANGE_DEBOUNCE_MS);
+    });
+
+    await eventually(() => expect(lspClient.didChange).toHaveBeenCalledTimes(1));
+    expect(lspClient.didChange).toHaveBeenCalledWith(uriOne, "select 123", 2);
   });
 
   it("closes a late didOpen result after the editor context changes", async () => {

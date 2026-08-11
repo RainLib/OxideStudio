@@ -79,8 +79,6 @@ describe("query editor LSP completion presentation", () => {
       rankByUsage: false,
       usageScope: "project:connection:schema",
       recordUsageCommand: "record-completion",
-      appendSpace: true,
-      nextCharacter: "",
     });
 
     expect(suggestion).toMatchObject({
@@ -117,12 +115,10 @@ describe("query editor LSP completion presentation", () => {
       rankByUsage: true,
       usageScope: scope,
       recordUsageCommand: "record-completion",
-      appendSpace: true,
-      nextCharacter: "",
     });
 
     expect(suggestion.range).toBe(fallbackRange);
-    expect(suggestion.insertText).toBe(" customer_id ");
+    expect(suggestion.insertText).toBe(" customer_id");
     expect(suggestion.filterText).toBe("where");
     expect(suggestion.sortText).toMatch(/^0:\d{3}:customer_id$/);
     expect(suggestion.command).toEqual({

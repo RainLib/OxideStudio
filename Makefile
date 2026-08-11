@@ -1,4 +1,4 @@
-.PHONY: help setup install submodules dev dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db driver-conformance check cargo-check lsp-build ai ai-tools ai-manifest ai-inspect ai-mcp-smoke ai-mcp-stdio ai-plan clean info
+.PHONY: help setup install submodules dev run dev-no-watch start web preview build package test test-frontend test-rust test-lsp test-lsp-integration test-live-db driver-conformance check cargo-check lsp-build ai ai-tools ai-manifest ai-inspect ai-mcp-smoke ai-mcp-stdio ai-plan clean info
 
 .DEFAULT_GOAL := help
 
@@ -42,6 +42,9 @@ submodules: ## Initialize and update git submodules.
 	git submodule update --init --recursive
 
 dev: lsp-build ## Start the Tauri desktop app in development mode.
+	$(DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
+
+run: ## Start Tauri immediately using the prepared SQL LSP binary.
 	$(DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
 
 dev-no-watch: lsp-build ## Start Tauri dev without the Rust file watcher.

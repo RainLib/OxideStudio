@@ -10,6 +10,7 @@ import { EditorActionBar } from "./EditorActionBar";
 import { ThemeContext } from "@/theme/ThemeProvider";
 import Editor, { DiffEditor, useMonaco } from "@monaco-editor/react";
 import type { Selection } from "monaco-editor";
+import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import {
   useCallback,
@@ -290,9 +291,28 @@ export function QueryEditor({
   editorGroupId,
   onVimWindowNavigate,
 }: QueryEditorProps = {}) {
+  const storeActiveTabId = useTabStore((state) => state.activeTabId);
+  const effectiveTabId = tabId === undefined ? storeActiveTabId : tabId;
+  const activeTab = useTabStore((state) =>
+    state.tabs.find((candidate) => candidate.id === effectiveTabId),
+  );
+  const tabContextSignature = useTabStore((state) =>
+    state.tabs
+      .map((candidate) =>
+        [candidate.id, candidate.type, candidate.connectionId || ""].join("\u0001"),
+      )
+      .join("\u0000"),
+  );
+  const tabContexts = useMemo(
+    () =>
+      useTabStore.getState().tabs.map((candidate) => ({
+        id: candidate.id,
+        type: candidate.type,
+        connectionId: candidate.connectionId,
+      })),
+    [tabContextSignature],
+  );
   const {
-    tabs,
-    activeTabId,
     updateTabSql,
     setQueryLanguage,
     setElasticsearchVariables,
@@ -306,7 +326,23 @@ export function QueryEditor({
     setLspDiagnostics,
     applyEditorPatchPreview,
     dismissEditorPatch,
-  } = useTabStore(); // line 15...
+  } = useTabStore(
+    useShallow((state) => ({
+      updateTabSql: state.updateTabSql,
+      setQueryLanguage: state.setQueryLanguage,
+      setElasticsearchVariables: state.setElasticsearchVariables,
+      runTabQuery: state.runTabQuery,
+      runExplainPlan: state.runExplainPlan,
+      cancelTabQuery: state.cancelTabQuery,
+      setTargetSchema: state.setTargetSchema,
+      setTargetDatabase: state.setTargetDatabase,
+      setEditorSelection: state.setEditorSelection,
+      setEditorViewport: state.setEditorViewport,
+      setLspDiagnostics: state.setLspDiagnostics,
+      applyEditorPatchPreview: state.applyEditorPatchPreview,
+      dismissEditorPatch: state.dismissEditorPatch,
+    })),
+  );
   const activeConnectionId = useConnectionStore(
     (state) => state.activeConnectionId,
   );
@@ -349,7 +385,6 @@ export function QueryEditor({
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const [mountedEditor, setMountedEditor] = useState<any>(null);
-  const effectiveTabId = tabId === undefined ? activeTabId : tabId;
   const activeTabIdRef = useRef<string | null>(effectiveTabId);
   const vimControllerRef = useRef<VimModeController | null>(null);
   const vimModeRef = useRef("NORMAL");
@@ -383,7 +418,6 @@ export function QueryEditor({
     value: string;
   } | null>(null);
   const pendingElasticsearchSqlTimerRef = useRef<number | null>(null);
-  const activeTab = tabs.find((t) => t.id === effectiveTabId);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find(
     (c) => c.id === effectiveConnectionId,
@@ -658,7 +692,7 @@ export function QueryEditor({
     handleCommitTransaction,
     handleRollbackTransaction,
   } = useQueryTransactionController({
-    tabs,
+    tabs: tabContexts,
     connections,
     activeConnectionId,
     activeTabId: activeTab?.id,
@@ -798,7 +832,7 @@ export function QueryEditor({
     lspReady,
     lspSessionKey,
     monaco,
-    tabs,
+    tabs: tabContexts,
   });
   const lspSemanticStatus = useLspSemanticStatusStore((state) =>
     effectiveConnectionId ? state.byConnectionId[effectiveConnectionId] : undefined,
@@ -1699,7 +1733,6 @@ export function QueryEditor({
               rankByUsage,
               usageScope,
               recordUsageCommand: RECORD_COMPLETION_USAGE_COMMAND,
-              appendSpace: editorSettings.sqlCompletion.appendSpace,
               driver: completionDriver,
               nextCharacter,
               requestUri: uri,

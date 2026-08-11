@@ -3,7 +3,7 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useLspSemanticStatusStore } from "@/store/useLspSemanticStatusStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
-import { useTabStore } from "@/store/useTabStore";
+import { useTabStore, type TabData } from "@/store/useTabStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
@@ -42,6 +42,7 @@ import {
   createLspSyncPlan,
   lspCatalogKey,
   type LspCatalogTarget,
+  type LspSyncTab,
 } from "@/services/lsp/syncPlan";
 import {
   DEFAULT_LSP_METADATA_BATCHING,
@@ -67,6 +68,7 @@ import { v4 as uuidv4 } from "uuid";
 const LSP_METADATA_CACHE_TTL_MS = 60_000;
 const LSP_PROGRESS_PUBLISH_INTERVAL_MS = 1_000;
 const LSP_PROGRESS_PUBLISH_BATCHES = 8;
+const LSP_TAB_SNAPSHOT_DEBOUNCE_MS = 160;
 const EXACT_GENERATED_COLUMN_METADATA_DRIVERS = new Set([
   "postgres",
   "mysql",
@@ -74,6 +76,100 @@ const EXACT_GENERATED_COLUMN_METADATA_DRIVERS = new Set([
 ]);
 
 type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
+
+function lspTabSnapshot(tabs: TabData[]): LspSyncTab[] {
+  return tabs.map((tab) => ({
+    id: tab.id,
+    type: tab.type,
+    connectionId: tab.connectionId,
+    databaseName: tab.databaseName,
+    targetSchema: tab.targetSchema,
+    schemaName: tab.schemaName,
+    tableName: tab.tableName,
+    sql: tab.sql,
+  }));
+}
+
+function lspTabSnapshotsEqual(
+  left: readonly LspSyncTab[],
+  right: readonly LspSyncTab[],
+) {
+  if (left.length !== right.length) return false;
+  return left.every((tab, index) => {
+    const candidate = right[index];
+    return Boolean(
+      candidate &&
+        tab.id === candidate.id &&
+        tab.type === candidate.type &&
+        tab.connectionId === candidate.connectionId &&
+        tab.databaseName === candidate.databaseName &&
+        tab.targetSchema === candidate.targetSchema &&
+        tab.schemaName === candidate.schemaName &&
+        tab.tableName === candidate.tableName &&
+        tab.sql === candidate.sql,
+    );
+  });
+}
+
+function lspTabStructuresEqual(
+  left: readonly LspSyncTab[],
+  right: readonly LspSyncTab[],
+) {
+  if (left.length !== right.length) return false;
+  return left.every((tab, index) => {
+    const candidate = right[index];
+    return Boolean(
+      candidate &&
+        tab.id === candidate.id &&
+        tab.type === candidate.type &&
+        tab.connectionId === candidate.connectionId &&
+        tab.databaseName === candidate.databaseName &&
+        tab.targetSchema === candidate.targetSchema &&
+        tab.schemaName === candidate.schemaName &&
+        tab.tableName === candidate.tableName,
+    );
+  });
+}
+
+/**
+ * Tab result, cursor, viewport and editor text updates all share one Zustand
+ * collection. Publish structural changes immediately, but only publish SQL text
+ * after editor input goes idle. This keeps document closure and target changes
+ * responsive without rebuilding and reparsing the sync plan on every keystroke.
+ */
+function useDebouncedLspTabSnapshot() {
+  const [tabs, setTabs] = useState(() =>
+    lspTabSnapshot(useTabStore.getState().tabs),
+  );
+  const latestRef = useRef(tabs);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = useTabStore.subscribe((state) => {
+      const next = lspTabSnapshot(state.tabs);
+      if (lspTabSnapshotsEqual(latestRef.current, next)) return;
+      const structureChanged = !lspTabStructuresEqual(latestRef.current, next);
+      latestRef.current = next;
+      if (timer !== null) clearTimeout(timer);
+      if (structureChanged) {
+        timer = null;
+        setTabs(next);
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        setTabs(latestRef.current);
+      }, LSP_TAB_SNAPSHOT_DEBOUNCE_MS);
+    });
+
+    return () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, []);
+
+  return tabs;
+}
 
 type OpenProjectLspDocument = {
   client: LspClient;
@@ -134,7 +230,7 @@ export function LspConnectionSyncer() {
   const tables = useSchemaStore((state) => state.tables);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
-  const tabs = useTabStore((state) => state.tabs);
+  const tabs = useDebouncedLspTabSnapshot();
   const activeTabId = useTabStore((state) => state.activeTabId);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProjectRoot = useProjectStore((state) =>

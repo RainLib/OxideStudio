@@ -39,6 +39,7 @@ type DocumentSession = {
 // settled. Serialize by LSP session + URI across hook instances so the old
 // cleanup always finishes before the replacement opens the document.
 const lifecycleSyncChains = new Map<string, Promise<void>>();
+export const LSP_DOCUMENT_CHANGE_DEBOUNCE_MS = 120;
 
 /**
  * Owns the virtual LSP document registry used by Monaco providers.
@@ -67,6 +68,10 @@ export function useLspDocumentLifecycle({
   const completionRequestGenerationRef = useRef<Map<string, number>>(new Map());
   const activeDocumentUriRef = useRef<string | null>(null);
   const lifecycleGenerationRef = useRef(0);
+  const requestedDocumentKeyRef = useRef<string | null>(null);
+  const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const runtimeKey = lspReady ? lspSessionKey : null;
   const previousRuntimeKeyRef = useRef<string | null>(runtimeKey);
   const activeSyncKey =
@@ -78,6 +83,7 @@ export function useLspDocumentLifecycle({
   if (previousActiveSyncKeyRef.current !== activeSyncKey) {
     previousActiveSyncKeyRef.current = activeSyncKey;
     lifecycleGenerationRef.current += 1;
+    requestedDocumentKeyRef.current = null;
   }
 
   const forgetDocument = (uri: string) => {
@@ -126,54 +132,84 @@ export function useLspDocumentLifecycle({
       if (staleOwner) void staleOwner.client.didClose(staleUri);
     }
 
-    void enqueueLspDocumentSync(
-      lifecycleSyncChains,
-      `${lspSessionKey}\u0000${documentUri}`,
-      async () => {
-        if (
-          lifecycleGenerationRef.current !== generation ||
-          activeDocumentUriRef.current !== documentUri
-        ) {
-          return;
-        }
-
-        const owner = documentSessionsRef.current.get(documentUri);
-        if (owner?.sessionKey !== lspSessionKey) {
-          documentSessionsRef.current.delete(documentUri);
-          if (owner) {
-            await owner.client.didClose(documentUri).catch(() => undefined);
+    const syncChainKey = `${lspSessionKey}\u0000${documentUri}`;
+    const synchronizeDocument = () => {
+      documentChangeTimerRef.current = null;
+      void enqueueLspDocumentSync(
+        lifecycleSyncChains,
+        syncChainKey,
+        async () => {
+          if (
+            lifecycleGenerationRef.current !== generation ||
+            activeDocumentUriRef.current !== documentUri
+          ) {
+            return;
           }
-        }
 
-        await syncLspModelBeforeCompletion({
-          uri: documentUri,
-          model: { getValue: () => activeDocumentText },
-          languageId: documentLanguageId,
-          client: lspClient,
-          openedDocuments: openedDocumentsRef.current,
-          documentVersions: documentVersionsRef.current,
-          documentTexts: documentTextsRef.current,
-        });
+          const owner = documentSessionsRef.current.get(documentUri);
+          if (owner?.sessionKey !== lspSessionKey) {
+            documentSessionsRef.current.delete(documentUri);
+            if (owner) {
+              await owner.client.didClose(documentUri).catch(() => undefined);
+            }
+          }
 
-        if (
-          lifecycleGenerationRef.current !== generation ||
-          activeDocumentUriRef.current !== documentUri ||
-          !openedDocumentsRef.current.has(documentUri)
-        ) {
-          forgetDocument(documentUri);
-          await lspClient.didClose(documentUri).catch(() => undefined);
-          return;
-        }
+          await syncLspModelBeforeCompletion({
+            uri: documentUri,
+            model: { getValue: () => activeDocumentText },
+            languageId: documentLanguageId,
+            client: lspClient,
+            openedDocuments: openedDocumentsRef.current,
+            documentVersions: documentVersionsRef.current,
+            documentTexts: documentTextsRef.current,
+          });
 
-        documentSessionsRef.current.set(documentUri, {
-          sessionKey: lspSessionKey,
-          client: lspClient,
-        });
-      },
-    ).catch((error) => {
-      // Completion retries the exact failed revision through this same FIFO.
-      console.debug("[LSP] Deferred document synchronization failed:", error);
-    });
+          if (
+            lifecycleGenerationRef.current !== generation ||
+            activeDocumentUriRef.current !== documentUri ||
+            !openedDocumentsRef.current.has(documentUri)
+          ) {
+            forgetDocument(documentUri);
+            await lspClient.didClose(documentUri).catch(() => undefined);
+            return;
+          }
+
+          documentSessionsRef.current.set(documentUri, {
+            sessionKey: lspSessionKey,
+            client: lspClient,
+          });
+        },
+      ).catch((error) => {
+        // Completion retries the exact failed revision through this same FIFO.
+        console.debug("[LSP] Deferred document synchronization failed:", error);
+      });
+    };
+
+    // didOpen remains immediate. Once a document is open (or its open is
+    // already queued), collapse rapid editor revisions into the latest text.
+    // Completion still calls syncLspModelBeforeCompletion directly, so an
+    // explicit request never observes a stale revision while ordinary typing
+    // cannot build an unbounded FIFO of full-document didChange payloads.
+    const hasOpenOrRequestedDocument =
+      openedDocumentsRef.current.has(documentUri) ||
+      documentSessionsRef.current.has(documentUri) ||
+      requestedDocumentKeyRef.current === syncChainKey;
+    if (!hasOpenOrRequestedDocument) {
+      requestedDocumentKeyRef.current = syncChainKey;
+      synchronizeDocument();
+      return;
+    }
+
+    const timer = setTimeout(
+      synchronizeDocument,
+      LSP_DOCUMENT_CHANGE_DEBOUNCE_MS,
+    );
+    documentChangeTimerRef.current = timer;
+    return () => {
+      if (documentChangeTimerRef.current !== timer) return;
+      clearTimeout(timer);
+      documentChangeTimerRef.current = null;
+    };
   }, [
     activeDocumentText,
     activeTabId,
@@ -207,6 +243,10 @@ export function useLspDocumentLifecycle({
     return () => {
       lifecycleGenerationRef.current += 1;
       activeDocumentUriRef.current = null;
+      if (documentChangeTimerRef.current !== null) {
+        clearTimeout(documentChangeTimerRef.current);
+        documentChangeTimerRef.current = null;
+      }
       for (const [uri, owner] of documentSessionsRef.current) {
         void owner.client.didClose(uri);
         clearMarkers(uri);
