@@ -14,7 +14,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { aiService } from "@/services/tauri/ai.service";
+import {
+  aiService,
+  type AiCliModelInfo,
+  type AiCliProviderConfig,
+} from "@/services/tauri/ai.service";
 import { agentHostService } from "@/services/tauri/agent-host.service";
 import { databaseService } from "@/services/tauri/database.service";
 import type {
@@ -269,6 +273,7 @@ export function SettingsDialog({
   const updateSettings = useSettingsStore((state) => state.updateSettings);
   const resetSettings = useSettingsStore((state) => state.resetSettings);
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
+  const aiProvider = useAiSettingsStore((state) => state.provider);
   const aiBaseUrl = useAiSettingsStore((state) => state.baseUrl);
   const aiModel = useAiSettingsStore((state) => state.model);
   const aiApiKey = useAiSettingsStore((state) => state.apiKey);
@@ -290,6 +295,37 @@ export function SettingsDialog({
   const aiInlineCompletionModel = useAiSettingsStore(
     (state) => state.inlineCompletionModel
   );
+  const aiInlineBaseUrl = useAiSettingsStore((state) => state.inlineBaseUrl);
+  const aiInlineApiKey = useAiSettingsStore((state) => state.inlineApiKey);
+  const aiInlineTimeoutMs = useAiSettingsStore(
+    (state) => state.inlineTimeoutMs,
+  );
+  const codexCliProfileId = useAiSettingsStore(
+    (state) => state.codexCliProfileId,
+  );
+  const codexCliPath = useAiSettingsStore((state) => state.codexCliPath);
+  const codexCliModel = useAiSettingsStore((state) => state.codexCliModel);
+  const codexCliReasoningEffort = useAiSettingsStore(
+    (state) => state.codexCliReasoningEffort,
+  );
+  const codexCliEnvironmentDraft = useAiSettingsStore(
+    (state) => state.codexCliEnvironmentDraft,
+  );
+  const codeBuddyCliProfileId = useAiSettingsStore(
+    (state) => state.codeBuddyCliProfileId,
+  );
+  const codeBuddyCliPath = useAiSettingsStore(
+    (state) => state.codeBuddyCliPath,
+  );
+  const codeBuddyCliModel = useAiSettingsStore(
+    (state) => state.codeBuddyCliModel,
+  );
+  const codeBuddyCliReasoningEffort = useAiSettingsStore(
+    (state) => state.codeBuddyCliReasoningEffort,
+  );
+  const codeBuddyCliEnvironmentDraft = useAiSettingsStore(
+    (state) => state.codeBuddyCliEnvironmentDraft,
+  );
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProjectName = useProjectStore((state) => state.activeProjectName);
   const setAiEnabled = useAiSettingsStore((state) => state.setEnabled);
@@ -310,6 +346,7 @@ export function SettingsDialog({
   const [isTestingAi, setIsTestingAi] = useState(false);
   const [isSavingAiSecret, setIsSavingAiSecret] = useState(false);
   const [hasAiProviderSecret, setHasAiProviderSecret] = useState(false);
+  const [hasInlineProviderSecret, setHasInlineProviderSecret] = useState(false);
   const aiSecretSaveRef = useRef<Promise<boolean> | null>(null);
   const [isClearingAgentState, setIsClearingAgentState] = useState(false);
   const [agentStateMessage, setAgentStateMessage] = useState<{
@@ -340,6 +377,50 @@ export function SettingsDialog({
   }, [aiBaseUrl, open]);
 
   useEffect(() => {
+    const baseUrl = aiInlineBaseUrl.trim();
+    if (!open || !baseUrl) {
+      setHasInlineProviderSecret(false);
+      return;
+    }
+    let active = true;
+    void aiService
+      .hasProviderSecret(baseUrl)
+      .then((available) => {
+        if (active) setHasInlineProviderSecret(available);
+      })
+      .catch(() => {
+        if (active) setHasInlineProviderSecret(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [aiInlineBaseUrl, open]);
+
+  useEffect(() => {
+    if (!open || aiProvider === "openai-compatible") return;
+    const profileId =
+      aiProvider === "codex-cli"
+        ? codexCliProfileId
+        : codeBuddyCliProfileId;
+    void aiService
+      .getCliEnvironment(aiProvider, profileId)
+      .then((environment) =>
+        updateAiSettings(
+          aiProvider === "codex-cli"
+            ? { codexCliEnvironmentDraft: environment }
+            : { codeBuddyCliEnvironmentDraft: environment },
+        ),
+      )
+      .catch(() => undefined);
+  }, [
+    aiProvider,
+    codeBuddyCliProfileId,
+    codexCliProfileId,
+    open,
+    updateAiSettings,
+  ]);
+
+  useEffect(() => {
     if (open && initialSection) {
       setActiveSection(initialSection);
     }
@@ -367,7 +448,14 @@ export function SettingsDialog({
   if (!themeContext) return null;
   const { mode, setTheme } = themeContext;
   const currentMeta = localizedSectionMeta[activeSection];
-  const canTestAi = Boolean(aiBaseUrl.trim() && aiModel.trim());
+  const canTestAi = Boolean(
+    aiEnabled &&
+      (aiProvider === "openai-compatible"
+        ? aiBaseUrl.trim() && aiModel.trim()
+        : aiProvider === "codex-cli"
+          ? codexCliModel.trim()
+          : codeBuddyCliModel.trim()),
+  );
 
   const updateAppSettings = (updates: Partial<AppSettings>) => {
     void updateSettings(updates);
@@ -420,19 +508,39 @@ export function SettingsDialog({
     setAiTestState(null);
     setIsTestingAi(true);
     try {
-      if (aiApiKey.trim() && !(await persistAiProviderSecret())) return;
-      const result = await aiService.testProvider({
-        kind: "openai-compatible",
-        baseUrl: aiBaseUrl.trim(),
-        model: aiModel.trim(),
-        // Test the persisted credential path used by the Agent Host. Passing
-        // the draft directly would hide a failed credential-file save.
-        apiKey: undefined,
-        timeoutMs: aiTimeoutMs,
-      });
+      if (
+        aiProvider === "openai-compatible" &&
+        aiApiKey.trim() &&
+        !(await persistAiProviderSecret())
+      ) {
+        return;
+      }
+      const provider = useAiSettingsStore.getState().assistantProviderConfig();
+      if (!provider) throw new Error("Configure and enable an AI provider first.");
+      if (provider.kind !== "openai-compatible") {
+        const environment =
+          provider.kind === "codex-cli"
+            ? codexCliEnvironmentDraft
+            : codeBuddyCliEnvironmentDraft;
+        const keys = await aiService.setCliEnvironment(
+          provider.kind,
+          provider.profileId,
+          environment,
+        );
+        updateAiSettings(
+          provider.kind === "codex-cli"
+            ? { codexCliEnvironmentKeys: keys }
+            : { codeBuddyCliEnvironmentKeys: keys },
+        );
+      }
+      const result = await aiService.testProvider(
+        provider.kind === "openai-compatible"
+          ? { ...provider, apiKey: undefined }
+          : provider,
+      );
       setAiTestState({
         status: "success",
-        message: `${result.message}: ${result.model}`,
+        message: `${result.message}: ${result.model}${result.version ? ` (${result.version})` : ""}`,
       });
     } catch (error: any) {
       setAiTestState({
@@ -442,6 +550,33 @@ export function SettingsDialog({
     } finally {
       setIsTestingAi(false);
     }
+  };
+
+  const persistInlineProviderSecret = async () => {
+    const secret = aiInlineApiKey.trim();
+    const baseUrl = aiInlineBaseUrl.trim();
+    if (!secret || !baseUrl) return;
+    setIsSavingAiSecret(true);
+    try {
+      await aiService.setProviderSecret(baseUrl, secret);
+      updateAiSettings({ inlineApiKey: "" });
+      setHasInlineProviderSecret(true);
+      setAiTestState({
+        status: "success",
+        message: "Inline completion API key saved in the local credential file.",
+      });
+    } catch (error: any) {
+      setAiTestState({ status: "error", message: error?.message || String(error) });
+    } finally {
+      setIsSavingAiSecret(false);
+    }
+  };
+
+  const removeInlineProviderSecret = async () => {
+    if (!aiInlineBaseUrl.trim()) return;
+    await aiService.setProviderSecret(aiInlineBaseUrl.trim());
+    updateAiSettings({ inlineApiKey: "" });
+    setHasInlineProviderSecret(false);
   };
 
   const removeAiProviderSecret = async () => {
@@ -618,6 +753,7 @@ export function SettingsDialog({
               {activeSection === "ai" && (
                 <AiSettings
                   aiEnabled={aiEnabled}
+                  aiProvider={aiProvider}
                   aiBaseUrl={aiBaseUrl}
                   aiModel={aiModel}
                   aiApiKey={aiApiKey}
@@ -630,6 +766,20 @@ export function SettingsDialog({
                   aiMaxOutputTokens={aiMaxOutputTokens}
                   aiInlineCompletionProtocol={aiInlineCompletionProtocol}
                   aiInlineCompletionModel={aiInlineCompletionModel}
+                  aiInlineBaseUrl={aiInlineBaseUrl}
+                  aiInlineApiKey={aiInlineApiKey}
+                  aiInlineTimeoutMs={aiInlineTimeoutMs}
+                  hasInlineProviderSecret={hasInlineProviderSecret}
+                  codexCliProfileId={codexCliProfileId}
+                  codexCliPath={codexCliPath}
+                  codexCliModel={codexCliModel}
+                  codexCliReasoningEffort={codexCliReasoningEffort}
+                  codexCliEnvironmentDraft={codexCliEnvironmentDraft}
+                  codeBuddyCliProfileId={codeBuddyCliProfileId}
+                  codeBuddyCliPath={codeBuddyCliPath}
+                  codeBuddyCliModel={codeBuddyCliModel}
+                  codeBuddyCliReasoningEffort={codeBuddyCliReasoningEffort}
+                  codeBuddyCliEnvironmentDraft={codeBuddyCliEnvironmentDraft}
                   settings={appSettings}
                   onUpdate={updateAppSettings}
                   setAiEnabled={setAiEnabled}
@@ -641,6 +791,8 @@ export function SettingsDialog({
                   onTest={handleTestAiProvider}
                   onPersistSecret={() => void persistAiProviderSecret()}
                   onRemoveSecret={() => void removeAiProviderSecret()}
+                  onPersistInlineSecret={() => void persistInlineProviderSecret()}
+                  onRemoveInlineSecret={() => void removeInlineProviderSecret()}
                   activeProjectName={activeProjectName}
                   isClearingAgentState={isClearingAgentState}
                   agentStateMessage={agentStateMessage}
@@ -3010,6 +3162,7 @@ function DriverManagementSettings() {
 
 function AiSettings({
   aiEnabled,
+  aiProvider,
   aiBaseUrl,
   aiModel,
   aiApiKey,
@@ -3022,6 +3175,20 @@ function AiSettings({
   aiMaxOutputTokens,
   aiInlineCompletionProtocol,
   aiInlineCompletionModel,
+  aiInlineBaseUrl,
+  aiInlineApiKey,
+  aiInlineTimeoutMs,
+  hasInlineProviderSecret,
+  codexCliProfileId,
+  codexCliPath,
+  codexCliModel,
+  codexCliReasoningEffort,
+  codexCliEnvironmentDraft,
+  codeBuddyCliProfileId,
+  codeBuddyCliPath,
+  codeBuddyCliModel,
+  codeBuddyCliReasoningEffort,
+  codeBuddyCliEnvironmentDraft,
   settings,
   onUpdate,
   setAiEnabled,
@@ -3033,12 +3200,15 @@ function AiSettings({
   onTest,
   onPersistSecret,
   onRemoveSecret,
+  onPersistInlineSecret,
+  onRemoveInlineSecret,
   activeProjectName,
   isClearingAgentState,
   agentStateMessage,
   onClearAgentState,
 }: {
   aiEnabled: boolean;
+  aiProvider: "openai-compatible" | "codex-cli" | "codebuddy-cli";
   aiBaseUrl: string;
   aiModel: string;
   aiApiKey: string;
@@ -3051,10 +3221,25 @@ function AiSettings({
   aiMaxOutputTokens: number;
   aiInlineCompletionProtocol: "chat-completions" | "text-completions-fim";
   aiInlineCompletionModel: string;
+  aiInlineBaseUrl: string;
+  aiInlineApiKey: string;
+  aiInlineTimeoutMs: number;
+  hasInlineProviderSecret: boolean;
+  codexCliProfileId: string;
+  codexCliPath: string;
+  codexCliModel: string;
+  codexCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+  codexCliEnvironmentDraft: Record<string, string>;
+  codeBuddyCliProfileId: string;
+  codeBuddyCliPath: string;
+  codeBuddyCliModel: string;
+  codeBuddyCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+  codeBuddyCliEnvironmentDraft: Record<string, string>;
   settings: AppSettings;
   onUpdate: (updates: Partial<AppSettings>) => void;
   setAiEnabled: (enabled: boolean) => void;
   updateAiSettings: (settings: Partial<{
+    provider: "openai-compatible" | "codex-cli" | "codebuddy-cli";
     baseUrl: string;
     model: string;
     apiKey: string;
@@ -3066,6 +3251,19 @@ function AiSettings({
     maxOutputTokens: number;
     inlineCompletionProtocol: "chat-completions" | "text-completions-fim";
     inlineCompletionModel: string;
+    inlineBaseUrl: string;
+    inlineApiKey: string;
+    inlineTimeoutMs: number;
+    codexCliPath: string;
+    codexCliModel: string;
+    codexCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+    codexCliEnvironmentKeys: string[];
+    codexCliEnvironmentDraft: Record<string, string>;
+    codeBuddyCliPath: string;
+    codeBuddyCliModel: string;
+    codeBuddyCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+    codeBuddyCliEnvironmentKeys: string[];
+    codeBuddyCliEnvironmentDraft: Record<string, string>;
   }>) => void;
   canTestAi: boolean;
   isTestingAi: boolean;
@@ -3074,12 +3272,145 @@ function AiSettings({
   onTest: () => void;
   onPersistSecret: () => void;
   onRemoveSecret: () => void;
+  onPersistInlineSecret: () => void;
+  onRemoveInlineSecret: () => void;
   activeProjectName: string;
   isClearingAgentState: boolean;
   agentStateMessage: { status: "success" | "error"; message: string } | null;
   onClearAgentState: () => void;
 }) {
   const inlineCompletion = settings.editor.inlineCompletion;
+  const [cliModels, setCliModels] = useState<AiCliModelInfo[]>([]);
+  const [cliEfforts, setCliEfforts] = useState<string[]>([]);
+  const [cliStatus, setCliStatus] = useState<{
+    status: "idle" | "loading" | "success" | "error";
+    message?: string;
+  }>({ status: "idle" });
+  const cliConfig: AiCliProviderConfig | null =
+    aiProvider === "codex-cli"
+      ? {
+          kind: "codex-cli",
+          profileId: codexCliProfileId,
+          executablePath: codexCliPath.trim() || undefined,
+          model: codexCliModel.trim() || "default",
+          reasoningEffort: codexCliReasoningEffort,
+          timeoutMs: aiTimeoutMs,
+        }
+      : aiProvider === "codebuddy-cli"
+        ? {
+            kind: "codebuddy-cli",
+            profileId: codeBuddyCliProfileId,
+            executablePath: codeBuddyCliPath.trim() || undefined,
+            model: codeBuddyCliModel.trim() || "default",
+            reasoningEffort: codeBuddyCliReasoningEffort,
+            timeoutMs: aiTimeoutMs,
+          }
+        : null;
+  const cliEnvironment =
+    aiProvider === "codex-cli"
+      ? codexCliEnvironmentDraft
+      : codeBuddyCliEnvironmentDraft;
+
+  useEffect(() => {
+    setCliModels([]);
+    setCliEfforts([]);
+    setCliStatus({ status: "idle" });
+  }, [aiProvider, codexCliPath, codeBuddyCliPath]);
+
+  const persistCliEnvironment = async () => {
+    if (!cliConfig) return;
+    const keys = await aiService.setCliEnvironment(
+      cliConfig.kind,
+      cliConfig.profileId,
+      cliEnvironment,
+    );
+    updateAiSettings(
+      cliConfig.kind === "codex-cli"
+        ? { codexCliEnvironmentKeys: keys }
+        : { codeBuddyCliEnvironmentKeys: keys },
+    );
+  };
+
+  const detectCli = async () => {
+    if (!cliConfig) return;
+    setCliStatus({ status: "loading", message: "Detecting CLI..." });
+    try {
+      await persistCliEnvironment();
+      const result = await aiService.detectCliProvider(cliConfig);
+      if (result.available && result.executablePath) {
+        updateAiSettings(
+          cliConfig.kind === "codex-cli"
+            ? { codexCliPath: result.executablePath }
+            : { codeBuddyCliPath: result.executablePath },
+        );
+      }
+      setCliStatus({
+        status: result.available ? "success" : "error",
+        message: result.version
+          ? `${result.message} (${result.version})`
+          : result.message,
+      });
+    } catch (error: any) {
+      setCliStatus({ status: "error", message: error?.message || String(error) });
+    }
+  };
+
+  const refreshCliModels = async () => {
+    if (!cliConfig) return;
+    setCliStatus({ status: "loading", message: "Loading models..." });
+    try {
+      await persistCliEnvironment();
+      const models = await aiService.listCliModels(cliConfig);
+      setCliModels(models);
+      const efforts = await aiService.listCliEfforts(cliConfig).catch(() => []);
+      setCliEfforts(efforts);
+      setCliStatus({
+        status: "success",
+        message: `Loaded ${models.length} model${models.length === 1 ? "" : "s"}.`,
+      });
+    } catch (error: any) {
+      setCliStatus({ status: "error", message: error?.message || String(error) });
+    }
+  };
+
+  const selectCliExecutable = async () => {
+    if (!cliConfig) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title:
+        cliConfig.kind === "codex-cli"
+          ? "Choose Codex CLI executable"
+          : "Choose CodeBuddy Code CLI executable",
+    });
+    if (typeof selected !== "string") return;
+    updateAiSettings(
+      cliConfig.kind === "codex-cli"
+        ? { codexCliPath: selected }
+        : { codeBuddyCliPath: selected },
+    );
+  };
+
+  const updateCliEnvironmentText = (value: string) => {
+    const environment = Object.fromEntries(
+      value
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const separator = line.indexOf("=");
+          return separator < 0
+            ? [line, ""]
+            : [line.slice(0, separator).trim(), line.slice(separator + 1)];
+        }),
+    );
+    updateAiSettings(
+      aiProvider === "codex-cli"
+        ? { codexCliEnvironmentDraft: environment }
+        : { codeBuddyCliEnvironmentDraft: environment },
+    );
+  };
   const updateInlineCompletion = (
     patch: Partial<AppSettings["editor"]["inlineCompletion"]>
   ) =>
@@ -3103,6 +3434,26 @@ function AiSettings({
         Choose O2, Plan, Agent, or Chat from the assistant composer. Planning and
         tool orchestration are selected automatically for the active mode.
       </p>
+      <SettingRow label="Provider:">
+        <select
+          className={selectClass}
+          value={aiProvider}
+          onChange={(event) =>
+            updateAiSettings({
+              provider: event.target.value as
+                | "openai-compatible"
+                | "codex-cli"
+                | "codebuddy-cli",
+            })
+          }
+        >
+          <option value="openai-compatible">OpenAI compatible</option>
+          <option value="codex-cli">Codex CLI (no API key)</option>
+          <option value="codebuddy-cli">CodeBuddy Code CLI (no API key)</option>
+        </select>
+      </SettingRow>
+      {aiProvider === "openai-compatible" ? (
+        <>
       <SettingRow label="Base URL:">
         <div>
           <SettingsInput
@@ -3150,6 +3501,152 @@ function AiSettings({
         the project or browser storage. The credential file is restricted to the
         current OS user.
       </p>
+        </>
+      ) : (
+        <>
+          <SettingRow label="Executable:">
+            <div className="flex items-center gap-2">
+              <SettingsInput
+                value={aiProvider === "codex-cli" ? codexCliPath : codeBuddyCliPath}
+                onChange={(value) =>
+                  updateAiSettings(
+                    aiProvider === "codex-cli"
+                      ? { codexCliPath: value }
+                      : { codeBuddyCliPath: value },
+                  )
+                }
+                placeholder={
+                  aiProvider === "codex-cli"
+                    ? "Auto-detect codex"
+                    : "Auto-detect codebuddy or cbc"
+                }
+              />
+              <SettingsButton onClick={() => void selectCliExecutable()}>
+                Browse…
+              </SettingsButton>
+              <SettingsButton
+                onClick={() => void detectCli()}
+                disabled={cliStatus.status === "loading"}
+              >
+                Detect
+              </SettingsButton>
+            </div>
+          </SettingRow>
+          <SettingRow label="Model:">
+            <div className="flex items-center gap-2">
+              {cliModels.length ? (
+                <select
+                  className={selectClass}
+                  value={aiProvider === "codex-cli" ? codexCliModel : codeBuddyCliModel}
+                  onChange={(event) =>
+                    updateAiSettings(
+                      aiProvider === "codex-cli"
+                        ? { codexCliModel: event.target.value }
+                        : { codeBuddyCliModel: event.target.value },
+                    )
+                  }
+                >
+                  {cliModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <SettingsInput
+                  value={aiProvider === "codex-cli" ? codexCliModel : codeBuddyCliModel}
+                  onChange={(value) =>
+                    updateAiSettings(
+                      aiProvider === "codex-cli"
+                        ? { codexCliModel: value }
+                        : { codeBuddyCliModel: value },
+                    )
+                  }
+                  placeholder="default"
+                />
+              )}
+              <SettingsButton
+                onClick={() => void refreshCliModels()}
+                disabled={cliStatus.status === "loading"}
+              >
+                Refresh
+              </SettingsButton>
+            </div>
+          </SettingRow>
+          <SettingRow label="Reasoning:">
+            <select
+              className={selectClass}
+              value={
+                aiProvider === "codex-cli"
+                  ? codexCliReasoningEffort
+                  : codeBuddyCliReasoningEffort
+              }
+              onChange={(event) =>
+                updateAiSettings(
+                  aiProvider === "codex-cli"
+                    ? {
+                        codexCliReasoningEffort: event.target.value as
+                          | "default"
+                          | "low"
+                          | "medium"
+                          | "high"
+                          | "xhigh",
+                      }
+                    : {
+                        codeBuddyCliReasoningEffort: event.target.value as
+                          | "default"
+                          | "low"
+                          | "medium"
+                          | "high"
+                          | "xhigh",
+                      },
+                )
+              }
+            >
+              <option value="default">Provider default</option>
+              {(cliEfforts.length
+                ? cliEfforts
+                : ["low", "medium", "high", "xhigh"]
+              )
+                .filter((effort) => effort !== "default" && effort !== "enabled")
+                .map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+            </select>
+          </SettingRow>
+          <SettingRow label="Environment:">
+            <div>
+              <textarea
+                className="min-h-24 w-full resize-y rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 py-1.5 font-mono text-[11px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent))]"
+                value={Object.entries(cliEnvironment)
+                  .map(([name, value]) => `${name}=${value}`)
+                  .join("\n")}
+                onChange={(event) => updateCliEnvironmentText(event.target.value)}
+                onBlur={() => void persistCliEnvironment()}
+                placeholder="HTTPS_PROXY=http://127.0.0.1:7890"
+              />
+              <p className="mt-1 text-[11px] text-[hsl(var(--wb-text-muted))]">
+                Values are stored only in the private Rust credential store.
+                OXIDE_* and internal bridge variables are reserved.
+              </p>
+            </div>
+          </SettingRow>
+          {cliStatus.message && (
+            <p
+              className={cn(
+                "mb-2 ml-[148px] text-[11px]",
+                cliStatus.status === "error"
+                  ? "text-[hsl(var(--destructive))]"
+                  : "text-[hsl(var(--wb-text-muted))]",
+              )}
+            >
+              {cliStatus.message}
+            </p>
+          )}
+        </>
+      )}
       <SettingRow label="Timeout ms:">
         <NumberInput
           value={aiTimeoutMs}
@@ -3177,23 +3674,27 @@ function AiSettings({
           onChange={(maxOutputTokens) => updateAiSettings({ maxOutputTokens })}
         />
       </SettingRow>
-      <CheckboxLabel
-        label="Model supports streaming"
-        checked={aiStreaming}
-        onChange={() => updateAiSettings({ streaming: !aiStreaming })}
-      />
-      <CheckboxLabel
-        label="Model supports tool calling"
-        checked={aiToolCalling}
-        onChange={() => updateAiSettings({ toolCalling: !aiToolCalling })}
-      />
-      <CheckboxLabel
-        label="Model supports structured output"
-        checked={aiStructuredOutput}
-        onChange={() =>
-          updateAiSettings({ structuredOutput: !aiStructuredOutput })
-        }
-      />
+      {aiProvider === "openai-compatible" && (
+        <>
+          <CheckboxLabel
+            label="Model supports streaming"
+            checked={aiStreaming}
+            onChange={() => updateAiSettings({ streaming: !aiStreaming })}
+          />
+          <CheckboxLabel
+            label="Model supports tool calling"
+            checked={aiToolCalling}
+            onChange={() => updateAiSettings({ toolCalling: !aiToolCalling })}
+          />
+          <CheckboxLabel
+            label="Model supports structured output"
+            checked={aiStructuredOutput}
+            onChange={() =>
+              updateAiSettings({ structuredOutput: !aiStructuredOutput })
+            }
+          />
+        </>
+      )}
 
       <div className="mt-4 flex items-center gap-3">
         <SettingsButton onClick={onTest} disabled={!canTestAi || isTestingAi}>
@@ -3250,6 +3751,48 @@ function AiSettings({
           })
         }
       />
+      <SettingRow label="Base URL:">
+        <SettingsInput
+          value={aiInlineBaseUrl}
+          onChange={(inlineBaseUrl) => updateAiSettings({ inlineBaseUrl })}
+          placeholder="https://api.openai.com/v1"
+        />
+      </SettingRow>
+      <SettingRow label="API Key:">
+        <div className="flex items-center gap-2">
+          <SettingsInput
+            type="password"
+            value={aiInlineApiKey}
+            onChange={(inlineApiKey) => updateAiSettings({ inlineApiKey })}
+            onBlur={onPersistInlineSecret}
+            placeholder={
+              hasInlineProviderSecret
+                ? "Stored in local credential file"
+                : "sk-..."
+            }
+          />
+          {aiInlineApiKey.trim() && (
+            <SettingsButton
+              onClick={onPersistInlineSecret}
+              disabled={isSavingAiSecret}
+            >
+              Save
+            </SettingsButton>
+          )}
+          {hasInlineProviderSecret && (
+            <SettingsButton onClick={onRemoveInlineSecret}>Remove</SettingsButton>
+          )}
+        </div>
+      </SettingRow>
+      <SettingRow label="Timeout ms:">
+        <NumberInput
+          value={aiInlineTimeoutMs}
+          min={1_000}
+          max={15_000}
+          step={500}
+          onChange={(inlineTimeoutMs) => updateAiSettings({ inlineTimeoutMs })}
+        />
+      </SettingRow>
       <SettingRow label="Protocol:">
         <select
           className={selectClass}
@@ -3272,7 +3815,7 @@ function AiSettings({
           onChange={(inlineCompletionModel) =>
             updateAiSettings({ inlineCompletionModel })
           }
-          placeholder={`Use assistant model (${aiModel || "not configured"})`}
+          placeholder="Low-latency completion model"
         />
       </SettingRow>
       <p className="mt-2 max-w-[68ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">

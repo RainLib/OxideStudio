@@ -1,6 +1,7 @@
 /// OxideStudio - Tauri Application Entry Point
 /// 重构后的精简版本,使用模块化的 commands
 pub mod agent;
+pub mod ai_cli;
 pub mod commands;
 pub mod core;
 pub mod drivers;
@@ -136,6 +137,12 @@ pub fn run() {
             commands::ai::ai_test_provider,
             commands::ai::ai_set_provider_secret,
             commands::ai::ai_has_provider_secret,
+            commands::ai::ai_cli_detect,
+            commands::ai::ai_cli_list_models,
+            commands::ai::ai_cli_list_efforts,
+            commands::ai::ai_cli_test_provider,
+            commands::ai::ai_cli_set_environment,
+            commands::ai::ai_cli_get_environment,
             // DeepAgents host commands
             commands::agent::agent_start_turn,
             commands::agent::agent_resume_turn,

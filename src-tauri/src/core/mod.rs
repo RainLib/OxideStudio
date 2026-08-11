@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod cli_provider_secret;
 pub mod config;
 pub mod dialect;
 pub mod driver;

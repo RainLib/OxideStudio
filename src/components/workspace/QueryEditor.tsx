@@ -2174,7 +2174,6 @@ export function QueryEditor({
             config: {
               ...provider,
               model: inlineCompletionModel.trim() || provider.model,
-              timeoutMs: 4_000,
             },
             prefix: redactSecretString(completionContext.prefix),
             suffix: redactSecretString(completionContext.suffix),

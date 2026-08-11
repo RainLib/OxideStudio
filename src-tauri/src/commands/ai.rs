@@ -1,7 +1,15 @@
-use crate::core::{
-    protocol::Response,
-    provider_secret::{
-        has_provider_secret, load_provider_secret, normalize_provider_secret, save_provider_secret,
+use crate::{
+    ai_cli::{
+        codebuddy, codex, CliConnectionTestResult, CliDetectionResult, CliEnvironmentRequest,
+        CliModelInfo, CliProfileRequest, CliProviderConfig, CliProviderKind,
+    },
+    core::{
+        cli_provider_secret::{load_cli_environment, save_cli_environment},
+        protocol::Response,
+        provider_secret::{
+            has_provider_secret, load_provider_secret, normalize_provider_secret,
+            save_provider_secret,
+        },
     },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -169,6 +177,128 @@ pub async fn ai_has_provider_secret(
             "AI_PROVIDER_SECRET_ERROR",
             &error.to_string(),
         )),
+    }
+}
+
+async fn cli_environment(
+    app: &AppHandle,
+    provider: CliProviderKind,
+    profile_id: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    load_cli_environment(app, provider.as_str(), profile_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn ai_cli_set_environment(
+    app: AppHandle,
+    request: CliEnvironmentRequest,
+) -> Result<Response<Vec<String>>, String> {
+    match save_cli_environment(
+        &app,
+        request.provider.as_str(),
+        &request.profile_id,
+        request.environment,
+    )
+    .await
+    {
+        Ok(keys) => Ok(Response::ok(keys)),
+        Err(error) => Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error.to_string())),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_get_environment(
+    app: AppHandle,
+    request: CliProfileRequest,
+) -> Result<Response<std::collections::BTreeMap<String, String>>, String> {
+    match cli_environment(&app, request.provider, &request.profile_id).await {
+        Ok(environment) => Ok(Response::ok(environment)),
+        Err(error) => Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_detect(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<CliDetectionResult>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    let result = match config.kind {
+        CliProviderKind::CodexCli => codex::detect(config.executable_path.as_deref(), &environment).await,
+        CliProviderKind::CodebuddyCli => {
+            codebuddy::detect(config.executable_path.as_deref(), &environment).await
+        }
+    };
+    Ok(Response::ok(result))
+}
+
+#[tauri::command]
+pub async fn ai_cli_list_models(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<Vec<CliModelInfo>>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    let result = match config.kind {
+        CliProviderKind::CodexCli => codex::list_models(&config, &environment).await,
+        CliProviderKind::CodebuddyCli => codebuddy::list_models(&config, &environment).await,
+    };
+    match result {
+        Ok(models) => Ok(Response::ok(models)),
+        Err(error) => Ok(Response::err("AI_CLI_MODEL_DISCOVERY_ERROR", &error.to_string())),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_list_efforts(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<Vec<String>>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    let result = match config.kind {
+        CliProviderKind::CodexCli => codex::list_models(&config, &environment)
+            .await
+            .map(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id == config.model || model.id == "default")
+                    .map(|model| model.reasoning_efforts)
+                    .unwrap_or_default()
+            }),
+        CliProviderKind::CodebuddyCli => codebuddy::list_efforts(&config, &environment).await,
+    };
+    match result {
+        Ok(efforts) => Ok(Response::ok(efforts)),
+        Err(error) => Ok(Response::err("AI_CLI_EFFORT_DISCOVERY_ERROR", &error.to_string())),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_test_provider(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<CliConnectionTestResult>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    let result = match config.kind {
+        CliProviderKind::CodexCli => codex::test_connection(&config, &environment).await,
+        CliProviderKind::CodebuddyCli => codebuddy::test_connection(&config, &environment).await,
+    };
+    match result {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) => Ok(Response::err("AI_CLI_TEST_ERROR", &error.to_string())),
     }
 }
 

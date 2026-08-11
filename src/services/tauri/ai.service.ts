@@ -106,6 +106,24 @@ export interface AiInlineCompletionResult {
 export interface AiProviderTestResult {
   message: string;
   model: string;
+  executablePath?: string;
+  version?: string;
+  latencyMs?: number;
+}
+
+export interface AiCliDetectionResult {
+  provider: "codex-cli" | "codebuddy-cli";
+  available: boolean;
+  executablePath?: string;
+  version?: string;
+  message: string;
+}
+
+export interface AiCliModelInfo {
+  id: string;
+  label: string;
+  isDefault: boolean;
+  reasoningEfforts?: string[];
 }
 
 export async function setProviderSecret(
@@ -182,9 +200,57 @@ function abortError() {
 export async function testProvider(
   config: AiProviderConfig
 ): Promise<AiProviderTestResult> {
+  if (config.kind !== "openai-compatible") {
+    return invokeWithInterceptors<AiProviderTestResult>(
+      "ai_cli_test_provider",
+      { config },
+    );
+  }
   return invokeWithInterceptors<AiProviderTestResult>("ai_test_provider", {
     config,
   });
+}
+
+export async function detectCliProvider(
+  config: AiCliProviderConfig,
+): Promise<AiCliDetectionResult> {
+  return invokeWithInterceptors<AiCliDetectionResult>("ai_cli_detect", {
+    config,
+  });
+}
+
+export async function listCliModels(
+  config: AiCliProviderConfig,
+): Promise<AiCliModelInfo[]> {
+  return invokeWithInterceptors<AiCliModelInfo[]>("ai_cli_list_models", {
+    config,
+  });
+}
+
+export async function listCliEfforts(
+  config: AiCliProviderConfig,
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("ai_cli_list_efforts", { config });
+}
+
+export async function setCliEnvironment(
+  provider: AiCliProviderConfig["kind"],
+  profileId: string,
+  environment: Record<string, string>,
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("ai_cli_set_environment", {
+    request: { provider, profileId, environment },
+  });
+}
+
+export async function getCliEnvironment(
+  provider: AiCliProviderConfig["kind"],
+  profileId: string,
+): Promise<Record<string, string>> {
+  return invokeWithInterceptors<Record<string, string>>(
+    "ai_cli_get_environment",
+    { request: { provider, profileId } },
+  );
 }
 
 export const aiService = {
@@ -192,6 +258,11 @@ export const aiService = {
   inlineCompletion,
   cancelRequest,
   testProvider,
+  detectCliProvider,
+  listCliModels,
+  listCliEfforts,
+  setCliEnvironment,
+  getCliEnvironment,
   setProviderSecret,
   hasProviderSecret,
 };
