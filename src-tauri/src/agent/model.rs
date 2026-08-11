@@ -1,5 +1,7 @@
 use crate::{
-    agent::protocol::{AgentProviderConfig, AgentToolManifestEntry, ModelCompleteRequest},
+    agent::protocol::{
+        AgentProviderConfig, AgentProviderKind, AgentToolManifestEntry, ModelCompleteRequest,
+    },
     core::provider_secret::normalize_provider_secret,
 };
 use anyhow::{anyhow, Context, Result};
@@ -31,6 +33,9 @@ impl ModelGateway {
         provider: &AgentProviderConfig,
         request: &ModelCompleteRequest,
     ) -> Result<Value> {
+        if provider.kind != AgentProviderKind::OpenaiCompatible {
+            return Err(anyhow!("CLI providers are executed by the desktop CLI runtime"));
+        }
         request.metadata.validate().map_err(anyhow::Error::msg)?;
         if request.messages.is_empty() {
             return Err(anyhow!("model.complete requires at least one message"));
@@ -114,6 +119,9 @@ impl ModelGateway {
         chunks: mpsc::Sender<Value>,
         mut cancellation: watch::Receiver<bool>,
     ) -> Result<Value> {
+        if provider.kind != AgentProviderKind::OpenaiCompatible {
+            return Err(anyhow!("CLI providers are executed by the desktop CLI runtime"));
+        }
         request.metadata.validate().map_err(anyhow::Error::msg)?;
         if request.messages.is_empty() {
             return Err(anyhow!("model.stream requires at least one message"));

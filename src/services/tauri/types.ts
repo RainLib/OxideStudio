@@ -1071,6 +1071,10 @@ export interface SavedConnection {
   tags?: string[];
   icon?: string;
   color?: string;
+  /** AI write-safety classification. Legacy connections deserialize as unclassified. */
+  environment?: "unclassified" | "development" | "staging" | "production";
+  /** Database names that must remain AI read-only even on non-production servers. */
+  productionDatabases?: string[];
 }
 
 /** A desktop-picked external connection configuration, before it is parsed or saved. */

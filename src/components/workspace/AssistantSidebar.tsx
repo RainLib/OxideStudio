@@ -48,6 +48,7 @@ import {
   type AgentTextAttachment,
   type AgentToolManifestEntry,
 } from "@/services/tauri/agent-host.service";
+import type { AiProviderConfig } from "@/services/tauri/ai.service";
 import { ArrowDown, Sparkles, X } from "lucide-react";
 import {
   AssistantPendingChangesPanel,
@@ -86,10 +87,27 @@ function AgentHostAssistantSidebar() {
     (state) => state.setToolWindowVisible,
   );
   const aiEnabled = useAiSettingsStore((state) => state.enabled);
+  const aiProvider = useAiSettingsStore((state) => state.provider);
   const aiBaseUrl = useAiSettingsStore((state) => state.baseUrl);
   const aiModel = useAiSettingsStore((state) => state.model);
   const aiApiKey = useAiSettingsStore((state) => state.apiKey);
-  const aiTimeoutMs = useAiSettingsStore((state) => state.timeoutMs);
+  const codexCliPath = useAiSettingsStore((state) => state.codexCliPath);
+  const codexCliModel = useAiSettingsStore((state) => state.codexCliModel);
+  const codexCliReasoningEffort = useAiSettingsStore(
+    (state) => state.codexCliReasoningEffort,
+  );
+  const codeBuddyCliPath = useAiSettingsStore(
+    (state) => state.codeBuddyCliPath,
+  );
+  const codeBuddyCliModel = useAiSettingsStore(
+    (state) => state.codeBuddyCliModel,
+  );
+  const codeBuddyCliReasoningEffort = useAiSettingsStore(
+    (state) => state.codeBuddyCliReasoningEffort,
+  );
+  const assistantProviderConfig = useAiSettingsStore(
+    (state) => state.assistantProviderConfig,
+  );
   const aiStreaming = useAiSettingsStore((state) => state.streaming);
   const aiToolCalling = useAiSettingsStore((state) => state.toolCalling);
   const aiStructuredOutput = useAiSettingsStore(
@@ -158,9 +176,8 @@ function AgentHostAssistantSidebar() {
     (state) => state.consumeRequest,
   );
   const selectedText = activeTab?.editorSelection?.text || null;
-  const providerConfigured = Boolean(
-    aiEnabled && aiBaseUrl.trim() && aiModel.trim(),
-  );
+  const modelConfig = assistantProviderConfig();
+  const providerConfigured = Boolean(modelConfig);
   const session = useAssistantAgentSession(activeProjectId, providerConfigured);
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
@@ -175,7 +192,7 @@ function AgentHostAssistantSidebar() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoFollowConversationRef = useRef(true);
   const providerFingerprintRef = useRef(
-    `${aiEnabled}:${aiBaseUrl}:${aiModel}:${aiApiKey}`,
+    JSON.stringify(modelConfig),
   );
   const uiActionRegistry = useMemo(() => createWorkspaceUiActionRegistry(), []);
   const workspaceToolManifest = useMemo(
@@ -199,16 +216,6 @@ function AgentHostAssistantSidebar() {
     const installedTools = new Set(session.hostStatus?.installedTools ?? []);
     return workspaceToolManifest.filter((tool) => installedTools.has(tool.name));
   }, [session.hostStatus?.installedTools, workspaceToolManifest]);
-  const modelConfig = useMemo(() => {
-    const baseUrl = aiBaseUrl.trim();
-    const model = aiModel.trim();
-    if (!aiEnabled || !baseUrl || !model) return null;
-    return {
-      baseUrl,
-      model,
-      timeoutMs: aiTimeoutMs,
-    };
-  }, [aiBaseUrl, aiEnabled, aiModel, aiTimeoutMs]);
   const conversationHistory = useMemo(
     () => assistantConversationHistoryFromTurns(session.turns),
     [session.turns],
@@ -269,7 +276,7 @@ function AgentHostAssistantSidebar() {
     ],
   );
   const contextProviderLabel = modelConfig
-    ? providerDestinationLabel(modelConfig.model, modelConfig.baseUrl)
+    ? providerDestinationLabel(modelConfig)
     : null;
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
@@ -329,10 +336,22 @@ function AgentHostAssistantSidebar() {
   const activeAuthIssueId =
     authIssueId && authIssueId !== dismissedAuthIssueId ? authIssueId : null;
   const resolvedMode = resolveAssistantMode(assistantMode, message);
+  const displayedModel =
+    aiProvider === "codex-cli"
+      ? codexCliModel
+      : aiProvider === "codebuddy-cli"
+        ? codeBuddyCliModel
+        : aiModel;
+  const displayedEndpoint =
+    aiProvider === "codex-cli"
+      ? codexCliPath || "Auto-detect Codex CLI"
+      : aiProvider === "codebuddy-cli"
+        ? codeBuddyCliPath || "Auto-detect CodeBuddy CLI"
+        : aiBaseUrl;
   const { modelStatus, submissionBlockReason } = resolveModelUiState({
     enabled: aiEnabled,
-    baseUrl: aiBaseUrl,
-    model: aiModel,
+    baseUrl: displayedEndpoint,
+    model: displayedModel,
     resolvedMode,
     toolCalling: aiToolCalling,
     availability: session.availability,
@@ -342,11 +361,25 @@ function AgentHostAssistantSidebar() {
   });
 
   useEffect(() => {
-    const fingerprint = `${aiEnabled}:${aiBaseUrl}:${aiModel}:${aiApiKey}`;
+    const fingerprint = JSON.stringify(modelConfig);
     if (providerFingerprintRef.current === fingerprint) return;
     providerFingerprintRef.current = fingerprint;
     if (authIssueId) setDismissedAuthIssueId(authIssueId);
-  }, [aiApiKey, aiBaseUrl, aiEnabled, aiModel, authIssueId]);
+  }, [
+    aiApiKey,
+    aiBaseUrl,
+    aiEnabled,
+    aiModel,
+    aiProvider,
+    authIssueId,
+    codeBuddyCliModel,
+    codeBuddyCliPath,
+    codeBuddyCliReasoningEffort,
+    codexCliModel,
+    codexCliPath,
+    codexCliReasoningEffort,
+    modelConfig,
+  ]);
 
   useEffect(() => {
     const element = scrollContainerRef.current;
@@ -773,10 +806,18 @@ function AgentHostAssistantSidebar() {
             session.isBusy && session.activeTurn?.status !== "planning"
           }
           isCancelling={session.activeTurn?.status === "cancelling"}
-          model={aiModel}
-          modelEndpoint={aiBaseUrl}
+          model={displayedModel}
+          modelEndpoint={displayedEndpoint}
           modelStatus={modelStatus}
-          onModelChange={(model) => updateAiSettings({ model })}
+          onModelChange={(model) =>
+            updateAiSettings(
+              aiProvider === "codex-cli"
+                ? { codexCliModel: model }
+                : aiProvider === "codebuddy-cli"
+                  ? { codeBuddyCliModel: model }
+                  : { model },
+            )
+          }
           onOpenAiSettings={() => {
             window.dispatchEvent(
               new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
@@ -975,11 +1016,21 @@ function agentTurnPendingLabel(status: string) {
   return "Working...";
 }
 
-function providerDestinationLabel(model: string, baseUrl: string) {
+function providerDestinationLabel(
+  provider: AiProviderConfig,
+) {
+  if (provider.kind === "codex-cli") return `${provider.model} · Codex CLI`;
+  if (provider.kind === "codebuddy-cli") {
+    return `${provider.model} · CodeBuddy Code CLI`;
+  }
   try {
-    const hostname = new URL(baseUrl).hostname;
-    return hostname ? `${model} · ${hostname}` : `${model} · custom endpoint`;
+    const hostname = new URL(
+      "baseUrl" in provider ? provider.baseUrl : "",
+    ).hostname;
+    return hostname
+      ? `${provider.model} · ${hostname}`
+      : `${provider.model} · custom endpoint`;
   } catch {
-    return `${model} · custom endpoint`;
+    return `${provider.model} · custom endpoint`;
   }
 }

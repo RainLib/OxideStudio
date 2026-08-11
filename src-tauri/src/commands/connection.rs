@@ -196,6 +196,8 @@ fn config_connection_from_store(
             tags: None,
             icon: None,
             color: None,
+            environment: Default::default(),
+            production_databases: Vec::new(),
         });
     config_connection.project_id = project_id.to_string();
     config_connection

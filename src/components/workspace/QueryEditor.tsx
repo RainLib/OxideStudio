@@ -362,8 +362,9 @@ export function QueryEditor({
   const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
   const editorSettings = useSettingsStore((state) => state.settings.editor);
   const keymap = useSettingsStore((state) => state.settings.keymap);
-  const aiEnabled = useAiSettingsStore((state) => state.enabled);
-  const aiProviderConfig = useAiSettingsStore((state) => state.providerConfig);
+  const inlineProviderConfig = useAiSettingsStore(
+    (state) => state.inlineProviderConfig,
+  );
   const inlineCompletionProtocol = useAiSettingsStore(
     (state) => state.inlineCompletionProtocol,
   );
@@ -2153,8 +2154,8 @@ export function QueryEditor({
             return { items: [] };
           }
 
-          const provider = aiProviderConfig();
-          if (!aiEnabled || !provider) {
+          const provider = inlineProviderConfig();
+          if (!provider) {
             setInlineCompletionStatus(localText ? "local" : "offline");
             return inlineResult(localText);
           }
@@ -2313,8 +2314,7 @@ export function QueryEditor({
     };
   }, [
     activeTab?.fileRelativePath,
-    aiEnabled,
-    aiProviderConfig,
+    inlineProviderConfig,
     canUseLsp,
     capabilities.driver,
     capabilities.supportsSqlQuery,

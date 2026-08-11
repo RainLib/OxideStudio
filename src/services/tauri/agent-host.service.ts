@@ -1,6 +1,10 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AssistantMode } from "@/ai/assistant/modes";
 import type { AiToolPermission, JsonSchema } from "@/ai/tools/types";
+import type {
+  AiCliProviderConfig,
+  AiHttpProviderConfig,
+} from "./ai.service";
 import { invokeRawCommand } from "./client";
 
 export const AGENT_HOST_PROTOCOL_VERSION = 1 as const;
@@ -37,11 +41,10 @@ export type AgentProviderCapabilities = {
   maxOutputTokens: number | null;
 };
 
-export type AgentProviderConfig = {
-  baseUrl: string;
-  apiKey?: string;
-  model: string;
-  timeoutMs?: number;
+export type AgentProviderConfig = (
+  | AiHttpProviderConfig
+  | AiCliProviderConfig
+) & {
   capabilities: AgentProviderCapabilities;
 };
 

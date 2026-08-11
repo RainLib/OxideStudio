@@ -31,13 +31,15 @@ export function createAssistantPlannerSelection({
   modelConfig,
 }: AssistantPlannerSelectionInput): AssistantPlannerSelection {
   const localPlanner = createDefaultAssistantPlanner();
+  const httpModelConfig =
+    modelConfig?.kind === "openai-compatible" ? modelConfig : null;
   const modelPlanner =
-    enabled && modelConfig
-      ? createOpenAiCompatibleAssistantPlanner(modelConfig)
+    enabled && httpModelConfig
+      ? createOpenAiCompatibleAssistantPlanner(httpModelConfig)
       : undefined;
   const summarizeToolResults =
-    enabled && modelConfig
-      ? createOpenAiCompatibleResultSummarizer(modelConfig)
+    enabled && httpModelConfig
+      ? createOpenAiCompatibleResultSummarizer(httpModelConfig)
       : undefined;
 
   if (plannerKind === "local" || !enabled) {

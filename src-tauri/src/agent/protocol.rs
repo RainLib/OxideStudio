@@ -89,23 +89,53 @@ pub struct ProviderCapabilities {
     pub max_output_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentProviderKind {
+    OpenaiCompatible,
+    CodexCli,
+    CodebuddyCli,
+}
+
+impl Default for AgentProviderKind {
+    fn default() -> Self {
+        Self::OpenaiCompatible
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProviderConfig {
+    #[serde(default)]
+    pub kind: AgentProviderKind,
+    #[serde(default)]
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
     pub timeout_ms: Option<u64>,
     pub capabilities: ProviderCapabilities,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub executable_path: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub environment_keys: Vec<String>,
 }
 
 impl std::fmt::Debug for AgentProviderConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AgentProviderConfig")
+            .field("kind", &self.kind)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("model", &self.model)
+            .field("profile_id", &self.profile_id)
+            .field("executable_path", &self.executable_path)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("environment_keys", &self.environment_keys)
             .field("timeout_ms", &self.timeout_ms)
             .field("capabilities", &self.capabilities)
             .finish()
@@ -203,8 +233,25 @@ impl AgentTurnRequest {
         if self.messages.len() > 512 || self.tools.len() > 256 {
             return Err("turn exceeds the message or tool manifest limit".to_string());
         }
-        if self.provider.base_url.trim().is_empty() || self.provider.model.trim().is_empty() {
-            return Err("provider baseUrl and model are required".to_string());
+        if self.provider.model.trim().is_empty() {
+            return Err("provider model is required".to_string());
+        }
+        match self.provider.kind {
+            AgentProviderKind::OpenaiCompatible if self.provider.base_url.trim().is_empty() => {
+                return Err("OpenAI-compatible provider baseUrl is required".to_string());
+            }
+            AgentProviderKind::CodexCli | AgentProviderKind::CodebuddyCli
+                if self
+                    .provider
+                    .profile_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty() =>
+            {
+                return Err("CLI provider profileId is required".to_string());
+            }
+            _ => {}
         }
         for tool in &self.tools {
             if tool.name.trim().is_empty() || tool.name.chars().count() > 200 {
@@ -236,8 +283,13 @@ impl AgentTurnRequest {
             "messages": self.messages,
             "prompt": self.prompt,
             "provider": {
+                "kind": self.provider.kind,
                 "model": self.provider.model,
                 "capabilities": self.provider.capabilities,
+                "profileId": self.provider.profile_id,
+                "executablePath": self.provider.executable_path,
+                "reasoningEffort": self.provider.reasoning_effort,
+                "environmentKeys": self.provider.environment_keys,
             },
             "workspace": self.workspace,
             "tools": self.tools,
@@ -264,10 +316,15 @@ impl AgentTurnRequest {
             "messages": self.messages,
             "prompt": self.prompt,
             "provider": {
+                "kind": self.provider.kind,
                 "baseUrl": self.provider.base_url,
                 "model": self.provider.model,
                 "timeoutMs": self.provider.timeout_ms,
                 "capabilities": self.provider.capabilities,
+                "profileId": self.provider.profile_id,
+                "executablePath": self.provider.executable_path,
+                "reasoningEffort": self.provider.reasoning_effort,
+                "environmentKeys": self.provider.environment_keys,
             },
             "workspace": self.workspace,
             "tools": self.tools,
@@ -868,6 +925,7 @@ mod tests {
             messages: vec![],
             prompt: "hello".to_string(),
             provider: AgentProviderConfig {
+                kind: AgentProviderKind::OpenaiCompatible,
                 base_url: "https://example.com/v1".to_string(),
                 api_key: Some("super-secret".to_string()),
                 model: "model".to_string(),
@@ -879,6 +937,10 @@ mod tests {
                     max_input_tokens: None,
                     max_output_tokens: None,
                 },
+                profile_id: None,
+                executable_path: None,
+                reasoning_effort: None,
+                environment_keys: Vec::new(),
             },
             workspace: WorkspaceContext {
                 project_id: "project".to_string(),

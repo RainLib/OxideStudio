@@ -565,10 +565,11 @@ impl AgentHostInner {
         let key = TurnKey::from_metadata(&request.metadata);
         let active = ActiveTurn::from_request(&request);
         let mut provider = request.provider.clone();
-        if provider
-            .api_key
-            .as_deref()
-            .is_none_or(|secret| secret.trim().is_empty())
+        if provider.kind == crate::agent::protocol::AgentProviderKind::OpenaiCompatible
+            && provider
+                .api_key
+                .as_deref()
+                .is_none_or(|secret| secret.trim().is_empty())
         {
             // A missing entry is valid for keyless/local providers. Credential
             // manager failures are not: silently turning them into an anonymous
@@ -5922,6 +5923,8 @@ mod tests {
             tags: None,
             icon: None,
             color: None,
+            environment: Default::default(),
+            production_databases: Vec::new(),
         };
         let capabilities = database_capabilities_for_driver("postgres").unwrap();
         let url = connection_url_from_config(&capabilities, &config).unwrap();
@@ -5951,6 +5954,8 @@ mod tests {
             tags: None,
             icon: None,
             color: None,
+            environment: Default::default(),
+            production_databases: Vec::new(),
         };
         assert_eq!(
             connection_url_from_config(

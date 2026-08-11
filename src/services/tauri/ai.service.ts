@@ -1,11 +1,37 @@
 import { invokeWithInterceptors } from "./client";
 
-export interface AiProviderConfig {
+export type AiProviderKind =
+  | "openai-compatible"
+  | "codex-cli"
+  | "codebuddy-cli";
+
+export interface AiHttpProviderConfig {
+  kind: "openai-compatible";
   baseUrl: string;
   apiKey?: string;
   model: string;
   timeoutMs?: number;
 }
+
+export type AiCliReasoningEffort =
+  | "default"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+
+export interface AiCliProviderConfig {
+  kind: "codex-cli" | "codebuddy-cli";
+  profileId: string;
+  executablePath?: string;
+  model: string;
+  reasoningEffort?: AiCliReasoningEffort;
+  timeoutMs?: number;
+  /** Names only. Values are resolved by Rust from the private credential store. */
+  environmentKeys?: string[];
+}
+
+export type AiProviderConfig = AiHttpProviderConfig | AiCliProviderConfig;
 
 export interface AiChatMessage {
   role: "system" | "user" | "assistant";
@@ -14,7 +40,7 @@ export interface AiChatMessage {
 
 export interface AiChatCompletionRequest {
   requestId?: string;
-  config: AiProviderConfig;
+  config: AiHttpProviderConfig;
   messages: AiChatMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -62,7 +88,7 @@ export interface ProjectSnippet {
 export interface AiInlineCompletionRequest {
   requestId: string;
   protocol: InlineCompletionProtocol;
-  config: AiProviderConfig;
+  config: AiHttpProviderConfig;
   prefix: string;
   suffix: string;
   languageId: string;

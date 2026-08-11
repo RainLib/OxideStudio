@@ -294,6 +294,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       database: defaultDatabaseName(DEFAULT_DATABASE_DRIVER),
       icon: defaultConnectionIcon(DEFAULT_DATABASE_DRIVER),
       tags: [],
+      environment: "unclassified",
+      productionDatabases: [],
       sshTunnel: {
         enabled: false,
         host: "",

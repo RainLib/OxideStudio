@@ -422,6 +422,7 @@ export function SettingsDialog({
     try {
       if (aiApiKey.trim() && !(await persistAiProviderSecret())) return;
       const result = await aiService.testProvider({
+        kind: "openai-compatible",
         baseUrl: aiBaseUrl.trim(),
         model: aiModel.trim(),
         // Test the persisted credential path used by the Agent Host. Passing

@@ -83,6 +83,20 @@ pub struct SavedConnection {
     pub tags: Option<Vec<String>>,
     pub icon: Option<String>,
     pub color: Option<String>,
+    #[serde(default)]
+    pub environment: ConnectionEnvironment,
+    #[serde(default)]
+    pub production_databases: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectionEnvironment {
+    #[default]
+    Unclassified,
+    Development,
+    Staging,
+    Production,
 }
 
 fn default_project_id() -> String {
@@ -209,6 +223,8 @@ mod tests {
 
         assert_eq!(connection.project_id, "sqls");
         assert!(connection.ssh_tunnel.is_none());
+        assert_eq!(connection.environment, ConnectionEnvironment::Unclassified);
+        assert!(connection.production_databases.is_empty());
     }
 
     #[test]

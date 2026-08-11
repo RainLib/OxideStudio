@@ -14318,7 +14318,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
 
     #[test]
     fn preserves_materialized_view_index_definitions_for_backup() {
-        let indexes = vec![IndexInfo {
+        let mut indexes = vec![IndexInfo {
             name: "active_users_mv_email_idx".to_string(),
             columns: vec!["email".to_string()],
             is_unique: true,

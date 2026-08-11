@@ -1525,6 +1525,62 @@ export function ConnectionForm({
                 </SelectContent>
               </Select>
 
+              <label className={labelClass} htmlFor="connection-environment">
+                Environment
+              </label>
+              <div>
+                <select
+                  id="connection-environment"
+                  value={selectedConnection.environment || "unclassified"}
+                  onChange={(event) =>
+                    updateField(
+                      "environment",
+                      event.target.value as NonNullable<
+                        ConnectionConfig["environment"]
+                      >,
+                    )
+                  }
+                  className={fieldClass}
+                >
+                  <option value="unclassified">Unclassified — AI writes blocked</option>
+                  <option value="development">Development</option>
+                  <option value="staging">Staging</option>
+                  <option value="production">Production — AI writes blocked</option>
+                </select>
+                <p className="mt-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                  Agent writes require an explicit non-production classification
+                  and a separate approval for every operation.
+                </p>
+              </div>
+
+              <label
+                className={labelClass}
+                htmlFor="connection-production-databases"
+              >
+                Protected DBs
+              </label>
+              <div>
+                <input
+                  id="connection-production-databases"
+                  value={(selectedConnection.productionDatabases || []).join(", ")}
+                  onChange={(event) =>
+                    updateField(
+                      "productionDatabases",
+                      event.target.value
+                        .split(",")
+                        .map((database) => database.trim())
+                        .filter(Boolean),
+                    )
+                  }
+                  className={fieldClass}
+                  placeholder="production, customer_data"
+                />
+                <p className="mt-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                  These database names stay read-only even on development or
+                  staging connections.
+                </p>
+              </div>
+
               <label className={labelClass} htmlFor="connection-tags">
                 Tags
               </label>

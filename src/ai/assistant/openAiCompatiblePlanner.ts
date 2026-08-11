@@ -6,10 +6,10 @@ import {
   type AssistantModelResultSummaryRequest,
   type AssistantModelResultSummaryResponse,
 } from "./modelPlanner";
-import { aiService, type AiProviderConfig } from "@/services/tauri/ai.service";
+import { aiService, type AiHttpProviderConfig } from "@/services/tauri/ai.service";
 
 export function createOpenAiCompatibleAssistantPlanner(
-  config: AiProviderConfig
+  config: AiHttpProviderConfig
 ) {
   return createModelAssistantPlanner({
     id: "openai-compatible-tool-planner",
@@ -30,7 +30,7 @@ export function createOpenAiCompatibleAssistantPlanner(
 }
 
 export function createOpenAiCompatibleResultSummarizer(
-  config: AiProviderConfig
+  config: AiHttpProviderConfig
 ) {
   return createModelToolResultSummarizer(async (request) =>
     parseModelJson<AssistantModelResultSummaryResponse>(
