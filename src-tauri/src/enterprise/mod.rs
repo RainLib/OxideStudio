@@ -815,6 +815,7 @@ pub async fn enterprise_connect_managed_source(
     connection_id: String,
     descriptor: oxide_enterprise_contracts::ManagedDataSourceDescriptor,
 ) -> Result<String, String> {
+    let driver_id = descriptor.driver.clone();
     let mut driver = ManagedGatewayDriver::new(client.inner().clone(), descriptor)
         .map_err(|error| user_facing_enterprise_error(&error))?;
     use crate::core::driver::DatabaseDriver;
@@ -823,7 +824,12 @@ pub async fn enterprise_connect_managed_source(
         .await
         .map_err(|error| user_facing_enterprise_error(&error))?;
     manager
-        .replace_connection(connection_id, Box::new(driver))
+        .replace_connection_with_tunnel_and_driver_id(
+            connection_id,
+            Box::new(driver),
+            None,
+            Some(driver_id),
+        )
         .await
         .map_err(|error| user_facing_enterprise_error(&error))?;
     Ok("Managed Gateway session ready".into())

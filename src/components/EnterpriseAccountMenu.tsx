@@ -59,17 +59,6 @@ export function EnterpriseAccountMenu() {
   const authenticated = status.state === "authenticated";
 
   useEffect(() => {
-    const onboardingKey = "oxide-enterprise-account-choice-seen";
-    try {
-      if (localStorage.getItem(onboardingKey)) return;
-      const handle = window.setTimeout(() => setMenuOpen(true), 900);
-      return () => window.clearTimeout(handle);
-    } catch {
-      return;
-    }
-  }, []);
-
-  useEffect(() => {
     let disposed = false;
     const restoreAccount = () => {
       if (disposed) return;
@@ -116,11 +105,6 @@ export function EnterpriseAccountMenu() {
   };
 
   const completeAccountChoice = () => {
-    try {
-      localStorage.setItem("oxide-enterprise-account-choice-seen", "1");
-    } catch {
-      // The in-memory anonymous mode still works when local storage is blocked.
-    }
     setMenuOpen(false);
   };
 
@@ -196,6 +180,12 @@ export function EnterpriseAccountMenu() {
                   })
                 : t("account.localModeHint")}
             </div>
+            {authenticated && (
+              <div className="mt-1 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                Managed sources use the policy-enforcing Gateway; database
+                credentials never enter this client.
+              </div>
+            )}
           </div>
 
           {authenticated && status.memberships.length > 0 && (
@@ -265,12 +255,6 @@ export function EnterpriseAccountMenu() {
                 />
               )}
               <AccountMenuAction
-                icon={UserRound}
-                label={t("account.continueLocally")}
-                disabled={busy}
-                onClick={completeAccountChoice}
-              />
-              <AccountMenuAction
                 icon={ServerCog}
                 label={
                   status.configured
@@ -279,14 +263,6 @@ export function EnterpriseAccountMenu() {
                 }
                 disabled={busy}
                 onClick={() => {
-                  try {
-                    localStorage.setItem(
-                      "oxide-enterprise-account-choice-seen",
-                      "1",
-                    );
-                  } catch {
-                    // Configuration remains available without local storage.
-                  }
                   setMenuOpen(false);
                   void enterpriseService
                     .getPublicConfig()

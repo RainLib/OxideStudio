@@ -18,6 +18,12 @@ does not replace anonymous/local mode in the desktop application.
 The desktop receives neither database credentials nor Gateway secret
 references. `data_sources` intentionally has no credential column.
 
+Managed data access always uses the Gateway data plane. Desktop-direct access
+is reserved for personal/local connections and is never used as a fallback for
+an organization descriptor. See `docs/ENTERPRISE_IDENTITY_AND_ACCESS.md` for
+the transport decision and the requirements for any future short-lived direct
+credential mode.
+
 ## Development
 
 ```bash

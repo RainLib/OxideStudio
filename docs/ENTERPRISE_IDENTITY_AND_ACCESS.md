@@ -37,6 +37,30 @@ The control plane stores resource descriptors and policy, but not database
 credentials. The Gateway is the only service that resolves a credential and
 opens the database connection. It does not expose a generic TCP tunnel.
 
+## Data-plane decision: local direct, managed Gateway
+
+OxideStudio deliberately uses two connection paths rather than an enterprise
+mode that can silently change its trust boundary:
+
+| Connection origin | Data path | Credential owner | Enforcement |
+| --- | --- | --- | --- |
+| Personal/local | Desktop directly to the database | User device | Local connection policy and database account |
+| Organization-managed | Desktop to customer-network Gateway over mTLS; Gateway to database | Gateway `SecretProvider` | Control-plane ticket issuance plus Gateway re-authorization |
+
+Organization-managed sources never fall back to a desktop-direct database
+connection. A Gateway outage therefore fails closed instead of causing the
+client to request or cache a password. This is the production default because
+it provides immediate revocation, consistent row/byte limits, centralized
+audit identity, private-network reachability, and one location for dynamic
+Vault or Kubernetes credentials.
+
+A future direct mode is acceptable only for databases that issue short-lived,
+individually scoped credentials and can enforce the same object/action policy
+at the database itself. It must be a separately signed transport contract,
+must use OS credential protection, and must never reuse a Gateway descriptor.
+That mode is not implemented or advertised today; the client rejects every
+managed transport other than the Gateway path.
+
 ## Desktop behavior
 
 The account menu is optional. Account recovery runs during browser idle time,
@@ -51,6 +75,21 @@ operation obtains a fresh, scoped access ticket and opens an mTLS Gateway
 channel. Certificate paths are optional desktop enrollment settings normally
 installed by MDM; certificate material is loaded only when a managed source is
 opened and is never sent to the WebView.
+
+Before the Explorer becomes available, Desktop performs a Gateway capability
+handshake over the same mTLS channel. It rejects an incompatible contract
+version, a changed policy revision, or a Gateway whose advertised data-source
+capabilities no longer cover the client assignment. The UI continues to use
+the narrower descriptor-derived read-only capability set, so a Gateway cannot
+activate a local mutation surface by advertising an extra capability.
+
+The live driver reports a distinct `managed` distribution and derives its UI
+capabilities from the assigned descriptor. The current Gateway RPC contract
+implements discovery, metadata, and bounded read-only queries, so local
+mutation, DDL, migration, export, transaction, and Explain controls remain
+hidden even if a future policy grant already contains those action names.
+Adding a permission does not activate a feature until the Gateway and Desktop
+both implement and re-authorize its exact RPC.
 
 Refresh tokens use the operating-system credential manager. Public endpoints,
 issuer and client ID are stored in the application config directory with

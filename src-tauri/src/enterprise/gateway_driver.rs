@@ -1,12 +1,15 @@
 use super::{EnterpriseClient, ManagedAccessSessionRequest};
 use crate::core::{
+    dialect::{database_capabilities_for_driver, DatabaseCapabilities},
     driver::DatabaseDriver,
     protocol::{ColumnInfo, QueryResult, TableInfo},
     statement::StatementScanDialect,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use oxide_enterprise_contracts::{AccessAction, ManagedDataSourceDescriptor};
+use oxide_enterprise_contracts::{
+    AccessAction, ManagedDataSourceDescriptor, ENTERPRISE_CONTRACT_VERSION,
+};
 use sqlparser::{
     ast::{ObjectName, Visit, Visitor},
     dialect::{MsSqlDialect, MySqlDialect, PostgreSqlDialect},
@@ -21,9 +24,51 @@ pub mod proto {
     tonic::include_proto!("oxide.enterprise.gateway.v1");
 }
 
-use proto::{data_plane_client::DataPlaneClient, QueryRequest, RequestScope, ResourceRequest};
+use proto::{
+    data_plane_client::DataPlaneClient, CapabilitiesRequest, CapabilitiesResponse, QueryRequest,
+    RequestScope, ResourceRequest,
+};
 
 const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
+
+fn managed_capabilities(descriptor: &ManagedDataSourceDescriptor) -> Option<DatabaseCapabilities> {
+    let mut capabilities = database_capabilities_for_driver(&descriptor.driver).ok()?;
+    let allows = |action: &str| descriptor.capabilities.contains(action);
+    let can_discover = allows(AccessAction::ResourceDiscover.as_str());
+    let can_read_metadata = allows(AccessAction::MetadataRead.as_str());
+    let can_query = allows(AccessAction::QueryRead.as_str());
+
+    capabilities.display_name = format!("{} (managed)", capabilities.display_name);
+    capabilities.supports_sql_query &= can_query;
+    capabilities.supports_table_browsing &= can_discover && can_read_metadata;
+    capabilities.supports_schemas &= can_discover;
+    capabilities.supports_database_catalogs &= can_discover;
+    capabilities.supports_connection_database = false;
+    capabilities.table_export_formats.clear();
+    capabilities.supports_table_row_mutation = false;
+    capabilities.supports_table_data_transfer = false;
+    capabilities.supports_table_ddl = false;
+    capabilities.supports_column_alteration = false;
+    capabilities.supports_index_rename = false;
+    capabilities.supports_constraint_alteration = false;
+    capabilities.supports_create_database = false;
+    capabilities.supports_create_database_owner = false;
+    capabilities.supports_create_database_charset = false;
+    capabilities.supports_create_database_collation = false;
+    capabilities.supports_rename_database = false;
+    capabilities.supports_views = false;
+    capabilities.supports_replace_view = false;
+    capabilities.supports_materialized_views = false;
+    capabilities.supports_table_indexes = false;
+    capabilities.supports_table_constraints = false;
+    capabilities.supports_foreign_keys = false;
+    capabilities.supports_check_constraints = false;
+    capabilities.supports_functions = false;
+    capabilities.supports_transactions = false;
+    capabilities.supports_query_cancellation = false;
+    capabilities.supports_explain_plan = false;
+    Some(capabilities)
+}
 
 /// Adapter that lets the existing workbench consume an enterprise Gateway
 /// without ever materializing a database URL or credential on the client.
@@ -153,6 +198,33 @@ impl ManagedGatewayDriver {
         Ok(response.items)
     }
 
+    async fn negotiate_gateway_contract(&self) -> Result<()> {
+        let resource_path = self
+            .descriptor
+            .allowed_resource_summary
+            .first()
+            .map(|summary| {
+                summary
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let (mut client, session, scope) = self
+            .open_client(AccessAction::ResourceDiscover, resource_path)
+            .await?;
+        let response = client
+            .capabilities(CapabilitiesRequest {
+                access_ticket: session.ticket,
+                scope: Some(scope),
+            })
+            .await
+            .context("managed Gateway capability negotiation failed")?
+            .into_inner();
+        validate_gateway_capabilities(&self.descriptor, &session.policy_revision, &response)
+    }
+
     fn query_resource_path(
         &self,
         sql: &str,
@@ -243,6 +315,18 @@ impl ManagedGatewayDriver {
 
 #[async_trait]
 impl DatabaseDriver for ManagedGatewayDriver {
+    fn is_managed_data_source(&self) -> bool {
+        true
+    }
+
+    fn package_capabilities(&self) -> Option<DatabaseCapabilities> {
+        // The stage-one Gateway implements discovery, metadata and bounded
+        // read-only queries only. Descriptor permissions for future actions
+        // must not make local write/export controls appear before the data
+        // plane implements and re-authorizes those exact RPCs.
+        managed_capabilities(&self.descriptor)
+    }
+
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
         match self.descriptor.driver.as_str() {
             "mysql" => Some(StatementScanDialect::Mysql),
@@ -261,6 +345,7 @@ impl DatabaseDriver for ManagedGatewayDriver {
     }
 
     async fn ping(&self) -> Result<()> {
+        self.negotiate_gateway_contract().await?;
         self.list_resources("database", None, None, None)
             .await
             .map(|_| ())
@@ -347,6 +432,43 @@ impl DatabaseDriver for ManagedGatewayDriver {
                 .await?,
         )
     }
+}
+
+fn validate_gateway_capabilities(
+    descriptor: &ManagedDataSourceDescriptor,
+    policy_revision: &str,
+    response: &CapabilitiesResponse,
+) -> Result<()> {
+    if response.contract_version != u32::from(ENTERPRISE_CONTRACT_VERSION) {
+        return Err(anyhow!(
+            "managed Gateway contract version {} is incompatible with desktop version {}",
+            response.contract_version,
+            ENTERPRISE_CONTRACT_VERSION
+        ));
+    }
+    if response.policy_revision != policy_revision {
+        return Err(anyhow!(
+            "enterprise access policy changed during Gateway negotiation"
+        ));
+    }
+    let gateway = response
+        .capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let unavailable = descriptor
+        .capabilities
+        .iter()
+        .filter(|capability| !gateway.contains(capability.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unavailable.is_empty() {
+        return Err(anyhow!(
+            "managed Gateway does not implement assigned capabilities: {}",
+            unavailable.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 fn read_tls_file(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -485,5 +607,71 @@ mod tests {
             vec!["app", "public"]
         );
         assert!(metadata_parent_path("column", Some("app"), Some("public"), None).is_err());
+    }
+
+    #[test]
+    fn managed_capabilities_never_inherit_local_write_or_export_surfaces() {
+        let descriptor = ManagedDataSourceDescriptor {
+            organization_id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            data_source_id: uuid::Uuid::new_v4(),
+            gateway_id: uuid::Uuid::new_v4(),
+            driver: "postgres".into(),
+            display_name: "Managed analytics".into(),
+            capabilities: [
+                AccessAction::ResourceDiscover.as_str().to_string(),
+                AccessAction::MetadataRead.as_str().to_string(),
+                AccessAction::QueryRead.as_str().to_string(),
+                AccessAction::DataWrite.as_str().to_string(),
+                AccessAction::SchemaDdl.as_str().to_string(),
+                AccessAction::DataExport.as_str().to_string(),
+            ]
+            .into_iter()
+            .collect(),
+            allowed_resource_summary: vec!["app/public/orders".into()],
+            policy_revision: "policy-8".into(),
+        };
+
+        let capabilities = managed_capabilities(&descriptor).unwrap();
+        assert!(capabilities.supports_sql_query);
+        assert!(capabilities.supports_table_browsing);
+        assert!(!capabilities.supports_table_row_mutation);
+        assert!(!capabilities.supports_table_ddl);
+        assert!(!capabilities.supports_table_data_transfer);
+        assert!(capabilities.table_export_formats.is_empty());
+    }
+
+    #[test]
+    fn rejects_stale_or_under_capable_gateway_contracts() {
+        let descriptor = ManagedDataSourceDescriptor {
+            organization_id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            data_source_id: uuid::Uuid::new_v4(),
+            gateway_id: uuid::Uuid::new_v4(),
+            driver: "postgres".into(),
+            display_name: "Managed analytics".into(),
+            capabilities: [
+                AccessAction::ResourceDiscover.as_str().to_string(),
+                AccessAction::QueryRead.as_str().to_string(),
+            ]
+            .into_iter()
+            .collect(),
+            allowed_resource_summary: vec!["app/public/orders".into()],
+            policy_revision: "policy-8".into(),
+        };
+        let valid = CapabilitiesResponse {
+            contract_version: u32::from(ENTERPRISE_CONTRACT_VERSION),
+            capabilities: descriptor.capabilities.iter().cloned().collect(),
+            policy_revision: "policy-8".into(),
+        };
+        assert!(validate_gateway_capabilities(&descriptor, "policy-8", &valid).is_ok());
+
+        let mut stale = valid.clone();
+        stale.policy_revision = "policy-9".into();
+        assert!(validate_gateway_capabilities(&descriptor, "policy-8", &stale).is_err());
+
+        let mut missing = valid;
+        missing.capabilities = vec![AccessAction::ResourceDiscover.as_str().to_string()];
+        assert!(validate_gateway_capabilities(&descriptor, "policy-8", &missing).is_err());
     }
 }

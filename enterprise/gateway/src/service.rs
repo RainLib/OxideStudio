@@ -177,7 +177,7 @@ impl DataPlane for DataPlaneService {
         let (claims, authorization) = self.authorize(
             &request.access_ticket,
             request.scope.as_ref(),
-            AccessAction::MetadataRead,
+            AccessAction::ResourceDiscover,
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         Ok(Response::new(CapabilitiesResponse {
