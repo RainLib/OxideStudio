@@ -1,6 +1,6 @@
 use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
-    ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
+    ColumnDef, ColumnInfo, ConstraintInfo, DatabaseInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
     TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
@@ -834,6 +834,59 @@ impl DatabaseDriver for MysqlDriver {
 
         (&mut **conn).execute("ROLLBACK").await?;
         Ok(())
+    }
+
+    async fn get_database_metadata(&self) -> Result<Vec<DatabaseInfo>> {
+        let pool = self.get_pool(None).await?;
+        let metadata = sqlx::query(
+            r#"
+            SELECT s.SCHEMA_NAME,
+                   s.DEFAULT_CHARACTER_SET_NAME,
+                   s.DEFAULT_COLLATION_NAME,
+                   SUM(COALESCE(t.DATA_LENGTH, 0) + COALESCE(t.INDEX_LENGTH, 0)) AS SIZE_BYTES
+            FROM information_schema.SCHEMATA s
+            LEFT JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = s.SCHEMA_NAME
+            GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME, s.DEFAULT_COLLATION_NAME
+            ORDER BY s.SCHEMA_NAME
+            "#,
+        )
+        .persistent(false)
+        .fetch_all(&pool)
+        .await;
+
+        match metadata {
+            Ok(rows) => Ok(rows
+                .iter()
+                .map(|row| DatabaseInfo {
+                    name: mysql_string_by_index(row, 0).unwrap_or_default(),
+                    default_charset: mysql_string_by_index(row, 1)
+                        .filter(|value| !value.trim().is_empty()),
+                    default_collation: mysql_string_by_index(row, 2)
+                        .filter(|value| !value.trim().is_empty()),
+                    size_bytes: row
+                        .try_get::<Option<i64>, _>(3)
+                        .ok()
+                        .flatten()
+                        .or_else(|| mysql_string_by_index(row, 3)?.parse::<i64>().ok()),
+                    ..DatabaseInfo::default()
+                })
+                .filter(|database| !database.name.trim().is_empty())
+                .collect()),
+            Err(error) => {
+                tracing::debug!(
+                    "Falling back to MySQL database names after metadata query failed: {error}"
+                );
+                Ok(self
+                    .get_schemas()
+                    .await?
+                    .into_iter()
+                    .map(|name| DatabaseInfo {
+                        name,
+                        ..DatabaseInfo::default()
+                    })
+                    .collect())
+            }
+        }
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {

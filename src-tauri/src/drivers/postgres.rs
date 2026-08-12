@@ -1,7 +1,7 @@
 use crate::core::dialect::DatabaseKind;
 use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
-    ColumnDef, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo, FunctionInfo,
+    ColumnDef, ColumnInfo, ConstraintInfo, DatabaseInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
     SchemaObjectInfo, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
@@ -1793,6 +1793,72 @@ impl DatabaseDriver for PostgresDriver {
         .await?;
 
         Ok(databases)
+    }
+
+    async fn get_database_metadata(&self) -> Result<Vec<DatabaseInfo>> {
+        let pool = self.get_pool().await?;
+        let metadata = sqlx::query(
+            r#"
+            SELECT d.datname,
+                   CASE
+                     WHEN has_database_privilege(d.datname, 'CONNECT')
+                       OR COALESCE((
+                         SELECT pg_has_role(current_user, r.oid, 'MEMBER')
+                         FROM pg_catalog.pg_roles r
+                         WHERE r.rolname = 'pg_read_all_stats'
+                       ), false)
+                     THEN pg_database_size(d.oid)
+                     ELSE NULL
+                   END AS size_bytes,
+                   pg_catalog.shobj_description(d.oid, 'pg_database') AS comment,
+                   pg_catalog.pg_encoding_to_char(d.encoding) AS default_charset,
+                   d.datcollate AS default_collation
+            FROM pg_catalog.pg_database d
+            WHERE d.datallowconn AND NOT d.datistemplate
+            ORDER BY d.datname
+            "#,
+        )
+        .persistent(false)
+        .fetch_all(&pool)
+        .await;
+
+        match metadata {
+            Ok(rows) => Ok(rows
+                .iter()
+                .map(|row| DatabaseInfo {
+                    name: row.try_get::<String, _>(0).unwrap_or_default(),
+                    size_bytes: row.try_get::<Option<i64>, _>(1).ok().flatten(),
+                    comment: row
+                        .try_get::<Option<String>, _>(2)
+                        .ok()
+                        .flatten()
+                        .filter(|value| !value.trim().is_empty()),
+                    default_charset: row
+                        .try_get::<Option<String>, _>(3)
+                        .ok()
+                        .flatten()
+                        .filter(|value| !value.trim().is_empty()),
+                    default_collation: row
+                        .try_get::<Option<String>, _>(4)
+                        .ok()
+                        .flatten()
+                        .filter(|value| !value.trim().is_empty()),
+                    ..DatabaseInfo::default()
+                })
+                .collect()),
+            Err(error) => {
+                tracing::debug!("Falling back to PostgreSQL database names after metadata query failed: {error}");
+                Ok(self
+                    .get_databases()
+                    .await?
+                    .into_iter()
+                    .map(|name| DatabaseInfo {
+                        name,
+                        ..DatabaseInfo::default()
+                    })
+                    .collect())
+            }
+        }
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod codebuddy;
 pub mod codex;
 pub mod runtime;
+pub mod setup;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +67,30 @@ impl CliModelInfo {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliCommandInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
+impl CliCommandInfo {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            argument_hint: None,
+        }
+    }
+
+    pub fn with_argument_hint(mut self, hint: impl Into<String>) -> Self {
+        self.argument_hint = Some(hint.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliDetectionResult {
@@ -84,6 +109,64 @@ pub struct CliConnectionTestResult {
     pub executable_path: String,
     pub version: Option<String>,
     pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInstallResult {
+    pub provider: CliProviderKind,
+    pub executable_path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliAuthenticationLaunchResult {
+    pub provider: CliProviderKind,
+    pub session_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliAuthenticationMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliAuthenticationPhase {
+    Starting,
+    WaitingForBrowser,
+    WaitingForCallback,
+    Verifying,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+impl CliAuthenticationPhase {
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Expired
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliAuthenticationStatus {
+    pub session_id: String,
+    pub provider: CliProviderKind,
+    pub phase: CliAuthenticationPhase,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

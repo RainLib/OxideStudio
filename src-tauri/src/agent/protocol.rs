@@ -393,6 +393,8 @@ pub struct AgentProjectStateCleared {
 #[serde(rename_all = "camelCase")]
 pub struct AgentConversationSnapshotSaveRequest {
     pub project_id: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
     pub thread_id: String,
     pub turns: Value,
     #[serde(default)]
@@ -403,6 +405,8 @@ pub struct AgentConversationSnapshotSaveRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AgentConversationSnapshot {
     pub project_id: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
     pub thread_id: String,
     pub turns: Value,
     #[serde(default)]

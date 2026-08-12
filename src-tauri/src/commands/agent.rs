@@ -223,9 +223,10 @@ pub async fn agent_save_conversation_snapshot(
 pub async fn agent_load_conversation_snapshot(
     manager: State<'_, AgentHostManager>,
     project_id: String,
+    conversation_id: Option<String>,
 ) -> Result<Option<AgentConversationSnapshot>, CommandError> {
     manager
-        .load_conversation_snapshot(&project_id)
+        .load_conversation_snapshot(&project_id, conversation_id.as_deref())
         .await
         .map_err(|error| agent_error("AGENT_CONVERSATION_LOAD_FAILED", error))
 }

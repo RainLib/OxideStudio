@@ -24,8 +24,11 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 use zeroize::Zeroize;
 
-const DEFAULT_CLI_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const MIN_CLI_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_CLI_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+// CLI turns regularly spend more than 30 seconds reasoning or waiting for an
+// approved tool. Treat the provider timeout as an inactivity timeout and do
+// not inherit the short HTTP request timeout from legacy settings.
+const MIN_CLI_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 const MAX_CLI_TIMEOUT_MS: u64 = 2 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,8 +70,18 @@ pub struct PreparedCliRun {
     pub environment: BTreeMap<String, String>,
     pub stdin: Vec<u8>,
     pub timeout: Duration,
+    protocol: CliRunProtocol,
     working_directory: TempDir,
     _bridge: PrivateBridgeSession,
+}
+
+enum CliRunProtocol {
+    Jsonl,
+    CodexAppServer {
+        model: Option<String>,
+        effort: Option<String>,
+        collaboration_mode: &'static str,
+    },
 }
 
 impl PreparedCliRun {
@@ -81,19 +94,45 @@ impl PreparedCliRun {
         cancellation: watch::Receiver<bool>,
         events: mpsc::UnboundedSender<Value>,
     ) -> Result<crate::ai_cli::runtime::CliJsonlOutput> {
-        crate::ai_cli::runtime::run_jsonl_process(
-            &self.command,
-            &self.args,
-            &self.environment,
-            self.working_directory(),
-            &self.stdin,
-            self.timeout,
-            cancellation,
-            move |event| {
-                let _ = events.send(event);
-            },
-        )
-        .await
+        match &self.protocol {
+            CliRunProtocol::Jsonl => {
+                crate::ai_cli::runtime::run_jsonl_process(
+                    &self.command,
+                    &self.args,
+                    &self.environment,
+                    self.working_directory(),
+                    &self.stdin,
+                    self.timeout,
+                    cancellation,
+                    move |event| {
+                        let _ = events.send(event);
+                    },
+                )
+                .await
+            }
+            CliRunProtocol::CodexAppServer {
+                model,
+                effort,
+                collaboration_mode,
+            } => {
+                crate::ai_cli::runtime::run_codex_app_server(
+                    &self.command,
+                    &self.args,
+                    &self.environment,
+                    self.working_directory(),
+                    &self.stdin,
+                    model.as_deref(),
+                    effort.as_deref(),
+                    collaboration_mode,
+                    self.timeout,
+                    cancellation,
+                    move |event| {
+                        let _ = events.send(event);
+                    },
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -114,6 +153,7 @@ pub struct CliAgentEventParser {
     saw_terminal: bool,
     saw_error: bool,
     mutation_result_unknown: bool,
+    last_usage: Option<(u64, u64)>,
 }
 
 impl CliAgentEventParser {
@@ -125,6 +165,7 @@ impl CliAgentEventParser {
             saw_terminal: false,
             saw_error: false,
             mutation_result_unknown: false,
+            last_usage: None,
         }
     }
 
@@ -158,6 +199,9 @@ impl CliAgentEventParser {
     }
 
     fn parse_codex(&mut self, value: &Value) -> Vec<CliAgentEvent> {
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
+            return self.parse_codex_app_server(method, value.get("params").unwrap_or(value));
+        }
         let event_type = value
             .get("type")
             .and_then(Value::as_str)
@@ -214,6 +258,97 @@ impl CliAgentEventParser {
                 vec![CliAgentEvent::Error(classify_cli_error(
                     CliProviderKind::CodexCli,
                     &error_message(value),
+                ))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn parse_codex_app_server(&mut self, method: &str, params: &Value) -> Vec<CliAgentEvent> {
+        match method {
+            "item/agentMessage/delta" => self.push_text(
+                params
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ),
+            "item/started" => {
+                let item = params.get("item").unwrap_or(params);
+                parse_codex_tool(item).map_or_else(Vec::new, |(call_id, tool_name)| {
+                    self.tool_names.insert(call_id.clone(), tool_name.clone());
+                    vec![CliAgentEvent::ToolStarted { call_id, tool_name }]
+                })
+            }
+            "item/completed" => {
+                let item = params.get("item").unwrap_or(params);
+                let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+                if matches!(item_type, "mcpToolCall" | "mcp_tool_call" | "mcpTool") {
+                    let (call_id, parsed_name) = parse_codex_tool(item)
+                        .unwrap_or_else(|| (fallback_call_id(item), "oxide tool".to_string()));
+                    let tool_name = self.tool_names.remove(&call_id).unwrap_or(parsed_name);
+                    let status = item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("completed");
+                    let success = !matches!(status, "failed" | "error" | "cancelled");
+                    let detail = safe_tool_detail(item);
+                    self.mutation_result_unknown |= detail.is_some();
+                    vec![CliAgentEvent::ToolFinished {
+                        call_id,
+                        tool_name,
+                        success,
+                        detail,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                let usage = params.pointer("/tokenUsage/last").unwrap_or(params);
+                self.last_usage = Some((
+                    usage
+                        .get("inputTokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    usage
+                        .get("outputTokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                ));
+                Vec::new()
+            }
+            "turn/completed" => {
+                self.saw_terminal = true;
+                let turn = params.get("turn").unwrap_or(params);
+                let status = turn
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed");
+                if status == "completed" {
+                    let mut events = self
+                        .last_usage
+                        .take()
+                        .map(|(input_tokens, output_tokens)| CliAgentEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                        })
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    events.push(CliAgentEvent::End);
+                    events
+                } else {
+                    self.saw_error = true;
+                    vec![CliAgentEvent::Error(classify_cli_error(
+                        CliProviderKind::CodexCli,
+                        &error_message(turn),
+                    ))]
+                }
+            }
+            "error" => {
+                self.saw_error = true;
+                vec![CliAgentEvent::Error(classify_cli_error(
+                    CliProviderKind::CodexCli,
+                    &error_message(params),
                 ))]
             }
             _ => Vec::new(),
@@ -376,6 +511,18 @@ pub async fn prepare_cli_run(
             codebuddy_args(provider, &oxide_agent, request, working_directory.path())?
         }
     };
+    let protocol = match provider_kind {
+        CliProviderKind::CodexCli => CliRunProtocol::CodexAppServer {
+            model: non_default(provider.model.as_str()),
+            effort: provider.reasoning_effort.as_deref().and_then(non_default),
+            collaboration_mode: if request.profile == AgentProfile::Plan {
+                "plan"
+            } else {
+                "default"
+            },
+        },
+        CliProviderKind::CodebuddyCli => CliRunProtocol::Jsonl,
+    };
     Ok(PreparedCliRun {
         provider: provider_kind,
         command,
@@ -383,6 +530,7 @@ pub async fn prepare_cli_run(
         environment,
         stdin: prompt.into_bytes(),
         timeout,
+        protocol,
         working_directory,
         _bridge: bridge,
     })
@@ -435,6 +583,13 @@ fn provider_kind(kind: AgentProviderKind) -> Result<CliProviderKind> {
 }
 
 fn build_prompt(request: &AgentTurnRequest) -> String {
+    let current_request = request.prompt.trim();
+    // Native slash commands must be the first token in the provider input.
+    // Runtime tool manifests, sandboxing and Desktop approval leases still
+    // enforce the Oxide boundary for commands that can invoke tools.
+    if current_request.starts_with('/') {
+        return current_request.to_string();
+    }
     let profile = match request.profile {
         AgentProfile::Chat => "Chat (strictly read-only)",
         AgentProfile::Plan => "Plan (strictly read-only)",
@@ -461,16 +616,14 @@ tell the user to verify it manually and do not retry it. Do not reveal hidden re
 }
 
 fn codex_args(
-    provider: &AgentProviderConfig,
+    _provider: &AgentProviderConfig,
     oxide_agent: &Path,
     request: &AgentTurnRequest,
 ) -> Vec<String> {
-    let mut args = vec![
-        "exec".to_string(),
-        "--json".to_string(),
-        "--skip-git-repo-check".to_string(),
-        "--sandbox".to_string(),
-        "read-only".to_string(),
+    let args = vec![
+        "app-server".to_string(),
+        "-c".to_string(),
+        "mcp_servers={}".to_string(),
         "-c".to_string(),
         "features.shell_tool=false".to_string(),
         "-c".to_string(),
@@ -509,23 +662,12 @@ fn codex_args(
             .unwrap_or_else(|_| "[]".to_string())
         ),
     ];
-    let model = provider.model.trim();
-    if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
-        args.extend(["--model".to_string(), model.to_string()]);
-    }
-    if let Some(effort) = provider
-        .reasoning_effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
-    {
-        args.extend([
-            "-c".to_string(),
-            format!("model_reasoning_effort={}", toml_string(effort)),
-        ]);
-    }
-    args.push("-".to_string());
     args
+}
+
+fn non_default(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && !value.eq_ignore_ascii_case("default")).then(|| value.to_string())
 }
 
 fn codebuddy_args(
@@ -550,6 +692,11 @@ fn codebuddy_args(
         .iter()
         .map(|tool| format!("mcp__oxide__{}", tool.name))
         .collect::<Vec<_>>();
+    let permission_mode = if request.profile == AgentProfile::Plan {
+        "plan"
+    } else {
+        "dontAsk"
+    };
     let mut args = vec![
         "--print".to_string(),
         "--output-format".to_string(),
@@ -559,7 +706,7 @@ fn codebuddy_args(
         "text".to_string(),
         "--no-session-persistence".to_string(),
         "--permission-mode".to_string(),
-        "dontAsk".to_string(),
+        permission_mode.to_string(),
         "--mcp-config".to_string(),
         config_path.to_string_lossy().into_owned(),
         "--strict-mcp-config".to_string(),
@@ -638,7 +785,7 @@ fn toml_string(value: &str) -> String {
 fn parse_codex_tool(item: &Value) -> Option<(String, String)> {
     if !matches!(
         item.get("type").and_then(Value::as_str),
-        Some("mcp_tool_call" | "mcp_tool" | "tool_call")
+        Some("mcp_tool_call" | "mcp_tool" | "tool_call" | "mcpToolCall" | "mcpTool")
     ) {
         return None;
     }
@@ -650,6 +797,7 @@ fn parse_codex_tool(item: &Value) -> Option<(String, String)> {
         .unwrap_or_else(|| fallback_call_id(item));
     let tool_name = item
         .get("tool_name")
+        .or_else(|| item.get("toolName"))
         .or_else(|| item.get("tool"))
         .or_else(|| item.get("name"))
         .or_else(|| item.get("server_tool_name"))
@@ -803,6 +951,38 @@ mod tests {
             vec![CliAgentEvent::TextDelta("done".to_string())]
         );
         assert_eq!(parser.final_text(), "done");
+    }
+
+    #[test]
+    fn maps_codex_app_server_stream_and_final_usage() {
+        let mut parser = CliAgentEventParser::new(CliProviderKind::CodexCli);
+        assert_eq!(
+            parser.parse(&json!({
+                "method":"item/agentMessage/delta",
+                "params":{"delta":"hello"}
+            })),
+            vec![CliAgentEvent::TextDelta("hello".to_string())]
+        );
+        assert!(parser
+            .parse(&json!({
+                "method":"thread/tokenUsage/updated",
+                "params":{"tokenUsage":{"last":{"inputTokens":21,"outputTokens":8}}}
+            }))
+            .is_empty());
+        assert_eq!(
+            parser.parse(&json!({
+                "method":"turn/completed",
+                "params":{"turn":{"status":"completed"}}
+            })),
+            vec![
+                CliAgentEvent::Usage {
+                    input_tokens: 21,
+                    output_tokens: 8,
+                },
+                CliAgentEvent::End,
+            ]
+        );
+        assert_eq!(parser.final_text(), "hello");
     }
 
     #[test]

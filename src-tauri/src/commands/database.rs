@@ -347,14 +347,20 @@ fn connection_database_capability_context(
 
     Ok(ConnectionDatabaseCapabilityContext {
         connection_id,
-        schema_migration_mode: schema_migration_capability_mode(
-            &driver,
-            external_package,
-            snapshot.semantic_schema_migration_mode,
-            snapshot.has_exact_semantic_schema_migration_evidence,
-        ),
+        schema_migration_mode: if snapshot.managed {
+            SchemaMigrationCapabilityMode::ReviewOnly
+        } else {
+            schema_migration_capability_mode(
+                &driver,
+                external_package,
+                snapshot.semantic_schema_migration_mode,
+                snapshot.has_exact_semantic_schema_migration_evidence,
+            )
+        },
         driver,
-        distribution: if external_package {
+        distribution: if snapshot.managed {
+            "managed".to_string()
+        } else if external_package {
             "external".to_string()
         } else {
             "bundled".to_string()
@@ -1381,6 +1387,7 @@ mod tests {
             "connection-1".to_string(),
             LiveConnectionCapabilitySnapshot {
                 driver_id: Some("postgres".to_string()),
+                managed: false,
                 external_driver_id: Some("postgres".to_string()),
                 package_version: Some("16.4.1".to_string()),
                 package_capabilities: Some(capabilities.clone()),
@@ -1408,6 +1415,7 @@ mod tests {
             "postgres-1".to_string(),
             LiveConnectionCapabilitySnapshot {
                 driver_id: Some("postgresql".to_string()),
+                managed: false,
                 external_driver_id: None,
                 package_version: None,
                 package_capabilities: None,
@@ -1421,6 +1429,7 @@ mod tests {
             "mysql-1".to_string(),
             LiveConnectionCapabilitySnapshot {
                 driver_id: Some("mariadb".to_string()),
+                managed: false,
                 external_driver_id: None,
                 package_version: None,
                 package_capabilities: None,
@@ -1439,6 +1448,36 @@ mod tests {
             mysql.schema_migration_mode,
             SchemaMigrationCapabilityMode::NonTransactional
         );
+    }
+
+    #[test]
+    fn managed_capability_context_is_not_classified_as_a_local_bundle() {
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        capabilities.supports_table_row_mutation = false;
+        capabilities.supports_table_ddl = false;
+        capabilities.table_export_formats.clear();
+        let context = connection_database_capability_context(
+            "managed-postgres".to_string(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("postgres".to_string()),
+                managed: true,
+                external_driver_id: None,
+                package_version: None,
+                package_capabilities: Some(capabilities),
+                server_version: None,
+                semantic_schema_migration_mode: None,
+                has_exact_semantic_schema_migration_evidence: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(context.distribution, "managed");
+        assert_eq!(
+            context.schema_migration_mode,
+            SchemaMigrationCapabilityMode::ReviewOnly
+        );
+        assert!(!context.capabilities.supports_table_row_mutation);
+        assert!(!context.capabilities.supports_table_ddl);
     }
 
     #[test]

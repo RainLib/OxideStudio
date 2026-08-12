@@ -16,6 +16,15 @@ const mocks = vi.hoisted(() => ({
   cancelTurn: vi.fn(),
   answerClarification: vi.fn(),
   approveAction: vi.fn(),
+  detectCliProvider: vi.fn(),
+  testAiProvider: vi.fn(),
+  installCliProvider: vi.fn(),
+  beginCliAuthentication: vi.fn(),
+  listCliAuthenticationMethods: vi.fn(),
+  getCliAuthenticationStatus: vi.fn(),
+  cancelCliAuthentication: vi.fn(),
+  listCliModels: vi.fn(),
+  listCliCommands: vi.fn(),
   listener: null as ((event: any) => void) | null,
 }));
 
@@ -42,6 +51,27 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
   isAgentHostUnavailableError: (error: unknown) =>
     error instanceof Error && /unavailable|not found/iu.test(error.message),
 }));
+
+vi.mock("@/services/tauri/ai.service", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("@/services/tauri/ai.service")
+  >();
+  return {
+    ...original,
+    aiService: {
+      ...original.aiService,
+      detectCliProvider: mocks.detectCliProvider,
+      testProvider: mocks.testAiProvider,
+      installCliProvider: mocks.installCliProvider,
+      beginCliAuthentication: mocks.beginCliAuthentication,
+      listCliAuthenticationMethods: mocks.listCliAuthenticationMethods,
+      getCliAuthenticationStatus: mocks.getCliAuthenticationStatus,
+      cancelCliAuthentication: mocks.cancelCliAuthentication,
+      listCliModels: mocks.listCliModels,
+      listCliCommands: mocks.listCliCommands,
+    },
+  };
+});
 
 import {
   AssistantSidebar,
@@ -155,6 +185,54 @@ describe("AssistantSidebar Agent Host path", () => {
     mocks.cancelTurn.mockResolvedValue({ accepted: true });
     mocks.answerClarification.mockResolvedValue({ accepted: true });
     mocks.approveAction.mockResolvedValue({ accepted: true });
+    mocks.detectCliProvider.mockResolvedValue({
+      provider: "codex-cli",
+      available: true,
+      executablePath: "C:/tools/codex.cmd",
+      version: "codex 1.0.0",
+      message: "Codex CLI is available",
+    });
+    mocks.testAiProvider.mockResolvedValue({
+      message: "CLI is installed and authenticated",
+      model: "default",
+      executablePath: "C:/tools/codex.cmd",
+      version: "codex 1.0.0",
+    });
+    mocks.installCliProvider.mockResolvedValue({
+      provider: "codex-cli",
+      executablePath: "C:/managed/codex.cmd",
+      message: "Codex CLI installed",
+    });
+    mocks.beginCliAuthentication.mockResolvedValue({
+      provider: "codex-cli",
+      sessionId: "auth-session-1",
+      message: "Secure browser sign-in opened",
+    });
+    mocks.listCliAuthenticationMethods.mockResolvedValue([
+      {
+        id: "browser",
+        name: "ChatGPT / Codex account",
+        description: "Secure browser sign-in",
+      },
+    ]);
+    mocks.getCliAuthenticationStatus.mockResolvedValue({
+      sessionId: "auth-session-1",
+      provider: "codex-cli",
+      phase: "waiting-for-callback",
+      message: "Complete sign-in in your browser",
+      methodId: "browser",
+    });
+    mocks.cancelCliAuthentication.mockResolvedValue({
+      sessionId: "auth-session-1",
+      provider: "codex-cli",
+      phase: "cancelled",
+      message: "Sign-in was cancelled",
+      methodId: "browser",
+    });
+    mocks.listCliModels.mockResolvedValue([
+      { id: "default", label: "Default", isDefault: true },
+    ]);
+    mocks.listCliCommands.mockResolvedValue([]);
     mocks.resumeTurn.mockImplementation(async (request) => ({
       accepted: true,
       requestId: request.requestId,
@@ -811,7 +889,7 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Resumed from checkpoint");
   });
 
-  it("does not invoke Agent Host when no AI provider is configured", async () => {
+  it("onboards the first Assistant provider before showing the composer", async () => {
     useAiSettingsStore.setState({ enabled: false });
     await act(async () => {
       root = createRoot(container);
@@ -819,10 +897,197 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
 
-    await submitPrompt(container, "Hello", "Run agent");
     expect(mocks.startTurn).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Configure an AI provider");
+    expect(container.textContent).toContain("Choose how Assistant runs");
+    expect(container.textContent).toContain("Codex CLI");
+    expect(container.textContent).toContain("CodeBuddy CLI");
+    expect(container.querySelector("textarea")).toBeNull();
+
+    await clickButtonByAria(container, "Use Oxide Assistant");
+    expect(useAiSettingsStore.getState()).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        provider: "openai-compatible",
+      }),
+    );
     expect(container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("switches Assistant providers from the persistent runtime control", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    expect(document.body.textContent).toContain("Run Assistant with");
+    expect(document.body.textContent).toContain(
+      "SQL inline completion keeps its separate HTTP provider",
+    );
+
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    expect(useAiSettingsStore.getState()).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        provider: "codex-cli",
+      }),
+    );
+    expect(
+      container.querySelector(
+        'button[aria-label^="Assistant provider: Codex CLI"]',
+      ),
+    ).not.toBeNull();
+    expect(mocks.loadConversationSnapshot).toHaveBeenCalledWith(
+      "project-1",
+      "provider:codex-cli",
+    );
+  });
+
+  it("surfaces provider-native CLI commands beside the composer", async () => {
+    mocks.listCliCommands.mockResolvedValue([
+      {
+        name: "review",
+        description: "Start the provider review workflow",
+        argumentHint: "optional review focus",
+      },
+      {
+        name: "status",
+        description: "Show the active provider status",
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    const commandTrigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Provider commands (2)"]',
+    );
+    expect(commandTrigger).not.toBeNull();
+    await act(async () => {
+      commandTrigger!.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          ctrlKey: false,
+        }),
+      );
+      await flushAsyncWork();
+    });
+    expect(document.body.textContent).toContain("/review");
+    expect(document.body.textContent).toContain(
+      "Start the provider review workflow",
+    );
+    expect(document.body.textContent).toContain("optional review focus");
+    expect(document.body.textContent).toContain("/status");
+  });
+
+  it("keeps the conversation surface mounted while a ready CLI is revalidated", async () => {
+    const detection = deferred<{
+      provider: "codex-cli";
+      available: boolean;
+      executablePath: string;
+      version: string;
+      message: string;
+    }>();
+    mocks.detectCliProvider.mockReturnValueOnce(detection.promise);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+
+    expect(container.textContent).not.toContain("Set up Codex CLI");
+    expect(container.querySelector("textarea")).not.toBeNull();
+    expect(
+      container
+        .querySelector("button[data-assistant-provider]")
+        ?.getAttribute("title"),
+    ).toContain("Verifying CLI");
+
+    await act(async () => {
+      detection.resolve({
+        provider: "codex-cli",
+        available: true,
+        executablePath: "C:/tools/codex.cmd",
+        version: "codex 1.0.0",
+        message: "Codex CLI is available",
+      });
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).not.toContain("Set up Codex CLI");
+    expect(container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("guides a missing CLI through managed install and provider authentication", async () => {
+    mocks.detectCliProvider
+      .mockResolvedValueOnce({
+        provider: "codex-cli",
+        available: false,
+        message: "Codex CLI is not installed",
+      })
+      .mockResolvedValueOnce({
+        provider: "codex-cli",
+        available: true,
+        executablePath: "C:/managed/codex.cmd",
+        version: "codex 1.0.0",
+        message: "Codex CLI is available",
+      });
+    mocks.testAiProvider.mockRejectedValueOnce(
+      new Error("Codex CLI is not authenticated. Sign in and try again."),
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Set up Codex CLI");
+    expect(container.textContent).toContain("Install for OxideStudio");
+
+    await clickButton(container, "Install for OxideStudio");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    expect(mocks.installCliProvider).toHaveBeenCalledWith("codex-cli");
+    expect(useAiSettingsStore.getState().codexCliPath).toBe(
+      "C:/managed/codex.cmd",
+    );
+    await act(async () => {
+      await flushAsyncWork();
+    });
+    expect(container.textContent).toContain("ChatGPT / Codex account");
+
+    await clickButton(container, "ChatGPT / Codex account");
+    expect(mocks.beginCliAuthentication).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "codex-cli",
+        executablePath: "C:/managed/codex.cmd",
+      }),
+      "browser",
+    );
+    expect(container.textContent).toContain("Complete sign-in in your browser");
   });
 
   it("manages the model from the composer and opens the AI settings section", async () => {
@@ -1080,4 +1345,14 @@ function baseEvent(threadId: string, turnId: string, sequence: number) {
 
 async function flushAsyncWork() {
   for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }

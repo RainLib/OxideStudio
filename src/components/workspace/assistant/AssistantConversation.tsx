@@ -40,6 +40,7 @@ interface AssistantConversationProps {
   isResponding: boolean;
   pendingLabel: string;
   onUsePrompt: (prompt: string) => void;
+  starterPrompts?: readonly string[];
   onPreviewSqlPatch?: (replacement: string) => void;
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
   onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
@@ -60,7 +61,7 @@ interface AssistantConversationProps {
   ) => Promise<void>;
 }
 
-const STARTER_PROMPTS = [
+const DEFAULT_STARTER_PROMPTS = [
   "Explain the SQL in my active editor",
   "Inspect the current database structure",
   "Plan a safe schema change",
@@ -72,6 +73,7 @@ export function AssistantConversation({
   isResponding,
   pendingLabel,
   onUsePrompt,
+  starterPrompts = DEFAULT_STARTER_PROMPTS,
   onPreviewSqlPatch,
   onExecuteAttachment,
   onOpenProjectFile,
@@ -87,6 +89,7 @@ export function AssistantConversation({
       <TurnConversation
         turns={turns}
         onUsePrompt={onUsePrompt}
+        starterPrompts={starterPrompts}
         onPreviewSqlPatch={onPreviewSqlPatch}
         onExecuteAttachment={onExecuteAttachment}
         onOpenProjectFile={onOpenProjectFile}
@@ -100,7 +103,12 @@ export function AssistantConversation({
   }
 
   if (entries.length === 0 && !isResponding) {
-    return <AssistantWelcome onUsePrompt={onUsePrompt} />;
+    return (
+      <AssistantWelcome
+        onUsePrompt={onUsePrompt}
+        starterPrompts={starterPrompts}
+      />
+    );
   }
 
   return (
@@ -191,6 +199,7 @@ export function AssistantConversation({
 function TurnConversation({
   turns,
   onUsePrompt,
+  starterPrompts,
   onPreviewSqlPatch,
   onExecuteAttachment,
   onOpenProjectFile,
@@ -202,6 +211,7 @@ function TurnConversation({
 }: {
   turns: AssistantTurn[];
   onUsePrompt: (prompt: string) => void;
+  starterPrompts: readonly string[];
   onPreviewSqlPatch?: (replacement: string) => void;
   onExecuteAttachment: (request: UiActionRequest) => Promise<UiActionResult>;
   onOpenProjectFile?: (relativePath: string) => Promise<unknown>;
@@ -228,7 +238,12 @@ function TurnConversation({
   };
 
   if (turns.length === 0) {
-    return <AssistantWelcome onUsePrompt={onUsePrompt} />;
+    return (
+      <AssistantWelcome
+        onUsePrompt={onUsePrompt}
+        starterPrompts={starterPrompts}
+      />
+    );
   }
 
   return (
@@ -402,8 +417,10 @@ function ArchivedProcessSummary({ content }: { content: string }) {
 
 function AssistantWelcome({
   onUsePrompt,
+  starterPrompts,
 }: {
   onUsePrompt: (prompt: string) => void;
+  starterPrompts: readonly string[];
 }) {
   return (
     <div className="flex min-h-full items-center justify-center px-5 py-8">
@@ -421,7 +438,7 @@ function AssistantWelcome({
         </p>
 
         <div className="mt-4 border-y border-[hsl(var(--wb-border-subtle))]">
-          {STARTER_PROMPTS.map((prompt) => (
+          {starterPrompts.map((prompt) => (
             <button
               key={prompt}
               type="button"

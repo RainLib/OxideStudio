@@ -21,6 +21,8 @@ export interface AiSettingsState {
   provider: AiProviderKind;
   plannerKind: AiPlannerKind;
   assistantMode: AssistantMode;
+  codexCliAssistantMode: AssistantMode;
+  codeBuddyCliAssistantMode: AssistantMode;
 
   // OpenAI-compatible Assistant profile. It remains intact when a CLI provider
   // is selected so switching providers never destroys a working configuration.
@@ -111,16 +113,26 @@ export function migratePersistedAiSettings(
   version: number,
 ): Partial<AiSettingsValues> {
   const state = (persisted || {}) as PersistedAiSettings;
-  if (version >= 2) return state;
+  const assistantMode = state.assistantMode || "o2";
+  const versionTwo =
+    version >= 2
+      ? state
+      : {
+          ...state,
+          provider: state.provider || "openai-compatible",
+          inlineBaseUrl:
+            state.inlineBaseUrl || state.baseUrl || DEFAULT_AI_BASE_URL,
+          inlineCompletionModel:
+            state.inlineCompletionModel || state.model || DEFAULT_AI_MODEL,
+          inlineTimeoutMs: state.inlineTimeoutMs || 4_000,
+          codexCliProfileId: DEFAULT_CODEX_CLI_PROFILE_ID,
+          codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
+        };
+  if (version >= 3) return versionTwo;
   return {
-    ...state,
-    provider: state.provider || "openai-compatible",
-    inlineBaseUrl: state.inlineBaseUrl || state.baseUrl || DEFAULT_AI_BASE_URL,
-    inlineCompletionModel:
-      state.inlineCompletionModel || state.model || DEFAULT_AI_MODEL,
-    inlineTimeoutMs: state.inlineTimeoutMs || 4_000,
-    codexCliProfileId: DEFAULT_CODEX_CLI_PROFILE_ID,
-    codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
+    ...versionTwo,
+    codexCliAssistantMode: state.codexCliAssistantMode || assistantMode,
+    codeBuddyCliAssistantMode: state.codeBuddyCliAssistantMode || assistantMode,
   };
 }
 
@@ -131,6 +143,8 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       provider: "openai-compatible",
       plannerKind: "model",
       assistantMode: "o2",
+      codexCliAssistantMode: "o2",
+      codeBuddyCliAssistantMode: "o2",
       baseUrl: DEFAULT_AI_BASE_URL,
       model: DEFAULT_AI_MODEL,
       apiKey: "",
@@ -192,13 +206,15 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "oxide-ai-settings",
-      version: 2,
+      version: 3,
       migrate: migratePersistedAiSettings,
       partialize: (state) => ({
         enabled: state.enabled,
         provider: state.provider,
         plannerKind: state.plannerKind,
         assistantMode: state.assistantMode,
+        codexCliAssistantMode: state.codexCliAssistantMode,
+        codeBuddyCliAssistantMode: state.codeBuddyCliAssistantMode,
         baseUrl: state.baseUrl,
         model: state.model,
         timeoutMs: state.timeoutMs,

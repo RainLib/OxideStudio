@@ -213,6 +213,21 @@ pub struct DatabaseCreateRequest {
     pub namespace_kind: Option<String>,
 }
 
+/// Read-only catalog metadata used by the connection-level database browser.
+/// Drivers that cannot expose the optional fields still return the database
+/// name so the browser degrades without product-specific SQL in the WebView.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseInfo {
+    pub name: String,
+    pub size_bytes: Option<i64>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub comment: Option<String>,
+    pub default_charset: Option<String>,
+    pub default_collation: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TableInfo {
     pub name: String,

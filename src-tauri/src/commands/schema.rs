@@ -2,8 +2,8 @@
 use crate::core::{
     manager::ConnectionManager,
     protocol::{
-        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, ForeignKeyReferenceInfo,
-        FunctionInfo, IndexInfo, Response, SchemaObjectInfo, TableInfo,
+        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, DatabaseInfo,
+        ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, Response, SchemaObjectInfo, TableInfo,
     },
 };
 use tauri::State;
@@ -154,6 +154,21 @@ pub async fn get_schema_objects(
             "connectionId": connection_id,
             "schema": schema,
         }),
+    ))
+}
+
+/// Get the richest safe catalog metadata exposed by the active driver.
+/// Optional fields remain empty when a product or account cannot provide them.
+#[tauri::command]
+pub async fn get_database_metadata(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+) -> Result<Response<Vec<DatabaseInfo>>, String> {
+    let result = manager.get_database_metadata(&connection_id).await;
+    Ok(schema_result(
+        result,
+        "DATABASE_METADATA_FAILED",
+        serde_json::json!({ "connectionId": connection_id }),
     ))
 }
 

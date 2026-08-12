@@ -194,6 +194,7 @@ fn config_connection_from_store(
             index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
+            note: None,
             icon: None,
             color: None,
             environment: Default::default(),

@@ -3,6 +3,7 @@ import {
   assistantModeOption,
   type AssistantMode,
 } from "@/ai/assistant/modes";
+import type { AssistantModeOption } from "@/ai/assistant/modes";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,7 +18,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AssistantContextPreview,
   AssistantContextSettings,
@@ -26,6 +27,10 @@ import {
   AssistantModelControl,
   type AssistantModelStatus,
 } from "./AssistantModelControl";
+import type {
+  AiCliCommandInfo,
+  AiCliModelInfo,
+} from "@/services/tauri/ai.service";
 import {
   Bot,
   Check,
@@ -44,6 +49,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  SquareTerminal,
   TextSelect,
   Wrench,
   X,
@@ -70,10 +76,15 @@ interface AssistantPromptBoxProps {
   model: string;
   modelEndpoint: string;
   modelStatus: AssistantModelStatus;
+  modelOptions?: readonly AiCliModelInfo[];
+  reasoningEffort?: string;
+  commandOptions?: readonly AiCliCommandInfo[];
   onModelChange: (model: string) => void;
+  onReasoningEffortChange?: (effort: string) => void;
   onOpenAiSettings: () => void;
   onRetryModel: () => void;
   submissionBlockReason: string | null;
+  modeOptions?: readonly AssistantModeOption[];
   attachments: Array<{ id: string; fileName: string; byteCount: number }>;
   attachmentError: string | null;
   isAddingAttachment: boolean;
@@ -108,10 +119,15 @@ export function AssistantPromptBox({
   model,
   modelEndpoint,
   modelStatus,
+  modelOptions,
+  reasoningEffort,
+  commandOptions,
   onModelChange,
+  onReasoningEffortChange,
   onOpenAiSettings,
   onRetryModel,
   submissionBlockReason,
+  modeOptions = ASSISTANT_MODE_OPTIONS,
   attachments,
   attachmentError,
   isAddingAttachment,
@@ -121,7 +137,9 @@ export function AssistantPromptBox({
   const { t } = useI18n();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const isComposingRef = useRef(false);
-  const currentMode = assistantModeOption(mode);
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const currentMode =
+    modeOptions.find((option) => option.id === mode) ?? assistantModeOption(mode);
   const CurrentModeIcon = MODE_ICONS[mode];
   const canSubmit =
     Boolean(message.trim()) &&
@@ -135,6 +153,22 @@ export function AssistantPromptBox({
         ? t("assistant.runAgent")
         : t("assistant.send");
   const contextLocked = isSubmitting || isToolRunning;
+  const commandQuery = /^\/([^\s]*)$/.exec(message)?.[1]?.toLowerCase();
+  const commandSuggestions =
+    commandQuery === undefined
+      ? []
+      : [...(commandOptions ?? [])]
+          .filter((command) => command.name.toLowerCase().includes(commandQuery))
+          .sort((left, right) => {
+            const leftStarts = left.name.toLowerCase().startsWith(commandQuery);
+            const rightStarts = right.name.toLowerCase().startsWith(commandQuery);
+            return leftStarts === rightStarts ? left.name.localeCompare(right.name) : leftStarts ? -1 : 1;
+          })
+          .slice(0, 8);
+  const acceptCommand = (command: AiCliCommandInfo) => {
+    onMessageChange(`/${command.name}${command.argumentHint ? " " : ""}`);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  };
   const updateContextSetting = (
     key: keyof AssistantContextSettings,
     checked: boolean,
@@ -154,6 +188,10 @@ export function AssistantPromptBox({
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY = textarea.scrollHeight > 180 ? "auto" : "hidden";
   }, [message]);
+
+  useEffect(() => {
+    setActiveCommandIndex(0);
+  }, [commandQuery]);
 
   return (
     <div className="shrink-0 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2">
@@ -194,6 +232,21 @@ export function AssistantPromptBox({
             onMessageChange(event.currentTarget.value);
           }}
           onKeyDown={(event) => {
+            if (commandSuggestions.length > 0 && !isComposingRef.current) {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setActiveCommandIndex((current) => {
+                  const direction = event.key === "ArrowDown" ? 1 : -1;
+                  return (current + direction + commandSuggestions.length) % commandSuggestions.length;
+                });
+                return;
+              }
+              if (event.key === "Tab" || event.key === "Enter") {
+                event.preventDefault();
+                acceptCommand(commandSuggestions[activeCommandIndex] ?? commandSuggestions[0]!);
+                return;
+              }
+            }
             if (
               event.key === "Enter" &&
               !event.shiftKey &&
@@ -216,6 +269,43 @@ export function AssistantPromptBox({
           aria-label={t("assistant.messageAria")}
         />
 
+        {commandSuggestions.length > 0 && !contextLocked && (
+          <div
+            className="mx-1.5 mb-1 max-h-[184px] overflow-y-auto rounded-[6px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.28)]"
+            role="listbox"
+            aria-label="Provider commands"
+          >
+            <div className="px-1.5 pb-1 pt-0.5 text-[8px] font-medium uppercase tracking-[0.08em] text-[hsl(var(--wb-text-muted))]">
+              Provider commands · Enter to insert
+            </div>
+            {commandSuggestions.map((command, index) => (
+              <button
+                key={command.name}
+                type="button"
+                role="option"
+                aria-selected={index === activeCommandIndex}
+                className={cn(
+                  "flex w-full items-start gap-2 rounded-[4px] px-1.5 py-1.5 text-left",
+                  index === activeCommandIndex
+                    ? "bg-[hsl(var(--wb-active))]"
+                    : "hover:bg-[hsl(var(--wb-hover))]",
+                )}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActiveCommandIndex(index)}
+                onClick={() => acceptCommand(command)}
+              >
+                <span className="shrink-0 font-mono text-[10px] text-[hsl(var(--wb-accent))]">
+                  /{command.name}
+                </span>
+                <span className="min-w-0 flex-1 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                  {command.description}
+                  {command.argumentHint ? ` · ${command.argumentHint}` : ""}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-2 px-1.5 pb-1.5">
           <div className="flex min-w-0 items-center gap-0.5">
             <button
@@ -232,6 +322,52 @@ export function AssistantPromptBox({
             >
               <Paperclip size={11} aria-hidden="true" />
             </button>
+            {(commandOptions?.length ?? 0) > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="wb-icon-button relative h-6 w-6 data-[state=open]:bg-[hsl(var(--wb-hover))] data-[state=open]:text-[hsl(var(--wb-text))]"
+                    disabled={contextLocked}
+                    title={`Provider commands (${commandOptions!.length})`}
+                    aria-label={`Provider commands (${commandOptions!.length})`}
+                  >
+                    <SquareTerminal size={11} aria-hidden="true" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="start"
+                  side="top"
+                  sideOffset={6}
+                  className={menuContentClass}
+                >
+                  <div className="px-2 pb-1 pt-1 text-[9px] font-medium text-[hsl(var(--wb-text-muted))]">
+                    Commands available in this provider session
+                  </div>
+                  {commandOptions!.map((command) => (
+                    <DropdownMenuItem
+                      key={command.name}
+                      className="min-h-10 cursor-default items-start gap-2 rounded-[4px] px-2 py-1.5 focus:bg-[hsl(var(--wb-active))] focus:text-[hsl(var(--wb-text))]"
+                      onClick={() => acceptCommand(command)}
+                    >
+                      <span className="shrink-0 font-mono text-[10px] text-[hsl(var(--wb-accent))]">
+                        /{command.name}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                          {command.description}
+                        </span>
+                        {command.argumentHint && (
+                          <span className="mt-0.5 block font-mono text-[8px] text-[hsl(var(--wb-text-muted)/0.78)]">
+                            {command.argumentHint}
+                          </span>
+                        )}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
@@ -255,7 +391,7 @@ export function AssistantPromptBox({
                 sideOffset={6}
                 className={menuContentClass}
               >
-                {ASSISTANT_MODE_OPTIONS.map((option) => {
+                {modeOptions.map((option) => {
                   const Icon = MODE_ICONS[option.id];
                   return (
                     <DropdownMenuItem
@@ -488,7 +624,10 @@ export function AssistantPromptBox({
               endpoint={modelEndpoint}
               status={modelStatus}
               disabled={isSubmitting || isToolRunning}
+              modelOptions={modelOptions}
+              reasoningEffort={reasoningEffort}
               onModelChange={onModelChange}
+              onReasoningEffortChange={onReasoningEffortChange}
               onOpenSettings={onOpenAiSettings}
               onRetry={onRetryModel}
             />

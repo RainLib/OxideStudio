@@ -598,8 +598,11 @@ impl AgentHostManager {
     pub async fn load_conversation_snapshot(
         &self,
         project_id: &str,
+        conversation_id: Option<&str>,
     ) -> Result<Option<AgentConversationSnapshot>> {
-        self.inner.load_conversation_snapshot(project_id).await
+        self.inner
+            .load_conversation_snapshot(project_id, conversation_id)
+            .await
     }
 
     pub async fn read_artifact(
@@ -787,16 +790,13 @@ impl AgentHostInner {
         let provider_kind = prepared.provider;
         let (cancellation, cancellation_receiver) = watch::channel(false);
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        self.cli_turns
-            .lock()
-            .await
-            .insert(
-                key.clone(),
-                CliTurnHandle {
-                    generation,
-                    cancellation,
-                },
-            );
+        self.cli_turns.lock().await.insert(
+            key.clone(),
+            CliTurnHandle {
+                generation,
+                cancellation,
+            },
+        );
         let inner = Arc::clone(self);
         tokio::spawn(async move {
             inner
@@ -958,12 +958,7 @@ impl AgentHostInner {
             return;
         }
         let pending_mutation = parser.has_pending_mutation();
-        let host_mutation_state = self
-            .mutation_turn_states
-            .read()
-            .await
-            .get(&key)
-            .copied();
+        let host_mutation_state = self.mutation_turn_states.read().await.get(&key).copied();
         let mutation_result_unknown = parser.mutation_result_unknown()
             || host_mutation_state == Some(MutationTurnState::Unknown)
             || (pending_mutation && host_mutation_state == Some(MutationTurnState::Started));
@@ -1490,6 +1485,7 @@ impl AgentHostInner {
         request: AgentConversationSnapshotSaveRequest,
     ) -> Result<AgentConversationSnapshot> {
         validate_project_id(&request.project_id)?;
+        validate_conversation_id(request.conversation_id.as_deref())?;
         if request.thread_id.trim().is_empty() || request.thread_id.chars().count() > 240 {
             return Err(anyhow!("threadId must contain 1 to 240 characters"));
         }
@@ -1520,6 +1516,7 @@ impl AgentHostInner {
 
         let snapshot = AgentConversationSnapshot {
             project_id: request.project_id,
+            conversation_id: request.conversation_id,
             thread_id: request.thread_id,
             turns: request.turns,
             resume_requests: Value::Array(
@@ -1541,7 +1538,7 @@ impl AgentHostInner {
         self.store
             .save_thread(
                 &snapshot.project_id,
-                CONVERSATION_SNAPSHOT_THREAD_ID,
+                &conversation_snapshot_store_key(snapshot.conversation_id.as_deref()),
                 &value,
             )
             .await
@@ -1552,11 +1549,16 @@ impl AgentHostInner {
     async fn load_conversation_snapshot(
         &self,
         project_id: &str,
+        conversation_id: Option<&str>,
     ) -> Result<Option<AgentConversationSnapshot>> {
         validate_project_id(project_id)?;
+        validate_conversation_id(conversation_id)?;
         let Some(value) = self
             .store
-            .load_thread(project_id, CONVERSATION_SNAPSHOT_THREAD_ID)
+            .load_thread(
+                project_id,
+                &conversation_snapshot_store_key(conversation_id),
+            )
             .await?
         else {
             return Ok(None);
@@ -1566,6 +1568,11 @@ impl AgentHostInner {
         if snapshot.project_id != project_id {
             return Err(anyhow!(
                 "persisted AI conversation snapshot does not match the requested project"
+            ));
+        }
+        if snapshot.conversation_id.as_deref() != conversation_id {
+            return Err(anyhow!(
+                "persisted AI conversation snapshot does not match the requested provider session"
             ));
         }
         Ok(Some(snapshot))
@@ -6404,6 +6411,30 @@ fn validate_project_id(project_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_conversation_id(conversation_id: Option<&str>) -> Result<()> {
+    let Some(conversation_id) = conversation_id else {
+        return Ok(());
+    };
+    if conversation_id.trim().is_empty()
+        || conversation_id.chars().count() > 80
+        || !conversation_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')
+        })
+    {
+        return Err(anyhow!(
+            "conversationId must contain 1 to 80 letters, numbers, dashes, underscores, colons, or dots"
+        ));
+    }
+    Ok(())
+}
+
+fn conversation_snapshot_store_key(conversation_id: Option<&str>) -> String {
+    match conversation_id {
+        Some(conversation_id) => format!("{CONVERSATION_SNAPSHOT_THREAD_ID}:{conversation_id}"),
+        None => CONVERSATION_SNAPSHOT_THREAD_ID.to_string(),
+    }
+}
+
 fn valid_clarification_question(value: &Value) -> bool {
     let Some(question) = value.as_object() else {
         return false;
@@ -6817,6 +6848,20 @@ fn sanitize_log_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_conversation_snapshots_use_distinct_validated_store_keys() {
+        assert_eq!(
+            conversation_snapshot_store_key(None),
+            CONVERSATION_SNAPSHOT_THREAD_ID
+        );
+        assert_ne!(
+            conversation_snapshot_store_key(Some("provider:codex-cli")),
+            conversation_snapshot_store_key(Some("provider:codebuddy-cli"))
+        );
+        assert!(validate_conversation_id(Some("provider:codex-cli")).is_ok());
+        assert!(validate_conversation_id(Some("../../other-session")).is_err());
+    }
 
     fn tool_manifest(name: &str) -> AgentToolManifestEntry {
         let permissions = RustHostTool::from_name(name)
@@ -7448,6 +7493,7 @@ mod tests {
             index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
+            note: None,
             icon: None,
             color: None,
             environment: Default::default(),
@@ -7479,6 +7525,7 @@ mod tests {
             index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
+            note: None,
             icon: None,
             color: None,
             environment: Default::default(),

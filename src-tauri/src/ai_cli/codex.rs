@@ -1,6 +1,10 @@
 use crate::ai_cli::{
-    runtime::{bounded_diagnostic, isolated_working_directory, resolve_command, run_captured, CliCommandSpec},
-    CliConnectionTestResult, CliDetectionResult, CliModelInfo, CliProviderConfig, CliProviderKind,
+    runtime::{
+        bounded_diagnostic, isolated_working_directory, resolve_command, run_captured,
+        CliCommandSpec,
+    },
+    CliCommandInfo, CliConnectionTestResult, CliDetectionResult, CliModelInfo, CliProviderConfig,
+    CliProviderKind,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -19,6 +23,7 @@ use tokio::{
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 struct CachedModels {
@@ -28,8 +33,28 @@ struct CachedModels {
     models: Vec<CliModelInfo>,
 }
 
-static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> =
-    LazyLock::new(|| Mutex::new(None));
+static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> = LazyLock::new(|| Mutex::new(None));
+
+pub fn common_commands() -> Vec<CliCommandInfo> {
+    vec![
+        CliCommandInfo::new(
+            "review",
+            "Start Codex's native review workflow for the current context",
+        )
+        .with_argument_hint("optional review focus"),
+        CliCommandInfo::new(
+            "plan",
+            "Switch the request to Codex Plan collaboration mode",
+        ),
+        CliCommandInfo::new("compact", "Compact the current Codex thread context")
+            .with_argument_hint("optional summary instructions"),
+        CliCommandInfo::new("skills", "List skills available to the Codex session"),
+        CliCommandInfo::new(
+            "status",
+            "Show the active Codex model, account and context status",
+        ),
+    ]
+}
 
 pub async fn detect(
     configured_path: Option<&str>,
@@ -66,7 +91,8 @@ pub async fn list_models(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliModelInfo>> {
-    let command = resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
+    let command =
+        resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
     let key = model_cache_key(&command, environment);
     let now = Instant::now();
     if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
@@ -87,10 +113,7 @@ pub async fn list_models(
     Ok(models)
 }
 
-fn model_cache_key(
-    command: &CliCommandSpec,
-    environment: &BTreeMap<String, String>,
-) -> u64 {
+fn model_cache_key(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> u64 {
     let mut hasher = DefaultHasher::new();
     command.program.hash(&mut hasher);
     command.prefix_args.hash(&mut hasher);
@@ -103,13 +126,17 @@ pub async fn test_connection(
     environment: &BTreeMap<String, String>,
 ) -> Result<CliConnectionTestResult> {
     let started = Instant::now();
-    let command = resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
+    let command =
+        resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
     let cli_version = version(&command, environment).await?;
+    verify_authentication(&command, environment).await?;
     let models = discover_models(&command, environment)
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
     if models.is_empty() {
-        return Err(anyhow!("Codex CLI returned no models; sign in with `codex login` and try again"));
+        return Err(anyhow!(
+            "Codex CLI returned no models; sign in with `codex login` and try again"
+        ));
     }
     let configured_model = config.model.trim();
     let model = if configured_model.is_empty() || configured_model.eq_ignore_ascii_case("default") {
@@ -123,7 +150,7 @@ pub async fn test_connection(
         configured_model.to_string()
     };
     Ok(CliConnectionTestResult {
-        message: "Codex CLI is installed and authenticated".to_string(),
+        message: "Codex CLI is ready. Existing sign-in verified.".to_string(),
         model,
         executable_path: command.resolved_path.unwrap_or(command.program),
         version: Some(cli_version),
@@ -131,7 +158,36 @@ pub async fn test_connection(
     })
 }
 
-async fn version(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> Result<String> {
+async fn verify_authentication(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    // model/list is intentionally not used as an authentication signal: Codex
+    // can publish a model catalog before an account has signed in.
+    let output = run_captured(
+        command,
+        &["login".to_string(), "status".to_string()],
+        environment,
+        None,
+        None,
+        AUTHENTICATION_TIMEOUT,
+    )
+    .await?;
+    if output.success {
+        return Ok(());
+    }
+    let diagnostic = [output.stderr.trim(), output.stdout.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(anyhow!(classify_error(&diagnostic)))
+}
+
+async fn version(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<String> {
     let output = run_captured(
         command,
         &["--version".to_string()],
@@ -184,9 +240,17 @@ async fn discover_models_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = process.spawn().context("failed to start Codex app-server")?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Codex app-server stdin is unavailable"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("Codex app-server stdout is unavailable"))?;
+    let mut child = process
+        .spawn()
+        .context("failed to start Codex app-server")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Codex app-server stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Codex app-server stdout is unavailable"))?;
     let mut lines = BufReader::new(stdout).lines();
     write_message(
         &mut stdin,
@@ -206,7 +270,11 @@ async fn discover_models_inner(
 
     let mut request_id = 2u64;
     let mut model_values = Vec::new();
-    while let Some(line) = lines.next_line().await.context("failed to read Codex app-server output")? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("failed to read Codex app-server output")?
+    {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -244,7 +312,9 @@ async fn discover_models_inner(
             _ => {}
         }
     }
-    Err(anyhow!("Codex app-server exited before model discovery completed"))
+    Err(anyhow!(
+        "Codex app-server exited before model discovery completed"
+    ))
 }
 
 async fn write_message(stdin: &mut tokio::process::ChildStdin, value: &Value) -> Result<()> {
@@ -261,7 +331,11 @@ async fn write_model_request(
     cursor: Option<&str>,
 ) -> Result<()> {
     let params = cursor.map_or_else(|| json!({}), |cursor| json!({ "cursor": cursor }));
-    write_message(stdin, &json!({ "method": "model/list", "id": id, "params": params })).await
+    write_message(
+        stdin,
+        &json!({ "method": "model/list", "id": id, "params": params }),
+    )
+    .await
 }
 
 fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
@@ -329,7 +403,13 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
 fn static_models() -> Vec<CliModelInfo> {
     ["default", "gpt-5.5", "gpt-5.4-mini"]
         .into_iter()
-        .map(|id| CliModelInfo::new(id, if id == "default" { "Default" } else { id }, id == "default"))
+        .map(|id| {
+            CliModelInfo::new(
+                id,
+                if id == "default" { "Default" } else { id },
+                id == "default",
+            )
+        })
         .collect()
 }
 
@@ -341,9 +421,13 @@ fn classify_error(value: &str) -> String {
         || lower.contains("login required")
         || lower.contains("unauthorized")
     {
-        return "Codex CLI is not authenticated. Run `codex login` in a terminal and try again.".to_string();
+        return "Codex CLI is not authenticated. Run `codex login` in a terminal and try again."
+            .to_string();
     }
-    if lower.contains("not installed") || lower.contains("not found") || lower.contains("no such file") {
+    if lower.contains("not installed")
+        || lower.contains("not found")
+        || lower.contains("no such file")
+    {
         return "Codex CLI is not installed or cannot be found. Install it or select its executable path.".to_string();
     }
     if diagnostic.is_empty() {
@@ -369,7 +453,13 @@ mod tests {
             json!({"id":"gpt-test"}),
         ])
         .unwrap();
-        assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["default", "gpt-test"]);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["default", "gpt-test"]
+        );
         assert_eq!(models[0].reasoning_efforts, ["low", "high"]);
     }
 

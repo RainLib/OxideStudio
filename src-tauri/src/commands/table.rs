@@ -1406,8 +1406,14 @@ fn postgres_sequence_from_row(row: &[Value]) -> Result<PostgresExportSequence, S
         cycle,
         cache_size: postgres_sequence_integer(row.get(7), "cache size", &name)?,
         last_value,
-        owner_table: row.get(9).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
-        owner_column: row.get(10).and_then(value_to_string).filter(|value| !value.trim().is_empty()),
+        owner_table: row
+            .get(9)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty()),
+        owner_column: row
+            .get(10)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -3287,11 +3293,14 @@ fn order_postgres_views(
 
     let mut ordered = Vec::with_capacity(views_by_name.len());
     while !remaining.is_empty() {
-        let next = remaining.iter().find(|view| {
-            requirements
-                .get(*view)
-                .map_or(true, |dependencies| dependencies.is_disjoint(&remaining))
-        }).cloned();
+        let next = remaining
+            .iter()
+            .find(|view| {
+                requirements
+                    .get(*view)
+                    .map_or(true, |dependencies| dependencies.is_disjoint(&remaining))
+            })
+            .cloned();
         let Some(next) = next else {
             let unresolved = remaining.into_iter().collect::<Vec<_>>().join(", ");
             return Err(format!(
@@ -3321,9 +3330,7 @@ fn postgres_backup_routine_definitions_query(schema: &str) -> String {
     )
 }
 
-fn postgres_backup_routine_definitions(
-    results: &[QueryResult],
-) -> Result<Vec<String>, String> {
+fn postgres_backup_routine_definitions(results: &[QueryResult]) -> Result<Vec<String>, String> {
     let rows = results
         .iter()
         .flat_map(|result| result.rows.iter())
@@ -3409,7 +3416,9 @@ fn postgres_trigger_definitions(results: &[QueryResult]) -> Result<Vec<String>, 
                 .and_then(value_to_string)
                 .filter(|definition| !definition.trim().is_empty())
                 .map(|definition| format!("{};", definition.trim().trim_end_matches(';')))
-                .ok_or_else(|| format!("PostgreSQL trigger on {table} has no definition available for backup"))
+                .ok_or_else(|| {
+                    format!("PostgreSQL trigger on {table} has no definition available for backup")
+                })
         })
         .collect()
 }
@@ -3429,17 +3438,31 @@ fn postgres_enum_definitions_query(schema: &str) -> String {
 fn postgres_enum_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
     let mut labels = BTreeMap::<String, Vec<String>>::new();
     for row in results.iter().flat_map(|result| result.rows.iter()) {
-        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let name = row
+            .first()
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "PostgreSQL enum metadata has no type name".to_string())?;
-        let label = row.get(1).and_then(value_to_string)
+        let label = row
+            .get(1)
+            .and_then(value_to_string)
             .ok_or_else(|| format!("PostgreSQL enum {name} has no label"))?;
         labels.entry(name).or_default().push(label);
     }
-    Ok(labels.into_iter().map(|(name, labels)| format!(
-        "CREATE TYPE {} AS ENUM ({});",
-        DatabaseKind::Postgres.qualified_table(Some(schema), &name),
-        labels.into_iter().map(|label| postgres_sql_string_literal(&label)).collect::<Vec<_>>().join(", "),
-    )).collect())
+    Ok(labels
+        .into_iter()
+        .map(|(name, labels)| {
+            format!(
+                "CREATE TYPE {} AS ENUM ({});",
+                DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+                labels
+                    .into_iter()
+                    .map(|label| postgres_sql_string_literal(&label))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        })
+        .collect())
 }
 
 fn postgres_domain_definitions_query(schema: &str) -> String {
@@ -3455,26 +3478,63 @@ fn postgres_domain_definitions_query(schema: &str) -> String {
 }
 
 fn postgres_domain_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
-    let mut domains = BTreeMap::<String, (String, bool, Option<String>, Vec<(String, String)>)>::new();
+    let mut domains =
+        BTreeMap::<String, (String, bool, Option<String>, Vec<(String, String)>)>::new();
     for row in results.iter().flat_map(|result| result.rows.iter()) {
-        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let name = row
+            .first()
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "PostgreSQL domain metadata has no type name".to_string())?;
-        let base_type = row.get(1).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let base_type = row
+            .get(1)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| format!("PostgreSQL domain {name} has no base type"))?;
-        let not_null = row.get(2).and_then(value_to_string).is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "t" | "1"));
-        let default = row.get(3).and_then(value_to_string).filter(|value| !value.trim().is_empty());
-        let entry = domains.entry(name).or_insert((base_type, not_null, default, Vec::new()));
-        if let (Some(constraint_name), Some(definition)) = (row.get(4).and_then(value_to_string), row.get(5).and_then(value_to_string)) {
+        let not_null = row.get(2).and_then(value_to_string).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "t" | "1"
+            )
+        });
+        let default = row
+            .get(3)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty());
+        let entry = domains
+            .entry(name)
+            .or_insert((base_type, not_null, default, Vec::new()));
+        if let (Some(constraint_name), Some(definition)) = (
+            row.get(4).and_then(value_to_string),
+            row.get(5).and_then(value_to_string),
+        ) {
             entry.3.push((constraint_name, definition));
         }
     }
-    Ok(domains.into_iter().map(|(name, (base_type, not_null, default, constraints))| {
-        let mut clauses = vec![format!("CREATE DOMAIN {} AS {}", DatabaseKind::Postgres.qualified_table(Some(schema), &name), base_type)];
-        if let Some(default) = default { clauses.push(format!("DEFAULT {default}")); }
-        if not_null { clauses.push("NOT NULL".to_string()); }
-        clauses.extend(constraints.into_iter().map(|(name, definition)| format!("CONSTRAINT {} {}", DatabaseKind::Postgres.quote_identifier(&name), definition)));
-        format!("{};", clauses.join(" "))
-    }).collect())
+    Ok(domains
+        .into_iter()
+        .map(|(name, (base_type, not_null, default, constraints))| {
+            let mut clauses = vec![format!(
+                "CREATE DOMAIN {} AS {}",
+                DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+                base_type
+            )];
+            if let Some(default) = default {
+                clauses.push(format!("DEFAULT {default}"));
+            }
+            if not_null {
+                clauses.push("NOT NULL".to_string());
+            }
+            clauses.extend(constraints.into_iter().map(|(name, definition)| {
+                format!(
+                    "CONSTRAINT {} {}",
+                    DatabaseKind::Postgres.quote_identifier(&name),
+                    definition
+                )
+            }));
+            format!("{};", clauses.join(" "))
+        })
+        .collect())
 }
 
 fn postgres_composite_type_query(schema: &str) -> String {
@@ -3490,22 +3550,47 @@ fn postgres_composite_type_query(schema: &str) -> String {
     )
 }
 
-fn postgres_composite_type_ddls(schema: &str, results: &[QueryResult]) -> Result<Vec<String>, String> {
+fn postgres_composite_type_ddls(
+    schema: &str,
+    results: &[QueryResult],
+) -> Result<Vec<String>, String> {
     let mut fields = BTreeMap::<String, Vec<(String, String)>>::new();
     for row in results.iter().flat_map(|result| result.rows.iter()) {
-        let name = row.first().and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let name = row
+            .first()
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "PostgreSQL composite type metadata has no name".to_string())?;
-        let field = row.get(1).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let field = row
+            .get(1)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| format!("PostgreSQL composite type {name} has an unnamed attribute"))?;
-        let field_type = row.get(2).and_then(value_to_string).filter(|value| !value.trim().is_empty())
+        let field_type = row
+            .get(2)
+            .and_then(value_to_string)
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| format!("PostgreSQL composite type {name}.{field} has no type"))?;
         fields.entry(name).or_default().push((field, field_type));
     }
-    Ok(fields.into_iter().map(|(name, fields)| format!(
-        "CREATE TYPE {} AS ({});",
-        DatabaseKind::Postgres.qualified_table(Some(schema), &name),
-        fields.into_iter().map(|(field, field_type)| format!("{} {}", DatabaseKind::Postgres.quote_identifier(&field), field_type)).collect::<Vec<_>>().join(", "),
-    )).collect())
+    Ok(fields
+        .into_iter()
+        .map(|(name, fields)| {
+            format!(
+                "CREATE TYPE {} AS ({});",
+                DatabaseKind::Postgres.qualified_table(Some(schema), &name),
+                fields
+                    .into_iter()
+                    .map(|(field, field_type)| format!(
+                        "{} {}",
+                        DatabaseKind::Postgres.quote_identifier(&field),
+                        field_type
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        })
+        .collect())
 }
 
 /// Read only user-defined range types.  PostgreSQL's built-in ranges live in
@@ -5233,10 +5318,12 @@ fn is_postgres_foreign_key_constraint(constraint: &ConstraintInfo) -> bool {
         .constraint_type
         .trim()
         .eq_ignore_ascii_case("FOREIGN KEY")
-        || constraint
-            .definition
-            .as_deref()
-            .is_some_and(|definition| definition.trim_start().to_ascii_uppercase().starts_with("FOREIGN KEY"))
+        || constraint.definition.as_deref().is_some_and(|definition| {
+            definition
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("FOREIGN KEY")
+        })
 }
 
 fn generate_postgres_table_ddl(
@@ -9678,19 +9765,34 @@ pub async fn export_database_sql(
     cancellation.take(&export_id).await;
     let (status, message) = match &result {
         Ok(_) => ("done", Some("Database SQL export completed".to_string())),
-        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) =>
-            ("cancelled", Some("Database SQL export cancelled; partial file removed".to_string())),
-        Err(_) => ("error", Some("Database SQL export failed; partial file removed".to_string())),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => (
+            "cancelled",
+            Some("Database SQL export cancelled; partial file removed".to_string()),
+        ),
+        Err(_) => (
+            "error",
+            Some("Database SQL export failed; partial file removed".to_string()),
+        ),
     };
-    let _ = app.emit(TABLE_EXPORT_PROGRESS_EVENT, TableExportProgress {
-        export_id: export_id.clone(), rows_exported: progress_rows.load(Ordering::Relaxed),
-        batches: progress_batches.load(Ordering::Relaxed), terminal: true,
-        status: status.to_string(), message,
-    });
+    let _ = app.emit(
+        TABLE_EXPORT_PROGRESS_EVENT,
+        TableExportProgress {
+            export_id: export_id.clone(),
+            rows_exported: progress_rows.load(Ordering::Relaxed),
+            batches: progress_batches.load(Ordering::Relaxed),
+            terminal: true,
+            status: status.to_string(),
+            message,
+        },
+    );
     match result {
         Ok(result) => Ok(Response::ok(result)),
-        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) =>
-            Ok(Response::err(TABLE_EXPORT_CANCELLED, "Database SQL export cancelled and the partial file was removed.")),
+        Err(error) if cancellation_requested || error.contains(TABLE_EXPORT_CANCELLED) => {
+            Ok(Response::err(
+                TABLE_EXPORT_CANCELLED,
+                "Database SQL export cancelled and the partial file was removed.",
+            ))
+        }
         Err(error) => Ok(Response::err("EXPORT_DATABASE_SQL_ERROR", &error)),
     }
 }
@@ -11059,6 +11161,26 @@ pub async fn mutate_table_rows(
 }
 
 #[tauri::command]
+pub async fn preview_create_table(
+    driver: String,
+    schema: String,
+    table: String,
+    columns: Vec<CreateTableColumn>,
+) -> Result<Response<Vec<String>>, String> {
+    let result = if is_sqlite_driver(&driver) {
+        build_sqlite_create_table_statements(&schema, &table, &columns)
+    } else {
+        DatabaseKind::from_str(&driver)
+            .map_err(|error| error.to_string())
+            .and_then(|kind| build_create_table_statements(kind, &schema, &table, &columns))
+    };
+    Ok(match result {
+        Ok(statements) => Response::ok(statements),
+        Err(error) => Response::err("PREVIEW_CREATE_TABLE_ERROR", &error),
+    })
+}
+
+#[tauri::command]
 pub async fn create_table(
     manager: State<'_, ConnectionManager>,
     connection_id: String,
@@ -12410,21 +12532,17 @@ mod tests {
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
         filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl,
-        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
-        normalized_table_data_transfer_project_id, object_label_from_type,
+        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        order_postgres_views, overwrite_transfer_verification,
-        postgres_backup_index_definitions,
+        order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
-        postgres_identity_reseed_verification_query,
-        postgres_multirange_type_names, postgres_multirange_type_query,
-        postgres_range_type_ddls, postgres_range_type_query,
-        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
-        postgres_materialized_view_populated_query, postgres_view_definition_query,
-        postgres_view_dependency_query,
-        preview_metadata_required, query_target,
+        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
+        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
+        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
+        postgres_sequence_setval_sql, postgres_view_definition_query,
+        postgres_view_dependency_query, preview_metadata_required, query_target,
         query_target_parameterized, read_csv_import_preview, read_json_import_preview,
         relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
@@ -14340,9 +14458,11 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         );
 
         indexes[0].definition = None;
-        assert!(postgres_backup_index_definitions("active_users_mv", &indexes)
-            .unwrap_err()
-            .contains("active_users_mv_email_idx"));
+        assert!(
+            postgres_backup_index_definitions("active_users_mv", &indexes)
+                .unwrap_err()
+                .contains("active_users_mv_email_idx")
+        );
     }
 
     #[test]
@@ -14366,12 +14486,15 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         )
         .unwrap();
         assert_eq!(
-            ordered.into_iter().map(|view| view.name).collect::<Vec<_>>(),
+            ordered
+                .into_iter()
+                .map(|view| view.name)
+                .collect::<Vec<_>>(),
             vec!["orders_source", "active_orders", "order_totals"]
         );
-        assert!(postgres_view_dependency_query("public").contains(
-            "dependent.relkind IN ('v', 'm')"
-        ));
+        assert!(
+            postgres_view_dependency_query("public").contains("dependent.relkind IN ('v', 'm')")
+        );
         assert!(order_postgres_views(
             vec![view("first", "VIEW"), view("second", "VIEW")],
             &[

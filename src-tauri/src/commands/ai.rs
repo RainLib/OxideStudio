@@ -1,6 +1,7 @@
 use crate::{
     ai_cli::{
-        codebuddy, codex, CliConnectionTestResult, CliDetectionResult, CliEnvironmentRequest,
+        codebuddy, codex, setup, CliAuthenticationLaunchResult, CliCommandInfo,
+        CliConnectionTestResult, CliDetectionResult, CliEnvironmentRequest, CliInstallResult,
         CliModelInfo, CliProfileRequest, CliProviderConfig, CliProviderKind,
     },
     core::{
@@ -204,7 +205,10 @@ pub async fn ai_cli_set_environment(
     .await
     {
         Ok(keys) => Ok(Response::ok(keys)),
-        Err(error) => Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error.to_string())),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_ENVIRONMENT_ERROR",
+            &error.to_string(),
+        )),
     }
 }
 
@@ -229,7 +233,9 @@ pub async fn ai_cli_detect(
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
     let result = match config.kind {
-        CliProviderKind::CodexCli => codex::detect(config.executable_path.as_deref(), &environment).await,
+        CliProviderKind::CodexCli => {
+            codex::detect(config.executable_path.as_deref(), &environment).await
+        }
         CliProviderKind::CodebuddyCli => {
             codebuddy::detect(config.executable_path.as_deref(), &environment).await
         }
@@ -252,7 +258,10 @@ pub async fn ai_cli_list_models(
     };
     match result {
         Ok(models) => Ok(Response::ok(models)),
-        Err(error) => Ok(Response::err("AI_CLI_MODEL_DISCOVERY_ERROR", &error.to_string())),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_MODEL_DISCOVERY_ERROR",
+            &error.to_string(),
+        )),
     }
 }
 
@@ -266,20 +275,47 @@ pub async fn ai_cli_list_efforts(
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
     let result = match config.kind {
-        CliProviderKind::CodexCli => codex::list_models(&config, &environment)
-            .await
-            .map(|models| {
-                models
-                    .into_iter()
-                    .find(|model| model.id == config.model || model.id == "default")
-                    .map(|model| model.reasoning_efforts)
-                    .unwrap_or_default()
-            }),
+        CliProviderKind::CodexCli => {
+            codex::list_models(&config, &environment)
+                .await
+                .map(|models| {
+                    models
+                        .into_iter()
+                        .find(|model| model.id == config.model || model.id == "default")
+                        .map(|model| model.reasoning_efforts)
+                        .unwrap_or_default()
+                })
+        }
         CliProviderKind::CodebuddyCli => codebuddy::list_efforts(&config, &environment).await,
     };
     match result {
         Ok(efforts) => Ok(Response::ok(efforts)),
-        Err(error) => Ok(Response::err("AI_CLI_EFFORT_DISCOVERY_ERROR", &error.to_string())),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_EFFORT_DISCOVERY_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_list_commands(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<Vec<CliCommandInfo>>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    let result = match config.kind {
+        CliProviderKind::CodexCli => Ok(codex::common_commands()),
+        CliProviderKind::CodebuddyCli => codebuddy::list_commands(&config, &environment).await,
+    };
+    match result {
+        Ok(commands) => Ok(Response::ok(commands)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_COMMAND_DISCOVERY_ERROR",
+            &error.to_string(),
+        )),
     }
 }
 
@@ -299,6 +335,80 @@ pub async fn ai_cli_test_provider(
     match result {
         Ok(result) => Ok(Response::ok(result)),
         Err(error) => Ok(Response::err("AI_CLI_TEST_ERROR", &error.to_string())),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_install_provider(
+    app: AppHandle,
+    provider: CliProviderKind,
+) -> Result<Response<CliInstallResult>, String> {
+    match setup::install_provider(&app, provider).await {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) => Ok(Response::err("AI_CLI_INSTALL_ERROR", &error.to_string())),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_begin_authentication(
+    app: AppHandle,
+    config: CliProviderConfig,
+    method_id: Option<String>,
+) -> Result<Response<CliAuthenticationLaunchResult>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    match setup::begin_authentication(&app, &config, &environment, method_id.as_deref()).await {
+        Ok(result) => Ok(Response::ok(result)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_AUTH_LAUNCH_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_list_authentication_methods(
+    app: AppHandle,
+    config: CliProviderConfig,
+) -> Result<Response<Vec<crate::ai_cli::CliAuthenticationMethod>>, String> {
+    let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
+        Ok(environment) => environment,
+        Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
+    };
+    match setup::authentication_methods(&config, &environment).await {
+        Ok(methods) => Ok(Response::ok(methods)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_AUTH_METHODS_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_authentication_status(
+    session_id: String,
+) -> Result<Response<crate::ai_cli::CliAuthenticationStatus>, String> {
+    match setup::authentication_status(&session_id).await {
+        Ok(status) => Ok(Response::ok(status)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_AUTH_STATUS_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_cancel_authentication(
+    session_id: String,
+) -> Result<Response<crate::ai_cli::CliAuthenticationStatus>, String> {
+    match setup::cancel_authentication(&session_id).await {
+        Ok(status) => Ok(Response::ok(status)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_AUTH_CANCEL_ERROR",
+            &error.to_string(),
+        )),
     }
 }
 

@@ -81,6 +81,8 @@ pub struct SavedConnection {
     pub index_grouping_pattern: Option<String>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub note: Option<String>,
     pub icon: Option<String>,
     pub color: Option<String>,
     #[serde(default)]
@@ -223,6 +225,7 @@ mod tests {
 
         assert_eq!(connection.project_id, "sqls");
         assert!(connection.ssh_tunnel.is_none());
+        assert!(connection.note.is_none());
         assert_eq!(connection.environment, ConnectionEnvironment::Unclassified);
         assert!(connection.production_databases.is_empty());
     }

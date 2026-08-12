@@ -302,6 +302,7 @@ pub async fn capture_schema_snapshot(
     driver: String,
     database: Option<String>,
     schema: String,
+    allow_partial: Option<bool>,
 ) -> Result<Response<SchemaSnapshot>, String> {
     let context = serde_json::json!({
         "projectId": project_id,
@@ -318,6 +319,7 @@ pub async fn capture_schema_snapshot(
         driver,
         database,
         schema,
+        allow_partial.unwrap_or(false),
     )
     .await;
 
@@ -341,6 +343,7 @@ async fn capture_schema_snapshot_inner(
     driver: String,
     database: Option<String>,
     schema: String,
+    allow_partial: bool,
 ) -> Result<SchemaSnapshot, String> {
     let capabilities = manager
         .package_capabilities(&connection_id)
@@ -389,6 +392,7 @@ async fn capture_schema_snapshot_inner(
         };
 
     let manager = manager.clone();
+    let mut warnings = Vec::new();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
     for (relation_name, object_type, comment) in objects {
@@ -458,25 +462,47 @@ async fn capture_schema_snapshot_inner(
                     }
                 }
             };
-            let metadata = tokio::try_join!(columns, indexes, constraints).map_err(|error| {
-                format!("Failed to capture metadata for {schema}.{relation_name}: {error}")
-            })?;
-
-            Ok::<_, String>(SchemaRelationSnapshot {
-                name: relation_name,
-                object_type,
-                comment,
-                columns: metadata.0,
-                indexes: metadata.1,
-                constraints: metadata.2,
-            })
+            match tokio::try_join!(columns, indexes, constraints) {
+                Ok(metadata) => Ok::<_, String>((
+                    SchemaRelationSnapshot {
+                        name: relation_name,
+                        object_type,
+                        comment,
+                        columns: metadata.0,
+                        indexes: metadata.1,
+                        constraints: metadata.2,
+                    },
+                    None,
+                )),
+                Err(error) if allow_partial => Ok((
+                    SchemaRelationSnapshot {
+                        name: relation_name.clone(),
+                        object_type,
+                        comment,
+                        columns: Vec::new(),
+                        indexes: Vec::new(),
+                        constraints: Vec::new(),
+                    },
+                    Some(format!(
+                        "Diagram metadata for {schema}.{relation_name} is incomplete: {error}"
+                    )),
+                )),
+                Err(error) => Err(format!(
+                    "Failed to capture metadata for {schema}.{relation_name}: {error}"
+                )),
+            }
         });
     }
 
     let mut relations = Vec::with_capacity(captures.len());
     while let Some(capture) = captures.join_next().await {
         match capture {
-            Ok(Ok(relation)) => relations.push(relation),
+            Ok(Ok((relation, warning))) => {
+                relations.push(relation);
+                if let Some(warning) = warning {
+                    warnings.push(warning);
+                }
+            }
             Ok(Err(error)) => {
                 captures.abort_all();
                 return Err(error);
@@ -514,7 +540,6 @@ async fn capture_schema_snapshot_inner(
     // relations may still lack catalog visibility for extensions, triggers or
     // types; that must not make an otherwise usable snapshot fail. The warning
     // binds this incomplete coverage to the snapshot review record.
-    let mut warnings = Vec::new();
     let schema_objects = if capabilities.supports_table_browsing {
         let result = match database {
             Some(database) => {
@@ -985,6 +1010,7 @@ async fn attach_host_recapture_after_external_failure(
         target.driver.clone(),
         target.database_name.clone(),
         target.schema_name.clone(),
+        false,
     )
     .await
     {
@@ -1122,6 +1148,7 @@ async fn execute_external_schema_migration(
         expected_target.driver.clone(),
         expected_target.database_name.clone(),
         expected_target.schema_name.clone(),
+        false,
     )
     .await
     {
@@ -1341,6 +1368,7 @@ async fn execute_external_schema_migration(
         expected_target.driver.clone(),
         expected_target.database_name.clone(),
         expected_target.schema_name.clone(),
+        false,
     )
     .await;
     let host_matches_source = after
@@ -1581,6 +1609,7 @@ pub async fn execute_schema_migration(
         expected_target.driver.clone(),
         expected_target.database_name.clone(),
         expected_target.schema_name.clone(),
+        false,
     )
     .await
     {
@@ -1760,6 +1789,7 @@ pub async fn execute_schema_migration(
         fresh_target.driver.clone(),
         fresh_target.database_name.clone(),
         fresh_target.schema_name.clone(),
+        false,
     )
     .await
     {

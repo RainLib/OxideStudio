@@ -1,6 +1,10 @@
 use crate::ai_cli::{
-    runtime::{bounded_diagnostic, isolated_working_directory, resolve_command, run_captured, CliCommandSpec},
-    CliConnectionTestResult, CliDetectionResult, CliModelInfo, CliProviderConfig, CliProviderKind,
+    runtime::{
+        bounded_diagnostic, isolated_working_directory, resolve_command, run_captured,
+        CliCommandSpec,
+    },
+    CliCommandInfo, CliConnectionTestResult, CliDetectionResult, CliModelInfo, CliProviderConfig,
+    CliProviderKind,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -17,7 +21,6 @@ use tokio::{
     sync::Mutex,
 };
 
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
 const ACP_TIMEOUT: Duration = Duration::from_secs(15);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -28,14 +31,31 @@ struct CachedModels {
     models: Vec<CliModelInfo>,
 }
 
-static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> =
-    LazyLock::new(|| Mutex::new(None));
+static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> = LazyLock::new(|| Mutex::new(None));
+
+const EMBEDDED_COMMANDS: &[&str] = &[
+    "btw",
+    "context",
+    "cost",
+    "goal",
+    "plan",
+    "review",
+    "skills",
+    "todos",
+    "effort",
+    "deep-research",
+    "simplify",
+    "code-review",
+    "verify",
+    "compact",
+    "security-review",
+];
 
 #[derive(Debug)]
-struct InitializeResult {
+struct AcpCatalog {
     models: Vec<CliModelInfo>,
-    authenticated: bool,
     current_model: Option<String>,
+    efforts: Vec<String>,
 }
 
 pub async fn detect(
@@ -73,7 +93,11 @@ pub async fn list_models(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliModelInfo>> {
-    let command = resolve_command(CliProviderKind::CodebuddyCli, config.executable_path.as_deref()).await?;
+    let command = resolve_command(
+        CliProviderKind::CodebuddyCli,
+        config.executable_path.as_deref(),
+    )
+    .await?;
     let key = model_cache_key(&command, environment);
     let now = Instant::now();
     if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
@@ -83,25 +107,19 @@ pub async fn list_models(
             return Ok(cached.models.clone());
         }
     }
-    let initialized = initialize(&command, environment).await?;
-    if !initialized.authenticated {
-        return Err(anyhow!("CodeBuddy Code is not authenticated. Open `codebuddy` in a terminal, sign in, and try again."));
-    }
-    if initialized.models.is_empty() {
-        return Err(anyhow!("CodeBuddy initialization returned no usable models"));
+    let catalog = discover_catalog_via_acp(&command, environment, config.model.trim()).await?;
+    if catalog.models.is_empty() {
+        return Err(anyhow!("CodeBuddy ACP session returned no usable models"));
     }
     *MODEL_CACHE.lock().await = Some(CachedModels {
         key,
         loaded_at: now,
-        models: initialized.models.clone(),
+        models: catalog.models.clone(),
     });
-    Ok(initialized.models)
+    Ok(catalog.models)
 }
 
-fn model_cache_key(
-    command: &CliCommandSpec,
-    environment: &BTreeMap<String, String>,
-) -> u64 {
+fn model_cache_key(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> u64 {
     let mut hasher = DefaultHasher::new();
     command.program.hash(&mut hasher);
     command.prefix_args.hash(&mut hasher);
@@ -113,18 +131,182 @@ pub async fn list_efforts(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
-    let command = resolve_command(CliProviderKind::CodebuddyCli, config.executable_path.as_deref()).await?;
-    match discover_efforts_via_acp(&command, environment, config.model.trim()).await {
-        Ok(efforts) if !efforts.is_empty() => Ok(efforts),
-        _ => {
-            let initialized = initialize(&command, environment).await?;
-            Ok(initialized
-                .models
-                .iter()
-                .find(|model| model.id == config.model.trim())
-                .map(|model| model.reasoning_efforts.clone())
-                .unwrap_or_default())
+    let command = resolve_command(
+        CliProviderKind::CodebuddyCli,
+        config.executable_path.as_deref(),
+    )
+    .await?;
+    Ok(
+        discover_catalog_via_acp(&command, environment, config.model.trim())
+            .await?
+            .efforts,
+    )
+}
+
+pub async fn list_commands(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<CliCommandInfo>> {
+    let command = resolve_command(
+        CliProviderKind::CodebuddyCli,
+        config.executable_path.as_deref(),
+    )
+    .await?;
+    tokio::time::timeout(
+        ACP_TIMEOUT,
+        discover_commands_via_acp(&command, environment),
+    )
+    .await
+    .map_err(|_| anyhow!("CodeBuddy ACP command discovery timed out"))?
+}
+
+async fn discover_commands_via_acp(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<CliCommandInfo>> {
+    let cwd = isolated_working_directory()?;
+    let mcp_config = cwd.path().join("mcp.json");
+    std::fs::write(&mcp_config, br#"{"mcpServers":{}}"#)
+        .context("failed to create isolated CodeBuddy MCP configuration")?;
+    let mut process = Command::new(&command.program);
+    process
+        .args(&command.prefix_args)
+        .args([
+            "--acp",
+            "--acp-transport",
+            "stdio",
+            "--strict-mcp-config",
+            "--mcp-config",
+            &mcp_config.to_string_lossy(),
+            "--setting-sources",
+            "user",
+        ])
+        .envs(environment)
+        .current_dir(cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = process
+        .spawn()
+        .context("failed to start CodeBuddy ACP command discovery")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("CodeBuddy ACP stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("CodeBuddy ACP stdout is unavailable"))?;
+    let mut lines = BufReader::new(stdout).lines();
+    write_rpc(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "terminal": false
+            },
+            "clientInfo": { "name": "OxideStudio", "version": env!("CARGO_PKG_VERSION") }
+        }),
+    )
+    .await?;
+    read_rpc_result(&mut lines, 1).await?;
+    write_rpc(&mut stdin, 2, "_codebuddy.ai/getUserInfo", json!({})).await?;
+    let account = read_rpc_result(&mut lines, 2).await?;
+    if !has_authenticated_user(&account) {
+        let _ = child.kill().await;
+        return Err(anyhow!(
+            "CodeBuddy Code is not authenticated. Sign in from OxideStudio and try again."
+        ));
+    }
+    write_rpc(
+        &mut stdin,
+        3,
+        "session/new",
+        json!({ "cwd": cwd.path().to_string_lossy(), "mcpServers": [] }),
+    )
+    .await?;
+
+    let mut session_ready = false;
+    let mut commands = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("id").and_then(Value::as_u64) == Some(3) {
+            if let Some(error) = value.get("error") {
+                return Err(anyhow!("CodeBuddy ACP session failed: {error}"));
+            }
+            session_ready = true;
         }
+        if value.get("method").and_then(Value::as_str) == Some("session/update") {
+            let update = value
+                .pointer("/params/update")
+                .or_else(|| value.get("params"))
+                .unwrap_or(&Value::Null);
+            if matches!(
+                update
+                    .get("sessionUpdate")
+                    .or_else(|| update.get("session_update"))
+                    .and_then(Value::as_str),
+                Some("available_commands_update")
+            ) {
+                commands = parse_available_commands(update);
+            }
+        }
+        if session_ready && !commands.is_empty() {
+            let _ = child.kill().await;
+            return Ok(commands);
+        }
+    }
+    Err(anyhow!(
+        "CodeBuddy ACP session did not publish its command catalog"
+    ))
+}
+
+fn parse_available_commands(value: &Value) -> Vec<CliCommandInfo> {
+    value
+        .get("availableCommands")
+        .or_else(|| value.get("available_commands"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|command| {
+            let name = command.get("name")?.as_str()?.trim();
+            if !EMBEDDED_COMMANDS.contains(&name) {
+                return None;
+            }
+            let description = command
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("CodeBuddy command");
+            let mut info = CliCommandInfo::new(name, description);
+            info.argument_hint = command
+                .get("inputHint")
+                .or_else(|| command.get("input_hint"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| command_argument_hint(name).map(str::to_string));
+            Some(info)
+        })
+        .collect()
+}
+
+fn command_argument_hint(name: &str) -> Option<&'static str> {
+    match name {
+        "goal" => Some("condition to keep working toward"),
+        "review" | "code-review" => Some("optional review target or focus"),
+        "effort" => Some("minimal | low | medium | high | xhigh | max"),
+        "compact" => Some("optional summary instructions"),
+        "btw" => Some("side question"),
+        _ => None,
     }
 }
 
@@ -133,21 +315,25 @@ pub async fn test_connection(
     environment: &BTreeMap<String, String>,
 ) -> Result<CliConnectionTestResult> {
     let started = Instant::now();
-    let command = resolve_command(CliProviderKind::CodebuddyCli, config.executable_path.as_deref()).await?;
+    let command = resolve_command(
+        CliProviderKind::CodebuddyCli,
+        config.executable_path.as_deref(),
+    )
+    .await?;
     let cli_version = version(&command, environment).await?;
-    let initialized = initialize(&command, environment)
+    // Account state, model catalog and session creation are all verified over
+    // ACP. Stream-json's apiKeySource is only a service origin and must never
+    // be interpreted as proof that a user is signed in.
+    let catalog = discover_catalog_via_acp(&command, environment, config.model.trim())
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
-    if !initialized.authenticated {
-        return Err(anyhow!("CodeBuddy Code is not authenticated. Open `codebuddy` in a terminal, sign in, and try again."));
-    }
     let configured = config.model.trim();
-    let model = initialized
+    let model = catalog
         .current_model
         .or_else(|| (!configured.is_empty()).then(|| configured.to_string()))
         .unwrap_or_else(|| "default".to_string());
     Ok(CliConnectionTestResult {
-        message: "CodeBuddy Code CLI is installed and authenticated".to_string(),
+        message: "CodeBuddy Code CLI is ready. Existing sign-in verified.".to_string(),
         model,
         executable_path: command.resolved_path.unwrap_or(command.program),
         version: Some(cli_version),
@@ -155,7 +341,10 @@ pub async fn test_connection(
     })
 }
 
-async fn version(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> Result<String> {
+async fn version(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<String> {
     let output = run_captured(
         command,
         &["--version".to_string()],
@@ -180,148 +369,6 @@ async fn version(command: &CliCommandSpec, environment: &BTreeMap<String, String
         .collect())
 }
 
-async fn initialize(
-    command: &CliCommandSpec,
-    environment: &BTreeMap<String, String>,
-) -> Result<InitializeResult> {
-    let cwd = isolated_working_directory()?;
-    let args = vec![
-        "--print".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--input-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--no-session-persistence".to_string(),
-        "--setting-sources".to_string(),
-        "user".to_string(),
-    ];
-    let mut request = serde_json::to_vec(&json!({
-        "type": "control_request",
-        "request_id": "oxide_model_discovery",
-        "request": { "subtype": "initialize" }
-    }))?;
-    request.push(b'\n');
-    let output = run_captured(
-        command,
-        &args,
-        environment,
-        Some(cwd.path()),
-        Some(&request),
-        INITIALIZE_TIMEOUT,
-    )
-    .await?;
-    if !output.success {
-        return Err(anyhow!(classify_error(&output.stderr)));
-    }
-    parse_initialize(&output.stdout)
-        .ok_or_else(|| anyhow!("CodeBuddy initialization returned no valid control response"))
-}
-
-fn parse_initialize(stdout: &str) -> Option<InitializeResult> {
-    for line in stdout.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if event.get("type").and_then(Value::as_str) != Some("control_response") {
-            continue;
-        }
-        let response = event.get("response")?;
-        let data = response.get("response").unwrap_or(response);
-        let models = parse_models(data.get("models").and_then(Value::as_array));
-        let authenticated = parse_authentication(data.get("account")).unwrap_or(!models.is_empty());
-        let current_model = data
-            .get("currentModelId")
-            .or_else(|| data.get("current_model_id"))
-            .and_then(Value::as_str)
-            .map(normalize_model_id);
-        return Some(InitializeResult {
-            models,
-            authenticated,
-            current_model,
-        });
-    }
-    None
-}
-
-fn parse_models(models: Option<&Vec<Value>>) -> Vec<CliModelInfo> {
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    let Some(models) = models else {
-        return result;
-    };
-    for model in models {
-        let Some(raw_id) = model
-            .get("value")
-            .and_then(Value::as_str)
-            .or_else(|| model.get("id").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let id = normalize_model_id(raw_id);
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let label = model
-            .get("displayName")
-            .or_else(|| model.get("display_name"))
-            .or_else(|| model.get("name"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&id)
-            .to_string();
-        let mut info = CliModelInfo::new(id, label, false);
-        if model
-            .get("supportsEffort")
-            .or_else(|| model.get("supports_effort"))
-            .and_then(Value::as_bool)
-            != Some(false)
-        {
-            info.reasoning_efforts = effort_strings(model);
-        }
-        result.push(info);
-    }
-    if !result.is_empty() && seen.insert("default".to_string()) {
-        result.insert(0, CliModelInfo::new("default", "Default", true));
-    }
-    result
-}
-
-fn effort_strings(value: &Value) -> Vec<String> {
-    let mut seen = HashSet::new();
-    value
-        .get("supportedEffortLevels")
-        .or_else(|| value.get("supported_effort_levels"))
-        .or_else(|| value.get("effortLevels"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && seen.insert(value.to_string()))
-        .map(str::to_string)
-        .collect()
-}
-
-fn parse_authentication(value: Option<&Value>) -> Option<bool> {
-    let value = value?;
-    if let Some(value) = value.as_bool() {
-        return Some(value);
-    }
-    for key in ["authenticated", "loggedIn", "isAuthenticated", "isLoggedIn"] {
-        if let Some(value) = value.get(key).and_then(Value::as_bool) {
-            return Some(value);
-        }
-    }
-    value
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|status| matches!(status.to_ascii_lowercase().as_str(), "authenticated" | "logged_in" | "active"))
-}
-
 fn normalize_model_id(value: &str) -> String {
     let value = value.trim();
     if value.eq_ignore_ascii_case("default-model") {
@@ -331,21 +378,24 @@ fn normalize_model_id(value: &str) -> String {
     }
 }
 
-async fn discover_efforts_via_acp(
+async fn discover_catalog_via_acp(
     command: &CliCommandSpec,
     environment: &BTreeMap<String, String>,
     model: &str,
-) -> Result<Vec<String>> {
-    tokio::time::timeout(ACP_TIMEOUT, discover_efforts_via_acp_inner(command, environment, model))
-        .await
-        .map_err(|_| anyhow!("CodeBuddy ACP effort discovery timed out"))?
+) -> Result<AcpCatalog> {
+    tokio::time::timeout(
+        ACP_TIMEOUT,
+        discover_catalog_via_acp_inner(command, environment, model),
+    )
+    .await
+    .map_err(|_| anyhow!("CodeBuddy ACP capability discovery timed out"))?
 }
 
-async fn discover_efforts_via_acp_inner(
+async fn discover_catalog_via_acp_inner(
     command: &CliCommandSpec,
     environment: &BTreeMap<String, String>,
     model: &str,
-) -> Result<Vec<String>> {
+) -> Result<AcpCatalog> {
     let cwd = isolated_working_directory()?;
     let mcp_config = cwd.path().join("mcp.json");
     std::fs::write(&mcp_config, br#"{"mcpServers":{}}"#)
@@ -369,40 +419,162 @@ async fn discover_efforts_via_acp_inner(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let mut child = process.spawn().context("failed to start CodeBuddy ACP")?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("CodeBuddy ACP stdin is unavailable"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("CodeBuddy ACP stdout is unavailable"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("CodeBuddy ACP stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("CodeBuddy ACP stdout is unavailable"))?;
     let mut lines = BufReader::new(stdout).lines();
 
-    write_rpc(&mut stdin, 1, "initialize", json!({
-        "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false
-        },
-        "clientInfo": { "name": "OxideStudio", "version": env!("CARGO_PKG_VERSION") }
-    })).await?;
+    write_rpc(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": { "readTextFile": false, "writeTextFile": false },
+                "terminal": false
+            },
+            "clientInfo": { "name": "OxideStudio", "version": env!("CARGO_PKG_VERSION") }
+        }),
+    )
+    .await?;
     read_rpc_result(&mut lines, 1).await?;
-    write_rpc(&mut stdin, 2, "session/new", json!({
-        "cwd": cwd.path().to_string_lossy(),
-        "mcpServers": []
-    })).await?;
-    let session = read_rpc_result(&mut lines, 2).await?;
+    write_rpc(&mut stdin, 2, "_codebuddy.ai/getUserInfo", json!({})).await?;
+    let account = read_rpc_result(&mut lines, 2).await?;
+    if !has_authenticated_user(&account) {
+        let _ = child.kill().await;
+        return Err(anyhow!(
+            "CodeBuddy Code is not authenticated. Sign in from OxideStudio and try again."
+        ));
+    }
+    write_rpc(
+        &mut stdin,
+        3,
+        "session/new",
+        json!({
+            "cwd": cwd.path().to_string_lossy(),
+            "mcpServers": []
+        }),
+    )
+    .await?;
+    let session = read_rpc_result(&mut lines, 3).await?;
     let session_id = session
         .get("sessionId")
         .or_else(|| session.get("session_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("CodeBuddy ACP session omitted its id"))?;
     let options = if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
-        write_rpc(&mut stdin, 3, "session/set_config_option", json!({
-            "sessionId": session_id,
-            "configId": "model",
-            "value": model
-        })).await?;
-        read_rpc_result(&mut lines, 3).await?
+        write_rpc(
+            &mut stdin,
+            4,
+            "session/set_config_option",
+            json!({
+                "sessionId": session_id,
+                "configId": "model",
+                "value": model
+            }),
+        )
+        .await?;
+        read_rpc_result(&mut lines, 4).await?
     } else {
         session
     };
-    Ok(parse_effort_options(&options))
+    let efforts = parse_effort_options(&options);
+    let mut models = parse_acp_model_options(&options, &efforts);
+    let current_model = current_config_value(&options, "model")
+        .as_deref()
+        .map(normalize_model_id);
+    if let Some(current_model) = current_model.as_deref() {
+        for model in &mut models {
+            model.is_default = model.id == current_model;
+        }
+    }
+    let _ = child.kill().await;
+    Ok(AcpCatalog {
+        models,
+        current_model,
+        efforts,
+    })
+}
+
+fn has_authenticated_user(value: &Value) -> bool {
+    value
+        .get("userInfo")
+        .or_else(|| value.get("user_info"))
+        .is_some_and(|user| user.is_object() && !user.as_object().is_some_and(|map| map.is_empty()))
+}
+
+fn current_config_value(value: &Value, config_id: &str) -> Option<String> {
+    config_options(value)
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option.get("id").and_then(Value::as_str) == Some(config_id))
+        })
+        .and_then(|option| {
+            option
+                .get("currentValue")
+                .or_else(|| option.get("current_value"))
+                .or_else(|| option.get("value"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn config_options(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .get("configOptions")
+        .or_else(|| value.get("config_options"))
+        .and_then(Value::as_array)
+}
+
+fn parse_acp_model_options(value: &Value, efforts: &[String]) -> Vec<CliModelInfo> {
+    let Some(model_config) = config_options(value).and_then(|options| {
+        options
+            .iter()
+            .find(|option| option.get("id").and_then(Value::as_str) == Some("model"))
+    }) else {
+        return Vec::new();
+    };
+    let current = current_config_value(value, "model");
+    let mut seen = HashSet::new();
+    model_config
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| {
+            let id = option
+                .get("value")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())?
+                .trim();
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                return None;
+            }
+            let label = option
+                .get("name")
+                .or_else(|| option.get("label"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id);
+            let mut model = CliModelInfo::new(
+                normalize_model_id(id),
+                label,
+                current.as_deref() == Some(id),
+            );
+            model.reasoning_efforts = efforts.to_vec();
+            Some(model)
+        })
+        .collect()
 }
 
 async fn write_rpc(
@@ -463,7 +635,12 @@ fn parse_effort_options(value: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|option| option.get("value").and_then(Value::as_str).or_else(|| option.as_str()))
+        .filter_map(|option| {
+            option
+                .get("value")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())
+        })
         .map(str::trim)
         .filter(|value| !value.is_empty() && seen.insert(value.to_string()))
         .map(str::to_string)
@@ -478,9 +655,12 @@ fn classify_error(value: &str) -> String {
         || lower.contains("login required")
         || lower.contains("unauthorized")
     {
-        return "CodeBuddy Code is not authenticated. Open `codebuddy` in a terminal, sign in, and try again.".to_string();
+        return "CodeBuddy Code is not authenticated. Sign in from the OxideStudio Assistant and try again.".to_string();
     }
-    if lower.contains("not installed") || lower.contains("not found") || lower.contains("no such file") {
+    if lower.contains("not installed")
+        || lower.contains("not found")
+        || lower.contains("no such file")
+    {
         return "CodeBuddy Code CLI is not installed or cannot be found. Install it or select its executable path.".to_string();
     }
     if diagnostic.is_empty() {
@@ -495,15 +675,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_initialize_without_exposing_account_payload() {
-        let result = parse_initialize(
-            r#"{"type":"control_response","response":{"response":{"models":[{"id":"default-model","name":"Default"},{"id":"kimi","displayName":"Kimi","supportsEffort":true,"supportedEffortLevels":["low","high"]}],"account":{"authenticated":true,"token":"must-not-escape"},"currentModelId":"kimi"}}}"#,
-        )
-        .unwrap();
-        assert!(result.authenticated);
-        assert_eq!(result.current_model.as_deref(), Some("kimi"));
-        assert_eq!(result.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["default", "kimi"]);
-        assert_eq!(result.models[1].reasoning_efforts, ["low", "high"]);
+    fn requires_a_real_acp_user_payload() {
+        assert!(has_authenticated_user(&json!({
+            "userInfo": { "userName": "account", "token": "must-not-escape" }
+        })));
+        assert!(!has_authenticated_user(&json!({ "userInfo": null })));
+        assert!(!has_authenticated_user(
+            &json!({ "apiKeySource": "www.codebuddy.ai" })
+        ));
+    }
+
+    #[test]
+    fn parses_acp_model_catalog_with_dynamic_efforts() {
+        let value = json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "currentValue": "hy3",
+                    "options": [
+                        { "value": "hy3", "name": "Hy3" },
+                        { "value": "glm-5.2", "name": "GLM-5.2" }
+                    ]
+                },
+                {
+                    "id": "thought_level",
+                    "currentValue": "enabled",
+                    "options": [{"value":"minimal"},{"value":"max"},{"value":"enabled"}]
+                }
+            ]
+        });
+        let efforts = parse_effort_options(&value);
+        let models = parse_acp_model_options(&value, &efforts);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["hy3", "glm-5.2"]
+        );
+        assert!(models[0].is_default);
+        assert_eq!(models[1].reasoning_efforts, ["minimal", "max", "enabled"]);
+    }
+
+    #[test]
+    fn filters_codebuddy_commands_for_the_embedded_surface() {
+        let commands = parse_available_commands(&json!({
+            "availableCommands": [
+                { "name": "goal", "description": "Keep working" },
+                { "name": "login", "description": "Open terminal login" },
+                { "name": "compact", "description": "Compact context" }
+            ]
+        }));
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["goal", "compact"]
+        );
+        assert!(commands[0].argument_hint.is_some());
     }
 
     #[test]

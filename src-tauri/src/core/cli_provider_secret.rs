@@ -30,7 +30,9 @@ pub fn validate_cli_profile_id(profile_id: &str) -> Result<String> {
 
 pub fn validate_cli_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     if environment.len() > MAX_CLI_ENV_ENTRIES {
-        return Err(anyhow!("CLI environment exceeds {MAX_CLI_ENV_ENTRIES} entries"));
+        return Err(anyhow!(
+            "CLI environment exceeds {MAX_CLI_ENV_ENTRIES} entries"
+        ));
     }
     let mut encoded_bytes = 0usize;
     for (name, value) in environment {
@@ -38,12 +40,18 @@ pub fn validate_cli_environment(environment: &BTreeMap<String, String>) -> Resul
             return Err(anyhow!("CLI environment variable name is invalid: {name}"));
         }
         if reserved_environment_name(name) {
-            return Err(anyhow!("CLI environment variable is reserved by OxideStudio: {name}"));
+            return Err(anyhow!(
+                "CLI environment variable is reserved by OxideStudio: {name}"
+            ));
         }
         if value.contains('\0') {
-            return Err(anyhow!("CLI environment variable contains a null byte: {name}"));
+            return Err(anyhow!(
+                "CLI environment variable contains a null byte: {name}"
+            ));
         }
-        encoded_bytes = encoded_bytes.saturating_add(name.len()).saturating_add(value.len());
+        encoded_bytes = encoded_bytes
+            .saturating_add(name.len())
+            .saturating_add(value.len());
     }
     if encoded_bytes > MAX_CLI_ENV_BYTES {
         return Err(anyhow!("CLI environment exceeds the 64 KiB limit"));
@@ -69,8 +77,8 @@ pub async fn save_cli_environment(
                 Err(error) => return Err(anyhow!("failed to delete CLI environment: {error}")),
             }
         }
-        let mut payload = serde_json::to_vec(&environment)
-            .context("failed to serialize CLI environment")?;
+        let mut payload =
+            serde_json::to_vec(&environment).context("failed to serialize CLI environment")?;
         if payload.len() > MAX_CLI_ENV_BYTES {
             payload.zeroize();
             return Err(anyhow!("CLI environment exceeds the 64 KiB limit"));
@@ -172,20 +180,34 @@ mod tests {
     #[test]
     fn validates_environment_names_and_reserved_bridge_keys() {
         let mut valid = BTreeMap::new();
-        valid.insert("HTTPS_PROXY".to_string(), "http://localhost:8080".to_string());
+        valid.insert(
+            "HTTPS_PROXY".to_string(),
+            "http://localhost:8080".to_string(),
+        );
         valid.insert("CODEX_HOME".to_string(), "C:/codex".to_string());
         assert!(validate_cli_environment(&valid).is_ok());
 
-        for name in ["1INVALID", "HAS-DASH", "OXIDE_CLI_BRIDGE_TOKEN", "DBX_MCP_ALLOW_WRITES"] {
+        for name in [
+            "1INVALID",
+            "HAS-DASH",
+            "OXIDE_CLI_BRIDGE_TOKEN",
+            "DBX_MCP_ALLOW_WRITES",
+        ] {
             let mut invalid = BTreeMap::new();
             invalid.insert(name.to_string(), "value".to_string());
-            assert!(validate_cli_environment(&invalid).is_err(), "accepted {name}");
+            assert!(
+                validate_cli_environment(&invalid).is_err(),
+                "accepted {name}"
+            );
         }
     }
 
     #[test]
     fn validates_profile_identifiers() {
-        assert_eq!(validate_cli_profile_id("codex-cli:default").unwrap(), "codex-cli:default");
+        assert_eq!(
+            validate_cli_profile_id("codex-cli:default").unwrap(),
+            "codex-cli:default"
+        );
         assert!(validate_cli_profile_id("../../profile").is_err());
     }
 }

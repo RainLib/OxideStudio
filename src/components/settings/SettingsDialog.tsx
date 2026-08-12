@@ -18,6 +18,7 @@ import {
   aiService,
   type AiCliModelInfo,
   type AiCliProviderConfig,
+  type AiCliReasoningEffort,
 } from "@/services/tauri/ai.service";
 import { agentHostService } from "@/services/tauri/agent-host.service";
 import { databaseService } from "@/services/tauri/database.service";
@@ -3228,12 +3229,12 @@ function AiSettings({
   codexCliProfileId: string;
   codexCliPath: string;
   codexCliModel: string;
-  codexCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+  codexCliReasoningEffort: AiCliReasoningEffort;
   codexCliEnvironmentDraft: Record<string, string>;
   codeBuddyCliProfileId: string;
   codeBuddyCliPath: string;
   codeBuddyCliModel: string;
-  codeBuddyCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+  codeBuddyCliReasoningEffort: AiCliReasoningEffort;
   codeBuddyCliEnvironmentDraft: Record<string, string>;
   settings: AppSettings;
   onUpdate: (updates: Partial<AppSettings>) => void;
@@ -3256,12 +3257,12 @@ function AiSettings({
     inlineTimeoutMs: number;
     codexCliPath: string;
     codexCliModel: string;
-    codexCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+    codexCliReasoningEffort: AiCliReasoningEffort;
     codexCliEnvironmentKeys: string[];
     codexCliEnvironmentDraft: Record<string, string>;
     codeBuddyCliPath: string;
     codeBuddyCliModel: string;
-    codeBuddyCliReasoningEffort: "default" | "low" | "medium" | "high" | "xhigh";
+    codeBuddyCliReasoningEffort: AiCliReasoningEffort;
     codeBuddyCliEnvironmentKeys: string[];
     codeBuddyCliEnvironmentDraft: Record<string, string>;
   }>) => void;
@@ -3585,20 +3586,10 @@ function AiSettings({
                 updateAiSettings(
                   aiProvider === "codex-cli"
                     ? {
-                        codexCliReasoningEffort: event.target.value as
-                          | "default"
-                          | "low"
-                          | "medium"
-                          | "high"
-                          | "xhigh",
+                        codexCliReasoningEffort: event.target.value,
                       }
                     : {
-                        codeBuddyCliReasoningEffort: event.target.value as
-                          | "default"
-                          | "low"
-                          | "medium"
-                          | "high"
-                          | "xhigh",
+                        codeBuddyCliReasoningEffort: event.target.value,
                       },
                 )
               }
@@ -3608,7 +3599,7 @@ function AiSettings({
                 ? cliEfforts
                 : ["low", "medium", "high", "xhigh"]
               )
-                .filter((effort) => effort !== "default" && effort !== "enabled")
+                .filter((effort) => effort !== "default")
                 .map((effort) => (
                   <option key={effort} value={effort}>
                     {effort}

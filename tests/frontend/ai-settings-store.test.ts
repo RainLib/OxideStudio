@@ -66,4 +66,31 @@ describe("AI settings provider channels", () => {
       timeoutMs: useAiSettingsStore.getState().inlineTimeoutMs,
     });
   });
+
+  it("migrates and preserves an independent mode for each Assistant provider", () => {
+    const migrated = migratePersistedAiSettings(
+      { assistantMode: "plan" },
+      2,
+    );
+    expect(migrated).toEqual(
+      expect.objectContaining({
+        assistantMode: "plan",
+        codexCliAssistantMode: "plan",
+        codeBuddyCliAssistantMode: "plan",
+      }),
+    );
+
+    useAiSettingsStore.getState().updateSettings({
+      assistantMode: "chat",
+      codexCliAssistantMode: "agent",
+      codeBuddyCliAssistantMode: "plan",
+    });
+    expect(useAiSettingsStore.getState()).toEqual(
+      expect.objectContaining({
+        assistantMode: "chat",
+        codexCliAssistantMode: "agent",
+        codeBuddyCliAssistantMode: "plan",
+      }),
+    );
+  });
 });

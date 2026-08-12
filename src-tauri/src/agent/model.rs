@@ -34,7 +34,9 @@ impl ModelGateway {
         request: &ModelCompleteRequest,
     ) -> Result<Value> {
         if provider.kind != AgentProviderKind::OpenaiCompatible {
-            return Err(anyhow!("CLI providers are executed by the desktop CLI runtime"));
+            return Err(anyhow!(
+                "CLI providers are executed by the desktop CLI runtime"
+            ));
         }
         request.metadata.validate().map_err(anyhow::Error::msg)?;
         if request.messages.is_empty() {
@@ -120,7 +122,9 @@ impl ModelGateway {
         mut cancellation: watch::Receiver<bool>,
     ) -> Result<Value> {
         if provider.kind != AgentProviderKind::OpenaiCompatible {
-            return Err(anyhow!("CLI providers are executed by the desktop CLI runtime"));
+            return Err(anyhow!(
+                "CLI providers are executed by the desktop CLI runtime"
+            ));
         }
         request.metadata.validate().map_err(anyhow::Error::msg)?;
         if request.messages.is_empty() {

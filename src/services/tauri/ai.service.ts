@@ -13,12 +13,8 @@ export interface AiHttpProviderConfig {
   timeoutMs?: number;
 }
 
-export type AiCliReasoningEffort =
-  | "default"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh";
+/** Provider-advertised value; Codex and CodeBuddy may add levels independently. */
+export type AiCliReasoningEffort = string;
 
 export interface AiCliProviderConfig {
   kind: "codex-cli" | "codebuddy-cli";
@@ -124,6 +120,48 @@ export interface AiCliModelInfo {
   label: string;
   isDefault: boolean;
   reasoningEfforts?: string[];
+}
+
+export interface AiCliCommandInfo {
+  name: string;
+  description: string;
+  argumentHint?: string;
+}
+
+export interface AiCliInstallResult {
+  provider: "codex-cli" | "codebuddy-cli";
+  executablePath: string;
+  message: string;
+}
+
+export interface AiCliAuthenticationLaunchResult {
+  provider: "codex-cli" | "codebuddy-cli";
+  sessionId: string;
+  message: string;
+}
+
+export interface AiCliAuthenticationMethod {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export type AiCliAuthenticationPhase =
+  | "starting"
+  | "waiting-for-browser"
+  | "waiting-for-callback"
+  | "verifying"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+export interface AiCliAuthenticationStatus {
+  sessionId: string;
+  provider: "codex-cli" | "codebuddy-cli";
+  phase: AiCliAuthenticationPhase;
+  message: string;
+  methodId?: string;
 }
 
 export async function setProviderSecret(
@@ -233,6 +271,60 @@ export async function listCliEfforts(
   return invokeWithInterceptors<string[]>("ai_cli_list_efforts", { config });
 }
 
+export async function listCliCommands(
+  config: AiCliProviderConfig,
+): Promise<AiCliCommandInfo[]> {
+  return invokeWithInterceptors<AiCliCommandInfo[]>("ai_cli_list_commands", {
+    config,
+  });
+}
+
+export async function installCliProvider(
+  provider: AiCliProviderConfig["kind"],
+): Promise<AiCliInstallResult> {
+  return invokeWithInterceptors<AiCliInstallResult>(
+    "ai_cli_install_provider",
+    { provider },
+  );
+}
+
+export async function beginCliAuthentication(
+  config: AiCliProviderConfig,
+  methodId?: string,
+): Promise<AiCliAuthenticationLaunchResult> {
+  return invokeWithInterceptors<AiCliAuthenticationLaunchResult>(
+    "ai_cli_begin_authentication",
+    { config, methodId },
+  );
+}
+
+export async function listCliAuthenticationMethods(
+  config: AiCliProviderConfig,
+): Promise<AiCliAuthenticationMethod[]> {
+  return invokeWithInterceptors<AiCliAuthenticationMethod[]>(
+    "ai_cli_list_authentication_methods",
+    { config },
+  );
+}
+
+export async function getCliAuthenticationStatus(
+  sessionId: string,
+): Promise<AiCliAuthenticationStatus> {
+  return invokeWithInterceptors<AiCliAuthenticationStatus>(
+    "ai_cli_authentication_status",
+    { sessionId },
+  );
+}
+
+export async function cancelCliAuthentication(
+  sessionId: string,
+): Promise<AiCliAuthenticationStatus> {
+  return invokeWithInterceptors<AiCliAuthenticationStatus>(
+    "ai_cli_cancel_authentication",
+    { sessionId },
+  );
+}
+
 export async function setCliEnvironment(
   provider: AiCliProviderConfig["kind"],
   profileId: string,
@@ -261,6 +353,12 @@ export const aiService = {
   detectCliProvider,
   listCliModels,
   listCliEfforts,
+  listCliCommands,
+  installCliProvider,
+  listCliAuthenticationMethods,
+  beginCliAuthentication,
+  getCliAuthenticationStatus,
+  cancelCliAuthentication,
   setCliEnvironment,
   getCliEnvironment,
   setProviderSecret,

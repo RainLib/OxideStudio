@@ -2,9 +2,9 @@ use super::statement::StatementScanDialect;
 use super::{
     dialect::DatabaseCapabilities,
     protocol::{
-        CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, ForeignKeyReferenceInfo,
-        FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-        SchemaObjectInfo, TableInfo,
+        CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, DatabaseInfo,
+        ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter,
+        QueryResult, SchemaObjectInfo, TableInfo,
     },
 };
 use anyhow::{anyhow, Result};
@@ -21,6 +21,13 @@ fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
 
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
+    /// Managed enterprise drivers use a remote policy-enforcing data plane.
+    /// Consumers must not classify them as bundled/local merely because the
+    /// underlying database dialect is PostgreSQL or MySQL.
+    fn is_managed_data_source(&self) -> bool {
+        false
+    }
+
     /// When set, this connection is backed by the named independently updated
     /// sidecar package. Connection management uses it to prevent replacing a
     /// package that still owns live sessions.
@@ -298,6 +305,20 @@ pub trait DatabaseDriver: Send + Sync {
     /// because its schemas belong to one database in a larger server cluster.
     async fn get_databases(&self) -> Result<Vec<String>> {
         self.get_schemas().await
+    }
+
+    /// Get optional database catalog metadata. The default is deliberately
+    /// generic so every signed external driver remains compatible.
+    async fn get_database_metadata(&self) -> Result<Vec<DatabaseInfo>> {
+        Ok(self
+            .get_databases()
+            .await?
+            .into_iter()
+            .map(|name| DatabaseInfo {
+                name,
+                ..DatabaseInfo::default()
+            })
+            .collect())
     }
 
     /// Get list of schemas/namespaces in the currently connected database.

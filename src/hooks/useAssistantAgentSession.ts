@@ -116,6 +116,7 @@ export function useAssistantAgentSession(
   projectId: string,
   providerConfigured = false,
   providerKind?: AiProviderKind,
+  conversationId?: string,
 ): AssistantAgentSession {
   const [turns, setTurns] = useState<AssistantTurn[]>([]);
   const [availability, setAvailability] =
@@ -125,12 +126,15 @@ export function useAssistantAgentSession(
   const [contextMetrics, setContextMetrics] =
     useState<AgentContextMetrics | null>(null);
   const projectIdRef = useRef(projectId);
+  const conversationIdRef = useRef(conversationId);
   const providerConfiguredRef = useRef(providerConfigured);
   const providerKindRef = useRef(providerKind);
   const turnsRef = useRef<AssistantTurn[]>([]);
-  const threadIdRef = useRef(createAgentId(`thread:${projectId}`));
+  const threadIdRef = useRef(
+    createAgentId(`thread:${projectId}:${conversationId || "default"}`),
+  );
   const resumeRequestsRef = useRef(new Map<string, AgentStartTurnRequest>());
-  const hydratedProjectRef = useRef<string | null>(null);
+  const hydratedScopeRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const fileProposalWritesRef = useRef(new Set<string>());
 
@@ -221,7 +225,35 @@ export function useAssistantAgentSession(
 
   useEffect(() => {
     const previousProjectId = projectIdRef.current;
-    if (previousProjectId !== projectId) {
+    const previousConversationId = conversationIdRef.current;
+    const previousScope = conversationScope(previousProjectId, previousConversationId);
+    const nextScope = conversationScope(projectId, conversationId);
+    if (previousScope !== nextScope) {
+      const previousTurns = turnsRef.current.slice(-100);
+      if (previousTurns.length > 0) {
+        const resumableTurnIds = new Set(
+          previousTurns
+            .filter(
+              (turn) => assistantTurnIsActive(turn) || turn.status === "paused",
+            )
+            .map((turn) => turn.id),
+        );
+        const resumeRequests = Array.from(resumeRequestsRef.current.entries())
+          .filter(([turnId]) => resumableTurnIds.has(turnId))
+          .map(([, request]) => request)
+          .slice(-8);
+        void agentHostService
+          .saveConversationSnapshot({
+            projectId: previousProjectId,
+            conversationId: previousConversationId,
+            threadId: threadIdRef.current,
+            turns: previousTurns,
+            resumeRequests,
+          })
+          .catch((error) => {
+            console.warn("Failed to persist provider conversation before switching", error);
+          });
+      }
       for (const turn of turnsRef.current) {
         const source = resumeRequestsRef.current.get(turn.id);
         if (
@@ -245,8 +277,11 @@ export function useAssistantAgentSession(
     }
 
     projectIdRef.current = projectId;
-    threadIdRef.current = createAgentId(`thread:${projectId}`);
-    hydratedProjectRef.current = null;
+    conversationIdRef.current = conversationId;
+    threadIdRef.current = createAgentId(
+      `thread:${projectId}:${conversationId || "default"}`,
+    );
+    hydratedScopeRef.current = null;
     if (persistTimerRef.current !== null) {
       window.clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
@@ -303,9 +338,12 @@ export function useAssistantAgentSession(
       });
 
     void agentHostService
-      .loadConversationSnapshot(projectId)
+      .loadConversationSnapshot(projectId, conversationId)
       .then((snapshot) => {
-        if (disposed || projectIdRef.current !== projectId) return;
+        if (
+          disposed ||
+          conversationScope(projectIdRef.current, conversationIdRef.current) !== nextScope
+        ) return;
         const restoredTurns = restoreConversationTurns(snapshot?.turns);
         const restoredRequests = restoreConversationRequests(
           snapshot?.resumeRequests,
@@ -369,27 +407,31 @@ export function useAssistantAgentSession(
         }
         turnsRef.current = mergedTurns;
         setTurns(turnsRef.current);
-        hydratedProjectRef.current = projectId;
+        hydratedScopeRef.current = nextScope;
       })
       .catch((error) => {
-        if (disposed || projectIdRef.current !== projectId) return;
+        if (
+          disposed ||
+          conversationScope(projectIdRef.current, conversationIdRef.current) !== nextScope
+        ) return;
         console.warn("Failed to restore encrypted AI conversation", error);
-        hydratedProjectRef.current = projectId;
+        hydratedScopeRef.current = nextScope;
       });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [handleCommandError, mutateTurns, projectId, refreshStatus]);
+  }, [conversationId, handleCommandError, mutateTurns, projectId, refreshStatus]);
 
   useEffect(() => {
-    if (hydratedProjectRef.current !== projectId) return;
+    const scope = conversationScope(projectId, conversationId);
+    if (hydratedScopeRef.current !== scope) return;
     if (persistTimerRef.current !== null) {
       window.clearTimeout(persistTimerRef.current);
     }
     persistTimerRef.current = window.setTimeout(() => {
       persistTimerRef.current = null;
-      if (hydratedProjectRef.current !== projectId) return;
+      if (hydratedScopeRef.current !== scope) return;
       const persistedTurns = turnsRef.current.slice(-100);
       const resumableTurnIds = new Set(
         persistedTurns
@@ -405,6 +447,7 @@ export function useAssistantAgentSession(
       void agentHostService
         .saveConversationSnapshot({
           projectId,
+          conversationId,
           threadId: threadIdRef.current,
           turns: persistedTurns,
           resumeRequests,
@@ -419,7 +462,7 @@ export function useAssistantAgentSession(
         persistTimerRef.current = null;
       }
     };
-  }, [projectId, turns]);
+  }, [conversationId, projectId, turns]);
 
   useEffect(() => {
     void refreshStatus();
@@ -1037,7 +1080,9 @@ export function useAssistantAgentSession(
     turnsRef.current = [];
     setTurns([]);
     resumeRequestsRef.current.clear();
-    threadIdRef.current = createAgentId(`thread:${projectIdRef.current}`);
+    threadIdRef.current = createAgentId(
+      `thread:${projectIdRef.current}:${conversationIdRef.current || "default"}`,
+    );
     setHostError(null);
   }, []);
 
@@ -1726,6 +1771,10 @@ function contextMetricsScore(metrics: AgentContextMetrics) {
     (metrics.modelUsage?.calls ?? 0) +
     (metrics.modelUsage?.totalTokens ?? 0)
   );
+}
+
+function conversationScope(projectId: string, conversationId?: string) {
+  return `${projectId}\u0000${conversationId || "default"}`;
 }
 
 function errorMessage(error: unknown) {

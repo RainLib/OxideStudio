@@ -15,13 +15,22 @@ import {
   DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
   type AssistantContextSettings,
 } from "@/ai/assistant/contextPreview";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantHeader } from "./assistant/AssistantHeader";
 import { AssistantConversation } from "./assistant/AssistantConversation";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 import type { AssistantModelStatus } from "./assistant/AssistantModelControl";
 import { AssistantConversationMinimap } from "./assistant/AssistantConversationMinimap";
 import { AssistantClarificationDock } from "./assistant/AssistantClarificationDock";
+import {
+  AssistantProviderControl,
+  AssistantProviderWelcome,
+} from "./assistant/AssistantProviderControl";
+import {
+  AssistantProviderSetup,
+  type AssistantCliSetupState,
+} from "./assistant/AssistantProviderSetup";
+import { assistantProviderDefinition } from "@/ai/assistant/providerDefinitions";
 import { createWorkspaceUiActionRegistry } from "@/ai/ui-actions";
 import type { UiActionRequest } from "@/ai/ui-actions/types";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -50,8 +59,11 @@ import {
 } from "@/services/tauri/agent-host.service";
 import {
   aiService,
-  type AiCliDetectionResult,
+  type AiCliCommandInfo,
+  type AiCliModelInfo,
+  type AiCliProviderConfig,
   type AiProviderConfig,
+  type AiProviderKind,
 } from "@/services/tauri/ai.service";
 import { ArrowDown, Sparkles, X } from "lucide-react";
 import {
@@ -65,6 +77,15 @@ import {
 } from "@/lib/agentFileReview";
 
 type PendingTextAttachment = AgentTextAttachment & { id: string };
+type CliProviderKind = AiCliProviderConfig["kind"];
+type CliSetupStateByProvider = Partial<
+  Record<CliProviderKind, AssistantCliSetupState>
+>;
+type CliModelsByProvider = Partial<Record<CliProviderKind, AiCliModelInfo[]>>;
+type CliCommandsByProvider = Partial<Record<CliProviderKind, AiCliCommandInfo[]>>;
+type CliSetupStateUpdate =
+  | AssistantCliSetupState
+  | ((current: AssistantCliSetupState | null) => AssistantCliSetupState);
 
 export function assistantToolManifestForProfile(
   profile: AgentProfile,
@@ -121,7 +142,13 @@ function AgentHostAssistantSidebar() {
   const aiMaxOutputTokens = useAiSettingsStore(
     (state) => state.maxOutputTokens,
   );
-  const assistantMode = useAiSettingsStore((state) => state.assistantMode);
+  const oxideAssistantMode = useAiSettingsStore((state) => state.assistantMode);
+  const codexAssistantMode = useAiSettingsStore(
+    (state) => state.codexCliAssistantMode,
+  );
+  const codeBuddyAssistantMode = useAiSettingsStore(
+    (state) => state.codeBuddyCliAssistantMode,
+  );
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const setProjectTurns = useAssistantChangeStore((state) => state.setProjectTurns);
@@ -181,11 +208,20 @@ function AgentHostAssistantSidebar() {
   );
   const selectedText = activeTab?.editorSelection?.text || null;
   const modelConfig = assistantProviderConfig();
+  const assistantMode =
+    aiProvider === "codex-cli"
+      ? codexAssistantMode
+      : aiProvider === "codebuddy-cli"
+        ? codeBuddyAssistantMode
+        : oxideAssistantMode;
   const providerConfigured = Boolean(modelConfig);
+  const conversationId =
+    aiProvider === "openai-compatible" ? undefined : `provider:${aiProvider}`;
   const session = useAssistantAgentSession(
     activeProjectId,
     providerConfigured,
     modelConfig?.kind,
+    conversationId,
   );
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
@@ -197,9 +233,12 @@ function AgentHostAssistantSidebar() {
   const [dismissedAuthIssueId, setDismissedAuthIssueId] = useState<
     string | null
   >(null);
-  const [cliDetection, setCliDetection] = useState<
-    AiCliDetectionResult | "checking" | null
-  >(null);
+  const [cliSetupByProvider, setCliSetupByProvider] =
+    useState<CliSetupStateByProvider>({});
+  const [cliModelsByProvider, setCliModelsByProvider] =
+    useState<CliModelsByProvider>({});
+  const [cliCommandsByProvider, setCliCommandsByProvider] =
+    useState<CliCommandsByProvider>({});
   const [cliDetectionRevision, setCliDetectionRevision] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoFollowConversationRef = useRef(true);
@@ -294,6 +333,21 @@ function AgentHostAssistantSidebar() {
     modelConfig && modelConfig.kind !== "openai-compatible"
       ? JSON.stringify(modelConfig)
       : null;
+  const cliSetup =
+    modelConfig && modelConfig.kind !== "openai-compatible"
+      ? cliSetupByProvider[modelConfig.kind] ?? null
+      : null;
+  const updateCliSetup = useCallback(
+    (provider: CliProviderKind, update: CliSetupStateUpdate) => {
+      setCliSetupByProvider((currentByProvider) => {
+        const current = currentByProvider[provider] ?? null;
+        const next = typeof update === "function" ? update(current) : update;
+        if (current === next) return currentByProvider;
+        return { ...currentByProvider, [provider]: next };
+      });
+    },
+    [],
+  );
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
     [attachments, message],
@@ -364,8 +418,15 @@ function AgentHostAssistantSidebar() {
       : aiProvider === "codebuddy-cli"
         ? codeBuddyCliPath || "Auto-detect CodeBuddy CLI"
         : aiBaseUrl;
+  const displayedReasoningEffort =
+    aiProvider === "codex-cli"
+      ? codexCliReasoningEffort
+      : aiProvider === "codebuddy-cli"
+        ? codeBuddyCliReasoningEffort
+        : undefined;
   const { modelStatus, submissionBlockReason } = resolveModelUiState({
     enabled: aiEnabled,
+    providerKind: aiProvider,
     baseUrl: displayedEndpoint,
     model: displayedModel,
     resolvedMode,
@@ -374,33 +435,443 @@ function AgentHostAssistantSidebar() {
     hostCapabilities: session.hostStatus?.capabilities ?? null,
     hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
-    cliDetection,
+    cliSetup,
   });
+  const showProviderWelcome = !aiEnabled && session.turns.length === 0;
+  const cliSetupRequired = Boolean(
+    modelConfig &&
+      modelConfig.kind !== "openai-compatible" &&
+      cliSetup &&
+      cliSetup.phase !== "ready" &&
+      cliSetup.phase !== "checking",
+  );
+
+  const openAiSettings = () => {
+    window.dispatchEvent(
+      new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
+        detail: { section: "ai" },
+      }),
+    );
+  };
+
+  const selectAssistantProvider = (provider: AiProviderKind) => {
+    if (session.isBusy) return;
+    if (
+      (aiProvider === "codex-cli" || aiProvider === "codebuddy-cli") &&
+      aiProvider !== provider
+    ) {
+      const activeSetup = cliSetupByProvider[aiProvider];
+      if (activeSetup?.phase === "authorizing" && activeSetup.authenticationSessionId) {
+        void aiService
+          .cancelCliAuthentication(activeSetup.authenticationSessionId)
+          .catch(() => undefined);
+      }
+    }
+    if (authIssueId) setDismissedAuthIssueId(authIssueId);
+    if (
+      provider !== "openai-compatible" &&
+      !cliSetupByProvider[provider]
+    ) {
+      updateCliSetup(provider, {
+        phase: "checking",
+        message: "Verifying installation and account sign-in…",
+      });
+    }
+    updateAiSettings({
+      enabled: true,
+      provider,
+    });
+  };
+
+  const retryAssistantProvider = () => {
+    if (authIssueId) setDismissedAuthIssueId(authIssueId);
+    if (aiProvider === "codex-cli" || aiProvider === "codebuddy-cli") {
+      updateCliSetup(aiProvider, (current) =>
+        current && current.phase !== "ready" && current.phase !== "checking"
+          ? {
+              ...current,
+              message: "Checking installation and account sign-in again…",
+              refreshing: true,
+            }
+          : {
+              phase: "checking",
+              message: "Checking installation and account sign-in again…",
+            },
+      );
+      setCliDetectionRevision((value) => value + 1);
+      return;
+    }
+    void session.refreshStatus();
+  };
+
+  const installAssistantProvider = async () => {
+    if (!modelConfig || modelConfig.kind === "openai-compatible") return;
+    const provider = modelConfig.kind;
+    updateCliSetup(provider, {
+      phase: "installing",
+      message: `Installing ${assistantProviderDefinition(provider).label} in OxideStudio's managed agent directory…`,
+    });
+    try {
+      const result = await aiService.installCliProvider(provider);
+      updateAiSettings(
+        provider === "codex-cli"
+          ? { codexCliPath: result.executablePath }
+          : { codeBuddyCliPath: result.executablePath },
+      );
+      updateCliSetup(provider, {
+        phase: "installing",
+        message: "Installation complete. Verifying account sign-in…",
+        executablePath: result.executablePath,
+      });
+      setCliDetectionRevision((value) => value + 1);
+    } catch (error) {
+      updateCliSetup(provider, {
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const authenticateAssistantProvider = async (methodId?: string) => {
+    if (!modelConfig || modelConfig.kind === "openai-compatible") return;
+    const provider = modelConfig.kind;
+    try {
+      updateCliSetup(provider, (current) => ({
+        ...current,
+        phase: "authorizing",
+        message: "Starting the provider's secure browser sign-in…",
+        authenticationMethodId: methodId,
+      }));
+      const result = await aiService.beginCliAuthentication(modelConfig, methodId);
+      updateCliSetup(provider, (current) => ({
+        ...current,
+        phase: "authorizing",
+        message: result.message,
+        authenticationSessionId: result.sessionId,
+        authenticationMethodId: methodId,
+      }));
+    } catch (error) {
+      updateCliSetup(provider, (current) => ({
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+        executablePath: current?.executablePath,
+        version: current?.version,
+      }));
+    }
+  };
+
+  const cancelAssistantAuthentication = async () => {
+    if (!modelConfig || modelConfig.kind === "openai-compatible") return;
+    const sessionId = cliSetup?.authenticationSessionId;
+    if (!sessionId) {
+      updateCliSetup(modelConfig.kind, (current) => ({
+        ...current,
+        phase: "auth-required",
+        message: "Sign-in was cancelled. Choose an account method to try again.",
+      }));
+      return;
+    }
+    try {
+      const status = await aiService.cancelCliAuthentication(sessionId);
+      updateCliSetup(modelConfig.kind, (current) => ({
+        ...current,
+        phase: "auth-required",
+        message: status.message,
+        authenticationSessionId: undefined,
+      }));
+    } catch (error) {
+      updateCliSetup(modelConfig.kind, (current) => ({
+        ...current,
+        phase: "error",
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  };
 
   useEffect(() => {
     if (!modelConfig || modelConfig.kind === "openai-compatible") {
-      setCliDetection(null);
       return;
     }
+    const provider = modelConfig.kind;
     let disposed = false;
-    setCliDetection("checking");
+    updateCliSetup(provider, (current) =>
+      current && current.phase !== "ready" && current.phase !== "checking"
+        ? {
+            ...current,
+            message: "Verifying installation and account sign-in…",
+            refreshing: true,
+          }
+        : {
+            phase: "checking",
+            message: "Verifying installation and account sign-in…",
+          },
+    );
     void aiService
       .detectCliProvider(modelConfig)
-      .then((result) => {
-        if (!disposed) setCliDetection(result);
+      .then(async (result) => {
+        if (disposed) return;
+        if (!result.available) {
+          updateCliSetup(provider, {
+            phase: "missing",
+            message: result.message,
+            executablePath: result.executablePath,
+            version: result.version,
+          });
+          return;
+        }
+        updateCliSetup(provider, (current) => ({
+          phase:
+            current?.phase === "installing" ? "installing" : "checking",
+          message: "CLI detected. Verifying account sign-in and capabilities…",
+          executablePath: result.executablePath,
+          version: result.version,
+        }));
+        try {
+          const tested = await aiService.testProvider(modelConfig);
+          if (disposed) return;
+          updateCliSetup(provider, {
+            phase: "ready",
+            message: tested.message,
+            executablePath: tested.executablePath || result.executablePath,
+            version: tested.version || result.version,
+          });
+          if (
+            modelConfig.model.trim().toLowerCase() === "default" &&
+            tested.model.trim() &&
+            tested.model.trim().toLowerCase() !== "default"
+          ) {
+            updateAiSettings(
+              modelConfig.kind === "codex-cli"
+                ? { codexCliModel: tested.model }
+                : { codeBuddyCliModel: tested.model },
+            );
+          }
+        } catch (error) {
+          if (disposed) return;
+          const message = error instanceof Error ? error.message : String(error);
+          updateCliSetup(provider, {
+            phase: isAuthenticationError(message) ? "auth-required" : "error",
+            message,
+            executablePath: result.executablePath,
+            version: result.version,
+          });
+        }
       })
       .catch((error) => {
         if (disposed) return;
-        setCliDetection({
-          provider: modelConfig.kind,
-          available: false,
+        updateCliSetup(provider, {
+          phase: "error",
           message: error instanceof Error ? error.message : String(error),
         });
       });
     return () => {
       disposed = true;
     };
-  }, [cliDetectionRevision, cliProviderFingerprint]);
+  }, [
+    cliDetectionRevision,
+    cliProviderFingerprint,
+    updateAiSettings,
+    updateCliSetup,
+  ]);
+
+  useEffect(() => {
+    if (
+      cliSetup?.phase !== "ready" ||
+      !modelConfig ||
+      modelConfig.kind === "openai-compatible"
+    ) {
+      return;
+    }
+    let disposed = false;
+    const config = modelConfig;
+    void Promise.all([
+      aiService.listCliModels(config),
+      aiService.listCliCommands(config).catch(() => []),
+    ])
+      .then(([models, commands]) => {
+        if (disposed) return;
+        setCliModelsByProvider((current) => ({
+          ...current,
+          [config.kind]: models,
+        }));
+        setCliCommandsByProvider((current) => ({
+          ...current,
+          [config.kind]: commands,
+        }));
+      })
+      .catch((error) => {
+        if (disposed) return;
+        updateCliSetup(config.kind, (current) => ({
+          ...current,
+          phase: "ready",
+          message: `Provider session is ready, but its capability catalog could not be refreshed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        }));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [cliProviderFingerprint, cliSetup?.phase, updateCliSetup]);
+
+  useEffect(() => {
+    if (
+      cliSetup?.phase !== "auth-required" ||
+      cliSetup.authenticationMethods?.length ||
+      cliSetup.authMethodsLoading ||
+      !modelConfig ||
+      modelConfig.kind === "openai-compatible"
+    ) {
+      return;
+    }
+    let disposed = false;
+    const provider = modelConfig.kind;
+    updateCliSetup(provider, (current) => ({
+      ...current,
+      phase: "auth-required",
+      message: current?.message ?? "Choose a secure browser sign-in method.",
+      authMethodsLoading: true,
+    }));
+    void aiService
+      .listCliAuthenticationMethods(modelConfig)
+      .then((methods) => {
+        if (disposed) return;
+        updateCliSetup(provider, (current) => ({
+          ...current,
+          phase: "auth-required",
+          message: current?.message ?? "Choose a secure browser sign-in method.",
+          authenticationMethods: methods,
+          authMethodsLoading: false,
+        }));
+      })
+      .catch((error) => {
+        if (disposed) return;
+        updateCliSetup(provider, (current) => ({
+          ...current,
+          phase: "auth-required",
+          message: error instanceof Error ? error.message : String(error),
+          authMethodsLoading: false,
+        }));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [
+    cliProviderFingerprint,
+    cliSetup?.phase,
+    updateCliSetup,
+  ]);
+
+  useEffect(() => {
+    if (
+      cliSetup?.phase !== "authorizing" ||
+      !modelConfig ||
+      modelConfig.kind === "openai-compatible"
+    ) {
+      return;
+    }
+    let disposed = false;
+    const config: AiCliProviderConfig = modelConfig;
+    const provider = config.kind;
+    const authenticationSessionId = cliSetup.authenticationSessionId;
+    if (!authenticationSessionId) {
+      updateCliSetup(provider, (current) => ({
+        ...current,
+        phase: "auth-required",
+        message: "The sign-in session was interrupted. Choose a sign-in method to restart it.",
+      }));
+      return;
+    }
+    let timer: number | undefined;
+    const poll = () => {
+      void aiService
+        .getCliAuthenticationStatus(authenticationSessionId)
+        .then(async (status) => {
+          if (disposed) return;
+          if (status.phase === "succeeded") {
+            const result = await aiService.testProvider(config);
+            if (disposed) return;
+            updateCliSetup(provider, (current) => ({
+              ...current,
+              phase: "ready",
+              message: result.message,
+              executablePath: result.executablePath,
+              version: result.version,
+              authenticationSessionId: undefined,
+              refreshing: false,
+            }));
+            if (
+              config.model.trim().toLowerCase() === "default" &&
+              result.model.trim() &&
+              result.model.trim().toLowerCase() !== "default"
+            ) {
+              updateAiSettings(
+                config.kind === "codex-cli"
+                  ? { codexCliModel: result.model }
+                  : { codeBuddyCliModel: result.model },
+              );
+            }
+            void session.refreshStatus();
+            return;
+          }
+          if (["failed", "cancelled", "expired"].includes(status.phase)) {
+            updateCliSetup(provider, (current) => ({
+              ...current,
+              phase: "auth-required",
+              message: status.message,
+              authenticationSessionId: undefined,
+              refreshing: false,
+            }));
+            return;
+          }
+          updateCliSetup(provider, (current) => ({
+            ...current,
+            phase: "authorizing",
+            message: status.message,
+            authenticationSessionId,
+            authenticationMethodId: status.methodId,
+          }));
+          timer = window.setTimeout(poll, 1_000);
+        })
+        .catch((error) => {
+          if (disposed) return;
+          const message = error instanceof Error ? error.message : String(error);
+          updateCliSetup(provider, (current) => ({
+            ...current,
+            phase: "error",
+            message,
+          }));
+        });
+    };
+    poll();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    cliSetup?.authenticationSessionId,
+    cliSetup?.phase,
+    cliProviderFingerprint,
+    session.refreshStatus,
+    updateAiSettings,
+    updateCliSetup,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activeAuthIssueId ||
+      !providerError ||
+      aiProvider === "openai-compatible"
+    ) {
+      return;
+    }
+    updateCliSetup(aiProvider, (current) => ({
+      phase: "auth-required",
+      message: providerError,
+      executablePath: current?.executablePath,
+      version: current?.version,
+    }));
+  }, [activeAuthIssueId, aiProvider, providerError, updateCliSetup]);
 
   useEffect(() => {
     const fingerprint = JSON.stringify(modelConfig);
@@ -694,45 +1165,17 @@ function AgentHostAssistantSidebar() {
         }}
       />
 
-      {contextProviderLabel && (
-        <div
-          className="flex h-7 shrink-0 items-center gap-1.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-[10px] text-[hsl(var(--wb-text-muted))]"
-          data-assistant-provider
-          title={contextProviderLabel}
-        >
-          <span
-            className={cn(
-              "h-1.5 w-1.5 rounded-full",
-              cliDetection !== "checking" &&
-                (!cliDetection || cliDetection.available) &&
-                session.availability === "available"
-                ? "bg-emerald-400"
-                : cliDetection === "checking" ||
-                    session.availability === "checking"
-                  ? "bg-amber-400"
-                  : "bg-red-400",
-            )}
-            aria-hidden="true"
-          />
-          <span className="min-w-0 flex-1 truncate">
-            {cliDetection && cliDetection !== "checking"
-              ? `${contextProviderLabel} · ${cliDetection.message}`
-              : contextProviderLabel}
-          </span>
-          {cliDetection &&
-            cliDetection !== "checking" &&
-            !cliDetection.available && (
-              <button
-                type="button"
-                className="underline underline-offset-2 hover:text-[hsl(var(--wb-text))]"
-                onClick={() => setCliDetectionRevision((value) => value + 1)}
-              >
-                Retry
-              </button>
-            )}
-          {session.isBusy && <span>Active</span>}
-        </div>
-      )}
+      <AssistantProviderControl
+        provider={aiProvider}
+        enabled={aiEnabled}
+        destination={contextProviderLabel}
+        modelStatus={modelStatus}
+        cliSetup={cliSetup}
+        isBusy={session.isBusy}
+        onSelect={selectAssistantProvider}
+        onRetry={retryAssistantProvider}
+        onOpenSettings={openAiSettings}
+      />
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[hsl(var(--wb-editor))]">
         <div
@@ -749,40 +1192,65 @@ function AgentHostAssistantSidebar() {
             session.turns.length >= 4 && "wb-assistant-scroll-with-minimap",
           )}
         >
-          {session.hostError && session.turns.length === 0 && (
-            <div className="mx-3 mt-3 border-y border-amber-500/25 bg-amber-500/5 px-2 py-2 text-[10px] leading-4 text-amber-300">
-              {session.hostError}
-              <button
-                type="button"
-                className="ml-2 underline underline-offset-2 hover:text-[hsl(var(--wb-text))]"
-                onClick={() => void session.refreshStatus()}
-              >
-                Retry
-              </button>
-            </div>
-          )}
+          {showProviderWelcome ? (
+            <AssistantProviderWelcome
+              isBusy={session.isBusy}
+              onSelect={selectAssistantProvider}
+              onOpenSettings={openAiSettings}
+            />
+          ) : cliSetupRequired && modelConfig?.kind !== "openai-compatible" && cliSetup ? (
+            <AssistantProviderSetup
+              provider={
+                aiProvider === "codex-cli" ? "codex-cli" : "codebuddy-cli"
+              }
+              state={cliSetup}
+              onInstall={() => void installAssistantProvider()}
+              onAuthenticate={(methodId) => void authenticateAssistantProvider(methodId)}
+              onCancelAuthentication={() => void cancelAssistantAuthentication()}
+              onRetry={retryAssistantProvider}
+              onOpenSettings={openAiSettings}
+            />
+          ) : (
+            <>
+              {session.hostError && session.turns.length === 0 && (
+                <div className="mx-3 mt-3 border-y border-amber-500/25 bg-amber-500/5 px-2 py-2 text-[10px] leading-4 text-amber-300">
+                  {session.hostError}
+                  <button
+                    type="button"
+                    className="ml-2 underline underline-offset-2 hover:text-[hsl(var(--wb-text))]"
+                    onClick={() => void session.refreshStatus()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
-          <AssistantConversation
-            turns={session.turns}
-            isResponding={false}
-            pendingLabel={pendingLabel}
-            onUsePrompt={handleUsePrompt}
-            onPreviewSqlPatch={handlePreviewSqlPatch}
-            onExecuteAttachment={handleExecuteAttachment}
-            onOpenProjectFile={openProjectFileInEditor}
-            onOpenProjectFileProposal={(turnId, callId) => {
-              const item = pendingAssistantFileProposals(session.turns).find(
-                (candidate) =>
-                  candidate.turnId === turnId &&
-                  candidate.proposal.callId === callId,
-              );
-              if (item) openPendingFileProposal(item);
-            }}
-            expectedProjectRoot={activeProjectRoot}
-            contextFingerprint={contextFingerprint}
-            onDecideApproval={session.decideApproval}
-            onResumeTurn={session.resumeTurn}
-          />
+              <AssistantConversation
+                turns={session.turns}
+                starterPrompts={
+                  assistantProviderDefinition(aiProvider).starterPrompts
+                }
+                isResponding={false}
+                pendingLabel={pendingLabel}
+                onUsePrompt={handleUsePrompt}
+                onPreviewSqlPatch={handlePreviewSqlPatch}
+                onExecuteAttachment={handleExecuteAttachment}
+                onOpenProjectFile={openProjectFileInEditor}
+                onOpenProjectFileProposal={(turnId, callId) => {
+                  const item = pendingAssistantFileProposals(session.turns).find(
+                    (candidate) =>
+                      candidate.turnId === turnId &&
+                      candidate.proposal.callId === callId,
+                  );
+                  if (item) openPendingFileProposal(item);
+                }}
+                expectedProjectRoot={activeProjectRoot}
+                contextFingerprint={contextFingerprint}
+                onDecideApproval={session.decideApproval}
+                onResumeTurn={session.resumeTurn}
+              />
+            </>
+          )}
         </div>
 
         <AssistantConversationMinimap
@@ -815,114 +1283,138 @@ function AgentHostAssistantSidebar() {
         )}
       </div>
 
-      <div className="relative shrink-0">
-        <AssistantClarificationDock
-          turn={
-            session.activeTurn?.status === "awaiting_input"
-              ? session.activeTurn
-              : null
-          }
-          contextFingerprint={contextFingerprint}
-          onAnswer={session.answerClarification}
-        />
+      {!showProviderWelcome && !cliSetupRequired && (
+        <div className="relative shrink-0">
+          <AssistantClarificationDock
+            turn={
+              session.activeTurn?.status === "awaiting_input"
+                ? session.activeTurn
+                : null
+            }
+            contextFingerprint={contextFingerprint}
+            onAnswer={session.answerClarification}
+          />
 
-        <AssistantPendingChangesPanel
-          turns={session.turns}
-          onOpen={openPendingFileProposal}
-          onKeep={keepPendingFileChange}
-          onUndo={undoPendingFileChange}
-        />
+          <AssistantPendingChangesPanel
+            turns={session.turns}
+            onOpen={openPendingFileProposal}
+            onKeep={keepPendingFileChange}
+            onUndo={undoPendingFileChange}
+          />
 
-        {composeRequest && message.trim() && (
-          <div
-            className="flex items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2.5 py-1.5 text-[10px]"
-            data-assistant-compose-suggestion
-          >
-            <Sparkles
-              size={11}
-              className="shrink-0 text-[hsl(var(--wb-accent))]"
-              aria-hidden="true"
-            />
-            <span className="min-w-0 flex-1 truncate text-[hsl(var(--wb-text-muted))]">
-              Query error fix prompt ready
-            </span>
-            <button
-              type="button"
-              className="wb-text-button h-6 px-1.5 text-[10px]"
-              onClick={handleUseComposeRequest}
+          {composeRequest && message.trim() && (
+            <div
+              className="flex items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2.5 py-1.5 text-[10px]"
+              data-assistant-compose-suggestion
             >
-              Use prompt
-            </button>
-            <button
-              type="button"
-              className="wb-icon-button h-6 w-6"
-              onClick={() => consumeComposeRequest(composeRequest.id)}
-              title="Dismiss suggested prompt"
-              aria-label="Dismiss suggested prompt"
-            >
-              <X size={10} aria-hidden="true" />
-            </button>
-          </div>
-        )}
+              <Sparkles
+                size={11}
+                className="shrink-0 text-[hsl(var(--wb-accent))]"
+                aria-hidden="true"
+              />
+              <span className="min-w-0 flex-1 truncate text-[hsl(var(--wb-text-muted))]">
+                Query error fix prompt ready
+              </span>
+              <button
+                type="button"
+                className="wb-text-button h-6 px-1.5 text-[10px]"
+                onClick={handleUseComposeRequest}
+              >
+                Use prompt
+              </button>
+              <button
+                type="button"
+                className="wb-icon-button h-6 w-6"
+                onClick={() => consumeComposeRequest(composeRequest.id)}
+                title="Dismiss suggested prompt"
+                aria-label="Dismiss suggested prompt"
+              >
+                <X size={10} aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
-        <AssistantPromptBox
-          message={message}
-          onMessageChange={setMessage}
-          onSubmit={handleSubmit}
-          onStop={() => {
-            if (session.activeTurn)
-              void session.cancelTurn(session.activeTurn.id);
-          }}
-          mode={assistantMode}
-          onModeChange={(mode) => {
-            if (!session.isBusy) updateAiSettings({ assistantMode: mode });
-          }}
-          activeContextLabel={activeContextLabel}
-          contextPreview={contextPreview}
-          contextSettings={contextSettings}
-          onContextSettingChange={(key, checked) =>
-            setContextSettings((current) => ({ ...current, [key]: checked }))
-          }
-          isSubmitting={session.activeTurn?.status === "planning"}
-          isToolRunning={
-            session.isBusy && session.activeTurn?.status !== "planning"
-          }
-          isCancelling={session.activeTurn?.status === "cancelling"}
-          model={displayedModel}
-          modelEndpoint={displayedEndpoint}
-          modelStatus={modelStatus}
-          onModelChange={(model) =>
-            updateAiSettings(
-              aiProvider === "codex-cli"
-                ? { codexCliModel: model }
-                : aiProvider === "codebuddy-cli"
-                  ? { codeBuddyCliModel: model }
-                  : { model },
-            )
-          }
-          onOpenAiSettings={() => {
-            window.dispatchEvent(
-              new CustomEvent(APP_EVENT_OPEN_SETTINGS, {
-                detail: { section: "ai" },
-              }),
-            );
-          }}
-          onRetryModel={() => {
-            if (authIssueId) setDismissedAuthIssueId(authIssueId);
-            void session.refreshStatus();
-          }}
-          submissionBlockReason={submissionBlockReason}
-          attachments={attachments}
-          attachmentError={attachmentError}
-          isAddingAttachment={isAddingAttachment}
-          onAddAttachment={() => void handleAddAttachment()}
-          onRemoveAttachment={(attachmentId) =>
-            setAttachments((current) =>
-              current.filter((attachment) => attachment.id !== attachmentId),
-            )
-          }
-        />
-      </div>
+          <AssistantPromptBox
+            message={message}
+            onMessageChange={setMessage}
+            onSubmit={handleSubmit}
+            onStop={() => {
+              if (session.activeTurn)
+                void session.cancelTurn(session.activeTurn.id);
+            }}
+            mode={assistantMode}
+            onModeChange={(mode) => {
+              if (session.isBusy) return;
+              updateAiSettings(
+                aiProvider === "codex-cli"
+                  ? { codexCliAssistantMode: mode }
+                  : aiProvider === "codebuddy-cli"
+                    ? { codeBuddyCliAssistantMode: mode }
+                    : { assistantMode: mode },
+              );
+            }}
+            activeContextLabel={activeContextLabel}
+            contextPreview={contextPreview}
+            contextSettings={contextSettings}
+            onContextSettingChange={(key, checked) =>
+              setContextSettings((current) => ({ ...current, [key]: checked }))
+            }
+            isSubmitting={session.activeTurn?.status === "planning"}
+            isToolRunning={
+              session.isBusy && session.activeTurn?.status !== "planning"
+            }
+            isCancelling={session.activeTurn?.status === "cancelling"}
+            model={displayedModel}
+            modelEndpoint={displayedEndpoint}
+            modelStatus={modelStatus}
+            modelOptions={
+              aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
+                ? cliModelsByProvider[aiProvider]
+                : undefined
+            }
+            reasoningEffort={displayedReasoningEffort}
+            commandOptions={
+              aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
+                ? cliCommandsByProvider[aiProvider]
+                : undefined
+            }
+            onModelChange={(model) =>
+              updateAiSettings(
+                aiProvider === "codex-cli"
+                  ? { codexCliModel: model }
+                  : aiProvider === "codebuddy-cli"
+                    ? { codeBuddyCliModel: model }
+                    : { model },
+              )
+            }
+            onReasoningEffortChange={(reasoningEffort) =>
+              updateAiSettings(
+                aiProvider === "codex-cli"
+                  ? { codexCliReasoningEffort: reasoningEffort }
+                  : aiProvider === "codebuddy-cli"
+                    ? { codeBuddyCliReasoningEffort: reasoningEffort }
+                    : {},
+              )
+            }
+            onOpenAiSettings={openAiSettings}
+            onRetryModel={() => {
+              if (authIssueId) setDismissedAuthIssueId(authIssueId);
+              void session.refreshStatus();
+            }}
+            submissionBlockReason={submissionBlockReason}
+            modeOptions={assistantProviderDefinition(aiProvider).modeOptions}
+            attachments={attachments}
+            attachmentError={attachmentError}
+            isAddingAttachment={isAddingAttachment}
+            onAddAttachment={() => void handleAddAttachment()}
+            onRemoveAttachment={(attachmentId) =>
+              setAttachments((current) =>
+                current.filter((attachment) => attachment.id !== attachmentId),
+              )
+            }
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -941,6 +1433,7 @@ function promptWithTextAttachments(
 
 function resolveModelUiState({
   enabled,
+  providerKind,
   baseUrl,
   model,
   resolvedMode,
@@ -949,9 +1442,10 @@ function resolveModelUiState({
   hostCapabilities,
   hostInstalledTools,
   authenticationError,
-  cliDetection,
+  cliSetup,
 }: {
   enabled: boolean;
+  providerKind: AiProviderKind;
   baseUrl: string;
   model: string;
   resolvedMode: "chat" | "plan" | "agent";
@@ -960,7 +1454,7 @@ function resolveModelUiState({
   hostCapabilities: string[] | null;
   hostInstalledTools: string[] | null;
   authenticationError: string | null;
-  cliDetection: AiCliDetectionResult | "checking" | null;
+  cliSetup: AssistantCliSetupState | null;
 }): {
   modelStatus: AssistantModelStatus;
   submissionBlockReason: string | null;
@@ -978,25 +1472,33 @@ function resolveModelUiState({
     };
   }
 
-  if (cliDetection === "checking") {
-    const detail = "Detecting the configured CLI executable.";
+  if (cliSetup && cliSetup.phase !== "ready") {
+    const detail = cliSetup.message;
     return {
-      modelStatus: { kind: "checking", label: "Detecting CLI", detail },
-      submissionBlockReason: detail,
-    };
-  }
-
-  if (cliDetection && !cliDetection.available) {
-    const detail = cliDetection.message;
-    return {
-      modelStatus: { kind: "unavailable", label: "CLI unavailable", detail },
+      modelStatus: {
+        kind:
+          cliSetup.phase === "checking" || cliSetup.phase === "installing"
+            ? "checking"
+            : cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
+              ? "authentication-error"
+              : "unavailable",
+        label:
+          cliSetup.phase === "installing"
+            ? "Installing CLI"
+            : cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
+              ? "Authentication required"
+              : "CLI setup required",
+        detail,
+      },
       submissionBlockReason: detail,
     };
   }
 
   if (authenticationError) {
     const detail =
-      "The provider rejected the credential. Update the API key in AI settings, then retry.";
+      providerKind === "openai-compatible"
+        ? "The provider rejected the credential. Update the API key in AI settings, then retry."
+        : "The CLI session is no longer authenticated. Open the provider sign-in flow, then retry.";
     return {
       modelStatus: {
         kind: "authentication-error",

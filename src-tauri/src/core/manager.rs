@@ -78,6 +78,7 @@ struct ExternalDriverRuntimeTelemetry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveConnectionCapabilitySnapshot {
     pub driver_id: Option<String>,
+    pub managed: bool,
     pub external_driver_id: Option<String>,
     pub package_version: Option<String>,
     pub package_capabilities: Option<DatabaseCapabilities>,
@@ -291,6 +292,7 @@ impl ConnectionManager {
             .external_package_identity()
             .map(|(driver, version)| (Some(driver.to_string()), Some(version.to_string())))
             .unwrap_or((None, None));
+        let managed = driver.is_managed_data_source();
         let package_capabilities = driver.package_capabilities();
         let server_version = driver.server_version().await;
         let semantic_schema_migration_mode = driver.semantic_schema_migration_mode();
@@ -299,6 +301,7 @@ impl ConnectionManager {
 
         Ok(LiveConnectionCapabilitySnapshot {
             driver_id,
+            managed,
             external_driver_id,
             package_version,
             package_capabilities,
@@ -717,6 +720,14 @@ impl ConnectionManager {
     pub async fn get_databases(&self, id: &str) -> Result<Vec<String>> {
         let driver = self.get_driver(id).await?;
         driver.get_databases().await
+    }
+
+    pub async fn get_database_metadata(
+        &self,
+        id: &str,
+    ) -> Result<Vec<super::protocol::DatabaseInfo>> {
+        let driver = self.get_driver(id).await?;
+        driver.get_database_metadata().await
     }
 
     /// Get schemas in the currently connected database.
@@ -1542,6 +1553,7 @@ mod tests {
             manager.capability_snapshot("conn").await.unwrap(),
             LiveConnectionCapabilitySnapshot {
                 driver_id: Some("postgres".to_string()),
+                managed: false,
                 external_driver_id: Some("postgres".to_string()),
                 package_version: Some("16.4.1".to_string()),
                 package_capabilities: Some(capabilities),

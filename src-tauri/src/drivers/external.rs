@@ -1409,7 +1409,10 @@ impl DatabaseDriver for ExternalDriver {
         .await
     }
 
-    async fn get_schema_objects(&self, schema: &str) -> Result<Vec<crate::core::protocol::SchemaObjectInfo>> {
+    async fn get_schema_objects(
+        &self,
+        schema: &str,
+    ) -> Result<Vec<crate::core::protocol::SchemaObjectInfo>> {
         if !self.capabilities.lock().await.schema_objects {
             return Ok(Vec::new());
         }

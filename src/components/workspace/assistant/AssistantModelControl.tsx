@@ -14,6 +14,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
+import type { AiCliModelInfo } from "@/services/tauri/ai.service";
 
 export type AssistantModelStatusKind =
   | "configured"
@@ -34,6 +35,9 @@ interface AssistantModelControlProps {
   endpoint: string;
   status: AssistantModelStatus;
   disabled: boolean;
+  modelOptions?: readonly AiCliModelInfo[];
+  reasoningEffort?: string;
+  onReasoningEffortChange?: (effort: string) => void;
   onModelChange: (model: string) => void;
   onOpenSettings: () => void;
   onRetry: () => void;
@@ -44,20 +48,32 @@ export function AssistantModelControl({
   endpoint,
   status,
   disabled,
+  modelOptions,
+  reasoningEffort,
+  onReasoningEffortChange,
   onModelChange,
   onOpenSettings,
   onRetry,
 }: AssistantModelControlProps) {
   const [open, setOpen] = useState(false);
   const [draftModel, setDraftModel] = useState(model);
+  const [draftEffort, setDraftEffort] = useState(reasoningEffort || "default");
   const modelInputId = useId();
 
   useEffect(() => {
-    if (!open) setDraftModel(model);
-  }, [model, open]);
+    if (!open) {
+      setDraftModel(model);
+      setDraftEffort(reasoningEffort || "default");
+    }
+  }, [model, open, reasoningEffort]);
 
   const normalizedModel = draftModel.trim();
   const modelChanged = normalizedModel !== model.trim();
+  const effortChanged = draftEffort !== (reasoningEffort || "default");
+  const selectedModel = modelOptions?.find(
+    (option) => option.id === normalizedModel,
+  );
+  const effortOptions = selectedModel?.reasoningEfforts ?? [];
   const triggerLabel =
     status.kind === "missing" ? "Configure AI" : model.trim() || "Configure AI";
   const canRetry =
@@ -65,8 +81,9 @@ export function AssistantModelControl({
     status.kind === "authentication-error";
 
   const applyModel = () => {
-    if (!normalizedModel || !modelChanged || disabled) return;
-    onModelChange(normalizedModel);
+    if (!normalizedModel || (!modelChanged && !effortChanged) || disabled) return;
+    if (modelChanged) onModelChange(normalizedModel);
+    if (effortChanged) onReasoningEffortChange?.(draftEffort);
     setOpen(false);
   };
 
@@ -125,17 +142,66 @@ export function AssistantModelControl({
             <span className="mb-1 block text-[hsl(var(--wb-text-muted))]">
               Model
             </span>
-            <input
-              id={modelInputId}
-              value={draftModel}
-              onChange={(event) => setDraftModel(event.target.value)}
-              disabled={disabled}
-              placeholder="Model identifier"
-              autoComplete="off"
-              spellCheck={false}
-              className="wb-field w-full font-mono text-[10px]"
-            />
+            {modelOptions?.length ? (
+              <select
+                id={modelInputId}
+                value={draftModel}
+                onChange={(event) => {
+                  setDraftModel(event.target.value);
+                  const nextModel = modelOptions.find(
+                    (option) => option.id === event.target.value,
+                  );
+                  if (
+                    nextModel?.reasoningEfforts?.length &&
+                    draftEffort !== "default" &&
+                    !nextModel.reasoningEfforts.includes(draftEffort)
+                  ) {
+                    setDraftEffort("default");
+                  }
+                }}
+                disabled={disabled}
+                className="wb-field w-full font-mono text-[10px]"
+              >
+                {modelOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}{option.isDefault ? " · default" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id={modelInputId}
+                value={draftModel}
+                onChange={(event) => setDraftModel(event.target.value)}
+                disabled={disabled}
+                placeholder="Model identifier"
+                autoComplete="off"
+                spellCheck={false}
+                className="wb-field w-full font-mono text-[10px]"
+              />
+            )}
           </label>
+
+          {effortOptions.length > 0 && (
+            <label className="block">
+              <span className="mb-1 block text-[hsl(var(--wb-text-muted))]">
+                Reasoning effort
+              </span>
+              <select
+                value={draftEffort}
+                onChange={(event) => setDraftEffort(event.target.value)}
+                disabled={disabled}
+                className="wb-field w-full text-[10px]"
+              >
+                <option value="default">Provider default</option>
+                {effortOptions.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {formatEffort(effort)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <div className="min-w-0">
             <div className="text-[hsl(var(--wb-text-muted))]">Endpoint</div>
@@ -176,7 +242,9 @@ export function AssistantModelControl({
               <button
                 type="submit"
                 className="wb-primary-button h-7 px-2 text-[10px]"
-                disabled={!normalizedModel || !modelChanged || disabled}
+                disabled={
+                  !normalizedModel || (!modelChanged && !effortChanged) || disabled
+                }
               >
                 <Check size={11} />
                 Apply
@@ -187,6 +255,13 @@ export function AssistantModelControl({
       </PopoverContent>
     </Popover>
   );
+}
+
+function formatEffort(value: string) {
+  if (value === "enabled") return "On (provider default)";
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character: string) => character.toUpperCase());
 }
 
 function ModelStatusIcon({
