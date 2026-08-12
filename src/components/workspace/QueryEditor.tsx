@@ -146,6 +146,15 @@ import {
 } from "@/lib/elasticsearchConsole";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
+import {
+  buildRedisCompletionItems,
+  getRedisCompletionContext,
+  takesRedisKeyArgument,
+} from "@/lib/redisCompletion";
+import {
+  loadRedisCommandDocumentation,
+  loadRedisCompletionKeys,
+} from "@/lib/redisCompletionSource";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   buildQueryEditorOptions,
@@ -1392,13 +1401,101 @@ export function QueryEditor({
           );
           const completionDriver =
             completionIdentity?.driver.toLocaleLowerCase() || "";
+          const isRedisCompletionDocument = completionDriver === "redis";
           const isSqlCompletionDocument = ![
             "elasticsearch",
             "elastic",
             "mongodb",
+            "redis",
           ].includes(completionDriver);
           const explicitCompletion = completionTriggerOriginRef.current !== null;
           completionTriggerOriginRef.current = null;
+          if (isRedisCompletionDocument) {
+            if (
+              completionUri !== documentUri ||
+              !effectiveConnectionId ||
+              !isCurrentLspModelUri(completionUri)
+            ) {
+              return { suggestions: [] };
+            }
+            const source = model.getValue();
+            const offset = model.getOffsetAt(position);
+            const redisDatabase =
+              activeTab?.targetSchema ||
+              currentSchema ||
+              activeConnection?.database ||
+              "0";
+            const commands = await loadRedisCommandDocumentation(
+              effectiveConnectionId,
+              redisDatabase,
+              metadataVersion,
+            );
+            if (
+              token?.isCancellationRequested ||
+              model.getVersionId() !== initialModelVersion
+            ) {
+              return { suggestions: [] };
+            }
+            const redisContext = getRedisCompletionContext(source, offset, {
+              commands,
+            });
+            let keys: string[] = [];
+            if (
+              redisContext.mode === "argument" &&
+              takesRedisKeyArgument(
+                redisContext.commandName,
+                { commands },
+                redisContext.argumentIndex,
+                redisContext.argumentValues,
+              )
+            ) {
+              try {
+                keys = await loadRedisCompletionKeys(
+                  effectiveConnectionId,
+                  redisDatabase,
+                  metadataVersion,
+                );
+              } catch {
+                // Command and argument completion remain useful when SCAN is denied.
+              }
+            }
+            if (
+              token?.isCancellationRequested ||
+              model.getVersionId() !== initialModelVersion
+            ) {
+              return { suggestions: [] };
+            }
+            const start = model.getPositionAt(redisContext.from);
+            const range = new monaco.Range(
+              start.lineNumber,
+              start.column,
+              position.lineNumber,
+              position.column,
+            );
+            const suggestions = buildRedisCompletionItems(redisContext, {
+              commands,
+              keys,
+            }).map((item) => ({
+              label: item.label,
+              kind:
+                item.type === "key"
+                  ? monaco.languages.CompletionItemKind.Reference
+                  : item.type === "value"
+                    ? monaco.languages.CompletionItemKind.Value
+                    : monaco.languages.CompletionItemKind.Keyword,
+              detail: item.detail,
+              documentation: item.documentation
+                ? { value: item.documentation }
+                : undefined,
+              insertText: `${item.insertText || item.label}${
+                item.appendSpace ? " " : ""
+              }`,
+              filterText: item.label,
+              sortText: item.sortText,
+              range,
+            }));
+            return { suggestions, incomplete: false };
+          }
           if (isSqlCompletionDocument) {
             const trigger = sqlCompletionTriggerDecision(
               editorSettings.sqlCompletion.triggerMode,

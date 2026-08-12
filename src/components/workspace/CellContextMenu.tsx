@@ -46,68 +46,68 @@ export function CellContextMenu({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-56 bg-[#1a1a1a] border-[#333]">
-        <ContextMenuItem onClick={onEditModal} className="text-gray-300">
+      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <ContextMenuItem onClick={onEditModal} className="text-[hsl(var(--wb-text))]">
           Edit in modal
           <ContextMenuShortcut>⌅Enter</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onClick={onSetNull} className="text-gray-300">
+        <ContextMenuItem onClick={onSetNull} className="text-[hsl(var(--wb-text))]">
           Set as NULL
         </ContextMenuItem>
-        <ContextMenuItem onClick={onQuickFilter} className="text-gray-300">
+        <ContextMenuItem onClick={onQuickFilter} className="text-[hsl(var(--wb-text))]">
           Quick Filter
           <ContextMenuShortcut>⌥⌘</ContextMenuShortcut>
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onCopy} className="text-gray-300">
+        <ContextMenuItem onClick={onCopy} className="text-[hsl(var(--wb-text))]">
           Copy
           <ContextMenuShortcut>⌘C</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyColumnName} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyColumnName} className="text-[hsl(var(--wb-text))]">
           Copy Column Name
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsTSV} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsTSV} className="text-[hsl(var(--wb-text))]">
           Copy as TSV for Excel
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsJSON} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsJSON} className="text-[hsl(var(--wb-text))]">
           Copy as JSON
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsMarkdown} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsMarkdown} className="text-[hsl(var(--wb-text))]">
           Copy as Markdown
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsSQL} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsSQL} className="text-[hsl(var(--wb-text))]">
           Copy as SQL
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyForIN} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyForIN} className="text-[hsl(var(--wb-text))]">
           Copy for IN statement
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onPaste} className="text-gray-300">
+        <ContextMenuItem onClick={onPaste} className="text-[hsl(var(--wb-text))]">
           Paste
           <ContextMenuShortcut>⌘V</ContextMenuShortcut>
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onCloneRow} className="text-gray-300">
+        <ContextMenuItem onClick={onCloneRow} className="text-[hsl(var(--wb-text))]">
           Clone row
           <ContextMenuShortcut>⌘D</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
           onClick={onDeleteRow}
-          className="text-gray-300 text-red-400"
+          className="text-[hsl(var(--destructive))] focus:text-[hsl(var(--destructive))]"
         >
           Delete row
           <ContextMenuShortcut>Delete</ContextMenuShortcut>
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onSeeDetails} className="text-gray-300">
+        <ContextMenuItem onClick={onSeeDetails} className="text-[hsl(var(--wb-text))]">
           See details
         </ContextMenuItem>
       </ContextMenuContent>

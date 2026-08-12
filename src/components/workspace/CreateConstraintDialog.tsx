@@ -311,8 +311,8 @@ export function CreateConstraintDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[560px] bg-[#18181b] text-foreground border-white/10 p-0 gap-0">
-        <DialogHeader className="p-4 border-b border-white/5">
+      <DialogContent className="w-[560px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
           <DialogTitle>Create Constraint</DialogTitle>
           <div className="text-xs text-muted-foreground font-mono truncate">
             {schema}.{tableName}
@@ -332,7 +332,7 @@ export function CreateConstraintDialog({
                 Type
               </label>
               <Select value={mode} onValueChange={(value) => setModeAndName(value as ConstraintMode)}>
-                <SelectTrigger className="h-8 text-xs bg-[#27272a] border-white/10">
+                <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -354,7 +354,7 @@ export function CreateConstraintDialog({
               <Input
                 value={constraintName}
                 onChange={(event) => setConstraintName(event.target.value)}
-                className="h-8 text-xs bg-[#27272a] border-white/10 font-mono"
+                className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] font-mono text-xs"
               />
             </div>
           </div>
@@ -364,7 +364,7 @@ export function CreateConstraintDialog({
               <div className="text-xs font-medium text-muted-foreground">
                 Local Columns
               </div>
-              <div className="max-h-40 overflow-auto border border-white/10 rounded-sm">
+              <div className="max-h-40 overflow-auto rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))]">
                 {columns.length === 0 ? (
                   <div className="p-3 text-xs text-muted-foreground">
                     No columns loaded
@@ -373,7 +373,7 @@ export function CreateConstraintDialog({
                   columns.map((column) => (
                     <label
                       key={column.name}
-                      className="flex items-center gap-2 px-3 py-2 border-b border-white/5 last:border-b-0 text-xs"
+                      className="flex items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-xs last:border-b-0 hover:bg-[hsl(var(--wb-hover))]"
                     >
                       <Checkbox
                         checked={selectedColumns.includes(column.name)}
@@ -403,7 +403,7 @@ export function CreateConstraintDialog({
                 value={checkExpression}
                 onChange={(event) => setCheckExpression(event.target.value)}
                 placeholder="amount >= 0"
-                className="h-8 text-xs bg-[#27272a] border-white/10 font-mono"
+                className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] font-mono text-xs"
               />
             </div>
           )}
@@ -415,7 +415,7 @@ export function CreateConstraintDialog({
                   Referenced Table
                 </label>
                 <Select value={referencedTable} onValueChange={setReferencedTable}>
-                  <SelectTrigger className="h-8 text-xs bg-[#27272a] border-white/10">
+                  <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                     <SelectValue placeholder="Select table" />
                   </SelectTrigger>
                   <SelectContent>
@@ -431,7 +431,7 @@ export function CreateConstraintDialog({
                 <label className="text-xs font-medium text-muted-foreground">
                   Column Mapping
                 </label>
-                <div className="max-h-32 overflow-auto rounded-sm border border-white/10">
+                <div className="max-h-32 overflow-auto rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))]">
                   {selectedColumns.length === 0 ? (
                     <div className="p-2 text-xs text-muted-foreground">
                       Select local columns
@@ -440,7 +440,7 @@ export function CreateConstraintDialog({
                     selectedColumns.map((columnName) => (
                       <div
                         key={columnName}
-                        className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2 border-b border-white/5 px-2 py-1.5 last:border-b-0"
+                        className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 last:border-b-0"
                       >
                         <span className="truncate font-mono text-xs">
                           {columnName}
@@ -454,7 +454,7 @@ export function CreateConstraintDialog({
                             }))
                           }
                         >
-                          <SelectTrigger className="h-7 text-xs bg-[#27272a] border-white/10">
+                          <SelectTrigger className="h-7 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                             <SelectValue placeholder="Column" />
                           </SelectTrigger>
                           <SelectContent>
@@ -475,7 +475,7 @@ export function CreateConstraintDialog({
                   On Delete
                 </label>
                 <Select value={onDelete} onValueChange={setOnDelete}>
-                  <SelectTrigger className="h-8 text-xs bg-[#27272a] border-white/10">
+                  <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -492,7 +492,7 @@ export function CreateConstraintDialog({
                   On Update
                 </label>
                 <Select value={onUpdate} onValueChange={setOnUpdate}>
-                  <SelectTrigger className="h-8 text-xs bg-[#27272a] border-white/10">
+                  <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -508,7 +508,7 @@ export function CreateConstraintDialog({
           )}
         </div>
 
-        <DialogFooter className="p-4 border-t border-white/5 bg-[#27272a]/30">
+        <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
           <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>
             Cancel
           </Button>

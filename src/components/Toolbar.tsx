@@ -20,16 +20,16 @@ export function Toolbar({
   onToggleRight,
 }: ToolbarProps) {
   return (
-    <div className="h-9 bg-[#1a1a1a] border-b border-[#333] flex items-center justify-between px-3 shrink-0">
+    <div className="flex h-9 shrink-0 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
       {/* Left: App/View Info */}
-      <div className="text-xs text-gray-400 font-medium">Database Manager</div>
+      <div className="text-xs font-medium text-[hsl(var(--wb-text-muted))]">Database Manager</div>
 
       {/* Right: Panel Toggles */}
       <div className="flex items-center gap-1">
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
           onClick={onToggleLeft}
           title="Toggle Left Panel"
         >
@@ -43,7 +43,7 @@ export function Toolbar({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]"
+          className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
           onClick={onToggleRight}
           title="Toggle Right Panel"
         >

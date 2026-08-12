@@ -67,7 +67,7 @@ export function CommandPalette({
         actions,
         deferredSearchQuery,
         (action) => `${action.title} ${action.group} ${action.id}`,
-        { limit: 30, emptyLimit: 12 },
+        { limit: 30, emptyLimit: 12, primaryText: (action) => action.title },
       ),
     [actions, deferredSearchQuery],
   );
@@ -80,7 +80,11 @@ export function CommandPalette({
           `${object.name} ${object.schema} ${
             object.kind === "relation" ? object.objectType || "table" : "schema"
           }`,
-        { limit: 40, emptyLimit: 12 },
+        {
+          limit: 40,
+          emptyLimit: 12,
+          primaryText: (object) => object.name,
+        },
       ),
     [databaseObjects, deferredSearchQuery],
   );
@@ -90,7 +94,12 @@ export function CommandPalette({
         projectFilePaths,
         deferredSearchQuery,
         (relativePath) => relativePath,
-        { limit: 40, emptyLimit: 12 },
+        {
+          limit: 40,
+          emptyLimit: 12,
+          primaryText: (relativePath) =>
+            relativePath.split("/").pop() || relativePath,
+        },
       ),
     [deferredSearchQuery, projectFilePaths],
   );
@@ -100,7 +109,7 @@ export function CommandPalette({
         tabs,
         deferredSearchQuery,
         (tab) => `${tab.title} ${tab.type}`,
-        { limit: 40, emptyLimit: 12 },
+        { limit: 40, emptyLimit: 12, primaryText: (tab) => tab.title },
       ),
     [deferredSearchQuery, tabs],
   );
@@ -110,7 +119,11 @@ export function CommandPalette({
         connections,
         deferredSearchQuery,
         (connection) => `${connection.name} ${connection.driver}`,
-        { limit: 40, emptyLimit: 12 },
+        {
+          limit: 40,
+          emptyLimit: 12,
+          primaryText: (connection) => connection.name,
+        },
       ),
     [connections, deferredSearchQuery],
   );

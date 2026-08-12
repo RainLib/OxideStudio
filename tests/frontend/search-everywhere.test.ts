@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   rankSearchEverywhereItems,
+  matchSearchEverywhereText,
   searchableDatabaseObjects,
   searchableProjectFilePaths,
 } from "@/lib/searchEverywhere";
@@ -99,12 +100,39 @@ describe("Search Everywhere indexes", () => {
       rankSearchEverywhereItems(items, "public active", (item) => item, {
         limit: 2,
       })
-    ).toEqual(["public.active_connections", "public.active_customers"]);
+    ).toEqual(["public.active_customers", "public.active_connections"]);
     expect(
       rankSearchEverywhereItems(items, "pac", (item) => item, { limit: 2 })
-    ).toEqual(["public.account_customer", "public.active_connections"]);
+    ).toEqual(["public.account_customer", "public.active_customers"]);
     expect(
       rankSearchEverywhereItems(items, "", (item) => item, { emptyLimit: 2 })
     ).toHaveLength(2);
+  });
+
+  it("matches DBX-style initials, word prefixes, camel case, and fuzzy symbols", () => {
+    expect(matchSearchEverywhereText("pac", "public.active_customers")?.kind).toBe(
+      "initials",
+    );
+    expect(matchSearchEverywhereText("ac", "ActiveConnections")?.kind).toBe(
+      "initials",
+    );
+    expect(matchSearchEverywhereText("actcon", "active_connections")?.kind).toBe(
+      "word-prefix",
+    );
+    expect(matchSearchEverywhereText("acvr", "archived_customer_versions")?.kind).toBe(
+      "fuzzy",
+    );
+  });
+
+  it("prefers an exact primary label over metadata-only matches", () => {
+    const items = [
+      { name: "staging", metadata: "orders staging" },
+      { name: "orders", metadata: "staging orders" },
+    ];
+    expect(
+      rankSearchEverywhereItems(items, "orders", (item) => item.metadata, {
+        primaryText: (item) => item.name,
+      }).map((item) => item.name),
+    ).toEqual(["orders", "staging"]);
   });
 });

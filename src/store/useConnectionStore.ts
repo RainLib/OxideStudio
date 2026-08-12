@@ -294,6 +294,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       database: defaultDatabaseName(DEFAULT_DATABASE_DRIVER),
       icon: defaultConnectionIcon(DEFAULT_DATABASE_DRIVER),
       tags: [],
+      note: "",
       environment: "unclassified",
       productionDatabases: [],
       sshTunnel: {
@@ -328,7 +329,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         "Managed data sources cannot be changed or saved on this device.",
       );
     }
-    const scopedConfig = scopeConnectionToActiveProject(config);
+    const scopedConfig = scopeConnectionToActiveProject({
+      ...config,
+      note: config.note?.trim() || undefined,
+    });
     const connections = get().connections;
     const existingIndex = connections.findIndex(
       (c) => c.id === scopedConfig.id,

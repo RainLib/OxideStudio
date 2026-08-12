@@ -209,22 +209,24 @@ export function PostgresRemoteDatabaseContents({
       !target ||
       target.connectionId !== connectionId ||
       target.databaseName !== database ||
+      !target.schemaName ||
       !schemas.includes(target.schemaName)
     ) {
       return;
     }
+    const schemaName = target.schemaName;
     setExpandedSchemas((current) =>
-      current.has(target.schemaName)
+      current.has(schemaName)
         ? current
-        : new Set([...current, target.schemaName])
+        : new Set([...current, schemaName])
     );
-    const loadState = schemaLoads[target.schemaName];
+    const loadState = schemaLoads[schemaName];
     if (
       target.objectName &&
       loadState?.status !== "loading" &&
       loadState?.status !== "success"
     ) {
-      void loadTables(target.schemaName);
+      void loadTables(schemaName);
     }
   }, [databaseRevealRequest?.id, schemas]);
 
@@ -234,6 +236,7 @@ export function PostgresRemoteDatabaseContents({
     if (
       target.connectionId !== connectionId ||
       target.databaseName !== database ||
+      !target.schemaName ||
       (target.objectName &&
         schemaLoads[target.schemaName]?.status !== "success")
     ) {

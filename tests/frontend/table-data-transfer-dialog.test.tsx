@@ -267,4 +267,59 @@ describe("TableDataTransferDialog", () => {
     expect(mocks.getDatabases).not.toHaveBeenCalled();
     expect(mocks.getDatabaseSchemas).not.toHaveBeenCalled();
   });
+
+  it("opens schema-level transfers with every source table selected", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "postgres",
+      displayName: "PostgreSQL",
+      supportsDatabaseCatalogs: false,
+      supportsTableDataTransfer: true,
+    });
+    mocks.getTables.mockImplementation(async (connectionId: string) =>
+      connectionId === "source"
+        ? [
+            { name: "orders", type: "BASE TABLE" },
+            { name: "users", type: "BASE TABLE" },
+            { name: "users_view", type: "VIEW" },
+          ]
+        : [
+            { name: "orders", type: "BASE TABLE" },
+            { name: "users", type: "BASE TABLE" },
+          ],
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataTransferDialog
+          open
+          initialSourceScope="schema"
+          source={{
+            connectionId: "source",
+            driver: "postgres",
+            schema: "public",
+            table: "orders",
+          }}
+          sourceCapabilities={
+            {
+              displayName: "PostgreSQL",
+              supportsTableDataTransfer: true,
+            } as Parameters<typeof TableDataTransferDialog>[0]["sourceCapabilities"]
+          }
+          connections={[
+            { id: "source", name: "Source", driver: "postgres", url: "postgres://source" },
+            { id: "target", name: "Target", driver: "postgres", url: "postgres://target" },
+          ]}
+          onClose={vi.fn()}
+          onTransferred={vi.fn()}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("Transfer schema data");
+      expect(document.body.textContent).toContain("2 selected");
+    });
+    expect(document.body.textContent).not.toContain("users_view");
+  });
 });

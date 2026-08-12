@@ -174,6 +174,20 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("keeps connection notes visible by default and persists an explicit opt-out", () => {
+    expect(DEFAULT_APP_SETTINGS.databaseExplorer.showConnectionNotes).toBe(true);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { showConnectionNotes: false },
+      }).databaseExplorer.showConnectionNotes,
+    ).toBe(false);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { showConnectionNotes: "no" },
+      }).databaseExplorer.showConnectionNotes,
+    ).toBe(true);
+  });
+
   it("keeps blank-line full-document execution explicitly opt-in", () => {
     expect(DEFAULT_APP_SETTINGS.editor.executeAllOnBlankLine).toBe(false);
     expect(

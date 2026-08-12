@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Plus, Trash2, GripVertical } from "lucide-react";
+import { FileCode2, Plus, Trash2, GripVertical } from "lucide-react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { databaseService, tableService } from "@/services/tauri";
 import type { DatabaseCapabilities } from "@/services/tauri";
@@ -60,6 +60,8 @@ export function CreateTableTab({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [previewSql, setPreviewSql] = useState("");
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(
     null
   );
@@ -113,6 +115,46 @@ export function CreateTableTab({
       },
     ]);
   }, [activeCapabilities.defaultPrimaryKeyType]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!tableName.trim() || columns.some((column) => !column.name.trim())) {
+      setPreviewSql("");
+      setPreviewError(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void tableService
+        .previewCreateTable(
+          driver,
+          schemaName,
+          tableName,
+          columns.map((column) => ({
+            name: column.name,
+            dataType: column.type,
+            length: column.length || null,
+            isPrimaryKey: column.isPrimaryKey,
+            isNotNull: column.isNotNull,
+            isAutoIncrement: column.isAutoIncrement,
+            comment: column.comment || null,
+          })),
+        )
+        .then((statements) => {
+          if (cancelled) return;
+          setPreviewSql(statements.join("\n\n"));
+          setPreviewError(null);
+        })
+        .catch((cause) => {
+          if (cancelled) return;
+          setPreviewSql("");
+          setPreviewError(cause instanceof Error ? cause.message : String(cause));
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [columns, driver, schemaName, tableName]);
 
   const addColumn = () => {
     const dataType = defaultStringDataType(activeCapabilities);
@@ -231,7 +273,7 @@ export function CreateTableTab({
       await loadTables(connectionId, schemaName, true);
 
       setSuccess(true);
-      updateTabTitle(tabId, `✓ ${tableName}`);
+      updateTabTitle(tabId, `Created ${tableName}`);
 
       // Close tab after 1.5 seconds
       setTimeout(() => {
@@ -245,9 +287,9 @@ export function CreateTableTab({
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#18181b] text-foreground">
+    <div className="flex h-full flex-col bg-[hsl(var(--wb-editor))] text-[hsl(var(--wb-text))]">
       {/* Header */}
-      <div className="p-4 border-b border-white/5">
+      <div className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
         <h2 className="text-lg font-medium">Create New Table</h2>
         <p className="text-xs text-muted-foreground mt-1">
           Creating in {namespaceLabel}:{" "}
@@ -265,7 +307,7 @@ export function CreateTableTab({
 
         {success && (
           <div className="bg-green-500/10 text-green-400 text-xs p-3 rounded border border-green-500/20">
-            ✓ Table created successfully! This tab will close shortly.
+            Table created successfully. This tab will close shortly.
           </div>
         )}
 
@@ -278,7 +320,7 @@ export function CreateTableTab({
             value={tableName}
             onChange={(e) => setTableName(e.target.value)}
             placeholder="e.g. users"
-            className="bg-[#27272a] border-white/10 max-w-md"
+            className="max-w-md border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))]"
           />
         </div>
 
@@ -299,12 +341,12 @@ export function CreateTableTab({
                 key={idx}
                 onMouseEnter={() => handleDragEnter(idx)}
                 onMouseUp={handleDragEnd}
-                className={`flex items-start gap-2 bg-[#27272a]/50 p-3 rounded border transition-all ${
+                className={`flex items-start gap-2 rounded-[5px] border bg-[hsl(var(--wb-panel))] p-3 transition-all ${
                   dragState.isDragging && dragState.dragIndex === idx
                     ? "opacity-50 border-primary/50"
                     : dragState.isDragging && dragState.hoverIndex === idx
                     ? "border-primary border-dashed"
-                    : "border-white/5"
+                    : "border-[hsl(var(--wb-border-subtle))]"
                 }`}
               >
                 {/* Drag Handle */}
@@ -324,7 +366,7 @@ export function CreateTableTab({
                         updateColumn(idx, "name", e.target.value)
                       }
                       placeholder="Column name"
-                      className="h-8 text-xs bg-[#18181b]"
+                      className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs"
                     />
                   </div>
                   {/* Type */}
@@ -333,7 +375,7 @@ export function CreateTableTab({
                       value={col.type}
                       onValueChange={(val) => updateColumn(idx, "type", val)}
                     >
-                      <SelectTrigger className="h-8 text-xs bg-[#18181b]">
+                      <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -353,7 +395,7 @@ export function CreateTableTab({
                         updateColumn(idx, "length", e.target.value)
                       }
                       placeholder="Length"
-                      className="h-8 text-xs bg-[#18181b]"
+                      className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs"
                     />
                   </div>
                   {/* Comment */}
@@ -364,7 +406,7 @@ export function CreateTableTab({
                         updateColumn(idx, "comment", e.target.value)
                       }
                       placeholder="Comment"
-                      className="h-8 text-xs bg-[#18181b]"
+                      className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs"
                     />
                   </div>
                   {/* Options */}
@@ -446,11 +488,27 @@ export function CreateTableTab({
             variant="outline"
             size="sm"
             onClick={addColumn}
-            className="border-dashed border-white/20 hover:bg-[#27272a]"
+            className="border-dashed border-[hsl(var(--wb-border))] hover:bg-[hsl(var(--wb-hover))]"
           >
             <Plus size={14} className="mr-2" /> Add Column
           </Button>
         </div>
+
+        <section className="overflow-hidden rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))]">
+          <div className="flex h-8 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3 text-[11px] font-medium">
+            <FileCode2 size={13} className="text-[hsl(var(--wb-accent))]" />
+            SQL preview
+            <span className="ml-auto text-[9px] font-normal wb-muted">
+              Generated by the active driver dialect
+            </span>
+          </div>
+          <pre className="max-h-52 min-h-24 overflow-auto whitespace-pre-wrap p-3 font-mono text-[11px] leading-5 text-[hsl(var(--wb-text))]">
+            {previewError
+              ? `Preview unavailable: ${previewError}`
+              : previewSql ||
+                "Enter a table name and complete every column name to generate SQL."}
+          </pre>
+        </section>
       </div>
 
       {/* Footer via Portal to status bar */}

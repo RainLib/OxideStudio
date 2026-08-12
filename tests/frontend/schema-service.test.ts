@@ -17,7 +17,11 @@ describe("schema service database discovery", () => {
   it("uses a database command distinct from schema discovery", async () => {
     mocks.invoke
       .mockResolvedValueOnce({ success: true, data: ["app", "analytics"] })
-      .mockResolvedValueOnce({ success: true, data: ["public"] });
+      .mockResolvedValueOnce({ success: true, data: ["public"] })
+      .mockResolvedValueOnce({
+        success: true,
+        data: [{ name: "analytics", sizeBytes: 1024 }],
+      });
 
     await expect(schemaService.getDatabases("connection-1")).resolves.toEqual([
       "app",
@@ -26,10 +30,14 @@ describe("schema service database discovery", () => {
     await expect(schemaService.getSchemas("connection-1")).resolves.toEqual([
       "public",
     ]);
+    await expect(
+      schemaService.getDatabaseMetadata("connection-1"),
+    ).resolves.toEqual([{ name: "analytics", sizeBytes: 1024 }]);
 
     expect(mocks.invoke.mock.calls).toEqual([
       ["get_databases", { connectionId: "connection-1" }],
       ["get_schemas", { connectionId: "connection-1" }],
+      ["get_database_metadata", { connectionId: "connection-1" }],
     ]);
   });
 
@@ -124,6 +132,45 @@ describe("schema service database discovery", () => {
         },
       ],
     ]);
+  });
+
+  it("requests a best-effort snapshot only for diagram capture", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        version: 1,
+        id: "snapshot-1",
+        fingerprint: "fingerprint-1",
+        projectId: "project-1",
+        connectionId: "connection-1",
+        connectionName: "Local",
+        driver: "postgres",
+        schemaName: "public",
+        capturedAt: 1,
+        relations: [],
+        warnings: [],
+      },
+    });
+
+    await schemaService.captureSchemaSnapshot({
+      projectId: "project-1",
+      connectionId: "connection-1",
+      connectionName: "Local",
+      driver: "postgres",
+      database: "app",
+      schema: "public",
+      allowPartial: true,
+    });
+
+    expect(mocks.invoke).toHaveBeenCalledWith("capture_schema_snapshot", {
+      projectId: "project-1",
+      connectionId: "connection-1",
+      connectionName: "Local",
+      driver: "postgres",
+      database: "app",
+      schema: "public",
+      allowPartial: true,
+    });
   });
 
   it("keeps migration approval bound to snapshots, plan id, and target fingerprint", async () => {

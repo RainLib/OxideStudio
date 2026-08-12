@@ -177,7 +177,7 @@ export function CreateViewDialog({
         if (!open) handleClose();
       }}
     >
-      <DialogContent className="max-w-[640px] bg-[#18181b] text-foreground border-white/10">
+      <DialogContent className="w-[640px] max-w-[calc(100vw-32px)] rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
         <DialogHeader>
           <DialogTitle>
             {isEditMode ? `Edit ${objectLabel}` : `Create New ${objectLabel}`}
@@ -199,7 +199,7 @@ export function CreateViewDialog({
               value={viewName}
               onChange={(e) => setViewName(e.target.value)}
               placeholder="e.g. active_users"
-              className="bg-[#27272a] border-white/10"
+              className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))]"
               autoFocus
               disabled={isEditMode}
             />
@@ -213,7 +213,7 @@ export function CreateViewDialog({
               value={selectSql}
               onChange={(e) => setSelectSql(e.target.value)}
               placeholder="SELECT id, email FROM users WHERE active = true"
-              className="min-h-[180px] w-full resize-y rounded-sm border border-white/10 bg-[#27272a] px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-primary"
+              className="min-h-[180px] w-full resize-y rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] px-3 py-2 font-mono text-xs text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent))]"
               spellCheck={false}
             />
           </div>

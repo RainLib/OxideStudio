@@ -9,6 +9,7 @@ import * as LucideIcons from "lucide-react";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 import { cn } from "@/lib/utils";
 import { useState, useMemo } from "react";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import {
   defaultConnectionAccentClassName,
 } from "@/lib/databaseDialect";
@@ -31,6 +32,9 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
   const [filter, setFilter] = useState("");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [showTagFilters, setShowTagFilters] = useState(false);
+  const showConnectionNotes = useSettingsStore(
+    (state) => state.settings.databaseExplorer.showConnectionNotes,
+  );
 
   // Get all unique tags from all connections
   const allTags = useMemo(() => {
@@ -44,7 +48,9 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
   const filteredConnections = connections.filter((c: ConnectionConfig) => {
     const matchesFilter =
       c.name.toLowerCase().includes(filter.toLowerCase()) ||
-      c.host?.toLowerCase().includes(filter.toLowerCase());
+      c.host?.toLowerCase().includes(filter.toLowerCase()) ||
+      c.note?.toLowerCase().includes(filter.toLowerCase()) ||
+      c.tags?.some((tag) => tag.toLowerCase().includes(filter.toLowerCase()));
 
     if (!matchesFilter) return false;
 
@@ -263,6 +269,15 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
               >
                 {conn.name}
               </div>
+
+              {showConnectionNotes && conn.note?.trim() ? (
+                <div
+                  className="truncate text-[10px] leading-tight text-[hsl(var(--wb-text-muted))]"
+                  title={conn.note.trim()}
+                >
+                  {conn.note.trim()}
+                </div>
+              ) : null}
 
               {/* Tags Display - Optimized */}
               {conn.tags && conn.tags.length > 0 ? (

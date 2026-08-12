@@ -267,6 +267,17 @@ describe("connection store", () => {
     expect(created.icon).toBe("Database");
   });
 
+  it("normalizes connection notes before persisting them", async () => {
+    await useConnectionStore
+      .getState()
+      .saveConnection(connection({ note: "  Owner: Data Platform  " }));
+
+    expect(mocks.saveConnections).toHaveBeenCalledWith(
+      [expect.objectContaining({ note: "Owner: Data Platform" })],
+      "sqls",
+    );
+  });
+
   it("passes enabled SSH tunnel settings without rewriting the saved database URL", async () => {
     const config = connection({
       connectionUrl: "postgres://postgres:secret@db.internal:5432/app",

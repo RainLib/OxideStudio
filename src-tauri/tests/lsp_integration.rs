@@ -3183,7 +3183,10 @@ async fn bundled_sql_lsp_applies_configured_formatter_layout() -> Result<()> {
         formatted.contains("from users"),
         "formatted SQL: {formatted}"
     );
-    assert!(formatted.contains("COUNT(id)"), "formatted SQL: {formatted}");
+    assert!(
+        formatted.contains("COUNT(id)"),
+        "formatted SQL: {formatted}"
+    );
     assert!(
         formatted.contains("\"KeepFn\"(id)"),
         "formatted SQL: {formatted}"

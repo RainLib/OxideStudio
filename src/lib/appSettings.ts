@@ -147,6 +147,7 @@ export type AppSettings = {
     refreshMode: "manual" | "cache-first";
     showOnlySelectedSchemas: boolean;
     showCacheBadges: boolean;
+    showConnectionNotes: boolean;
   };
   drivers: {
     /** HTTPS URL for the optional, signed external-driver discovery catalog. */
@@ -314,6 +315,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     refreshMode: "cache-first",
     showOnlySelectedSchemas: true,
     showCacheBadges: true,
+    showConnectionNotes: true,
   },
   drivers: {
     catalogUrl: "",
@@ -729,6 +731,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["databaseExplorer", "showCacheBadges"],
         defaults.databaseExplorer.showCacheBadges,
+      ),
+      showConnectionNotes: boolAt(
+        raw,
+        ["databaseExplorer", "showConnectionNotes"],
+        defaults.databaseExplorer.showConnectionNotes,
       ),
     },
     drivers: {

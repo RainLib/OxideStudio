@@ -29,7 +29,9 @@ import {
   Search,
   X,
   GitCompareArrows,
+  ArrowRightLeft,
   AlertTriangle,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +68,7 @@ import type {
   DatabaseDriver,
   FunctionInfo,
   SchemaObjectInfo,
+  TableDataTransferEndpoint,
   TableInfo,
 } from "@/services/tauri/types";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
@@ -196,11 +199,23 @@ const DatabaseAdministrationDialog = lazy(() =>
     default: module.DatabaseAdministrationDialog,
   })),
 );
+const TableDataTransferDialog = lazy(() =>
+  import("./TableDataTransferDialog").then((module) => ({
+    default: module.TableDataTransferDialog,
+  })),
+);
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
   schemas: Record<string, string[]>;
   tables: Record<string, Record<string, TableInfo[]>>;
+}
+
+interface ExplorerDataTransferRequest {
+  source: TableDataTransferEndpoint;
+  sourceCapabilities: DatabaseCapabilities;
+  initialSourceScope: "schema" | "database";
+  sourceSchemas: string[];
 }
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
@@ -591,6 +606,8 @@ export function SchemaSidebar() {
   const [schemaDiagramLoadingKey, setSchemaDiagramLoadingKey] = useState<
     string | null
   >(null);
+  const [dataTransferRequest, setDataTransferRequest] =
+    useState<ExplorerDataTransferRequest | null>(null);
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
     capabilities: DatabaseCapabilities;
@@ -1487,6 +1504,9 @@ export function SchemaSidebar() {
   );
   const loadTablePage = useTabStore((state) => state.loadTablePage);
   const createTableTab = useTabStore((state) => state.createTableTab);
+  const openDatabaseBrowser = useTabStore(
+    (state) => state.openDatabaseBrowser,
+  );
   const createTab = useTabStore((state) => state.createTab);
   const openSchemaDiagramTab = useTabStore(
     (state) => state.openSchemaDiagramTab,
@@ -1529,6 +1549,73 @@ export function SchemaSidebar() {
     setIsDataSourceDialogOpen(true);
   };
 
+  const handleOpenDataTransfer = async (options: {
+    connection: (typeof connections)[number];
+    database?: string;
+    schema?: string;
+    scope: "schema" | "database";
+  }) => {
+    const { connection, database, scope } = options;
+    setNamespaceError(null);
+    try {
+      const connectionError = await setActiveConnection(connection.id);
+      if (connectionError) throw new Error(connectionError);
+
+      const capabilityContext =
+        await databaseService.getConnectionDatabaseCapabilityContext(
+          connection.id,
+        );
+      if (!capabilityContext.capabilities.supportsTableDataTransfer) {
+        throw new Error(
+          `${capabilityContext.capabilities.displayName} does not expose a verified table-data transfer contract.`,
+        );
+      }
+
+      const schemas = options.schema
+        ? [options.schema]
+        : database
+          ? await schemaService.getDatabaseSchemas(connection.id, database)
+          : await schemaService.getSchemas(connection.id);
+      const schema =
+        options.schema ||
+        [currentSchema, "public", "dbo", schemas[0]].find(
+          (candidate): candidate is string =>
+            Boolean(candidate && schemas.includes(candidate)),
+        );
+      if (!schema) {
+        throw new Error("No transferable schema was found in this database.");
+      }
+
+      const relations = database
+        ? await schemaService.getDatabaseTables(connection.id, database, schema)
+        : await schemaService.getTables(connection.id, schema);
+      const firstTable = relations
+        .filter((relation) => !relation.type?.toUpperCase().includes("VIEW"))
+        .map((relation) => relation.name)
+        .sort((left, right) => left.localeCompare(right))[0];
+      if (!firstTable) {
+        throw new Error(`No transferable tables were found in ${[database, schema].filter(Boolean).join(".")}.`);
+      }
+
+      setDataTransferRequest({
+        source: {
+          connectionId: connection.id,
+          driver: connection.driver,
+          database,
+          schema,
+          table: firstTable,
+        },
+        sourceCapabilities: capabilityContext.capabilities,
+        initialSourceScope: scope,
+        sourceSchemas: schemas,
+      });
+    } catch (error) {
+      setNamespaceError(
+        `Could not prepare data transfer: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   const handleOpenSchemaDiagram = async (identity: SchemaSnapshotIdentity) => {
     const loadingKey = [
       identity.connectionId,
@@ -1547,7 +1634,9 @@ export function SchemaSidebar() {
     try {
       const connectionError = await setActiveConnection(identity.connectionId);
       if (connectionError) throw new Error(connectionError);
-      const snapshot = await captureLiveSchemaSnapshot(identity);
+      const snapshot = await captureLiveSchemaSnapshot(identity, {
+        allowPartial: true,
+      });
       openSchemaDiagramTab(snapshot);
       tasks.finishTask(
         taskId,
@@ -2343,6 +2432,33 @@ export function SchemaSidebar() {
         target.databaseName !== currentDatabase
       ) {
         await loadPostgresRemoteDatabase(connection.id, target.databaseName);
+        if (!target.schemaName) {
+          setFilterText("");
+          window.requestAnimationFrame(() => {
+            const databaseRow = Array.from(
+              document.querySelectorAll<HTMLElement>("[data-postgres-database]"),
+            ).find(
+              (element) =>
+                element.dataset.postgresDatabase === target.databaseName,
+            );
+            databaseRow?.querySelector<HTMLElement>("button")?.focus();
+            clearDatabaseReveal(requestId);
+          });
+        }
+        return;
+      }
+
+      if (!target.schemaName) {
+        setFilterText("");
+        window.requestAnimationFrame(() => {
+          const databaseRow = Array.from(
+            document.querySelectorAll<HTMLElement>("[data-postgres-database]"),
+          ).find(
+            (element) => element.dataset.postgresDatabase === target.databaseName,
+          );
+          databaseRow?.querySelector<HTMLElement>("button")?.focus();
+          clearDatabaseReveal(requestId);
+        });
         return;
       }
 
@@ -4292,6 +4408,7 @@ export function SchemaSidebar() {
             </div>
           ) : (
             connections.map((connection) => {
+              const isManagedConnection = connection.origin === "managed";
               const connectionColor = connectionTreeColor(
                 connection.driver,
                 connection.color,
@@ -4397,11 +4514,31 @@ export function SchemaSidebar() {
                           size={14}
                           className="shrink-0"
                           style={{ color: connectionColor }}
-                          title={`${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
+                          title={isManagedConnection
+                            ? `${databaseDriverProfile(connection.driver).capabilities.displayName} through managed Gateway`
+                            : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
                         />
                         <span className="truncate font-medium">
                           {connection.name}
                         </span>
+                        {databaseExplorerSettings.showConnectionNotes &&
+                          connection.note?.trim() && (
+                            <span
+                              className="ml-auto max-w-[42%] truncate text-[9px] font-normal text-[hsl(var(--wb-text-muted))]"
+                              title={connection.note.trim()}
+                            >
+                              {connection.note.trim()}
+                            </span>
+                          )}
+                        {isManagedConnection && (
+                          <span
+                            className="inline-flex h-4 shrink-0 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-accent)/0.35)] bg-[hsl(var(--wb-accent)/0.08)] px-1 text-[8px] font-medium uppercase tracking-wide text-[hsl(var(--wb-accent))]"
+                            title="Credentials stay behind the enterprise Gateway; local write surfaces are disabled."
+                          >
+                            <ShieldCheck size={9} />
+                            Managed
+                          </span>
+                        )}
                         <ConnectionRuntimeBadge
                           runtime={connectionRuntime}
                           isConnected={connectedConnectionIds.includes(
@@ -4426,7 +4563,10 @@ export function SchemaSidebar() {
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
                       <ContextMenuSub>
-                        <ContextMenuSubTrigger className={menuSubClass}>
+                        <ContextMenuSubTrigger
+                          className={menuSubClass}
+                          disabled={isManagedConnection}
+                        >
                           <Plus className="mr-2 h-3.5 w-3.5" />
                           New
                         </ContextMenuSubTrigger>
@@ -4435,6 +4575,7 @@ export function SchemaSidebar() {
                             className={menuItemClass}
                             onClick={handleCreateDatabase}
                             disabled={
+                              isManagedConnection ||
                               !activeCapabilities.supportsCreateDatabase
                             }
                           >
@@ -4444,7 +4585,11 @@ export function SchemaSidebar() {
                             className={menuItemClass}
                             onClick={handleCreateTable}
                             disabled={
-                              !isActive || !currentSchema || !canBrowseTables
+                              isManagedConnection ||
+                              !isActive ||
+                              !currentSchema ||
+                              !canBrowseTables ||
+                              !activeCapabilities.supportsTableDdl
                             }
                           >
                             Table
@@ -4475,6 +4620,21 @@ export function SchemaSidebar() {
                       >
                         Copy Name
                       </ContextMenuItem>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        disabled={
+                          !defaultDatabaseCapabilities(connection.driver)
+                            .supportsTableBrowsing ||
+                          defaultDatabaseCapabilities(connection.driver)
+                            .dataModel !== "relational"
+                        }
+                        onClick={() =>
+                          openDatabaseBrowser(connection.id, connection.name)
+                        }
+                      >
+                        <Database className="mr-2 h-3.5 w-3.5" />
+                        Browse Databases
+                      </ContextMenuItem>
                       <ContextMenuSeparator className={menuSeparatorClass} />
                       <ContextMenuItem
                         className={menuItemClass}
@@ -4500,28 +4660,32 @@ export function SchemaSidebar() {
                       >
                         Forget Cached Metadata
                       </ContextMenuItem>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() =>
-                          handleOpenConnectionProperties(connection.id)
-                        }
-                      >
-                        Properties...
-                      </ContextMenuItem>
-                      {supportsDatabaseAdministration(connection.driver) && (
+                      {!isManagedConnection && (
                         <ContextMenuItem
                           className={menuItemClass}
-                          onClick={() => {
-                            setDatabaseAdministrationConnectionId(connection.id);
-                          }}
+                          onClick={() =>
+                            handleOpenConnectionProperties(connection.id)
+                          }
                         >
-                          Database Administration...
+                          Properties...
                         </ContextMenuItem>
                       )}
+                      {!isManagedConnection &&
+                        supportsDatabaseAdministration(connection.driver) && (
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() => {
+                              setDatabaseAdministrationConnectionId(connection.id);
+                            }}
+                          >
+                            Database Administration...
+                          </ContextMenuItem>
+                        )}
                       <ContextMenuSub>
                         <ContextMenuSubTrigger
                           className={menuSubClass}
                           disabled={
+                            isManagedConnection ||
                             !defaultDatabaseCapabilities(connection.driver)
                               .supportsSqlQuery
                           }
@@ -4546,20 +4710,24 @@ export function SchemaSidebar() {
                           </ContextMenuItem>
                         </ContextMenuSubContent>
                       </ContextMenuSub>
-                      <ContextMenuSeparator className={menuSeparatorClass} />
-                      <ContextMenuItem
-                        className={cn(menuItemClass, "text-destructive")}
-                        onSelect={() => {
-                          setDataSourceRemovalError(null);
-                          setPendingDataSourceRemoval({
-                            id: connection.id,
-                            name: connection.name,
-                          });
-                        }}
-                      >
-                        <Trash2 className="mr-2 h-3.5 w-3.5" />
-                        Remove Data Source...
-                      </ContextMenuItem>
+                      {!isManagedConnection && (
+                        <>
+                          <ContextMenuSeparator className={menuSeparatorClass} />
+                          <ContextMenuItem
+                            className={cn(menuItemClass, "text-destructive")}
+                            onSelect={() => {
+                              setDataSourceRemovalError(null);
+                              setPendingDataSourceRemoval({
+                                id: connection.id,
+                                name: connection.name,
+                              });
+                            }}
+                          >
+                            <Trash2 className="mr-2 h-3.5 w-3.5" />
+                            Remove Data Source...
+                          </ContextMenuItem>
+                        </>
+                      )}
                     </ContextMenuContent>
                   </ContextMenu>
 
@@ -4656,6 +4824,19 @@ export function SchemaSidebar() {
                             >
                               <Upload className="mr-2 h-3.5 w-3.5" />
                               Import SQL Script...
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void handleOpenDataTransfer({
+                                  connection,
+                                  database,
+                                  scope: "database",
+                                })
+                              }
+                            >
+                              <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                              Transfer Database Data...
                             </ContextMenuItem>
                             <ContextMenuSeparator
                               className={menuSeparatorClass}
@@ -4957,6 +5138,23 @@ export function SchemaSidebar() {
                                     </ContextMenuItem>
                                     <ContextMenuItem
                                       className={menuItemClass}
+                                      onClick={() =>
+                                        void handleOpenDataTransfer({
+                                          connection,
+                                          database:
+                                            connectionCanBrowseDatabaseCatalogs
+                                              ? connectedPostgresDatabase
+                                              : undefined,
+                                          schema,
+                                          scope: "schema",
+                                        })
+                                      }
+                                    >
+                                      <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                                      Transfer Schema Data...
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
                                       disabled={
                                         !(
                                           supportsTableWorkspace(
@@ -5139,6 +5337,22 @@ export function SchemaSidebar() {
             open
             identity={schemaSnapshotIdentity}
             onClose={() => setSchemaSnapshotIdentity(null)}
+          />
+        )}
+        {dataTransferRequest !== null && (
+          <TableDataTransferDialog
+            open
+            projectId={activeProjectId}
+            source={dataTransferRequest.source}
+            initialSourceScope={dataTransferRequest.initialSourceScope}
+            sourceSchemas={dataTransferRequest.sourceSchemas}
+            sourceCapabilities={dataTransferRequest.sourceCapabilities}
+            connections={connections}
+            onClose={() => setDataTransferRequest(null)}
+            onTransferred={() => {
+              const { connectionId, schema } = dataTransferRequest.source;
+              void handleRefreshSchema(connectionId, schema);
+            }}
           />
         )}
       </Suspense>

@@ -175,7 +175,8 @@ export type TabType =
   | "create_table"
   | "schema_diff"
   | "schema_diagram"
-  | "data_compare";
+  | "data_compare"
+  | "database_browser";
 export type QueryLanguage = "elasticsearch-dsl" | "elasticsearch-eql";
 
 const ELASTICSEARCH_REQUEST_LINE =
@@ -760,6 +761,7 @@ interface TabState {
     title?: string,
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
+  openDatabaseBrowser: (connectionId: string, connectionName: string) => string;
   openSchemaDiffTab: (
     plan: SchemaDiffPlan,
     source: SchemaSnapshot,
@@ -1253,6 +1255,23 @@ export const useTabStore = create<TabState>((set, get) => ({
       activeTabId: newTab.id,
     }));
     return newTab.id;
+  },
+
+  openDatabaseBrowser: (connectionId, connectionName) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.type === "database_browser" && tab.connectionId === connectionId,
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return existing.id;
+    }
+    return get().createTab(
+      "database_browser",
+      `${connectionName} databases`,
+      "",
+      { connectionId },
+    );
   },
 
   openSchemaDiffTab: (plan, source, target) => {

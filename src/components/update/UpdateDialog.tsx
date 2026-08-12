@@ -124,6 +124,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     checkForUpdates,
     downloadUpdate,
     installAndRestart,
+    ignoreAvailableVersion,
     clearError,
   } = useUpdateStore();
 
@@ -141,6 +142,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const runPrimaryAction = () => {
     if (status === "available") void downloadUpdate();
     if (status === "downloaded") void installAndRestart();
+  };
+
+  const ignoreVersion = () => {
+    ignoreAvailableVersion();
+    onOpenChange(false);
   };
 
   return (
@@ -260,6 +266,15 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             >
               <RefreshCw size={13} />
               Check Again
+            </button>
+          )}
+          {status === "available" && update && (
+            <button
+              type="button"
+              className="wb-text-button h-7 px-3"
+              onClick={ignoreVersion}
+            >
+              Ignore {update.version}
             </button>
           )}
           <button

@@ -377,6 +377,34 @@ describe("table service database scope", () => {
     expect(stop).toBe(unlisten);
   });
 
+  it("previews create-table SQL without a connection or execution request", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: ["CREATE TABLE public.users (id INT);"],
+    });
+    const columns = [
+      {
+        name: "id",
+        dataType: "INT",
+        length: null,
+        isPrimaryKey: true,
+        isNotNull: true,
+        isAutoIncrement: false,
+        comment: null,
+      },
+    ];
+
+    await expect(
+      tableService.previewCreateTable("postgres", "public", "users", columns),
+    ).resolves.toEqual(["CREATE TABLE public.users (id INT);"]);
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_create_table", {
+      driver: "postgres",
+      schema: "public",
+      table: "users",
+      columns,
+    });
+  });
+
   it("asks the backend for one FK-ordered multi-table plan instead of looping table writes in the UI", async () => {
     const request = {
       sourceConnectionId: "source",

@@ -17,11 +17,11 @@ export function ActivityBar({
   isDrawerOpen,
 }: ActivityBarProps) {
   return (
-    <div className="w-[50px] flex flex-col bg-[#1a1a1a] border-r border-[#2a2a2a] shrink-0 z-50">
+    <div className="z-50 flex w-[50px] shrink-0 flex-col border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))]">
       <div className="flex-1 flex flex-col items-center py-4 gap-3">
         {/* App Logo */}
         <div className="mb-2">
-          <div className="h-8 w-8 bg-[#f39c12] rounded-lg flex items-center justify-center text-[#1a1a1a] shadow-lg shadow-orange-900/20">
+          <div className="flex h-8 w-8 items-center justify-center rounded-[6px] bg-[hsl(var(--wb-accent))] text-[hsl(var(--wb-accent-foreground))] shadow-lg shadow-black/20">
             <Database size={20} strokeWidth={2.5} />
           </div>
         </div>
@@ -83,14 +83,14 @@ function ActivityBarButton({
       className={cn(
         "relative w-full h-10 transition-all rounded-md group",
         active
-          ? "text-gray-100 bg-[#252525]"
-          : "text-gray-500 hover:text-gray-300 hover:bg-[#252525]"
+          ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+          : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
       )}
       onClick={onClick}
       title={title}
     >
       {active && (
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 bg-[#f39c12] rounded-r-md shadow-[0_0_8px_rgba(243,156,18,0.4)]" />
+        <div className="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-r-md bg-[hsl(var(--wb-accent))] shadow-[0_0_8px_hsl(var(--wb-accent)/0.4)]" />
       )}
       <Icon
         size={20}

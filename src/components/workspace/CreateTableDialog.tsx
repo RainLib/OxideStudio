@@ -206,8 +206,8 @@ export function CreateTableDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-[700px] bg-[#18181b] text-foreground border-white/10 max-h-[80vh] flex flex-col p-0 gap-0">
-        <DialogHeader className="p-4 border-b border-white/5">
+      <DialogContent className="flex max-h-[80vh] w-[700px] max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
           <DialogTitle>Create New Table</DialogTitle>
         </DialogHeader>
 
@@ -226,7 +226,7 @@ export function CreateTableDialog({
               value={tableName}
               onChange={(e) => setTableName(e.target.value)}
               placeholder="e.g. users"
-              className="bg-[#27272a] border-white/10"
+              className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))]"
             />
           </div>
 
@@ -246,7 +246,7 @@ export function CreateTableDialog({
                 return (
                   <div
                   key={idx}
-                  className="flex items-start gap-2 bg-[#27272a]/50 p-2 rounded border border-white/5"
+                  className="flex items-start gap-2 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2"
                 >
                   <div className="flex-1 grid grid-cols-12 gap-2">
                     {/* Name */}
@@ -257,7 +257,7 @@ export function CreateTableDialog({
                           updateColumn(idx, "name", e.target.value)
                         }
                         placeholder="Name"
-                        className="h-8 text-xs bg-[#18181b]"
+                        className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs"
                       />
                     </div>
                     {/* Type */}
@@ -266,7 +266,7 @@ export function CreateTableDialog({
                         value={col.type}
                         onValueChange={(val) => updateColumn(idx, "type", val)}
                       >
-                        <SelectTrigger className="h-8 text-xs bg-[#18181b]">
+                        <SelectTrigger className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -286,7 +286,7 @@ export function CreateTableDialog({
                           updateColumn(idx, "length", e.target.value)
                         }
                         placeholder="Len"
-                        className="h-8 text-xs bg-[#18181b]"
+                        className="h-8 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] text-xs"
                       />
                     </div>
                     {/* Options */}
@@ -367,14 +367,14 @@ export function CreateTableDialog({
               variant="outline"
               size="sm"
               onClick={addColumn}
-              className="w-full border-dashed border-white/20 hover:bg-[#27272a]"
+              className="w-full border-dashed border-[hsl(var(--wb-border))] hover:bg-[hsl(var(--wb-hover))]"
             >
               <Plus size={14} className="mr-2" /> Add Column
             </Button>
           </div>
         </div>
 
-        <DialogFooter className="p-4 border-t border-white/5 bg-[#27272a]/30">
+        <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
           <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>
             Cancel
           </Button>

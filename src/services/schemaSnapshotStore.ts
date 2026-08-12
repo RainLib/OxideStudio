@@ -31,6 +31,7 @@ export function schemaSnapshotParentId(identity: SchemaSnapshotIdentity) {
 
 export async function captureLiveSchemaSnapshot(
   identity: SchemaSnapshotIdentity,
+  options: { allowPartial?: boolean } = {},
 ) {
   return schemaService.captureSchemaSnapshot({
     projectId: identity.projectId,
@@ -39,6 +40,7 @@ export async function captureLiveSchemaSnapshot(
     driver: identity.driver,
     database: identity.databaseName,
     schema: identity.schemaName,
+    allowPartial: options.allowPartial,
   });
 }
 

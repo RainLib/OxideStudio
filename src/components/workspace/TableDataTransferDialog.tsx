@@ -43,6 +43,8 @@ interface TableDataTransferDialogProps {
   open: boolean;
   projectId?: string | null;
   source: TableDataTransferEndpoint;
+  initialSourceScope?: "table" | "schema" | "database";
+  sourceSchemas?: string[];
   sourceCapabilities?: DatabaseCapabilities | null;
   connections: ConnectionConfig[];
   onClose: () => void;
@@ -120,7 +122,7 @@ export function canExecuteTableDataTransfer(
 }
 
 export function supportsTableDataTransferUpsert(
-  distribution: "bundled" | "external" | null,
+  distribution: "bundled" | "external" | "managed" | null,
 ) {
   return distribution === "bundled";
 }
@@ -154,6 +156,8 @@ export function TableDataTransferDialog({
   open,
   projectId,
   source,
+  initialSourceScope = "table",
+  sourceSchemas = [source.schema],
   sourceCapabilities,
   connections,
   onClose,
@@ -176,7 +180,7 @@ export function TableDataTransferDialog({
   const [targetCapabilities, setTargetCapabilities] =
     useState<DatabaseCapabilities | null>(null);
   const [targetDistribution, setTargetDistribution] = useState<
-    "bundled" | "external" | null
+    "bundled" | "external" | "managed" | null
   >(null);
   const [externalTransferConnectionIds, setExternalTransferConnectionIds] =
     useState<Set<string>>(() => new Set());
@@ -184,6 +188,7 @@ export function TableDataTransferDialog({
   const [isSchemasLoading, setIsSchemasLoading] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
+  const [activeSourceSchema, setActiveSourceSchema] = useState(source.schema);
   const [selectedSourceTables, setSelectedSourceTables] = useState<Set<string>>(
     () => new Set([source.table]),
   );
@@ -229,6 +234,17 @@ export function TableDataTransferDialog({
     source.driver,
     sourceCapabilities,
   );
+  const selectedSourceTable = useMemo(
+    () =>
+      [...selectedSourceTables].sort((left, right) =>
+        left.localeCompare(right),
+      )[0] || source.table,
+    [selectedSourceTables, source.table],
+  );
+  const effectiveSource = useMemo(
+    () => ({ ...source, schema: activeSourceSchema, table: selectedSourceTable }),
+    [activeSourceSchema, selectedSourceTable, source],
+  );
   const isBatchTransfer = selectedSourceTables.size > 1;
 
   useEffect(() => {
@@ -242,30 +258,39 @@ export function TableDataTransferDialog({
           ? await schemaService.getDatabaseTables(
               source.connectionId,
               source.database,
-              source.schema,
+              activeSourceSchema,
             )
-          : await schemaService.getTables(source.connectionId, source.schema);
+          : await schemaService.getTables(source.connectionId, activeSourceSchema);
         if (cancelled) return;
         const names = items
           .filter((item) => !item.type?.toUpperCase().includes("VIEW"))
           .map((item) => item.name)
           .sort((left, right) => left.localeCompare(right));
-        if (!names.includes(source.table)) names.unshift(source.table);
+        const initialTable =
+          activeSourceSchema === source.schema && names.includes(source.table)
+            ? source.table
+            : names[0];
         setSourceTables(names);
         setSelectedSourceTables((current) => {
+          if (initialSourceScope !== "table") return new Set(names);
           const selected = [...current].filter((table) => names.includes(table));
-          return new Set(selected.length > 0 ? selected : [source.table]);
+          return new Set(
+            selected.length > 0 ? selected : initialTable ? [initialTable] : [],
+          );
         });
       } catch {
         // The active source remains usable for a single-table transfer even
         // when the optional multi-select inventory could not be refreshed.
-        if (!cancelled) setSourceTables([source.table]);
+        if (!cancelled && activeSourceSchema === source.schema) {
+          setSourceTables([source.table]);
+          setSelectedSourceTables(new Set([source.table]));
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [open, source, sourceSupportsTransfer]);
+  }, [activeSourceSchema, initialSourceScope, open, source, sourceSupportsTransfer]);
 
   useEffect(() => {
     if (!open || !projectId || !targetConnectionId) {
@@ -293,7 +318,7 @@ export function TableDataTransferDialog({
     return {
       projectId: projectId || undefined,
       transferId,
-      source,
+      source: effectiveSource,
       target: {
         connectionId: targetConnection.id,
         driver: targetConnection.driver,
@@ -312,7 +337,7 @@ export function TableDataTransferDialog({
     mode,
     projectId,
     reseedIdentity,
-    source,
+    effectiveSource,
     transferId,
     targetConnection,
     targetDatabase,
@@ -325,10 +350,10 @@ export function TableDataTransferDialog({
       projectId: projectId || undefined,
       transferId,
       plan: {
-        sourceConnectionId: source.connectionId,
-        sourceDriver: source.driver,
-        sourceDatabase: source.database,
-        sourceSchema: source.schema,
+        sourceConnectionId: effectiveSource.connectionId,
+        sourceDriver: effectiveSource.driver,
+        sourceDatabase: effectiveSource.database,
+        sourceSchema: effectiveSource.schema,
         targetConnectionId: targetConnection.id,
         targetDriver: targetConnection.driver,
         targetDatabase: targetDatabase || undefined,
@@ -349,7 +374,7 @@ export function TableDataTransferDialog({
     reseedIdentity,
     projectId,
     selectedSourceTables,
-    source,
+    effectiveSource,
     targetConnection,
     targetDatabase,
     targetSchema,
@@ -359,7 +384,7 @@ export function TableDataTransferDialog({
     () =>
       targetConnection && targetTableMode === "new"
         ? {
-            source,
+            source: effectiveSource,
             target: {
               connectionId: targetConnection.id,
               driver: targetConnection.driver,
@@ -370,7 +395,7 @@ export function TableDataTransferDialog({
           }
         : null,
     [
-      source,
+      effectiveSource,
       targetConnection,
       targetDatabase,
       targetSchema,
@@ -414,6 +439,7 @@ export function TableDataTransferDialog({
         connection.id !== source.connectionId || connection.driver !== source.driver,
     ) || eligibleTargetConnections.find((connection) => connection.id === source.connectionId);
     setTargetConnectionId(firstTarget?.id || "");
+    setActiveSourceSchema(source.schema);
     setTransferId(createTableDataTransferId());
     setTargetDatabase("");
     setTargetSchema(source.schema);
@@ -721,7 +747,9 @@ export function TableDataTransferDialog({
 
   const handleTargetTableModeChange = (nextMode: "existing" | "new") => {
     setTargetTableMode(nextMode);
-    setTargetTable(nextMode === "existing" ? (tables[0] || "") : source.table);
+    setTargetTable(
+      nextMode === "existing" ? (tables[0] || "") : effectiveSource.table,
+    );
     setTargetPlan(null);
     setTargetPlanPreviewKey("");
     setTargetPlanConfirmation("");
@@ -886,7 +914,7 @@ export function TableDataTransferDialog({
   };
 
   const handleRetryReport = (report: TableDataTransferReport) => {
-    if (!canRetryTableDataTransferReport(report, source)) return;
+    if (!canRetryTableDataTransferReport(report, effectiveSource)) return;
     if (report.target.connectionId !== targetConnectionId) return;
     if (
       report.mode === "upsert" &&
@@ -979,16 +1007,18 @@ export function TableDataTransferDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}>
-      <DialogContent className="flex max-h-[min(760px,calc(100vh-32px))] w-[min(1040px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent className="flex max-h-[min(780px,calc(100vh-32px))] w-[min(880px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-5 py-4">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">
               <ArrowRightLeft size={15} />
             </span>
             <div className="min-w-0">
-              <DialogTitle className="text-[14px] tracking-normal">Transfer table data</DialogTitle>
+              <DialogTitle className="text-[14px] tracking-normal">
+                Transfer {initialSourceScope === "table" ? "table" : initialSourceScope} data
+              </DialogTitle>
               <DialogDescription className="truncate text-[11px] text-[hsl(var(--wb-text-muted))]">
-                {displayEndpoint(source)} → {targetTableMode === "new" ? "review new target table" : `existing target table · ${mode}`}
+                {displayEndpoint(effectiveSource)} → {targetTableMode === "new" ? "review new target table" : `existing target table · ${mode}`}
               </DialogDescription>
             </div>
           </div>
@@ -1010,12 +1040,43 @@ export function TableDataTransferDialog({
           </ol>
         </DialogHeader>
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1.12fr)_minmax(360px,0.88fr)] lg:overflow-hidden">
-          <section className="space-y-4 border-b border-[hsl(var(--wb-border-subtle))] p-5 lg:overflow-y-auto lg:border-b-0 lg:border-r">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <section className="mx-auto w-full max-w-[760px] space-y-4 border-b border-[hsl(var(--wb-border-subtle))] px-5 py-4">
             <div>
               <div className="text-[12px] font-medium">Destination</div>
               <p className="mt-0.5 text-[10px] wb-muted">Choose where this data will be copied. No data is changed until you confirm a reviewed plan.</p>
             </div>
+            {initialSourceScope === "database" && sourceSchemas.length > 1 && (
+              <label className="block space-y-1">
+                <span className="text-[10px] font-medium">Source schema</span>
+                <Select
+                  value={activeSourceSchema}
+                  onValueChange={(nextSchema) => {
+                    setActiveSourceSchema(nextSchema);
+                    setSourceTables([]);
+                    setSelectedSourceTables(new Set());
+                    resetTransferReview();
+                    setError(null);
+                  }}
+                  disabled={isSubmitting}
+                >
+                  <SelectTrigger className={fieldClass}>
+                    <SelectValue placeholder="Choose source schema" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sourceSchemas.map((schema) => (
+                      <SelectItem key={schema} value={schema}>
+                        {schema}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="block text-[9px] leading-4 wb-muted">
+                  Database entry keeps schema boundaries explicit. Choose a
+                  schema, then review all its tables as one bounded batch.
+                </span>
+              </label>
+            )}
             {sourceTables.length > 1 && (
               <div className="space-y-1.5 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
                 <div className="flex items-center justify-between gap-2">
@@ -1213,7 +1274,7 @@ export function TableDataTransferDialog({
             )}
           </section>
 
-          <section className="min-w-0 bg-[hsl(var(--wb-panel))] p-5 lg:overflow-y-auto">
+          <section className="mx-auto min-w-0 w-full max-w-[760px] bg-[hsl(var(--wb-panel))] px-5 py-4">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <div className="text-[12px] font-medium">Review & confirm</div>
@@ -1225,7 +1286,7 @@ export function TableDataTransferDialog({
               <div className="mb-3 space-y-1 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 text-[10px]">
                 <p className="font-medium wb-muted">Recent target transfer history</p>
                 {recentReports.map((report) => {
-                  const retryable = canRetryTableDataTransferReport(report, source);
+                  const retryable = canRetryTableDataTransferReport(report, effectiveSource);
                   return (
                     <div key={report.id} className="flex items-center justify-between gap-2 leading-4">
                       <span

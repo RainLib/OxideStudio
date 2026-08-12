@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   Check,
+  AlertTriangle,
   Columns3,
   Crosshair,
   Download,
@@ -942,6 +943,18 @@ export function SchemaDiagramView() {
           <ExternalLink size={11} /> Reveal selected
         </button>
       </header>
+
+      {snapshot.warnings.length > 0 && (
+        <div
+          className="flex shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-warning)/0.28)] bg-[hsl(var(--wb-warning)/0.08)] px-3 py-1.5 text-[9px] text-[hsl(var(--wb-text))]"
+          title={snapshot.warnings.join("\n")}
+        >
+          <AlertTriangle size={11} className="shrink-0 text-[hsl(var(--wb-warning))]" />
+          <span className="truncate">
+            Diagram opened with {snapshot.warnings.length} metadata warning{snapshot.warnings.length === 1 ? "" : "s"}. Unavailable details are shown as relation shells.
+          </span>
+        </div>
+      )}
 
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.62)] px-3">
         <label className="relative block w-56">

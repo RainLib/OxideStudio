@@ -22,6 +22,7 @@ import {
   GitCompareArrows,
   Network,
   Rows3,
+  DatabaseZap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -61,6 +62,9 @@ const TabIcon = ({
   }
   if (type === "data_compare") {
     return <Rows3 size={12} className="text-cyan-300" />;
+  }
+  if (type === "database_browser") {
+    return <DatabaseZap size={12} className="text-emerald-400" />;
   }
   if (isImage) return <ImageIcon size={12} className="text-violet-400" />;
   if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
@@ -430,6 +434,9 @@ export function TabBar({
               {(() => {
                 const queryTabs = visibleTabs.filter((t) => t.type === "query");
                 const tableTabs = visibleTabs.filter((t) => t.type === "table");
+                const otherTabs = visibleTabs.filter(
+                  (tab) => tab.type !== "query" && tab.type !== "table",
+                );
 
                 const tablesBySchema = tableTabs.reduce((acc, tab) => {
                   const schema = tab.schemaName || "Unknown";
@@ -537,6 +544,55 @@ export function TabBar({
                           ))}
                         </div>
                       ))}
+
+                    {otherTabs.length > 0 && (
+                      <>
+                        {(queryTabs.length > 0 || tableTabs.length > 0) && (
+                          <DropdownMenuSeparator className="my-1 bg-border" />
+                        )}
+                        <DropdownMenuLabel className="px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+                          Other tabs
+                        </DropdownMenuLabel>
+                        {otherTabs.map((tab) => (
+                          <DropdownMenuItem
+                            key={tab.id}
+                            className={cn(
+                              "group/overflow flex cursor-pointer items-center gap-2 text-[11px]",
+                              displayedActiveTabId === tab.id
+                                ? "bg-background-tertiary text-foreground"
+                                : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary",
+                            )}
+                            onClick={() => activateTab(tab.id)}
+                          >
+                            <TabIcon
+                              type={tab.type}
+                              isFile={Boolean(tab.fileRelativePath)}
+                              isImage={Boolean(tab.filePreview)}
+                            />
+                            <span className="min-w-0 flex-1 truncate">
+                              {tab.title}
+                            </span>
+                            {hasUnsavedTabChanges(tab) && (
+                              <span
+                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                                title="Unsaved changes"
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                closeTab(tab.id);
+                              }}
+                              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background-elevated group-hover/overflow:opacity-100 focus-visible:opacity-100"
+                              aria-label={`Close ${tab.title}`}
+                            >
+                              <X size={10} />
+                            </button>
+                          </DropdownMenuItem>
+                        ))}
+                      </>
+                    )}
                   </>
                 );
               })()}

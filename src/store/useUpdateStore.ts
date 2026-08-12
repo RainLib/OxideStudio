@@ -24,14 +24,65 @@ interface AppUpdateState {
   totalBytes: number | null;
   error: string | null;
   lastCheckedAt: number | null;
+  ignoredVersion: string | null;
   checkForUpdates: (options?: CheckForUpdatesOptions) => Promise<void>;
   downloadUpdate: () => Promise<void>;
   installAndRestart: () => Promise<void>;
+  ignoreAvailableVersion: () => void;
   clearError: () => void;
 }
 
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const LAST_CHECK_STORAGE_KEY = "oxide-update-last-check";
+const IGNORED_VERSION_STORAGE_KEY = "oxide-update-ignored-version";
+
+function normalizedVersion(value: string) {
+  return value.trim().replace(/^v/i, "").toLocaleLowerCase();
+}
+
+function parsedVersion(value: string) {
+  const base = normalizedVersion(value).split(/[+-]/, 1)[0] || "";
+  const parts = base.split(".");
+  if (!parts.length || parts.some((part) => !/^\d+$/.test(part))) return null;
+  return parts.map(Number);
+}
+
+export function isUpdateVersionIgnored(
+  availableVersion: string,
+  ignoredVersion: string | null,
+) {
+  if (!ignoredVersion) return false;
+  const available = parsedVersion(availableVersion);
+  const ignored = parsedVersion(ignoredVersion);
+  if (!available || !ignored) {
+    return normalizedVersion(availableVersion) === normalizedVersion(ignoredVersion);
+  }
+  const length = Math.max(available.length, ignored.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (available[index] || 0) - (ignored[index] || 0);
+    if (difference) return difference < 0;
+  }
+  return true;
+}
+
+function readIgnoredVersion() {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    return localStorage.getItem(IGNORED_VERSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeIgnoredVersion(version: string | null) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (version) localStorage.setItem(IGNORED_VERSION_STORAGE_KEY, version);
+    else localStorage.removeItem(IGNORED_VERSION_STORAGE_KEY);
+  } catch {
+    // Update preferences remain best-effort when storage is unavailable.
+  }
+}
 
 function readLastCheck(): number | null {
   try {
@@ -85,6 +136,7 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
   totalBytes: null,
   error: null,
   lastCheckedAt: readLastCheck(),
+  ignoredVersion: readIgnoredVersion(),
 
   checkForUpdates: async (options = {}) => {
     const state = get();
@@ -109,8 +161,16 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
       writeLastCheck(checkedAt);
       set({
         currentVersion,
-        update,
-        status: update ? "available" : "up-to-date",
+        update:
+          update && !options.force && isUpdateVersionIgnored(update.version, get().ignoredVersion)
+            ? null
+            : update,
+        status:
+          update && !options.force && isUpdateVersionIgnored(update.version, get().ignoredVersion)
+            ? "up-to-date"
+            : update
+              ? "available"
+              : "up-to-date",
         downloadedBytes: 0,
         totalBytes: null,
         lastCheckedAt: checkedAt,
@@ -168,6 +228,20 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
     } catch (error) {
       set({ status: "downloaded", error: describeUpdateError(error) });
     }
+  },
+
+  ignoreAvailableVersion: () => {
+    const version = get().update?.version || null;
+    if (!version) return;
+    writeIgnoredVersion(version);
+    set({
+      ignoredVersion: version,
+      update: null,
+      status: "idle",
+      downloadedBytes: 0,
+      totalBytes: null,
+      error: null,
+    });
   },
 
   clearError: () => set({ error: null }),

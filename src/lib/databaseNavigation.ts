@@ -4,7 +4,7 @@ export type DatabaseObjectNavigationTarget = {
   projectId: string;
   connectionId: string;
   databaseName?: string;
-  schemaName: string;
+  schemaName?: string;
   objectType?: string;
   objectName?: string;
 };
@@ -40,13 +40,24 @@ export const useDatabaseNavigationStore = create<DatabaseNavigationState>(
 );
 
 export function requestDatabaseObjectReveal(
-  target: DatabaseObjectNavigationTarget & { objectName: string }
+  target: DatabaseObjectNavigationTarget & { schemaName: string; objectName: string }
 ) {
   return useDatabaseNavigationStore.getState().revealObject(target);
 }
 
 export function requestDatabaseSchemaReveal(
-  target: Omit<DatabaseObjectNavigationTarget, "objectName" | "objectType">,
+  target: Omit<DatabaseObjectNavigationTarget, "objectName" | "objectType" | "schemaName"> & {
+    schemaName: string;
+  },
+) {
+  return useDatabaseNavigationStore.getState().revealObject(target);
+}
+
+export function requestDatabaseReveal(
+  target: Pick<
+    DatabaseObjectNavigationTarget,
+    "projectId" | "connectionId" | "databaseName"
+  >,
 ) {
   return useDatabaseNavigationStore.getState().revealObject(target);
 }
@@ -60,7 +71,7 @@ export function databaseObjectNavigationKey(
   return [
     target.connectionId,
     target.databaseName || "",
-    target.schemaName,
+    target.schemaName || "",
     target.objectName,
   ]
     .map((part) => encodeURIComponent(part))
@@ -76,7 +87,7 @@ export function databaseSchemaNavigationKey(
   return [
     target.connectionId,
     target.databaseName || "",
-    target.schemaName,
+    target.schemaName || "",
   ]
     .map((part) => encodeURIComponent(part))
     .join(":");

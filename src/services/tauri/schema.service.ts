@@ -13,6 +13,7 @@ import type {
   SchemaDiffPlan,
   SchemaMigrationJournalEntry,
   SchemaSnapshot,
+  DatabaseInfo,
 } from "./types";
 
 /**
@@ -68,6 +69,18 @@ export async function getTables(
   return invokeWithInterceptors<TableInfo[]>("get_tables", {
     connectionId,
     schema,
+  });
+}
+
+/**
+ * Get database names plus optional product metadata for the workspace browser.
+ * Drivers without metadata support return name-only rows.
+ */
+export async function getDatabaseMetadata(
+  connectionId: string,
+): Promise<DatabaseInfo[]> {
+  return invokeWithInterceptors<DatabaseInfo[]>("get_database_metadata", {
+    connectionId,
   });
 }
 
@@ -344,6 +357,7 @@ export async function captureSchemaSnapshot(options: {
   driver: string;
   database?: string | null;
   schema: string;
+  allowPartial?: boolean;
 }): Promise<SchemaSnapshot> {
   return invokeWithInterceptors<SchemaSnapshot>("capture_schema_snapshot", {
     projectId: options.projectId,
@@ -352,6 +366,7 @@ export async function captureSchemaSnapshot(options: {
     driver: options.driver,
     database: options.database || null,
     schema: options.schema,
+    allowPartial: options.allowPartial || false,
   });
 }
 
@@ -446,6 +461,7 @@ export async function refreshTables(
  */
 export const schemaService = {
   getDatabases,
+  getDatabaseMetadata,
   getSchemas,
   getDatabaseSchemas,
   getDatabaseSchemaObjects,

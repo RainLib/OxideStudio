@@ -53,6 +53,16 @@ export type DatabaseTableExportFormat =
   | "parquet"
   | "arrow";
 
+export interface DatabaseInfo {
+  name: string;
+  sizeBytes?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  comment?: string | null;
+  defaultCharset?: string | null;
+  defaultCollation?: string | null;
+}
+
 export interface DatabaseCapabilities {
   driver: DatabaseDriver;
   displayName: string;
@@ -126,7 +136,7 @@ export type SchemaMigrationCapabilityMode =
 export interface ConnectionDatabaseCapabilityContext {
   connectionId: string;
   driver: DatabaseDriver;
-  distribution: "bundled" | "external";
+  distribution: "bundled" | "external" | "managed";
   packageVersion?: string | null;
   serverVersion?: string | null;
   schemaMigrationMode: SchemaMigrationCapabilityMode;
@@ -1069,6 +1079,8 @@ export interface SavedConnection {
   indexGroupingPattern?: string;
   sshTunnel?: SshTunnelConfig;
   tags?: string[];
+  /** Optional human-readable context shown beside the data source in Explorer. */
+  note?: string;
   icon?: string;
   color?: string;
   /** AI write-safety classification. Legacy connections deserialize as unclassified. */

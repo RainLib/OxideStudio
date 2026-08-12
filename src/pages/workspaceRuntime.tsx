@@ -98,6 +98,11 @@ const DataCompareView = lazy(() =>
     default: module.DataCompareView,
   })),
 );
+const DatabaseBrowser = lazy(() =>
+  import("@/components/workspace/DatabaseBrowser").then((module) => ({
+    default: module.DatabaseBrowser,
+  })),
+);
 const LspConnectionSyncer = lazy(() =>
   import("@/components/lsp/LspConnectionSyncer").then((module) => ({
     default: module.LspConnectionSyncer,
@@ -662,6 +667,8 @@ export function WorkspaceRuntime() {
                       <SchemaDiagramView />
                     ) : activeTab?.type === "data_compare" ? (
                       <DataCompareView />
+                    ) : activeTab?.type === "database_browser" ? (
+                      <DatabaseBrowser />
                     ) : (
                       <div className="relative flex h-full min-h-0 flex-col gap-1">
                         <div

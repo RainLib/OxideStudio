@@ -138,6 +138,40 @@ describe("SchemaDiagramView", () => {
     );
   });
 
+  it("keeps a partial diagram usable and surfaces capture warnings", async () => {
+    const partialSnapshot: SchemaSnapshot = {
+      ...snapshot,
+      id: "partial-diagram-snapshot",
+      fingerprint: "partial-diagram-fingerprint",
+      relations: [
+        ...snapshot.relations,
+        {
+          name: "restricted_view",
+          objectType: "VIEW",
+          columns: [],
+          indexes: [],
+          constraints: [],
+        },
+      ],
+      warnings: [
+        "Diagram metadata for public.restricted_view is incomplete: permission denied",
+      ],
+    };
+    useTabStore.getState().openSchemaDiagramTab(partialSnapshot);
+
+    await act(async () => {
+      root.render(<SchemaDiagramView />);
+    });
+
+    expect(container.textContent).toContain("3 relations");
+    expect(container.textContent).toContain(
+      "Diagram opened with 1 metadata warning",
+    );
+    expect(
+      container.querySelector('[data-schema-diagram-relation="restricted_view"]'),
+    ).not.toBeNull();
+  });
+
   it("filters by column and switches to a keys-only projection", async () => {
     await act(async () => {
       root.render(<SchemaDiagramView />);

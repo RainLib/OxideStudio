@@ -784,6 +784,20 @@ export async function getViewDefinition(
   });
 }
 
+export async function previewCreateTable(
+  driver: DatabaseDriver,
+  schema: string,
+  table: string,
+  columns: CreateTableColumn[],
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("preview_create_table", {
+    driver,
+    schema,
+    table,
+    columns,
+  });
+}
+
 /** PostgreSQL-only, bounded source definitions. Multiple overloads may match. */
 export async function getPostgresRoutineDefinitions(
   connectionId: string,
@@ -841,6 +855,7 @@ export const tableService = {
   createTableImportId,
   listTableImportReports,
   mutateTableRows,
+  previewCreateTable,
   createTable,
   createView,
   createMaterializedView,

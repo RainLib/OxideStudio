@@ -54,80 +54,80 @@ export function ColumnHeaderMenu({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-56 bg-[#1a1a1a] border-[#333]">
-        <ContextMenuItem onClick={onSetNull} className="text-gray-300">
+      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <ContextMenuItem onClick={onSetNull} className="text-[hsl(var(--wb-text))]">
           Set as NULL
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onCopy} className="text-gray-300">
+        <ContextMenuItem onClick={onCopy} className="text-[hsl(var(--wb-text))]">
           Copy
           <ContextMenuShortcut>⌘C</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyColumnName} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyColumnName} className="text-[hsl(var(--wb-text))]">
           Copy Column Name
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsTSV} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsTSV} className="text-[hsl(var(--wb-text))]">
           Copy as TSV for Excel
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsJSON} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsJSON} className="text-[hsl(var(--wb-text))]">
           Copy as JSON
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsMarkdown} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsMarkdown} className="text-[hsl(var(--wb-text))]">
           Copy as Markdown
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyAsSQL} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyAsSQL} className="text-[hsl(var(--wb-text))]">
           Copy as SQL
         </ContextMenuItem>
-        <ContextMenuItem onClick={onCopyForIN} className="text-gray-300">
+        <ContextMenuItem onClick={onCopyForIN} className="text-[hsl(var(--wb-text))]">
           Copy for IN statement
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onSortAsc} className="text-gray-300">
+        <ContextMenuItem onClick={onSortAsc} className="text-[hsl(var(--wb-text))]">
           Sort ascending
         </ContextMenuItem>
-        <ContextMenuItem onClick={onSortDesc} className="text-gray-300">
+        <ContextMenuItem onClick={onSortDesc} className="text-[hsl(var(--wb-text))]">
           Sort descending
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
         <ContextMenuSub>
-          <ContextMenuSubTrigger className="text-gray-300">
+          <ContextMenuSubTrigger className="text-[hsl(var(--wb-text))]">
             Resize columns
           </ContextMenuSubTrigger>
-          <ContextMenuSubContent className="bg-[#1a1a1a] border-[#333]">
+          <ContextMenuSubContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
             <ContextMenuItem
               onClick={onResizeToMatch}
-              className="text-gray-300"
+              className="text-[hsl(var(--wb-text))]"
             >
               Resize all columns to match
             </ContextMenuItem>
-            <ContextMenuItem onClick={onResizeToFit} className="text-gray-300">
+            <ContextMenuItem onClick={onResizeToFit} className="text-[hsl(var(--wb-text))]">
               Resize all columns to fit content
             </ContextMenuItem>
             <ContextMenuItem
               onClick={onResizeToFixed}
-              className="text-gray-300"
+              className="text-[hsl(var(--wb-text))]"
             >
               Resize all columns to fixed width
             </ContextMenuItem>
           </ContextMenuSubContent>
         </ContextMenuSub>
 
-        <ContextMenuItem onClick={onHideColumn} className="text-gray-300">
+        <ContextMenuItem onClick={onHideColumn} className="text-[hsl(var(--wb-text))]">
           Hide question
         </ContextMenuItem>
-        <ContextMenuItem onClick={onResetLayout} className="text-gray-300">
+        <ContextMenuItem onClick={onResetLayout} className="text-[hsl(var(--wb-text))]">
           Reset layout
         </ContextMenuItem>
 
-        <ContextMenuSeparator className="bg-[#333]" />
+        <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
 
-        <ContextMenuItem onClick={onOpenFilter} className="text-gray-300">
+        <ContextMenuItem onClick={onOpenFilter} className="text-[hsl(var(--wb-text))]">
           Open Column Filter
         </ContextMenuItem>
       </ContextMenuContent>
