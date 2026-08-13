@@ -83,6 +83,7 @@ vi.mock("@/services/tauri/ai.service", async (importOriginal) => {
 import {
   AssistantSidebar,
   assistantConversationId,
+  assistantConversationContentVersion,
   assistantToolManifestForProfile,
   cliSetupForProviderIdentity,
 } from "@/components/workspace/AssistantSidebar";
@@ -205,6 +206,33 @@ describe("AssistantSidebar Agent Host path", () => {
       message: "Checking",
       refreshing: true,
     });
+  });
+
+  it("keeps streaming content versions constant-time around the hot turn", () => {
+    const turns = Array.from({ length: 80 }, (_, index) => ({
+      id: `turn-${index}`,
+      updatedAt: index,
+      status: "completed" as const,
+      process: [],
+      draft: "",
+      final: { content: `answer ${index}`, attachments: [], createdAt: index },
+    })) as any[];
+    const active = {
+      ...turns[12],
+      status: "running" as const,
+      draft: "streaming",
+      updatedAt: 100,
+      final: null,
+    };
+    const before = assistantConversationContentVersion(turns, active);
+    const after = assistantConversationContentVersion(
+      turns,
+      { ...active, draft: "streaming more", updatedAt: 101 },
+    );
+
+    expect(before).not.toBe(after);
+    expect(after).toContain("turn-12:101:running:0:14:0");
+    expect(after).toContain("turn-79:79:completed:0:0:9");
   });
 
   it("filters tools by Chat, Plan, and Agent authority", () => {

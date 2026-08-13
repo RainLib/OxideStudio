@@ -45,7 +45,10 @@ import {
   useAiCliCatalog,
   useCliEnvironmentRevision,
 } from "@/hooks/useAiCliCatalog";
-import { assistantConversationHistoryFromTurns } from "@/ai/assistant/turns";
+import {
+  assistantConversationHistoryFromTurns,
+  type AssistantTurn,
+} from "@/ai/assistant/turns";
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import { createAssistantSqlPatchPreview } from "@/lib/assistantSqlPatch";
 import {
@@ -408,12 +411,10 @@ function AgentHostAssistantSidebar() {
     ],
   );
   const contextFingerprint = previewContext.workspaceContext?.fingerprint || "";
-  const turnsContentVersion = session.turns
-    .map(
-      (turn) =>
-        `${turn.id}:${turn.updatedAt}:${turn.status}:${turn.process.length}:${turn.final?.content.length || 0}`,
-    )
-    .join("|");
+  const turnsContentVersion = assistantConversationContentVersion(
+    session.turns,
+    session.activeTurn,
+  );
   // Provider health follows the newest turn only. Reusing an older failed turn
   // after a later successful request would incorrectly send a ready CLI back to
   // its authentication screen whenever the Assistant panel remounts.
@@ -1883,6 +1884,22 @@ export function cliSetupForProviderIdentity(
     message: checkingMessage,
     refreshing: true,
   };
+}
+
+export function assistantConversationContentVersion(
+  turns: readonly AssistantTurn[],
+  activeTurn: AssistantTurn | null,
+) {
+  // Deltas update a single active turn many times per second. The scroll and
+  // minimap consumers only need to know whether the hot turn or conversation
+  // tail changed; their DOM observers still catch any non-tail structural
+  // update. Avoid mapping the full persisted conversation for each token.
+  const tail = turns[turns.length - 1];
+  const versionFor = (turn: AssistantTurn | null | undefined) =>
+    turn
+      ? `${turn.id}:${turn.updatedAt}:${turn.status}:${turn.process.length}:${turn.draft.length}:${turn.final?.content.length || 0}`
+      : "none";
+  return `${turns.length}|${versionFor(activeTurn)}|${versionFor(tail)}`;
 }
 
 export function assistantConversationId(provider: AiProviderConfig | null) {
