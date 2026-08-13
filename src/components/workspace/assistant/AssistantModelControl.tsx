@@ -249,6 +249,16 @@ function AssistantModelPanel({
     Boolean(catalogWarning);
   const canReset =
     normalizedModel !== "default" || normalizedEffort !== "default";
+  const catalogPrimaryMessage =
+    catalogStatus === "loading"
+      ? t("assistant.model.catalogLoading")
+      : catalogStatus === "empty"
+        ? t("assistant.model.catalogEmpty")
+        : catalogStatus === "error"
+          ? t("assistant.model.catalogUnavailable")
+          : catalogWarning
+            ? t("assistant.model.catalogRefreshWarning")
+            : null;
 
   useEffect(() => setCustomModel(model), [model]);
   useEffect(() => {
@@ -314,17 +324,19 @@ function AssistantModelPanel({
             ) : (
               <AlertTriangle size={11} className="shrink-0 text-amber-400" />
             )}
-            <span
-              className="min-w-0 flex-1 truncate text-[9px] text-[hsl(var(--wb-text-muted))]"
-              title={catalogWarning}
-            >
-              {catalogStatus === "loading"
-                ? t("assistant.model.catalogLoading")
-                : catalogWarning ||
-                  (catalogStatus === "empty"
-                    ? t("assistant.model.catalogEmpty")
-                    : t("assistant.model.catalogUnavailable"))}
-            </span>
+            <div className="min-w-0 flex-1 text-[9px] text-[hsl(var(--wb-text-muted))]">
+              <p className="truncate">{catalogPrimaryMessage}</p>
+              {catalogWarning && catalogStatus !== "loading" && (
+                <details className="mt-0.5 text-current/80">
+                  <summary className="cursor-pointer select-none">
+                    {t("assistant.error.technicalDetails")}
+                  </summary>
+                  <p className="mt-1 break-words font-mono leading-4">
+                    {catalogWarning}
+                  </p>
+                </details>
+              )}
+            </div>
             {catalogStatus !== "loading" && (
               <button
                 type="button"

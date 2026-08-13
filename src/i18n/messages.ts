@@ -105,6 +105,8 @@ export const enUS = {
   "assistant.model.modelsLoading": "Loading models from the provider…",
   "assistant.model.catalogEmpty": "The provider returned no models.",
   "assistant.model.catalogUnavailable": "Provider capabilities are unavailable.",
+  "assistant.model.catalogRefreshWarning":
+    "Some provider capabilities could not refresh. Retry to check again.",
   "assistant.model.label": "Model",
   "assistant.model.advanced": "Advanced",
   "assistant.model.reset": "Reset",
@@ -280,6 +282,8 @@ export const zhCN: Record<MessageKey, string> = {
   "assistant.model.modelsLoading": "正在从提供方加载模型…",
   "assistant.model.catalogEmpty": "提供方未返回可用模型。",
   "assistant.model.catalogUnavailable": "提供方能力暂不可用。",
+  "assistant.model.catalogRefreshWarning":
+    "部分提供方能力未能刷新，请重试后再检查。",
   "assistant.model.label": "模型",
   "assistant.model.advanced": "高级",
   "assistant.model.reset": "重置",

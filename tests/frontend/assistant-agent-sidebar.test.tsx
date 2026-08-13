@@ -2044,7 +2044,13 @@ describe("AssistantSidebar Agent Host path", () => {
     );
     expect(catalogError).not.toBeNull();
     expect(catalogError?.getAttribute("role")).toBe("alert");
-    expect(catalogError?.textContent).toContain("catalog offline");
+    expect(catalogError?.textContent).toContain(
+      "Provider capabilities are unavailable.",
+    );
+    expect(catalogError?.querySelector("summary")?.textContent).toContain(
+      "Technical details",
+    );
+    expect(catalogError?.querySelector("details")?.open).toBe(false);
     expect(catalogError?.textContent).toContain("Retry");
     expect(
       modelPopover!.querySelector('input[placeholder="Model identifier"]'),
@@ -2083,7 +2089,7 @@ describe("AssistantSidebar Agent Host path", () => {
       modelPopover.querySelector(
         '[data-assistant-model-catalog-status="ready"]',
       )?.textContent,
-    ).toContain("command catalog failed");
+    ).toContain("Some provider capabilities could not refresh");
     await clickButton(modelPopover, "Advanced");
     await clickButtonByAria(modelPopover, "Toggle model list");
     expect(
