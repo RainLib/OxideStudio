@@ -29,6 +29,31 @@ test("reuses only an OxideStudio Vite server", async () => {
   ]);
 });
 
+test("reuses an OxideStudio Vite server bound only on IPv6 loopback", async () => {
+  const requests = [];
+  const refused = new TypeError("fetch failed");
+  Object.defineProperty(refused, "cause", {
+    value: { code: "ECONNREFUSED" },
+  });
+  const result = await probeExistingOxideVite({
+    port: 1420,
+    fetchImpl: async (url) => {
+      requests.push(url);
+      if (url.startsWith("http://127.0.0.1")) throw refused;
+      return url.endsWith("/@vite/client")
+        ? response("import '/@vite/env'")
+        : response("<title>OxideStudio</title>");
+    },
+  });
+
+  assert.deepEqual(result, { kind: "oxide-vite" });
+  assert.deepEqual(requests, [
+    "http://127.0.0.1:1420/",
+    "http://[::1]:1420/",
+    "http://[::1]:1420/@vite/client",
+  ]);
+});
+
 test("does not reuse a different page that happens to own the dev port", async () => {
   const result = await probeExistingOxideVite({
     port: 1420,

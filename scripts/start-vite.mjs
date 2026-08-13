@@ -26,8 +26,28 @@ export async function probeExistingOxideVite({
   fetchImpl = fetch,
   timeoutMs = 750,
 }) {
+  const loopbackOrigins = [
+    `http://127.0.0.1:${port}`,
+    `http://[::1]:${port}`,
+  ];
+  let lastFailure;
+  for (const origin of loopbackOrigins) {
+    const result = await probeOxideViteOrigin({
+      origin,
+      fetchImpl,
+      timeoutMs,
+    });
+    if (result.kind === "oxide-vite" || result.kind === "occupied") {
+      return result;
+    }
+    lastFailure = result;
+  }
+  return lastFailure ?? { kind: "available" };
+}
+
+async function probeOxideViteOrigin({ origin, fetchImpl, timeoutMs }) {
   try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/`, {
+    const response = await fetchImpl(`${origin}/`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
@@ -37,7 +57,7 @@ export async function probeExistingOxideVite({
     if (!html.includes(OXIDE_VITE_TITLE)) {
       return { kind: "occupied", detail: "its page is not OxideStudio" };
     }
-    const viteClient = await fetchImpl(`http://127.0.0.1:${port}/@vite/client`, {
+    const viteClient = await fetchImpl(`${origin}/@vite/client`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!viteClient.ok) {
