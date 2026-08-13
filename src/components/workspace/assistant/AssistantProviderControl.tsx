@@ -4,6 +4,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 import type { AiProviderKind } from "@/services/tauri/ai.service";
 import {
   ASSISTANT_PROVIDER_DEFINITIONS,
@@ -54,9 +55,10 @@ export function AssistantProviderControl({
   onRetry,
   onOpenSettings,
 }: AssistantProviderControlProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const option = providerOption(provider);
-  const status = providerStatus(enabled, modelStatus, cliSetup);
+  const status = providerStatus(enabled, modelStatus, cliSetup, t);
   const visibleDestination =
     cliSetup && cliSetup.phase !== "ready"
       ? status.label
@@ -70,7 +72,7 @@ export function AssistantProviderControl({
           className="group flex h-8 w-full shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-left transition-colors hover:bg-[hsl(var(--wb-hover)/0.58)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))] motion-reduce:transition-none"
           data-assistant-provider
           title={`${status.label}. ${status.detail}`}
-          aria-label={`Assistant provider: ${enabled ? option.label : "Choose provider"}`}
+          aria-label={`Assistant provider: ${enabled ? option.label : t("assistant.provider.chooseStatus")}`}
         >
           <span
             className={cn("h-1.5 w-1.5 shrink-0 rounded-full", status.dotClass)}
@@ -78,14 +80,14 @@ export function AssistantProviderControl({
           />
           <span className="min-w-0 flex-1 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
             <span className="font-medium text-[hsl(var(--wb-text))]">
-              {enabled ? option.label : "Choose assistant provider"}
+              {enabled ? option.label : t("assistant.provider.choose")}
             </span>
             <span aria-hidden="true"> · </span>
-            <span>{enabled ? visibleDestination : "Not connected"}</span>
+            <span>{enabled ? visibleDestination : t("assistant.provider.notConnected")}</span>
           </span>
           {isBusy && (
             <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
-              Active
+              {t("assistant.provider.active")}
             </span>
           )}
           <ChevronDown
@@ -103,10 +105,11 @@ export function AssistantProviderControl({
         className="w-[328px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.34)]"
       >
         <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2.5">
-          <div className="text-[11px] font-semibold">Run Assistant with</div>
+          <div className="text-[11px] font-semibold">
+            {t("assistant.provider.runWith")}
+          </div>
           <p className="mt-0.5 max-w-[42ch] leading-4 text-[hsl(var(--wb-text-muted))]">
-            Each provider restores its own conversation and native capabilities.
-            SQL inline completion keeps its separate HTTP provider.
+            {t("assistant.provider.switchDescription")}
           </p>
         </div>
 
@@ -149,7 +152,7 @@ export function AssistantProviderControl({
                 }}
               >
                 <RefreshCw size={11} aria-hidden="true" />
-                Retry
+                {t("assistant.provider.retry")}
               </button>
             )}
             <button
@@ -161,7 +164,7 @@ export function AssistantProviderControl({
               }}
             >
               <Settings2 size={11} aria-hidden="true" />
-              Provider settings
+                {t("assistant.provider.settings")}
             </button>
           </div>
         </div>
@@ -179,6 +182,7 @@ export function AssistantProviderWelcome({
   onSelect: (provider: AiProviderKind) => void;
   onOpenSettings: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div
       className="flex min-h-full items-center justify-center px-4 py-6"
@@ -187,11 +191,10 @@ export function AssistantProviderWelcome({
       <div className="w-full max-w-[340px]">
         <Bot size={20} className="mb-3 text-[hsl(var(--wb-accent))]" />
         <h2 className="text-[13px] font-semibold text-[hsl(var(--wb-text))]">
-          Choose how Assistant runs
+          {t("assistant.provider.welcomeTitle")}
         </h2>
         <p className="mt-1 max-w-[44ch] text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
-          Connect your own model or use a CLI already signed in on this computer.
-          You can switch providers here at any time.
+          {t("assistant.provider.welcomeDescription")}
         </p>
 
         <div className="mt-4 border-y border-[hsl(var(--wb-border-subtle))]">
@@ -214,8 +217,7 @@ export function AssistantProviderWelcome({
             aria-hidden="true"
           />
           <p>
-            All providers use the same workspace scope and approval gates.
-            Database writes never bypass Oxide review.
+            {t("assistant.provider.safety")}
           </p>
         </div>
 
@@ -225,7 +227,7 @@ export function AssistantProviderWelcome({
           onClick={onOpenSettings}
         >
           <Settings2 size={11} aria-hidden="true" />
-          Advanced provider setup
+          {t("assistant.provider.advancedSetup")}
         </button>
       </div>
     </div>
@@ -245,6 +247,7 @@ function ProviderOptionRow({
   roomy?: boolean;
   onSelect: () => void;
 }) {
+  const { t } = useI18n();
   const Icon = PROVIDER_ICONS[option.kind];
   return (
     <button
@@ -255,7 +258,7 @@ function ProviderOptionRow({
         selected && "bg-[hsl(var(--wb-accent)/0.08)]",
       )}
       disabled={disabled}
-      aria-label={`Use ${option.label}`}
+      aria-label={t("assistant.provider.use", { provider: option.label })}
       aria-pressed={selected}
       onClick={onSelect}
     >
@@ -310,11 +313,12 @@ function providerStatus(
   enabled: boolean,
   modelStatus: AssistantModelStatus,
   cliSetup: AssistantCliSetupState | null,
+  t: ReturnType<typeof useI18n>["t"],
 ) {
   if (!enabled) {
     return {
-      label: "Choose a provider",
-      detail: "Select Oxide Assistant, Codex CLI, or CodeBuddy CLI to begin.",
+      label: t("assistant.provider.chooseStatus"),
+      detail: t("assistant.provider.chooseDetail"),
       dotClass: "bg-[hsl(var(--wb-text-muted))]",
       canRetry: false,
     };
@@ -327,8 +331,8 @@ function providerStatus(
     return {
       label:
         cliSetup.phase === "installing"
-          ? "Installing CLI"
-          : "Verifying CLI",
+          ? t("assistant.provider.installing")
+          : t("assistant.provider.verifying"),
       detail: cliSetup.message,
       dotClass: "bg-amber-400",
       canRetry: false,
@@ -338,8 +342,8 @@ function providerStatus(
     return {
       label:
         cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
-          ? "Sign-in required"
-          : "CLI setup required",
+          ? t("assistant.provider.signInRequired")
+          : t("assistant.provider.cliSetupRequired"),
       detail: cliSetup.message,
       dotClass:
         cliSetup.phase === "error" ? "bg-red-400" : "bg-amber-400",
@@ -348,7 +352,7 @@ function providerStatus(
   }
   if (modelStatus.kind === "configured") {
     return {
-      label: "Ready",
+      label: t("assistant.provider.ready"),
       detail: cliSetup?.message || modelStatus.detail,
       dotClass: "bg-emerald-400",
       canRetry: false,

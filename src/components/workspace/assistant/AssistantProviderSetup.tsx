@@ -1,4 +1,5 @@
 import { assistantProviderDefinition } from "@/ai/assistant/providerDefinitions";
+import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 import type { AiCliProviderConfig } from "@/services/tauri/ai.service";
 import type {
@@ -38,6 +39,7 @@ export function AssistantProviderSetup({
   onRetry,
   onOpenSettings,
 }: AssistantProviderSetupProps) {
+  const { t } = useI18n();
   const definition = assistantProviderDefinition(provider);
   const installComplete = !["checking", "missing", "installing"].includes(
     state.phase,
@@ -62,7 +64,7 @@ export function AssistantProviderSetup({
           />
           <div className="min-w-0">
             <h2 className="text-[13px] font-semibold text-[hsl(var(--wb-text))]">
-              Set up {definition.label}
+              {t("assistant.setup.title", { provider: definition.label })}
             </h2>
             <p className="mt-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
               {definition.setupDescription}
@@ -73,11 +75,11 @@ export function AssistantProviderSetup({
         <ol className="mt-4 border-y border-[hsl(var(--wb-border-subtle))]">
           <SetupStep
             index={1}
-            label="Install agent"
+            label={t("assistant.setup.installAgent")}
             detail={
               state.executablePath
                 ? compactPath(state.executablePath)
-                : "Stored under OxideStudio application data; no global install required."
+                : t("assistant.setup.installDetail")
             }
             state={
               state.phase === "installing"
@@ -91,8 +93,8 @@ export function AssistantProviderSetup({
           />
           <SetupStep
             index={2}
-            label="Authorize account"
-            detail="OxideStudio opens the provider's secure browser flow and waits for the CLI to confirm the returned account. Credentials are never copied into the app."
+            label={t("assistant.setup.authorize")}
+            detail={t("assistant.setup.authorizeDetail")}
             state={
               state.phase === "authorizing"
                 ? "active"
@@ -105,8 +107,10 @@ export function AssistantProviderSetup({
           />
           <SetupStep
             index={3}
-            label="Start provider session"
-            detail={`Uses ${definition.transport} with an independent conversation and Oxide approval scope.`}
+            label={t("assistant.setup.startSession")}
+            detail={t("assistant.setup.startSessionDetail", {
+              transport: definition.transport,
+            })}
             state={authComplete ? "complete" : "pending"}
           />
         </ol>
@@ -135,7 +139,7 @@ export function AssistantProviderSetup({
               disabled={busy}
             >
               <PackageCheck size={11} aria-hidden="true" />
-              Install for OxideStudio
+              {t("assistant.setup.install")}
             </button>
           )}
           {state.phase === "auth-required" &&
@@ -170,7 +174,9 @@ export function AssistantProviderSetup({
                 ) : (
                   <ExternalLink size={11} aria-hidden="true" />
                 )}
-                {state.authMethodsLoading ? "Loading sign-in options" : "Open sign-in"}
+                {state.authMethodsLoading
+                  ? t("assistant.setup.loadingSignIn")
+                  : t("assistant.setup.openSignIn")}
               </button>
             ))}
           {state.phase === "authorizing" && (
@@ -180,7 +186,7 @@ export function AssistantProviderSetup({
               onClick={onCancelAuthentication}
             >
               <Circle size={11} aria-hidden="true" />
-              Cancel sign-in
+              {t("assistant.setup.cancelSignIn")}
             </button>
           )}
           {state.phase === "error" && (
@@ -198,7 +204,7 @@ export function AssistantProviderSetup({
                 )}
                 aria-hidden="true"
               />
-              Check again
+              {t("assistant.setup.checkAgain")}
             </button>
           )}
           <button
@@ -208,15 +214,14 @@ export function AssistantProviderSetup({
             disabled={busy}
           >
             <Settings2 size={11} aria-hidden="true" />
-            Use existing installation
+            {t("assistant.setup.useExisting")}
           </button>
         </div>
 
         <div className="mt-3 flex items-start gap-2 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
           <ShieldCheck size={11} className="mt-0.5 shrink-0" aria-hidden="true" />
           <p>
-            Chat and Plan remain read-only. Agent mutations still require the
-            current Oxide approval and are blocked for production or unclassified targets.
+            {t("assistant.setup.safety")}
           </p>
         </div>
       </div>
