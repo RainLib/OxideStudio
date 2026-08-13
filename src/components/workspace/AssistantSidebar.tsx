@@ -520,7 +520,7 @@ function AgentHostAssistantSidebar() {
     if (provider !== "openai-compatible" && !cliSetupByProvider[provider]) {
       updateCliSetup(provider, {
         phase: "checking",
-        message: "Verifying installation and account sign-in…",
+        message: t("assistant.setup.verifying"),
       });
     }
     updateAiSettings({
@@ -536,12 +536,12 @@ function AgentHostAssistantSidebar() {
         current && current.phase !== "ready" && current.phase !== "checking"
           ? {
               ...current,
-              message: "Checking installation and account sign-in again…",
+              message: t("assistant.setup.verifyingAgain"),
               refreshing: true,
             }
           : {
               phase: "checking",
-              message: "Checking installation and account sign-in again…",
+              message: t("assistant.setup.verifyingAgain"),
             },
       );
       requestCliDetection(aiProvider);
@@ -575,7 +575,7 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(provider, (current) => ({
         ...current,
         phase: "authorizing",
-        message: "Starting the provider's secure browser sign-in…",
+        message: t("assistant.setup.startingSignIn"),
         authenticationMethodId: methodId,
       }));
       const result = await aiService.beginCliAuthentication(
@@ -608,8 +608,7 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(modelConfig.kind, (current) => ({
         ...current,
         phase: "auth-required",
-        message:
-          "Sign-in was cancelled. Choose an account method to try again.",
+        message: t("assistant.setup.signInCancelled"),
       }));
       return;
     }
@@ -644,8 +643,7 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(provider, (current) => ({
         ...current,
         phase: "error",
-        message:
-          "The CLI installation session was interrupted. Start the installation again.",
+        message: t("assistant.setup.installInterrupted"),
       }));
       return;
     }
@@ -666,7 +664,7 @@ function AgentHostAssistantSidebar() {
             updateCliSetup(provider, (current) => ({
               ...current,
               phase: "checking",
-              message: "Installation complete. Verifying account sign-in...",
+              message: t("assistant.setup.installComplete"),
               executablePath,
               installationSessionId: undefined,
               refreshing: true,
@@ -700,7 +698,7 @@ function AgentHostAssistantSidebar() {
             message:
               error instanceof Error
                 ? error.message
-                : "Unable to resume the CLI installation status.",
+                : t("assistant.setup.resumeInstallFailed"),
             installationSessionId: undefined,
           }));
         });
@@ -715,6 +713,7 @@ function AgentHostAssistantSidebar() {
     cliSetup?.installationSessionId,
     cliSetup?.phase,
     requestCliDetection,
+    t,
     updateAiSettings,
     updateCliSetup,
   ]);
@@ -741,12 +740,12 @@ function AgentHostAssistantSidebar() {
       current && current.phase !== "ready" && current.phase !== "checking"
         ? {
             ...current,
-            message: "Verifying installation and account sign-in…",
+            message: t("assistant.setup.verifying"),
             refreshing: true,
           }
         : {
             phase: "checking",
-            message: "Verifying installation and account sign-in…",
+            message: t("assistant.setup.verifying"),
           },
     );
     void aiService
@@ -769,7 +768,7 @@ function AgentHostAssistantSidebar() {
         }
         updateCliSetup(provider, (current) => ({
           phase: current?.phase === "installing" ? "installing" : "checking",
-          message: "CLI detected. Verifying account sign-in and capabilities…",
+          message: t("assistant.setup.cliDetected"),
           executablePath: result.executablePath,
           version: result.version,
         }));
@@ -826,6 +825,7 @@ function AgentHostAssistantSidebar() {
     cliProbeIdentity?.verifiedAt,
     cliProviderFingerprint,
     completeCliProbe,
+    t,
     updateAiSettings,
     updateCliSetup,
   ]);
@@ -844,7 +844,7 @@ function AgentHostAssistantSidebar() {
     updateCliSetup(provider, (current) => ({
       ...current,
       phase: "auth-required",
-      message: current?.message ?? "Choose a secure browser sign-in method.",
+      message: current?.message ?? t("assistant.setup.chooseSignIn"),
       authMethodsLoading: true,
     }));
     void aiService
@@ -854,7 +854,7 @@ function AgentHostAssistantSidebar() {
           ...current,
           phase: "auth-required",
           message:
-            current?.message ?? "Choose a secure browser sign-in method.",
+            current?.message ?? t("assistant.setup.chooseSignIn"),
           authenticationMethods: methods,
           authMethodsLoading: false,
         }));
@@ -867,7 +867,7 @@ function AgentHostAssistantSidebar() {
           authMethodsLoading: false,
         }));
       });
-  }, [cliProviderFingerprint, cliSetup?.phase, updateCliSetup]);
+  }, [cliProviderFingerprint, cliSetup?.phase, t, updateCliSetup]);
 
   useEffect(() => {
     if (
@@ -885,8 +885,7 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(provider, (current) => ({
         ...current,
         phase: "auth-required",
-        message:
-          "The sign-in session was interrupted. Choose a sign-in method to restart it.",
+        message: t("assistant.setup.signInInterrupted"),
       }));
       return;
     }
@@ -907,7 +906,7 @@ function AgentHostAssistantSidebar() {
                 phase: cliSetupPhaseForFailure(error),
                 message:
                   cliSetupPhaseForFailure(error) === "auth-required"
-                    ? "Sign-in completed, but the CLI still needs account access. Choose a sign-in method to try again."
+                    ? t("assistant.setup.signInVerificationFailed")
                     : error instanceof Error
                       ? error.message
                       : String(error),
@@ -969,6 +968,7 @@ function AgentHostAssistantSidebar() {
     cliSetup?.phase,
     cliProviderFingerprint,
     session.refreshStatus,
+    t,
     updateAiSettings,
     updateCliSetup,
   ]);

@@ -133,7 +133,7 @@ flowchart TD
 | P2-1 | Slash 需要支持光标中间、多行内容和 IME | Oxide `AssistantPromptBox.tsx` 的 `slashCommandTokenAtCaret`；DBX caret-aware 参考 `AiAssistant.vue:1526-1617` | **本轮完成**：按 `selectionStart` 解析光标前 token，只替换命中 range；composition 期间关闭建议，提交后再计算 |
 | P2-2 | Codex 式面板功能已落地，但使用 Radix portal popover；真实桌面上可能出现窄 panel 碰撞、焦点返回或“浮窗感” | `AssistantModelControl.tsx:86-162`；测试 `assistant-agent-sidebar.test.tsx:1124-1297` | **本轮完成，验证待做**：先真实 Tauri 截图/键盘验证；若仍显浮离，再把 content 改为 composer 内 anchored layer，不复制 DBX 的嵌套 popover |
 | P2-3 | HTTP conversation key 需要低碰撞且不得错误合并大小写敏感路径 | `AssistantSidebar.tsx` 的 `assistantConversationId`、`canonicalHttpDestination` 与 `nonSecretDestinationDigest` | **本轮完成**。改为固定长度 128-bit avalanche identity digest；URL host 由 URL 标准化，路径保留大小写，并清除 URL userinfo/hash；API key 与 model 不进入 identity |
-| P2-4 | provider 原始错误与少量 setup 文案仍可能为英文，不能直接作为中文主交互文案 | `AssistantSidebar.tsx:1524-1699`；`src-tauri/src/commands/ai.rs`；`AssistantPromptBox.tsx:733-748`；语言包 `src/i18n/messages.ts` | **部分完成**：模型、推理、目录状态、重试、搜索、运行时/授权/模式阻断状态和无障碍标签已迁入 i18n；CLI 的未安装、需授权、超时和协议失败现以稳定 code 回传，授权路由不再依赖英文正则。下一步仅保留原始 provider 文本为可展开 detail |
+| P2-4 | provider 原始错误与 setup 过程文案不能直接作为中文主交互文案 | `AssistantSidebar.tsx`、`src-tauri/src/commands/ai.rs`、`AssistantPromptBox.tsx`、语言包 `src/i18n/messages.ts` | **本轮完成稳定 UI 文案迁移**：模型、推理、目录状态、重试、搜索、运行时/授权/模式阻断，以及 Provider 欢迎页、安装、重试、浏览器授权、安装/授权会话中断等状态均经 i18n 输出；CLI 的未安装、需授权、超时和协议失败以稳定 code 路由，授权不依赖英文正则。原始 provider diagnostic 保留为技术详情，后续需在真实桌面验证其脱敏与展开行为。 |
 | P2-5 | Assistant 关键 owner 文件偏大，增加状态耦合与回归面 | `AssistantSidebar.tsx` 1,621 行；`AssistantPromptBox.tsx` 963 行；`AssistantModelControl.tsx` 776 行；`useAssistantAgentSession.ts` 2,204 行 | 按 provider-setup state machine、composer overlays、turn event controller、snapshot writer 拆 owner；不是为了文件行数本身，而是为了独立生命周期测试 |
 | P2-6 | 真实可访问性/动效尚无桌面证据 | model Escape/focus `AssistantModelControl.tsx:130-146`；slash focus `AssistantPromptBox.tsx:753-787` | 用键盘-only、200% zoom、reduced motion、中文 IME、窄 280 px panel 验证；保留现有 focus-return 和 motion-reduce |
 
@@ -237,7 +237,7 @@ flowchart TD
 - [x] Slash 支持 caret-aware range replacement 与中文 IME。
 - [ ] 真实 Tauri 验证 model/slash 面板在 280 px、200% zoom、reduced motion 下的几何和焦点。
 - [ ] 为 50/100 turns 与 100/500 models 建 DOM/React profiler 基线，再决定窗口化阈值。
-- [ ] Provider/setup/error 文案完成 i18n，原始错误放可展开 detail。
+- [x] Provider/setup 的稳定状态文案完成 i18n；原始 provider diagnostic 继续只作技术详情。
 - [ ] 将 provider setup、event controller、snapshot writer 从大 owner 中分离并建立独立测试。
 
 ## 11. 本轮验证与延后项

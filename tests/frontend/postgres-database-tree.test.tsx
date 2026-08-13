@@ -258,6 +258,64 @@ describe("PostgresDatabaseTree", () => {
     expect(renderDatabaseChildren).toHaveBeenCalledWith("analytics");
   });
 
+  it("routes a database-scoped context action with the exact selected catalog", async () => {
+    const onTransferDatabase = vi.fn();
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <PostgresDatabaseTree
+          databases={["analytics", "app"]}
+          currentDatabase="app"
+          status="success"
+          schemaCount="1"
+          connectionColor="#5b8dd6"
+          renderDatabaseContextMenu={(database, isCurrent) => (
+            <button
+              type="button"
+              role="menuitem"
+              data-transfer-database={database}
+              onClick={() => onTransferDatabase(database, isCurrent)}
+            >
+              Transfer Database Data...
+            </button>
+          )}
+        >
+          <div>public</div>
+        </PostgresDatabaseTree>,
+      );
+    });
+
+    const analytics = container.querySelector<HTMLButtonElement>(
+      '[data-postgres-database="analytics"] > [data-radix-popper-content-wrapper] button',
+    ) ?? container.querySelector<HTMLButtonElement>(
+      '[data-postgres-database="analytics"] button',
+    );
+    await act(async () => {
+      analytics?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          button: 2,
+          clientX: 20,
+          clientY: 20,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const transferItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>("[role='menuitem']"),
+    ).find((item) => item.textContent?.includes("Transfer Database Data"));
+    expect(transferItem).toBeDefined();
+
+    await act(async () => {
+      transferItem?.click();
+    });
+
+    expect(onTransferDatabase).toHaveBeenCalledOnce();
+    expect(onTransferDatabase).toHaveBeenCalledWith("analytics", false);
+  });
+
   it("coalesces repeated expands while a database load is in flight", async () => {
     let resolveLoad: (() => void) | undefined;
     const onLoadDatabase = vi.fn(

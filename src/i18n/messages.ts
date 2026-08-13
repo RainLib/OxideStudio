@@ -159,6 +159,22 @@ export const enUS = {
   "assistant.setup.useExisting": "Use existing installation",
   "assistant.setup.safety":
     "Chat and Plan remain read-only. Agent mutations still require the current Oxide approval and are blocked for production or unclassified targets.",
+  "assistant.setup.verifying": "Verifying installation and account sign-in…",
+  "assistant.setup.verifyingAgain": "Checking installation and account sign-in again…",
+  "assistant.setup.startingSignIn": "Starting the provider's secure browser sign-in…",
+  "assistant.setup.signInCancelled":
+    "Sign-in was cancelled. Choose an account method to try again.",
+  "assistant.setup.installInterrupted":
+    "The CLI installation session was interrupted. Start the installation again.",
+  "assistant.setup.installComplete": "Installation complete. Verifying account sign-in...",
+  "assistant.setup.resumeInstallFailed": "Unable to resume the CLI installation status.",
+  "assistant.setup.cliDetected":
+    "CLI detected. Verifying account sign-in and capabilities…",
+  "assistant.setup.chooseSignIn": "Choose a secure browser sign-in method.",
+  "assistant.setup.signInInterrupted":
+    "The sign-in session was interrupted. Choose a sign-in method to restart it.",
+  "assistant.setup.signInVerificationFailed":
+    "Sign-in completed, but the CLI still needs account access. Choose a sign-in method to try again.",
   "assistant.status.configureProvider": "Configure an AI provider and enable it before sending a request.",
   "assistant.status.configureEndpoint": "Add an OpenAI-compatible endpoint before sending a request.",
   "assistant.status.chooseModel": "Choose a model identifier before sending a request.",
@@ -298,6 +314,18 @@ export const zhCN: Record<MessageKey, string> = {
   "assistant.setup.useExisting": "使用已有安装",
   "assistant.setup.safety":
     "聊天和计划模式保持只读。代理写入仍需当前 Oxide 审批，且对生产或未分类目标一律禁止。",
+  "assistant.setup.verifying": "正在验证安装和账号登录…",
+  "assistant.setup.verifyingAgain": "正在重新检查安装和账号登录…",
+  "assistant.setup.startingSignIn": "正在启动提供方的安全浏览器登录…",
+  "assistant.setup.signInCancelled": "登录已取消。请选择账号方式后重试。",
+  "assistant.setup.installInterrupted": "CLI 安装会话已中断。请重新开始安装。",
+  "assistant.setup.installComplete": "安装完成。正在验证账号登录…",
+  "assistant.setup.resumeInstallFailed": "无法恢复 CLI 安装状态。",
+  "assistant.setup.cliDetected": "已检测到 CLI。正在验证账号登录和能力…",
+  "assistant.setup.chooseSignIn": "请选择安全浏览器登录方式。",
+  "assistant.setup.signInInterrupted": "登录会话已中断。请选择登录方式后重新开始。",
+  "assistant.setup.signInVerificationFailed":
+    "登录已完成，但 CLI 仍无法访问账号。请选择登录方式后重试。",
   "assistant.status.configureProvider": "请先配置并启用 AI 提供方，再发送请求。",
   "assistant.status.configureEndpoint": "请先添加 OpenAI 兼容端点，再发送请求。",
   "assistant.status.chooseModel": "请先选择模型标识，再发送请求。",
