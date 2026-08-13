@@ -2143,7 +2143,7 @@ describe("AssistantSidebar Agent Host path", () => {
     ).toBeNull();
   });
 
-  it("retains a usable partial catalog with a warning and clears stale models after a failed refresh", async () => {
+  it("retains the last-known-good catalog when a refresh fails", async () => {
     useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
     mocks.listCliModels
       .mockResolvedValueOnce([
@@ -2197,11 +2197,18 @@ describe("AssistantSidebar Agent Host path", () => {
     const refreshError = modelPopover.querySelector<HTMLElement>(
       '[data-assistant-model-catalog-status="error"]',
     );
-    expect(refreshError?.textContent).toContain("model refresh failed");
-    expect(refreshError?.textContent).toContain("Retry");
+    expect(refreshError).toBeNull();
+    const staleCatalog = modelPopover.querySelector<HTMLElement>(
+      '[data-assistant-model-catalog-status="ready"]',
+    );
+    expect(staleCatalog?.textContent).toContain(
+      "Some provider capabilities could not refresh",
+    );
+    expect(staleCatalog?.textContent).toContain("model refresh failed");
+    expect(staleCatalog?.textContent).toContain("Retry");
     expect(
       modelPopover.querySelector('input[aria-label="Codex Sol"]'),
-    ).toBeNull();
+    ).not.toBeNull();
     expect(
       modelPopover.querySelector('input[placeholder="Model identifier"]'),
     ).toBeNull();

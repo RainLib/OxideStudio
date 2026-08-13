@@ -24,6 +24,8 @@ export interface AiCliCatalogSnapshot {
   commands: AiCliCommandInfo[];
   warning?: string;
   loadedAt?: number;
+  /** Last known provider capabilities remain selectable while a refresh fails. */
+  stale?: boolean;
 }
 
 export interface AiCliCatalogController extends AiCliCatalogSnapshot {
@@ -74,9 +76,13 @@ function catalogSignature(config: AiCliProviderConfig) {
   });
 }
 
-function isFresh(catalog: { loadedAt?: number } | undefined) {
+function isFresh(
+  catalog: { loadedAt?: number; stale?: boolean } | undefined,
+) {
   return Boolean(
-    catalog?.loadedAt && Date.now() - catalog.loadedAt < CATALOG_TTL_MS,
+    catalog?.loadedAt &&
+      !catalog.stale &&
+      Date.now() - catalog.loadedAt < CATALOG_TTL_MS,
   );
 }
 
@@ -119,9 +125,7 @@ async function loadCatalog(
       const models =
         modelResult.status === "fulfilled"
           ? uniqueBy(modelResult.value, (model) => model.id.trim())
-          : force
-            ? []
-            : previousModels;
+          : previousModels;
       const commands =
         commandResult.status === "fulfilled"
           ? uniqueBy(commandResult.value, (command) => command.name.trim())
@@ -139,6 +143,7 @@ async function loadCatalog(
 
       const modelsUnavailable =
         modelResult.status === "rejected" && models.length === 0;
+      const stale = modelResult.status === "rejected" || commandResult.status === "rejected";
       const next: CachedCatalog = {
         signature,
         status: modelsUnavailable
@@ -149,7 +154,11 @@ async function loadCatalog(
         models,
         commands,
         warning: warnings.length ? warnings.join(" ") : undefined,
-        loadedAt: Date.now(),
+        // A failed probe must not turn a last-known-good catalog into a fresh
+        // result. It remains usable but is retried on the next mount or when
+        // the user chooses Retry.
+        loadedAt: stale ? cached?.loadedAt : Date.now(),
+        stale,
       };
       catalogCache.set(signature, next);
       return next;
