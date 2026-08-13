@@ -145,6 +145,47 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(first).toMatch(/^provider:http:[0-9a-f]{32}$/u);
   });
 
+  it("isolates CLI conversation history by non-secret provider profile", () => {
+    const primary = assistantConversationId({
+      kind: "codex-cli",
+      profileId: "codex-cli:primary",
+      executablePath: "C:/tools/codex.cmd",
+      model: "gpt-5.6-sol",
+    });
+    const sameProfileDifferentModel = assistantConversationId({
+      kind: "codex-cli",
+      profileId: "codex-cli:primary",
+      executablePath: "C:/tools/codex.cmd",
+      model: "gpt-5.6-terra",
+    });
+    const anotherProfile = assistantConversationId({
+      kind: "codex-cli",
+      profileId: "codex-cli:work",
+      executablePath: "C:/tools/codex.cmd",
+      model: "gpt-5.6-sol",
+    });
+    const anotherExecutable = assistantConversationId({
+      kind: "codex-cli",
+      profileId: "codex-cli:primary",
+      executablePath: "D:/portable/codex.cmd",
+      model: "gpt-5.6-sol",
+    });
+    const anotherProvider = assistantConversationId({
+      kind: "codebuddy-cli",
+      profileId: "codex-cli:primary",
+      executablePath: "C:/tools/codex.cmd",
+      model: "default",
+    });
+
+    expect(sameProfileDifferentModel).toBe(primary);
+    expect(anotherProfile).not.toBe(primary);
+    expect(anotherExecutable).not.toBe(primary);
+    expect(anotherProvider).not.toBe(primary);
+    expect(primary).toMatch(/^provider:cli:[0-9a-f]{32}$/u);
+    expect(primary).not.toContain("primary");
+    expect(primary).not.toContain("C:/tools");
+  });
+
   it("filters tools by Chat, Plan, and Agent authority", () => {
     const tools = [
       {
@@ -1454,7 +1495,7 @@ describe("AssistantSidebar Agent Host path", () => {
     ).not.toBeNull();
     expect(mocks.loadConversationSnapshot).toHaveBeenCalledWith(
       "project-1",
-      "provider:codex-cli",
+      expect.stringMatching(/^provider:cli:[0-9a-f]{32}$/u),
     );
   });
 

@@ -1861,7 +1861,18 @@ function selectedCliReasoningEffort(
 export function assistantConversationId(provider: AiProviderConfig | null) {
   if (!provider) return undefined;
   if (provider.kind !== "openai-compatible") {
-    return `provider:${provider.kind}`;
+    // A CLI provider can have more than one signed-in profile on the same
+    // machine. Keeping a conversation keyed only by its kind would send prior
+    // workspace context to whichever identity happens to be selected next.
+    // These fields are configuration identifiers, never environment values or
+    // credentials, and are reduced to a fixed non-secret digest before they
+    // cross into the persisted conversation key.
+    const identity = JSON.stringify({
+      kind: provider.kind,
+      profileId: provider.profileId.trim(),
+      executablePath: provider.executablePath?.trim() || "",
+    });
+    return `provider:cli:${nonSecretDestinationDigest(identity)}`;
   }
   // Keep HTTP conversation history inside one non-secret destination boundary.
   // The API key is intentionally excluded: rotating a credential for the same

@@ -9,10 +9,11 @@ use crate::ai_cli::{
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
+    future::Future,
     hash::{Hash, Hasher},
     process::Stdio,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -34,6 +35,8 @@ struct CachedModels {
 }
 
 static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> = LazyLock::new(|| Mutex::new(None));
+static MODEL_DISCOVERY_LOCKS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn common_commands() -> Vec<CliCommandInfo> {
     vec![
@@ -93,21 +96,57 @@ pub async fn list_models(
 ) -> Result<Vec<CliModelInfo>> {
     let command =
         resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
+    cached_models(&command, environment).await.map_err(|error| {
+        anyhow!(
+            "Codex model catalog is unavailable: {}",
+            classify_error(&error.to_string())
+        )
+    })
+}
+
+/// Reuse the verified model list for both connection validation and the
+/// composer catalog. A normal setup flow validates the CLI first and opens the
+/// model picker immediately afterwards; querying app-server twice needlessly
+/// starts two short-lived provider processes and produces visible setup jitter.
+async fn cached_models(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<CliModelInfo>> {
     let key = model_cache_key(&command, environment);
+    get_or_discover_models_by_key(key, || async {
+        discover_models(command, environment).await
+    })
+    .await
+}
+
+async fn get_or_discover_models_by_key<F, Fut>(key: u64, discover: F) -> Result<Vec<CliModelInfo>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<CliModelInfo>>>,
+{
     let now = Instant::now();
     if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
         if cached.key == key && now.saturating_duration_since(cached.loaded_at) < cached.ttl {
             return Ok(cached.models.clone());
         }
     }
-    let models = discover_models(&command, environment)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "Codex model catalog is unavailable: {}",
-                classify_error(&error.to_string())
-            )
-        })?;
+    let discovery_lock = {
+        let mut locks = MODEL_DISCOVERY_LOCKS.lock().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _discovery_guard = discovery_lock.lock().await;
+    // A concurrent setup probe can finish while this caller waits. Check a
+    // second time so the composer does not launch another app-server process.
+    let now = Instant::now();
+    if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
+        if cached.key == key && now.saturating_duration_since(cached.loaded_at) < cached.ttl {
+            return Ok(cached.models.clone());
+        }
+    }
+    let models = discover().await?;
     if models.is_empty() {
         return Err(anyhow!("Codex model catalog returned no models"));
     }
@@ -137,7 +176,7 @@ pub async fn test_connection(
         resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
     let cli_version = version(&command, environment).await?;
     verify_authentication(&command, environment).await?;
-    let models = discover_models(&command, environment)
+    let models = cached_models(&command, environment)
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
     if models.is_empty() {
@@ -459,6 +498,7 @@ fn classify_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn parses_app_server_models_and_effort_levels() {
@@ -532,5 +572,30 @@ mod tests {
     #[test]
     fn classifies_authentication_failures() {
         assert!(classify_error("Unauthorized: login required").contains("codex login"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_model_catalog_requests_share_one_discovery() {
+        static NEXT_KEY: AtomicUsize = AtomicUsize::new(30_000);
+        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed) as u64;
+        let discoveries = Arc::new(AtomicUsize::new(0));
+        let first_count = discoveries.clone();
+        let second_count = discoveries.clone();
+        let first = get_or_discover_models_by_key(key, move || async move {
+            first_count.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(vec![CliModelInfo::new("default", "Default", true)])
+        });
+        let second = get_or_discover_models_by_key(key, move || async move {
+            second_count.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![CliModelInfo::new("incorrect", "Incorrect", false)])
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(discoveries.load(Ordering::SeqCst), 1);
+        assert_eq!(first.unwrap()[0].id, "default");
+        assert_eq!(second.unwrap()[0].id, "default");
+        *MODEL_CACHE.lock().await = None;
+        MODEL_DISCOVERY_LOCKS.lock().await.remove(&key);
     }
 }

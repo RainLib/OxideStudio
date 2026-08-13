@@ -241,7 +241,7 @@ impl ToolRuntime {
             build_explain_statement(&input.sql, kind, ExplainPlanMode::Estimate)?;
         let uses_engine_read_only = is_file_agent_driver(&connection.stored.driver)?;
         let script = if uses_engine_read_only {
-            statement
+            statement.to_string()
         } else {
             read_only_transaction_script(dialect, &statement)?
         };
