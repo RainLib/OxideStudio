@@ -1928,11 +1928,11 @@ export function assistantConversationHistoryVersion(
   const tail = turns[turns.length - 1];
   const versionFor = (turn: AssistantTurn | null | undefined) =>
     turn
-      ? `${turn.id}:${turn.userMessage}:${turn.final?.content || ""}:${turn.clarifications
+      ? `${turn.id}:${turn.final?.createdAt || 0}:${turn.clarifications
           .filter((clarification) => Boolean(clarification.answer?.trim()))
           .map(
             (clarification) =>
-              `${clarification.clarificationId}:${clarification.answer!.trim()}`,
+              `${clarification.clarificationId}:${clarification.answeredAt || 0}`,
           )
           .join("\\u0001")}`
       : "none";
