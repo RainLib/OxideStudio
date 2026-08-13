@@ -167,11 +167,11 @@ flowchart TD
 | --- | --- | --- |
 | Slash suggestion rows | 最多 8 行 | `AssistantPromptBox.tsx:169-188,772-805` |
 | Text attachment chips | 最多 4 个；总 128 KiB；最终 prompt 最多 200,000 characters | `AssistantPromptBox.tsx:361-367`；`AssistantSidebar.tsx:835-845,921-938` |
-| Conversation turns | 当前 DOM 为全部 `T` 个 turn，节点量 O(T)；row memo 降低无关重渲染但不减少节点 | `AssistantConversation.tsx:300-328,362-385` |
-| Model list | 折叠时不挂载 model rows；展开为 `M` 个 provider models，O(M)，当前无硬上限 | `AssistantModelControl.tsx:388-512` |
+| Conversation turns | 默认挂载最近 30 个终态 turn；更早的非终态 / 待审批 turn 始终保留，按每页 30 条展开 | `AssistantConversation.tsx:57-58,214-249` |
+| Model list | 折叠时不挂载 model rows；展开后单次至多挂载 100 个 provider models，并保留当前选项 | `AssistantModelControl.tsx:41,228-238,516-570` |
 | Snapshot retention | 最多 100 turns、8 resume requests | `useAssistantAgentSession.ts:503-514` |
 
-下一次性能验收应在 1、50、100 turns，以及 20、100、500 models 下分别记录 DOM nodes、React commit p95、heap 和 panel open latency。
+下一次性能验收应在 1、50、100 turns，以及 20、100、500 models 下分别记录 DOM nodes、React commit p95、heap 和 panel open latency。当前单元回归已证明 45 条历史只挂载 31 条（含早期待审批 turn），123 个模型目录只挂载 100 个；真实 WebView 指标仍待采集。
 
 ### 8.4 Reducer / delta / persistence
 
