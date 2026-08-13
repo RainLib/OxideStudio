@@ -1,5 +1,6 @@
 import { createServer } from "vite";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 const args = process.argv.slice(2);
 
@@ -18,54 +19,84 @@ const port =
     : undefined;
 const effectivePort = port ?? 1420;
 
-async function reuseExistingOxideVite() {
+const OXIDE_VITE_TITLE = "<title>OxideStudio</title>";
+
+export async function probeExistingOxideVite({
+  port,
+  fetchImpl = fetch,
+  timeoutMs = 750,
+}) {
   try {
-    const response = await fetch(`http://127.0.0.1:${effectivePort}/`, {
-      signal: AbortSignal.timeout(750),
+    const response = await fetchImpl(`http://127.0.0.1:${port}/`, {
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return false;
-    const html = await response.text();
-    if (html.includes("<title>OxideStudio</title>")) {
-      console.log(
-        `OxideStudio Vite is already running on port ${effectivePort}; reusing it for Tauri dev.`,
-      );
-      return true;
+    if (!response.ok) {
+      return { kind: "occupied", detail: `HTTP ${response.status}` };
     }
-    throw new Error(
-      `Port ${effectivePort} is already in use by a different application. Stop that process, or run the existing OxideStudio development server instead.`,
-    );
+    const html = await response.text();
+    if (!html.includes(OXIDE_VITE_TITLE)) {
+      return { kind: "occupied", detail: "its page is not OxideStudio" };
+    }
+    const viteClient = await fetchImpl(`http://127.0.0.1:${port}/@vite/client`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!viteClient.ok) {
+      return { kind: "occupied", detail: "it is not a Vite development server" };
+    }
+    return { kind: "oxide-vite" };
   } catch (error) {
-    if (error instanceof Error && !/fetch failed|timeout/iu.test(error.message)) {
+    const code = error?.cause?.code;
+    if (code === "ECONNREFUSED") return { kind: "available" };
+    if (error?.name === "TimeoutError") {
+      return { kind: "occupied", detail: "it did not respond in time" };
+    }
+    if (error instanceof Error && /fetch failed/iu.test(error.message)) {
+      return {
+        kind: "occupied",
+        detail: "it did not accept an HTTP probe",
+      };
+    }
+    if (error instanceof Error && !/fetch failed/iu.test(error.message)) {
       throw error;
     }
-    return false;
+    return { kind: "occupied", detail: "it could not be identified safely" };
   }
 }
 
-if (await reuseExistingOxideVite()) {
-  process.exit(0);
-}
+async function main() {
+  const existing = await probeExistingOxideVite({ port: effectivePort });
+  if (existing.kind === "oxide-vite") {
+    console.log(
+      `OxideStudio Vite is already running on port ${effectivePort}; reusing it for Tauri dev.`,
+    );
+    return;
+  }
+  if (existing.kind === "occupied") {
+    throw new Error(
+      `Port ${effectivePort} is already in use, but ${existing.detail}. Stop that process, or run the existing OxideStudio Vite server instead.`,
+    );
+  }
 
-const inlineConfig = {
-  configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),
-  server: {
-    ...(host !== undefined ? { host } : {}),
-    ...(port !== undefined ? { port } : {}),
-  },
-};
+  const inlineConfig = {
+    configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),
+    server: {
+      ...(host !== undefined ? { host } : {}),
+      ...(port !== undefined ? { port } : {}),
+    },
+  };
 
-const server = await createServer(inlineConfig);
+  const server = await createServer(inlineConfig);
 
-const depsOptimizer = server.environments.client.depsOptimizer;
-if (depsOptimizer) {
-  await depsOptimizer.init();
-  const pendingOptimizations = Object.values(
-    depsOptimizer.metadata.discovered,
-  )
-    .map((dependency) => dependency.processing)
-    .filter(Boolean);
-  await Promise.all(pendingOptimizations);
-}
+  const depsOptimizer = server.environments.client.depsOptimizer;
+  if (depsOptimizer) {
+    await depsOptimizer.init();
+    const pendingOptimizations = Object.values(
+      depsOptimizer.metadata.discovered,
+    )
+      .map((dependency) => dependency.processing)
+      .filter(Boolean);
+    await Promise.all(pendingOptimizations);
+  }
 
 // Vite can report its HTTP endpoint as available before a cold dependency
 // optimization has finished. Tauri then opens a WebView whose static shell
@@ -80,7 +111,7 @@ const criticalModules = [
   "/src/pages/workspaceRuntime.tsx",
 ];
 
-try {
+  try {
   for (const url of criticalModules) {
     await server.warmupRequest(url);
   }
@@ -97,18 +128,23 @@ try {
   }
   await server.waitForRequestsIdle();
 
-  await server.listen();
-  server.printUrls();
-  server.bindCLIShortcuts({ print: true });
-} catch (error) {
-  await server.close();
-  throw error;
+    await server.listen();
+    server.printUrls();
+    server.bindCLIShortcuts({ print: true });
+  } catch (error) {
+    await server.close();
+    throw error;
+  }
+
+  const close = async () => {
+    await server.close();
+    process.exit(0);
+  };
+
+  process.once("SIGINT", close);
+  process.once("SIGTERM", close);
 }
 
-const close = async () => {
-  await server.close();
-  process.exit(0);
-};
-
-process.once("SIGINT", close);
-process.once("SIGTERM", close);
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  await main();
+}
