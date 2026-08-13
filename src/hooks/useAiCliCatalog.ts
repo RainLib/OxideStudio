@@ -129,9 +129,7 @@ async function loadCatalog(
       const commands =
         commandResult.status === "fulfilled"
           ? uniqueBy(commandResult.value, (command) => command.name.trim())
-          : force
-            ? []
-            : previousCommands;
+          : previousCommands;
       const warnings = [
         modelResult.status === "rejected"
           ? `Model catalog: ${errorMessage(modelResult.reason)}`

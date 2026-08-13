@@ -2158,7 +2158,7 @@ describe("AssistantSidebar Agent Host path", () => {
       .mockRejectedValueOnce(new Error("model refresh failed"));
     mocks.listCliCommands
       .mockRejectedValueOnce(new Error("command catalog failed"))
-      .mockResolvedValueOnce([]);
+      .mockRejectedValueOnce(new Error("command refresh failed"));
 
     await act(async () => {
       root = createRoot(container);
@@ -2212,6 +2212,7 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(
       modelPopover.querySelector('input[placeholder="Model identifier"]'),
     ).toBeNull();
+
   });
 
   it("ignores a late catalog result after the CLI provider identity changes", async () => {
