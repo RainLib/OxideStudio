@@ -5,6 +5,7 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { localizedCliSetupStatus } from "./assistantProviderCopy";
 import type { AiProviderKind } from "@/services/tauri/ai.service";
 import {
   ASSISTANT_PROVIDER_DEFINITIONS,
@@ -280,7 +281,7 @@ function ProviderOptionRow({
           </span>
         </span>
         <span className="mt-0.5 block max-w-[42ch] text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
-          {option.description}
+          {localizedProviderDescription(option.kind, t)}
         </span>
         {roomy && (
           <span className="mt-1 block truncate font-mono text-[8px] text-[hsl(var(--wb-text-muted)/0.8)]">
@@ -302,6 +303,19 @@ function ProviderOptionRow({
         />
       )}
     </button>
+  );
+}
+
+function localizedProviderDescription(
+  provider: AiProviderKind,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(
+    provider === "openai-compatible"
+      ? "assistant.provider.oxideDescription"
+      : provider === "codex-cli"
+        ? "assistant.provider.codexDescription"
+        : "assistant.provider.codebuddyDescription",
   );
 }
 
@@ -333,7 +347,7 @@ function providerStatus(
         cliSetup.phase === "installing"
           ? t("assistant.provider.installing")
           : t("assistant.provider.verifying"),
-      detail: cliSetup.message,
+      detail: localizedCliSetupStatus(cliSetup, t),
       dotClass: "bg-amber-400",
       canRetry: false,
     };
@@ -344,7 +358,7 @@ function providerStatus(
         cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
           ? t("assistant.provider.signInRequired")
           : t("assistant.provider.cliSetupRequired"),
-      detail: cliSetup.message,
+      detail: localizedCliSetupStatus(cliSetup, t),
       dotClass:
         cliSetup.phase === "error" ? "bg-red-400" : "bg-amber-400",
       canRetry: cliSetup.phase === "error" || cliSetup.phase === "authorizing",
@@ -353,7 +367,7 @@ function providerStatus(
   if (modelStatus.kind === "configured") {
     return {
       label: t("assistant.provider.ready"),
-      detail: cliSetup?.message || modelStatus.detail,
+      detail: cliSetup ? localizedCliSetupStatus(cliSetup, t) : modelStatus.detail,
       dotClass: "bg-emerald-400",
       canRetry: false,
     };

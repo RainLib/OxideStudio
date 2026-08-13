@@ -2356,6 +2356,34 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Complete sign-in in your browser");
   });
 
+  it("keeps provider diagnostics behind the localized setup status", async () => {
+    mocks.detectCliProvider.mockResolvedValue({
+      provider: "codex-cli",
+      available: false,
+      message: "npm failed to start at C:/Users/example/AppData/Local/nvm/npm",
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    const status = container.querySelector("[data-assistant-cli-setup='missing'] [role='status']");
+    expect(status?.querySelector("p")?.textContent).toBe(
+      "CLI installation is required.",
+    );
+    expect(status?.querySelector("summary")?.textContent).toBe(
+      "Technical details",
+    );
+    expect(status?.querySelector("details")?.open).toBe(false);
+  });
+
   it("returns to account authorization when a completed browser flow still fails the CLI probe", async () => {
     mocks.getCliAuthenticationStatus.mockResolvedValue({
       sessionId: "auth-session-1",

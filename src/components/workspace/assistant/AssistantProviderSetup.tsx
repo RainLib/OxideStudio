@@ -1,6 +1,7 @@
 import { assistantProviderDefinition } from "@/ai/assistant/providerDefinitions";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { localizedCliSetupStatus } from "./assistantProviderCopy";
 import type { AiCliProviderConfig } from "@/services/tauri/ai.service";
 import type {
   AssistantCliSetupPhase,
@@ -49,6 +50,7 @@ export function AssistantProviderSetup({
     state.phase === "checking" ||
     state.phase === "installing" ||
     state.refreshing === true;
+  const primaryStatus = localizedCliSetupStatus(state, t);
 
   return (
     <div
@@ -67,7 +69,7 @@ export function AssistantProviderSetup({
               {t("assistant.setup.title", { provider: definition.label })}
             </h2>
             <p className="mt-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
-              {definition.setupDescription}
+              {localizedProviderSetupDescription(provider, t)}
             </p>
           </div>
         </div>
@@ -124,9 +126,19 @@ export function AssistantProviderSetup({
           )}
           role={state.phase === "error" ? "alert" : "status"}
         >
-          {state.message}
+          <p>{primaryStatus}</p>
           {state.version && (
             <span className="ml-1 font-mono text-[9px]">{state.version}</span>
+          )}
+          {state.message && state.message !== primaryStatus && (
+            <details className="mt-1.5 text-[9px] text-current/80">
+              <summary className="cursor-pointer select-none">
+                {t("assistant.error.technicalDetails")}
+              </summary>
+              <p className="mt-1 break-words font-mono leading-4">
+                {state.message}
+              </p>
+            </details>
           )}
         </div>
 
@@ -273,4 +285,15 @@ function SetupStep({
 function compactPath(path: string) {
   if (path.length <= 62) return path;
   return `${path.slice(0, 24)}…${path.slice(-34)}`;
+}
+
+function localizedProviderSetupDescription(
+  provider: AiCliProviderConfig["kind"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(
+    provider === "codex-cli"
+      ? "assistant.setup.codexDescription"
+      : "assistant.setup.codebuddyDescription",
+  );
 }

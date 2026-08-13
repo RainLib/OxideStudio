@@ -132,6 +132,18 @@ export const enUS = {
   "assistant.provider.safety":
     "All providers use the same workspace scope and approval gates. Database writes never bypass Oxide review.",
   "assistant.provider.advancedSetup": "Advanced provider setup",
+  "assistant.provider.oxideDescription":
+    "Oxide chat and database tools with your OpenAI-compatible endpoint.",
+  "assistant.provider.codexDescription":
+    "A native Codex agent session using your local ChatGPT/Codex sign-in.",
+  "assistant.provider.codebuddyDescription":
+    "A CodeBuddy agent session with native model and effort discovery.",
+  "assistant.setup.oxideDescription":
+    "Configure an endpoint, model, and optional API credential.",
+  "assistant.setup.codexDescription":
+    "OxideStudio can install Codex locally, then open its secure sign-in flow.",
+  "assistant.setup.codebuddyDescription":
+    "OxideStudio can install CodeBuddy locally, then hand off interactive sign-in.",
   "assistant.provider.use": "Use {provider}",
   "assistant.provider.chooseStatus": "Choose a provider",
   "assistant.provider.chooseDetail":
@@ -175,6 +187,13 @@ export const enUS = {
     "The sign-in session was interrupted. Choose a sign-in method to restart it.",
   "assistant.setup.signInVerificationFailed":
     "Sign-in completed, but the CLI still needs account access. Choose a sign-in method to try again.",
+  "assistant.setup.statusChecking": "Checking CLI availability…",
+  "assistant.setup.statusMissing": "CLI installation is required.",
+  "assistant.setup.statusInstalling": "Installing the managed CLI…",
+  "assistant.setup.statusAuthRequired": "Sign-in is required before the CLI can start.",
+  "assistant.setup.statusAuthorizing": "Waiting for secure browser sign-in…",
+  "assistant.setup.statusReady": "CLI is ready to use.",
+  "assistant.setup.statusError": "CLI setup needs attention.",
   "assistant.status.configureProvider": "Configure an AI provider and enable it before sending a request.",
   "assistant.status.configureEndpoint": "Add an OpenAI-compatible endpoint before sending a request.",
   "assistant.status.chooseModel": "Choose a model identifier before sending a request.",
@@ -288,6 +307,17 @@ export const zhCN: Record<MessageKey, string> = {
   "assistant.provider.safety":
     "所有提供方共享同一工作区范围和审批关卡。数据库写入绝不会绕过 Oxide 审核。",
   "assistant.provider.advancedSetup": "高级提供方设置",
+  "assistant.provider.oxideDescription":
+    "通过 OpenAI 兼容端点使用 Oxide 聊天与数据库工具。",
+  "assistant.provider.codexDescription":
+    "使用本机 ChatGPT/Codex 登录的原生 Codex 代理会话。",
+  "assistant.provider.codebuddyDescription":
+    "支持原生模型与推理强度发现的 CodeBuddy 代理会话。",
+  "assistant.setup.oxideDescription": "配置端点、模型和可选的 API 凭据。",
+  "assistant.setup.codexDescription":
+    "OxideStudio 可以在本地安装 Codex，然后打开其安全登录流程。",
+  "assistant.setup.codebuddyDescription":
+    "OxideStudio 可以在本地安装 CodeBuddy，然后交接交互式登录流程。",
   "assistant.provider.use": "使用 {provider}",
   "assistant.provider.chooseStatus": "选择提供方",
   "assistant.provider.chooseDetail":
@@ -326,6 +356,13 @@ export const zhCN: Record<MessageKey, string> = {
   "assistant.setup.signInInterrupted": "登录会话已中断。请选择登录方式后重新开始。",
   "assistant.setup.signInVerificationFailed":
     "登录已完成，但 CLI 仍无法访问账号。请选择登录方式后重试。",
+  "assistant.setup.statusChecking": "正在检查 CLI 是否可用…",
+  "assistant.setup.statusMissing": "需要安装 CLI。",
+  "assistant.setup.statusInstalling": "正在安装受管 CLI…",
+  "assistant.setup.statusAuthRequired": "CLI 启动前需要登录。",
+  "assistant.setup.statusAuthorizing": "正在等待安全浏览器登录…",
+  "assistant.setup.statusReady": "CLI 已可使用。",
+  "assistant.setup.statusError": "CLI 配置需要处理。",
   "assistant.status.configureProvider": "请先配置并启用 AI 提供方，再发送请求。",
   "assistant.status.configureEndpoint": "请先添加 OpenAI 兼容端点，再发送请求。",
   "assistant.status.chooseModel": "请先选择模型标识，再发送请求。",
