@@ -84,6 +84,7 @@ import {
   AssistantSidebar,
   assistantConversationId,
   assistantToolManifestForProfile,
+  cliSetupForProviderIdentity,
 } from "@/components/workspace/AssistantSidebar";
 import { resetAiCliCatalogForTests } from "@/hooks/useAiCliCatalog";
 import { resetAssistantAgentRuntimeForTests } from "@/hooks/useAssistantAgentSession";
@@ -184,6 +185,26 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(primary).toMatch(/^provider:cli:[0-9a-f]{32}$/u);
     expect(primary).not.toContain("primary");
     expect(primary).not.toContain("C:/tools");
+  });
+
+  it("does not reuse a ready CLI setup after its identity changes", () => {
+    const ready = {
+      phase: "ready" as const,
+      message: "CLI is installed and authenticated",
+      executablePath: "C:/tools/codex.cmd",
+    };
+
+    expect(
+      cliSetupForProviderIdentity(ready, "identity:old", "identity:old", "Checking"),
+    ).toBe(ready);
+    expect(
+      cliSetupForProviderIdentity(ready, "identity:new", "identity:old", "Checking"),
+    ).toEqual({
+      ...ready,
+      phase: "checking",
+      message: "Checking",
+      refreshing: true,
+    });
   });
 
   it("filters tools by Chat, Plan, and Agent authority", () => {

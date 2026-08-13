@@ -354,12 +354,6 @@ function AgentHostAssistantSidebar() {
     modelConfig && modelConfig.kind !== "openai-compatible"
       ? (cliSetupByProvider[modelConfig.kind] ?? null)
       : null;
-  const cliCatalog = useAiCliCatalog(
-    modelConfig?.kind === "codex-cli" || modelConfig?.kind === "codebuddy-cli"
-      ? modelConfig
-      : null,
-    cliSetup?.phase === "ready",
-  );
   const cliDetectionRevision =
     modelConfig && modelConfig.kind !== "openai-compatible"
       ? cliDetectionRevisionByProvider[modelConfig.kind]
@@ -368,6 +362,18 @@ function AgentHostAssistantSidebar() {
     modelConfig && modelConfig.kind !== "openai-compatible"
       ? cliProbeIdentityByProvider[modelConfig.kind]
       : null;
+  const cliSetupForCurrentIdentity = cliSetupForProviderIdentity(
+    cliSetup,
+    cliProviderFingerprint,
+    cliProbeIdentity?.fingerprint,
+    t("assistant.setup.verifying"),
+  );
+  const cliCatalog = useAiCliCatalog(
+    modelConfig?.kind === "codex-cli" || modelConfig?.kind === "codebuddy-cli"
+      ? modelConfig
+      : null,
+    cliSetupForCurrentIdentity?.phase === "ready",
+  );
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
     [attachments, message],
@@ -479,7 +485,7 @@ function AgentHostAssistantSidebar() {
     hostCapabilities: session.hostStatus?.capabilities ?? null,
     hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
-    cliSetup,
+    cliSetup: cliSetupForCurrentIdentity,
     t,
   });
   const showProviderWelcome =
@@ -487,9 +493,9 @@ function AgentHostAssistantSidebar() {
   const cliSetupRequired = Boolean(
     modelConfig &&
     modelConfig.kind !== "openai-compatible" &&
-    cliSetup &&
-    cliSetup.phase !== "ready" &&
-    cliSetup.phase !== "checking",
+    cliSetupForCurrentIdentity &&
+    cliSetupForCurrentIdentity.phase !== "ready" &&
+    cliSetupForCurrentIdentity.phase !== "checking",
   );
 
   const openAiSettings = () => {
@@ -1294,7 +1300,7 @@ function AgentHostAssistantSidebar() {
             : null
         }
         modelStatus={modelStatus}
-        cliSetup={cliSetup}
+        cliSetup={cliSetupForCurrentIdentity}
         isBusy={session.isBusy}
         onSelect={selectAssistantProvider}
         onRetry={retryAssistantProvider}
@@ -1336,12 +1342,12 @@ function AgentHostAssistantSidebar() {
             />
           ) : cliSetupRequired &&
             modelConfig?.kind !== "openai-compatible" &&
-            cliSetup ? (
+            cliSetupForCurrentIdentity ? (
             <AssistantProviderSetup
               provider={
                 aiProvider === "codex-cli" ? "codex-cli" : "codebuddy-cli"
               }
-              state={cliSetup}
+              state={cliSetupForCurrentIdentity}
               onInstall={() => void installAssistantProvider()}
               onAuthenticate={(methodId) =>
                 void authenticateAssistantProvider(methodId)
@@ -1856,6 +1862,27 @@ function selectedCliReasoningEffort(
   const selected = preferences[model.trim() || "default"]?.trim();
   if (selected) return selected;
   return Object.keys(preferences).length === 0 ? legacyEffort : "default";
+}
+
+export function cliSetupForProviderIdentity(
+  setup: AssistantCliSetupState | null,
+  expectedFingerprint: string | null,
+  verifiedFingerprint: string | undefined,
+  checkingMessage: string,
+) {
+  if (!setup || !expectedFingerprint || !verifiedFingerprint) return setup;
+  if (expectedFingerprint === verifiedFingerprint) return setup;
+  // State belongs to a provider kind in the setup store, but a ready result is
+  // only safe for the exact executable/profile/environment that was checked.
+  // Render the transitional state immediately while the detection effect
+  // verifies the new identity, rather than lending its old authorization to a
+  // newly selected CLI.
+  return {
+    ...setup,
+    phase: "checking" as const,
+    message: checkingMessage,
+    refreshing: true,
+  };
 }
 
 export function assistantConversationId(provider: AiProviderConfig | null) {
