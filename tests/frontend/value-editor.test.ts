@@ -3,6 +3,10 @@ import {
   binaryByteLength,
   formatJsonDraft,
   inferValueEditorKind,
+  parseGeometryPreview,
+  parseImagePreview,
+  parseMapPreview,
+  parseXmlPreview,
   parseJsonPreview,
   parseValueEditorDraft,
   valueEditorDraft,
@@ -31,6 +35,71 @@ describe("value editor model", () => {
     );
     expect(inferValueEditorKind("bigint", "9007199254740993")).toBe("number");
     expect(inferValueEditorKind("int8", "9007199254740993")).toBe("number");
+    expect(inferValueEditorKind("hstore", '"role"=>"admin"')).toBe("map");
+    expect(inferValueEditorKind("xml", "<role>admin</role>")).toBe("xml");
+    expect(inferValueEditorKind("geometry", "POINT(1 2)")).toBe("geometry");
+    expect(inferValueEditorKind("image", "data:image/png;base64,AA==")).toBe("image");
+  });
+
+  it("renders hstore and JSON maps as bounded read-only trees without rewriting drafts", () => {
+    expect(parseMapPreview('"role"=>"admin", "enabled"=>NULL')).toEqual({
+      ok: true,
+      value: { role: "admin", enabled: null },
+    });
+    expect(parseMapPreview('{"role":"admin"}')).toEqual({
+      ok: true,
+      value: { role: "admin" },
+    });
+    expect(parseMapPreview('"role"=>"admin",')).toMatchObject({ ok: false });
+    expect(
+      parseValueEditorDraft({
+        state: "value",
+        draft: '"role"=>"admin"',
+        kind: "map",
+        nullable: false,
+      }),
+    ).toEqual({ ok: true, value: '"role"=>"admin"' });
+  });
+
+  it("renders XML as a bounded inspection tree without parsing dangerous declarations", () => {
+    expect(parseXmlPreview('<role active="true"><name>admin</name></role>')).toEqual({
+      ok: true,
+      value: {
+        role: {
+          "@attributes": { active: "true" },
+          children: [{ name: { children: [{ "#text": "admin" }] } }],
+        },
+      },
+    });
+    expect(parseXmlPreview("<!DOCTYPE role><role/>" )).toMatchObject({ ok: false });
+    expect(parseXmlPreview("<role><name/></roleish>")).toMatchObject({ ok: false });
+    expect(
+      parseValueEditorDraft({
+        state: "value",
+        draft: "<role>admin</role>",
+        kind: "xml",
+        nullable: false,
+      }),
+    ).toEqual({ ok: true, value: "<role>admin</role>" });
+  });
+
+  it("previews only inert raster images and summarized WKT geometry", () => {
+    expect(parseImagePreview("data:image/png;base64,AA==")).toEqual({
+      ok: true,
+      dataUrl: "data:image/png;base64,AA==",
+    });
+    expect(parseImagePreview("data:image/svg+xml;base64,PHN2Zy8+")).toMatchObject({ ok: false });
+    expect(parseGeometryPreview("SRID=4326;POINT(120.1 30.2)")).toEqual({
+      ok: true,
+      value: {
+        type: "POINT",
+        srid: "4326",
+        empty: false,
+        coordinateCount: 2,
+        coordinates: ["120.1", "30.2"],
+      },
+    });
+    expect(parseGeometryPreview("POINT(1 2")).toMatchObject({ ok: false });
   });
 
   it("pretty-prints and validates JSON without turning it into text", () => {

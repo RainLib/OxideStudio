@@ -347,6 +347,66 @@ describe("app settings workbench layout", () => {
     expect(toolWindowAtSide(settings.workbench, "right")).toBeNull();
   });
 
+  it("normalizes stale persisted visibility so each shared side restores at most one panel", () => {
+    const settings = normalizeAppSettings({
+      workbench: {
+        layout: {
+          activeToolWindow: "commit",
+          activeSideToolWindows: {
+            left: "databaseExplorer",
+            right: "commit",
+          },
+          visibility: {
+            databaseExplorer: true,
+            projectFiles: true,
+            assistant: true,
+            commit: true,
+            versionControl: true,
+            results: false,
+          },
+        },
+        toolWindows: {
+          projectFiles: { enabled: true, side: "left" },
+        },
+      },
+    });
+
+    expect(settings.workbench.layout.activeSideToolWindows).toEqual({
+      left: "databaseExplorer",
+      right: "commit",
+    });
+    expect(settings.workbench.layout.visibility).toMatchObject({
+      databaseExplorer: true,
+      projectFiles: false,
+      assistant: false,
+      commit: true,
+      versionControl: false,
+    });
+    expect(settings.workbench.layout.activeToolWindow).toBe("commit");
+  });
+
+  it("honors the persisted active pane when old settings mark a shared side stale", () => {
+    const settings = normalizeAppSettings({
+      workbench: {
+        toolWindows: {
+          databaseExplorer: { enabled: true, side: "right" },
+          assistant: { enabled: true, side: "right" },
+        },
+        layout: {
+          activeSideToolWindows: { left: null, right: "assistant" },
+          visibility: {
+            databaseExplorer: true,
+            assistant: true,
+          },
+        },
+      },
+    });
+
+    expect(settings.workbench.layout.activeSideToolWindows.right).toBe("assistant");
+    expect(settings.workbench.layout.visibility.databaseExplorer).toBe(false);
+    expect(settings.workbench.layout.visibility.assistant).toBe(true);
+  });
+
   it("moves a side tool window without moving other windows on that dock", () => {
     const moved = moveSideToolWindow(
       DEFAULT_APP_SETTINGS.workbench,
@@ -363,7 +423,7 @@ describe("app settings workbench layout", () => {
     ).toBe("left");
   });
 
-  it("keeps same-side tools mutually exclusive and restores recent state", () => {
+  it("keeps same-side tools mutually exclusive and closes the shared panel", () => {
     const assistant = openSideToolWindow(
       DEFAULT_APP_SETTINGS.workbench,
       "assistant",
@@ -374,8 +434,60 @@ describe("app settings workbench layout", () => {
     expect(commit.layout.visibility.assistant).toBe(false);
     expect(commit.layout.visibility.commit).toBe(true);
 
-    const restored = closeSideToolWindow(commit, "commit");
-    expect(toolWindowAtSide(restored, "right")).toBe("assistant");
-    expect(restored.layout.visibility.assistant).toBe(true);
+    const closed = closeSideToolWindow(commit, "commit");
+    expect(toolWindowAtSide(closed, "right")).toBeNull();
+    expect(closed.layout.visibility.assistant).toBe(false);
+    expect(closed.layout.visibility.commit).toBe(false);
+    expect(closed.layout.activeSideToolWindows.right).toBeNull();
+    expect(closed.layout.sideHistory.right).toEqual([]);
+  });
+
+  it("clears stale visibility flags when closing a shared panel", () => {
+    const assistant = openSideToolWindow(
+      DEFAULT_APP_SETTINGS.workbench,
+      "assistant",
+    );
+    const stale = {
+      ...assistant,
+      layout: {
+        ...assistant.layout,
+        visibility: {
+          ...assistant.layout.visibility,
+          projectFiles: true,
+          commit: true,
+        },
+      },
+    };
+
+    const closed = closeSideToolWindow(stale, "assistant");
+    expect(toolWindowAtSide(closed, "right")).toBeNull();
+    expect(closed.layout.visibility.assistant).toBe(false);
+    expect(closed.layout.visibility.projectFiles).toBe(false);
+    expect(closed.layout.visibility.commit).toBe(false);
+    expect(closed.layout.visibility.versionControl).toBe(false);
+    expect(closed.layout.visibility.databaseExplorer).toBe(true);
+  });
+
+  it("uses the same close semantics for the shared first panel", () => {
+    const firstPanelSettings = moveSideToolWindow(
+      DEFAULT_APP_SETTINGS.workbench,
+      "projectFiles",
+      "left",
+    );
+    const database = openSideToolWindow(
+      firstPanelSettings,
+      "databaseExplorer",
+    );
+    const files = openSideToolWindow(database, "projectFiles");
+
+    expect(toolWindowAtSide(files, "left")).toBe("projectFiles");
+    expect(files.layout.visibility.databaseExplorer).toBe(false);
+
+    const closed = closeSideToolWindow(files, "projectFiles");
+    expect(toolWindowAtSide(closed, "left")).toBeNull();
+    expect(closed.layout.visibility.databaseExplorer).toBe(false);
+    expect(closed.layout.visibility.projectFiles).toBe(false);
+    expect(closed.layout.activeSideToolWindows.left).toBeNull();
+    expect(closed.layout.sideHistory.left).toEqual([]);
   });
 });

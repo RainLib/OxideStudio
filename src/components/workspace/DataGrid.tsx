@@ -80,10 +80,13 @@ import {
   DataGridContextMenu,
   DataGridHoverTooltip,
   gridCellTooltipText,
+  isTableColumnEditable,
   resolveHeaderColumnType,
   resolveRenderedColumnType,
   resultColumnTypeFamily,
   sortDataGridRowIndexes,
+  tableColumnEditability,
+  tableColumnReadOnlyReason,
   transposeQueryResult,
   gridLayoutKey,
   loadGridLayout,
@@ -382,6 +385,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const restoredLayoutRef = useRef<string | null>(null);
 
     const tableColumns = activeTab?.tableColumns;
+    const tableColumnsByName = useMemo(
+      () => new Map(tableColumns?.map((column) => [column.name, column])),
+      [tableColumns],
+    );
 
     const layoutColumnIds = useMemo(() => {
       if (isTransposed) return [];
@@ -461,7 +468,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             const customWidth =
               columnWidths[columnId] ?? columnWidths[col.name];
 
-            const metadata = tableColumns?.find((item) => item.name === col.name);
+            const metadata = tableColumnsByName.get(col.name);
             const dataType = resolveHeaderColumnType({
               tableColumnType: metadata?.data_type,
               resultColumnType: col.data_type,
@@ -685,12 +692,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             originalColumnIndex,
             dataType:
               resultColumn?.data_type ||
-              tableColumns?.find(
-                (columnInfo) => columnInfo.name === resultColumn?.name,
-              )?.data_type,
+              tableColumnsByName.get(resultColumn?.name || "")?.data_type,
           };
         }),
-      [columns, result, tableColumns, isTransposed],
+      [columns, result, tableColumnsByName, isTransposed],
     );
 
     const selectionAggregate = useMemo(() => {
@@ -853,17 +858,19 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           }
         }
 
+        const columnName =
+          result?.columns[originalColIndex]?.name ||
+          overrideColumns?.[originalColIndex]?.name;
+        const metadata = tableColumnsByName.get(columnName || "");
+        const cellEditable = isEditable && isTableColumnEditable(metadata);
         const baseCell = createTypedCell(
           isTableCellExpression(val) ? `ƒx ${val.expression}` : val,
-          isEditable,
+          cellEditable,
           isNewRow ? "DEFAULT" : "NOT LOADED",
           resolveRenderedColumnType({
             resultColumnType: result?.columns[originalColIndex]?.data_type,
             tableColumnType:
-              tableColumns?.find(
-                (column) =>
-                  column.name === result?.columns[originalColIndex]?.name,
-              )?.data_type || overrideColumns?.[originalColIndex]?.type,
+              metadata?.data_type || overrideColumns?.[originalColIndex]?.type,
           }),
         );
         const gridCell = { ...baseCell };
@@ -881,8 +888,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
         // Force editable for compatible types
         if (gridCell.kind !== GridCellKind.Boolean) {
-          (gridCell as any).allowOverlay = isEditable;
-          (gridCell as any).readonly = !isEditable;
+          (gridCell as any).allowOverlay = cellEditable;
+          (gridCell as any).readonly = !cellEditable;
         }
 
         // Apply theme override for new rows
@@ -988,6 +995,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           }
 
           if (actualRowKey === undefined || origColIdx === -1) return null;
+          const columnName =
+            result?.columns[origColIdx]?.name ||
+            overrideColumns?.[origColIdx]?.name;
+          const metadata = tableColumnsByName.get(columnName || "");
+          if (!isTableColumnEditable(metadata)) return null;
           return { rowIndex: actualRowKey, colIndex: origColIdx };
         };
 
@@ -1042,6 +1054,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         overrideColumns,
         gridSelection,
         isEditable,
+        tableColumnsByName,
       ],
     );
 
@@ -1109,9 +1122,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const fallbackColumn = overrideColumns?.[columnIndex];
         const columnName = resultColumn?.name || fallbackColumn?.name;
         if (!columnName) return;
-        const metadata = tableColumns?.find(
-          (column) => column.name === columnName,
-        );
+          const metadata = tableColumnsByName.get(columnName || "");
+        const columnEditability = tableColumnEditability(metadata);
+        const cellEditable =
+          isEditable &&
+          !activeTab.isExecuting &&
+          columnEditability === "editable";
         const editKey = `${rowIndex}:${columnIndex}`;
         const pending = pendingEdits.has(editKey);
         const originalValue =
@@ -1142,12 +1158,15 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               : `Row ${(pageOffset + rowIndex + 1).toLocaleString()}`,
           value,
           originalValue,
-          editable: isEditable && !activeTab.isExecuting,
+          editable: cellEditable,
           nullable: metadata?.is_nullable !== false,
           pending,
           defaultValue: metadata?.default_value,
           expression,
-          expressionAllowed: rowIndex >= 0,
+          expressionAllowed: cellEditable && rowIndex >= 0,
+          readOnlyReason: cellEditable
+            ? undefined
+            : tableColumnReadOnlyReason(columnEditability),
         });
       },
       [
@@ -1158,7 +1177,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         pendingEdits,
         result,
         sortedIndices,
-        tableColumns,
+        tableColumnsByName,
         visualColumnIndexToResultIndex,
       ],
     );
@@ -1338,9 +1357,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const column =
           result?.columns[originalColumnIndex] ??
           overrideColumns?.[originalColumnIndex];
-        const metadata = column
-          ? tableColumns?.find((item) => item.name === column.name)
-          : undefined;
+        const metadata = column ? tableColumnsByName.get(column.name) : undefined;
         const content =
           event.kind === "cell"
             ? gridCellTooltipText(getCellContent([col, row]))
@@ -1366,7 +1383,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         getCellContent,
         overrideColumns,
         result,
-        tableColumns,
+        tableColumnsByName,
         visualColumnIndexToResultIndex,
       ],
     );
@@ -1668,6 +1685,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           ? -1 - (contextMenu.row - filteredRows.length)
           : sortedIndices[contextMenu.row];
       if (colIndex < 0 || rowIndex === undefined) return;
+      const columnName =
+        result?.columns[colIndex]?.name || overrideColumns?.[colIndex]?.name;
+      const metadata = tableColumnsByName.get(columnName || "");
+      if (!isTableColumnEditable(metadata)) return;
 
       setCellEdit(activeTab.id, rowIndex, colIndex, null);
       closeContextMenu();
@@ -1678,18 +1699,19 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       contextMenu.row,
       filteredRows.length,
       isEditable,
+      overrideColumns,
+      result,
       setCellEdit,
       sortedIndices,
+      tableColumnsByName,
       visualColumnIndexToResultIndex,
     ]);
 
     const contextColumnAllowsNull = useMemo(() => {
-      if (!contextMenu.columnName || !tableColumns) return true;
-      return (
-        tableColumns.find((column) => column.name === contextMenu.columnName)
-          ?.is_nullable !== false
-      );
-    }, [contextMenu.columnName, tableColumns]);
+      if (!contextMenu.columnName) return false;
+      const column = tableColumnsByName.get(contextMenu.columnName);
+      return column?.is_nullable !== false && isTableColumnEditable(column);
+    }, [contextMenu.columnName, tableColumnsByName]);
 
     const contextForeignKeyPlans = useMemo(() => {
       if (

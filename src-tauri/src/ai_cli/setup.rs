@@ -5,13 +5,14 @@ use crate::ai_cli::{
         run_captured, CliCommandSpec,
     },
     CliAuthenticationLaunchResult, CliAuthenticationMethod, CliAuthenticationPhase,
-    CliAuthenticationStatus, CliInstallResult, CliProviderConfig, CliProviderKind,
+    CliAuthenticationStatus, CliInstallResult, CliInstallationLaunchResult, CliInstallationPhase,
+    CliInstallationStatus, CliProviderConfig, CliProviderKind,
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::LazyLock,
     time::Duration,
@@ -28,7 +29,38 @@ use url::Url;
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const AUTHENTICATION_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+// OAuth callbacks may reach the browser before a CLI persists its refreshed
+// credential. Keep verification bounded, but do not report a false failed
+// sign-in just because the first account probe races that persistence.
+const AUTHENTICATION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(18);
+const AUTHENTICATION_VERIFICATION_RETRY: Duration = Duration::from_millis(900);
 const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+const CODEX_PACKAGE_VERSION: &str = "0.147.0";
+const CODEX_PACKAGE_INTEGRITY: &str =
+    "sha512-EQLEXecAG2ptxI7UpBMo2TR/ga5596/c/OsYF/0LoUDh5JANZ7IoGqlzBEWbuEVQ76JePIbtTW/ihCkp1a7Z3w==";
+const CODEBUDDY_PACKAGE_VERSION: &str = "2.135.0";
+const CODEBUDDY_PACKAGE_INTEGRITY: &str =
+    "sha512-W6PgFWi16Px7V6F67qCZVJcfVhzW66oMhKgfoIPhtQPfhIO4TNWXawsPXfuULVgpyUl+kI6VWyR2CRQTUmC3TA==";
+
+#[derive(Clone, Copy)]
+struct ManagedPackageSpec {
+    name: &'static str,
+    version: &'static str,
+    integrity: &'static str,
+}
+
+impl ManagedPackageSpec {
+    fn reference(self) -> String {
+        format!("{}@{}", self.name, self.version)
+    }
+
+    fn package_json_path(self, root: &Path) -> PathBuf {
+        self.name
+            .split('/')
+            .fold(root.join("node_modules"), |path, part| path.join(part))
+            .join("package.json")
+    }
+}
 
 struct ManagedAuthenticationSession {
     profile_id: String,
@@ -36,45 +68,97 @@ struct ManagedAuthenticationSession {
     cancellation: watch::Sender<bool>,
 }
 
+struct ManagedInstallationSession {
+    status: CliInstallationStatus,
+}
+
 static AUTHENTICATION_SESSIONS: LazyLock<Mutex<HashMap<String, ManagedAuthenticationSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static INSTALLATION_SESSIONS: LazyLock<Mutex<HashMap<String, ManagedInstallationSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub async fn install_provider(
     app: &AppHandle,
     provider: CliProviderKind,
 ) -> Result<CliInstallResult> {
+    install_provider_with_progress(app, provider, None).await
+}
+
+async fn install_provider_with_progress(
+    app: &AppHandle,
+    provider: CliProviderKind,
+    session_id: Option<&str>,
+) -> Result<CliInstallResult> {
     let npm = resolve_named_command("npm").map_err(|error| {
         anyhow!(
             "Node.js and npm are required for managed installation. Install Node.js LTS or, if it was installed after OxideStudio started, restart OxideStudio and retry. {error}"
         )
     })?;
-    let package = match provider {
-        CliProviderKind::CodexCli => "@openai/codex@latest",
-        CliProviderKind::CodebuddyCli => "@tencent-ai/codebuddy-code@latest",
-    };
+    let package = managed_package_spec(provider);
     let target = managed_provider_root(app, provider)?;
-    std::fs::create_dir_all(&target)
-        .with_context(|| format!("failed to create {}", target.display()))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("managed agent directory has no parent"))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let install_id = uuid::Uuid::new_v4();
+    let staging = parent.join(format!(".{}-install-{install_id}", provider.as_str()));
+    std::fs::create_dir_all(&staging).with_context(|| {
+        format!(
+            "failed to create install staging directory {}",
+            staging.display()
+        )
+    })?;
+    if let Some(session_id) = session_id {
+        update_installation(
+            session_id,
+            CliInstallationPhase::Downloading,
+            "Downloading and verifying the managed CLI package...",
+        )
+        .await;
+    }
+    let archive = match download_verified_package(&npm, package, &staging, parent).await {
+        Ok(archive) => archive,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
     let args = vec![
         "install".to_string(),
         "--prefix".to_string(),
-        target.to_string_lossy().into_owned(),
+        staging.to_string_lossy().into_owned(),
         "--no-save".to_string(),
         "--omit=dev".to_string(),
         "--no-audit".to_string(),
         "--no-fund".to_string(),
         format!("--registry={NPM_REGISTRY}"),
-        package.to_string(),
+        archive.to_string_lossy().into_owned(),
     ];
-    let output = run_captured(
+    if let Some(session_id) = session_id {
+        update_installation(
+            session_id,
+            CliInstallationPhase::Installing,
+            "Installing the verified CLI package in OxideStudio...",
+        )
+        .await;
+    }
+    let install = run_captured(
         &npm,
         &args,
         &BTreeMap::new(),
-        Some(&target),
+        Some(&staging),
         None,
         INSTALL_TIMEOUT,
     )
-    .await?;
+    .await;
+    let output = match install {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error.context("managed installation failed before activation"));
+        }
+    };
     if !output.success {
         let detail = output
             .stderr
@@ -83,13 +167,32 @@ pub async fn install_provider(
             .map(str::trim)
             .find(|line| !line.is_empty())
             .unwrap_or("npm did not provide an error message");
+        let _ = std::fs::remove_dir_all(&staging);
         return Err(anyhow!("managed installation failed: {detail}"));
+    }
+
+    if let Some(session_id) = session_id {
+        update_installation(
+            session_id,
+            CliInstallationPhase::Verifying,
+            "Verifying the installed CLI entry point...",
+        )
+        .await;
+    }
+    if let Err(error) = verify_staged_install(&staging, provider, package) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let _ = std::fs::remove_file(&archive);
+    if let Err(error) = activate_managed_install(&target, &staging, provider) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
     }
 
     let executable_path = managed_executable_path(&target, provider);
     if !executable_path.is_file() {
         return Err(anyhow!(
-            "managed installation completed but {} was not created",
+            "managed installation activation did not preserve {}",
             executable_path.display()
         ));
     }
@@ -97,10 +200,279 @@ pub async fn install_provider(
         provider,
         executable_path: executable_path.to_string_lossy().into_owned(),
         message: format!(
-            "{} was installed in OxideStudio's managed agent directory",
-            provider.display_name()
+            "{} {} was verified and installed in OxideStudio's managed agent directory",
+            provider.display_name(),
+            package.version
         ),
     })
+}
+
+pub async fn begin_installation(
+    app: &AppHandle,
+    provider: CliProviderKind,
+) -> Result<CliInstallationLaunchResult> {
+    let session_id = {
+        let mut sessions = INSTALLATION_SESSIONS.lock().await;
+        if let Some(session) = sessions.values().find(|session| {
+            session.status.provider == provider && !session.status.phase.is_terminal()
+        }) {
+            return Ok(CliInstallationLaunchResult {
+                provider,
+                session_id: session.status.session_id.clone(),
+                message: session.status.message.clone(),
+            });
+        }
+        if sessions.len() >= 64 {
+            sessions.retain(|_, session| !session.status.phase.is_terminal());
+        }
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sessions.insert(
+            session_id.clone(),
+            ManagedInstallationSession {
+                status: CliInstallationStatus {
+                    session_id: session_id.clone(),
+                    provider,
+                    phase: CliInstallationPhase::Starting,
+                    message: format!("Preparing {} installation...", provider.display_name()),
+                    result: None,
+                },
+            },
+        );
+        session_id
+    };
+    let task_app = app.clone();
+    let task_session_id = session_id.clone();
+    tauri::async_runtime::spawn(async move {
+        match install_provider_with_progress(&task_app, provider, Some(&task_session_id)).await {
+            Ok(result) => {
+                update_installation_with_result(
+                    &task_session_id,
+                    CliInstallationPhase::Succeeded,
+                    result.message.clone(),
+                    Some(result),
+                )
+                .await;
+            }
+            Err(error) => {
+                update_installation_with_result(
+                    &task_session_id,
+                    CliInstallationPhase::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .await;
+            }
+        }
+    });
+    Ok(CliInstallationLaunchResult {
+        provider,
+        session_id,
+        message: format!("Preparing {} installation...", provider.display_name()),
+    })
+}
+
+pub async fn installation_status(session_id: &str) -> Result<CliInstallationStatus> {
+    INSTALLATION_SESSIONS
+        .lock()
+        .await
+        .get(session_id)
+        .map(|session| session.status.clone())
+        .ok_or_else(|| anyhow!("installation session is no longer available"))
+}
+
+async fn update_installation(
+    session_id: &str,
+    phase: CliInstallationPhase,
+    message: impl Into<String>,
+) {
+    update_installation_with_result(session_id, phase, message, None).await;
+}
+
+async fn update_installation_with_result(
+    session_id: &str,
+    phase: CliInstallationPhase,
+    message: impl Into<String>,
+    result: Option<CliInstallResult>,
+) {
+    if let Some(session) = INSTALLATION_SESSIONS.lock().await.get_mut(session_id) {
+        if !session.status.phase.is_terminal() || phase.is_terminal() {
+            session.status.phase = phase;
+            session.status.message = message.into();
+            if result.is_some() {
+                session.status.result = result;
+            }
+        }
+    }
+}
+
+fn managed_package_spec(provider: CliProviderKind) -> ManagedPackageSpec {
+    match provider {
+        CliProviderKind::CodexCli => ManagedPackageSpec {
+            name: "@openai/codex",
+            version: CODEX_PACKAGE_VERSION,
+            integrity: CODEX_PACKAGE_INTEGRITY,
+        },
+        CliProviderKind::CodebuddyCli => ManagedPackageSpec {
+            name: "@tencent-ai/codebuddy-code",
+            version: CODEBUDDY_PACKAGE_VERSION,
+            integrity: CODEBUDDY_PACKAGE_INTEGRITY,
+        },
+    }
+}
+
+async fn download_verified_package(
+    npm: &CliCommandSpec,
+    package: ManagedPackageSpec,
+    destination: &Path,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let args = vec![
+        "pack".to_string(),
+        package.reference(),
+        "--json".to_string(),
+        "--pack-destination".to_string(),
+        destination.to_string_lossy().into_owned(),
+        format!("--registry={NPM_REGISTRY}"),
+    ];
+    let output = run_captured(
+        npm,
+        &args,
+        &BTreeMap::new(),
+        Some(cwd),
+        None,
+        Duration::from_secs(60),
+    )
+    .await
+    .context("failed to download the managed package for verification")?;
+    if !output.success {
+        return Err(anyhow!(
+            "managed package download failed: {}",
+            first_output_line(&output.stderr, &output.stdout)
+        ));
+    }
+    let response: Value = serde_json::from_str(output.stdout.trim())
+        .context("npm returned an invalid package verification response")?;
+    let result = response
+        .as_array()
+        .and_then(|items| items.first())
+        .ok_or_else(|| anyhow!("npm returned no package verification result"))?;
+    let actual_integrity = result
+        .get("integrity")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if actual_integrity != package.integrity {
+        return Err(anyhow!(
+            "managed package integrity mismatch for {}: installation was stopped",
+            package.reference()
+        ));
+    }
+    let filename = result
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("npm did not identify the verified package archive"))?;
+    let filename_path = Path::new(filename);
+    if filename_path.file_name().and_then(|value| value.to_str()) != Some(filename) {
+        return Err(anyhow!("npm returned an unsafe package archive path"));
+    }
+    let archive = destination.join(filename);
+    if !archive.is_file() {
+        return Err(anyhow!(
+            "verified managed package archive was not created at {}",
+            archive.display()
+        ));
+    }
+    Ok(archive)
+}
+
+fn first_output_line<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
+    stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("npm did not provide an error message")
+}
+
+fn verify_staged_install(
+    staging: &Path,
+    provider: CliProviderKind,
+    package: ManagedPackageSpec,
+) -> Result<()> {
+    let executable = managed_executable_path(staging, provider);
+    if !executable.is_file() {
+        return Err(anyhow!(
+            "managed installation completed but {} was not created",
+            executable.display()
+        ));
+    }
+    let package_json_path = package.package_json_path(staging);
+    let package_json: Value = serde_json::from_slice(
+        &std::fs::read(&package_json_path)
+            .with_context(|| format!("failed to read {}", package_json_path.display()))?,
+    )
+    .with_context(|| format!("failed to parse {}", package_json_path.display()))?;
+    let actual_version = package_json
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if actual_version != package.version {
+        return Err(anyhow!(
+            "managed package version mismatch: expected {}, received {}",
+            package.version,
+            if actual_version.is_empty() {
+                "an unspecified version"
+            } else {
+                actual_version
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn activate_managed_install(
+    target: &Path,
+    staging: &Path,
+    provider: CliProviderKind,
+) -> Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("managed agent directory has no parent"))?;
+    if staging.parent() != Some(parent) {
+        return Err(anyhow!(
+            "managed install staging directory is outside its target"
+        ));
+    }
+    let backup = parent.join(format!(
+        ".{}-backup-{}",
+        provider.as_str(),
+        uuid::Uuid::new_v4()
+    ));
+    let had_existing = target.exists();
+    if had_existing {
+        std::fs::rename(target, &backup).with_context(|| {
+            format!(
+                "failed to preserve the existing managed installation at {}",
+                target.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(staging, target) {
+        if had_existing {
+            let _ = std::fs::rename(&backup, target);
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "failed to activate the verified managed installation at {}",
+                target.display()
+            )
+        });
+    }
+    if had_existing {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
 }
 
 pub async fn begin_authentication(
@@ -308,7 +680,7 @@ async fn run_codebuddy_authentication(
         )
         .await;
         let _ = child.kill().await;
-        codebuddy::test_connection(config, environment).await?;
+        verify_authenticated_provider(config, environment, session_id, &mut cancellation).await?;
         update_authentication(
             session_id,
             CliAuthenticationPhase::Succeeded,
@@ -384,7 +756,7 @@ async fn run_codebuddy_authentication(
                     "CodeBuddy confirmed the account. Verifying the provider session...",
                 ).await;
                 let _ = child.kill().await;
-                codebuddy::test_connection(config, environment).await?;
+                verify_authenticated_provider(config, environment, session_id, &mut cancellation).await?;
                 update_authentication(
                     session_id,
                     CliAuthenticationPhase::Succeeded,
@@ -547,7 +919,7 @@ async fn run_codex_authentication(
         "Codex confirmed the account. Verifying the provider session...",
     )
     .await;
-    codex::test_connection(config, environment).await?;
+    verify_authenticated_provider(config, environment, session_id, &mut cancellation).await?;
     update_authentication(
         session_id,
         CliAuthenticationPhase::Succeeded,
@@ -685,6 +1057,72 @@ fn authentication_method_description(id: &str) -> Option<&'static str> {
         "selfhosted" => Some("Continue with an enterprise domain account."),
         _ => None,
     }
+}
+
+async fn verify_authenticated_provider(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    session_id: &str,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    update_authentication(
+        session_id,
+        CliAuthenticationPhase::Verifying,
+        "Confirming the provider session in OxideStudio...",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + AUTHENTICATION_VERIFICATION_TIMEOUT;
+
+    loop {
+        let result = match config.kind {
+            CliProviderKind::CodexCli => codex::test_connection(config, environment).await,
+            CliProviderKind::CodebuddyCli => codebuddy::test_connection(config, environment).await,
+        };
+        let pending_error = match result {
+            Ok(_) => return Ok(()),
+            Err(error) if authentication_verification_may_be_pending(&error.to_string()) => error,
+            Err(error) => return Err(error),
+        };
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(anyhow!(
+                "provider sign-in completed but the CLI session did not become ready in time: {pending_error}"
+            ));
+        }
+        update_authentication(
+            session_id,
+            CliAuthenticationPhase::Verifying,
+            "Sign-in completed. Waiting for the CLI to finish saving the account...",
+        )
+        .await;
+        tokio::select! {
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    return Err(anyhow!("authentication cancelled"));
+                }
+            }
+            _ = tokio::time::sleep((deadline - now).min(AUTHENTICATION_VERIFICATION_RETRY)) => {}
+        }
+    }
+}
+
+fn authentication_verification_may_be_pending(error: &str) -> bool {
+    let value = error.to_ascii_lowercase();
+    [
+        "not authenticated",
+        "not logged in",
+        "login required",
+        "sign in",
+        "account access",
+        "authorization pending",
+        "credential is still",
+        "credentials are still",
+        "token is still",
+        "token not found",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 fn has_codebuddy_user(value: &Value) -> bool {
@@ -833,6 +1271,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn managed_packages_are_exactly_versioned_and_integrity_pinned() {
+        for provider in [CliProviderKind::CodexCli, CliProviderKind::CodebuddyCli] {
+            let package = managed_package_spec(provider);
+            assert!(!package.version.is_empty());
+            assert!(!package.reference().ends_with("@latest"));
+            assert!(package.integrity.starts_with("sha512-"));
+        }
+    }
+
+    #[test]
     fn parses_codebuddy_acp_authentication_methods() {
         let methods = parse_authentication_methods(&json!({
             "authMethods": [
@@ -851,5 +1299,21 @@ mod tests {
             "userInfo": { "userName": "user", "token": "must-not-escape" }
         })));
         assert!(!has_codebuddy_user(&json!({ "userInfo": null })));
+    }
+
+    #[test]
+    fn treats_only_account_propagation_failures_as_verification_retryable() {
+        assert!(authentication_verification_may_be_pending(
+            "CodeBuddy is not authenticated yet"
+        ));
+        assert!(authentication_verification_may_be_pending(
+            "credential is still being saved"
+        ));
+        assert!(!authentication_verification_may_be_pending(
+            "failed to parse an authentication token"
+        ));
+        assert!(!authentication_verification_may_be_pending(
+            "ACP protocol response was invalid"
+        ));
     }
 }

@@ -16,6 +16,35 @@ const port =
   typeof portValue === "string" && Number.isFinite(Number(portValue))
     ? Number(portValue)
     : undefined;
+const effectivePort = port ?? 1420;
+
+async function reuseExistingOxideVite() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${effectivePort}/`, {
+      signal: AbortSignal.timeout(750),
+    });
+    if (!response.ok) return false;
+    const html = await response.text();
+    if (html.includes("<title>OxideStudio</title>")) {
+      console.log(
+        `OxideStudio Vite is already running on port ${effectivePort}; reusing it for Tauri dev.`,
+      );
+      return true;
+    }
+    throw new Error(
+      `Port ${effectivePort} is already in use by a different application. Stop that process, or run the existing OxideStudio development server instead.`,
+    );
+  } catch (error) {
+    if (error instanceof Error && !/fetch failed|timeout/iu.test(error.message)) {
+      throw error;
+    }
+    return false;
+  }
+}
+
+if (await reuseExistingOxideVite()) {
+  process.exit(0);
+}
 
 const inlineConfig = {
   configFile: fileURLToPath(new URL("../vite.config.ts", import.meta.url)),

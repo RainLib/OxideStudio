@@ -367,7 +367,7 @@ export function normalizeAppSettings(value: unknown): AppSettings {
   const defaults = DEFAULT_APP_SETTINGS;
   const toolWindows = normalizedToolWindows(raw, defaults);
 
-  return {
+  const normalized: AppSettings = {
     appearance: {
       uiFontSize: numberAt(
         raw,
@@ -763,6 +763,99 @@ export function normalizeAppSettings(value: unknown): AppSettings {
       },
     },
   };
+
+  return normalizeSharedSidePanelVisibility(normalized, raw);
+}
+
+/**
+ * A first/secondary side is a single shared surface. Older persisted settings
+ * may still contain multiple `visibility` flags on the same side, which made
+ * settings controls claim that several panes were open even though runtime
+ * rendering can display only one. Pick one deterministic active pane and
+ * clear every sibling before the settings ever reach the workspace store.
+ */
+function normalizeSharedSidePanelVisibility(
+  settings: AppSettings,
+  raw: Record<string, unknown>,
+): AppSettings {
+  const visibility = { ...settings.workbench.layout.visibility };
+  const activeSideToolWindows = {
+    ...settings.workbench.layout.activeSideToolWindows,
+  };
+
+  for (const side of ["left", "right"] as const) {
+    const requested = activeSideToolWindows[side];
+    const candidateIds = SIDE_TOOL_WINDOW_IDS.filter(
+      (id) =>
+        settings.workbench.toolWindows[id].enabled &&
+        settings.workbench.toolWindows[id].side === side,
+    );
+    const visibleCandidates = candidateIds.filter(
+      (id) =>
+        visibility[id] &&
+        (hasExplicitPersistedVisibility(raw, id) ||
+          !hasMovedFromDefaultSide(raw, settings, id)),
+    );
+    const active =
+      requested &&
+      visibleCandidates.includes(requested)
+        ? requested
+        : visibleCandidates[0] ?? null;
+
+    for (const id of candidateIds) {
+      visibility[id] = id === active;
+    }
+    activeSideToolWindows[side] = active;
+  }
+
+  const activeToolWindow = settings.workbench.layout.activeToolWindow;
+  const activeToolStillVisible =
+    activeToolWindow === "editor" ||
+    activeToolWindow === "results" ||
+    activeSideToolWindows.left === activeToolWindow ||
+    activeSideToolWindows.right === activeToolWindow;
+
+  return {
+    ...settings,
+    workbench: {
+      ...settings.workbench,
+      layout: {
+        ...settings.workbench.layout,
+        visibility,
+        activeSideToolWindows,
+        activeToolWindow: activeToolStillVisible ? activeToolWindow : "editor",
+      },
+    },
+  };
+}
+
+function hasMovedFromDefaultSide(
+  raw: Record<string, unknown>,
+  settings: AppSettings,
+  id: SideToolWindowId,
+) {
+  const configuredSide = getAt(raw, ["workbench", "toolWindows", id, "side"]);
+  return (
+    (configuredSide === "left" || configuredSide === "right") &&
+    configuredSide !== DEFAULT_APP_SETTINGS.workbench.toolWindows[id].side &&
+    settings.workbench.toolWindows[id].side === configuredSide
+  );
+}
+
+function hasExplicitPersistedVisibility(
+  raw: Record<string, unknown>,
+  id: WorkbenchToolWindowId,
+) {
+  if (typeof getAt(raw, ["workbench", "layout", "visibility", id]) === "boolean") {
+    return true;
+  }
+  if (id === "databaseExplorer") {
+    return typeof getAt(raw, ["workbench", "layout", "leftVisible"]) === "boolean";
+  }
+  if (id === "assistant") {
+    return typeof getAt(raw, ["workbench", "layout", "rightVisible"]) === "boolean";
+  }
+  return false;
 }
 
 function normalizedToolWindows(

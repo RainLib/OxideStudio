@@ -384,6 +384,26 @@ pub struct AgentActionAccepted {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentTurnRuntimeStatus {
+    pub active: bool,
+}
+
+/// Bounded stateful events retained by Host for crash recovery. This is not a
+/// provider-session resume mechanism: it only lets the desktop reconstruct a
+/// safe UI state from an already persisted turn snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnJournal {
+    pub project_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub events: Vec<Value>,
+    pub truncated: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentProjectStateCleared {
     pub project_id: String,
     pub cleared_records: u64,

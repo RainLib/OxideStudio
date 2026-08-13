@@ -6,7 +6,7 @@ use crate::{
         AgentCancelTurnRequest, AgentContextMetrics, AgentConversationSnapshot,
         AgentConversationSnapshotSaveRequest, AgentHostManager, AgentHostStatus,
         AgentProjectStateCleared, AgentProviderKind, AgentTextAttachment, AgentTurnAccepted,
-        AgentTurnRequest,
+        AgentTurnJournal, AgentTurnRequest, AgentTurnRuntimeStatus,
     },
     core::protocol::CommandError,
 };
@@ -195,6 +195,30 @@ pub async fn agent_get_status(
     Ok(manager
         .status(provider_configured.unwrap_or(false), provider_kind)
         .await)
+}
+
+#[tauri::command]
+pub async fn agent_turn_runtime_status(
+    manager: State<'_, AgentHostManager>,
+    request: AgentCancelTurnRequest,
+) -> Result<AgentTurnRuntimeStatus, CommandError> {
+    manager
+        .turn_runtime_status(request)
+        .await
+        .map_err(|error| agent_error("AGENT_TURN_STATUS_FAILED", error))
+}
+
+#[tauri::command]
+pub async fn agent_load_turn_journal(
+    manager: State<'_, AgentHostManager>,
+    project_id: String,
+    thread_id: String,
+    turn_id: String,
+) -> Result<Option<AgentTurnJournal>, CommandError> {
+    manager
+        .turn_journal(&project_id, &thread_id, &turn_id)
+        .await
+        .map_err(|error| agent_error("AGENT_TURN_JOURNAL_LOAD_FAILED", error))
 }
 
 #[tauri::command]

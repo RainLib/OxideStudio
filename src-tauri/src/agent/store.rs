@@ -101,6 +101,7 @@ struct RecordKey {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 enum RecordKind {
     Thread,
+    Journal,
     Checkpoint,
     Artifact,
 }
@@ -109,6 +110,7 @@ impl RecordKind {
     fn label(self) -> &'static str {
         match self {
             Self::Thread => "thread",
+            Self::Journal => "journal",
             Self::Checkpoint => "checkpoint",
             Self::Artifact => "artifact",
         }
@@ -163,6 +165,24 @@ impl AgentStore {
 
     pub async fn load_thread(&self, project_id: &str, thread_id: &str) -> Result<Option<Value>> {
         self.get(RecordKey::thread(project_id, thread_id)).await
+    }
+
+    pub async fn save_turn_journal(
+        &self,
+        project_id: &str,
+        turn_id: &str,
+        value: &Value,
+    ) -> Result<()> {
+        self.put(RecordKey::journal(project_id, turn_id), value)
+            .await
+    }
+
+    pub async fn load_turn_journal(
+        &self,
+        project_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<Value>> {
+        self.get(RecordKey::journal(project_id, turn_id)).await
     }
 
     pub async fn save_checkpoint(
@@ -786,6 +806,15 @@ impl RecordKey {
         }
     }
 
+    fn journal(project_id: &str, turn_id: &str) -> Self {
+        Self {
+            kind: RecordKind::Journal,
+            project_id: project_id.to_string(),
+            record_id: format!("journal:{turn_id}"),
+            version: 0,
+        }
+    }
+
     fn artifact(project_id: &str, artifact_id: &str) -> Self {
         Self {
             kind: RecordKind::Artifact,
@@ -1116,7 +1145,7 @@ async fn put_persistent(
 ) -> Result<()> {
     let now = now_millis();
     match key.kind {
-        RecordKind::Thread => {
+        RecordKind::Thread | RecordKind::Journal => {
             sqlx::query(
                 r#"INSERT INTO agent_threads
                    (project_id, thread_id, ciphertext, nonce, updated_at, expires_at)
@@ -1181,7 +1210,7 @@ async fn get_persistent(
     now: i64,
 ) -> Result<Option<EncryptedRecord>> {
     let row = match key.kind {
-        RecordKind::Thread => sqlx::query(
+        RecordKind::Thread | RecordKind::Journal => sqlx::query(
             "SELECT ciphertext, nonce, expires_at FROM agent_threads WHERE project_id = ? AND thread_id = ? AND expires_at > ?",
         )
         .bind(&key.project_id)

@@ -146,6 +146,32 @@ describe("ValueEditorDialog", () => {
     expect(button("Close")).toBeTruthy();
   });
 
+  it("explains why generated database columns are read-only", async () => {
+    await renderDialog({
+      ...baseTarget,
+      editable: false,
+      readOnlyReason: "generated-column",
+    });
+
+    expect(document.body.textContent).toContain(
+      "Generated database columns are computed and cannot be edited.",
+    );
+    expect(document.body.textContent).not.toContain("Stage change");
+  });
+
+  it("does not allow a write when column ownership metadata is unavailable", async () => {
+    await renderDialog({
+      ...baseTarget,
+      editable: false,
+      readOnlyReason: "unclassified-column",
+    });
+
+    expect(document.body.textContent).toContain(
+      "Column write metadata is unavailable, so editing is disabled.",
+    );
+    expect(document.body.textContent).not.toContain("Stage change");
+  });
+
   it("inspects valid JSON as a read-only tree without replacing the staging draft", async () => {
     const { onStageValue } = await renderDialog(baseTarget);
     await act(async () => button("Tree").click());
@@ -161,6 +187,38 @@ describe("ValueEditorDialog", () => {
 
     await act(async () => button("Stage change").click());
     expect(onStageValue).toHaveBeenCalledWith({ role: "admin" });
+  });
+
+  it("offers an XML tree preview while preserving the staged XML source", async () => {
+    const target = {
+      ...baseTarget,
+      columnType: "xml",
+      value: '<role active="true"><name>admin</name></role>',
+      originalValue: '<role active="true"><name>admin</name></role>',
+    };
+    const { onStageValue } = await renderDialog(target);
+    await act(async () => button("Tree").click());
+
+    expect(document.body.textContent).toContain("role");
+    expect(document.body.textContent).toContain("2 properties");
+
+    await act(async () => button("Stage change").click());
+    expect(onStageValue).toHaveBeenCalledWith('<role active="true"><name>admin</name></role>');
+  });
+
+  it("renders raster image values only through an inert data URL preview", async () => {
+    await renderDialog({
+      ...baseTarget,
+      columnType: "image",
+      value: "data:image/png;base64,AA==",
+      originalValue: "data:image/png;base64,AA==",
+    });
+    await act(async () => button("Preview").click());
+
+    const preview = document.body.querySelector<HTMLImageElement>(
+      'img[alt="Database image value preview"]',
+    );
+    expect(preview?.src).toContain("data:image/png;base64,AA==");
   });
 
   it("can open after mounting without a target", async () => {

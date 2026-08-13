@@ -8,10 +8,12 @@ import { SchemaDiffView } from "@/components/workspace/SchemaDiffView";
 import type { SchemaDiffPlan, SchemaSnapshot } from "@/services/tauri/types";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useConnectionStore } from "@/store/useConnectionStore";
 
 const mocks = vi.hoisted(() => ({
   listJournal: vi.fn(async () => []),
   executeMigration: vi.fn(),
+  compareSnapshotToLive: vi.fn(),
 }));
 
 vi.mock("@/services/tauri/schema.service", () => ({
@@ -21,7 +23,13 @@ vi.mock("@/services/tauri/schema.service", () => ({
   },
 }));
 
+vi.mock("@/services/schemaSnapshotStore", () => ({
+  compareSnapshotToLive: mocks.compareSnapshotToLive,
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const initialConnectionState = useConnectionStore.getState();
 
 const source: SchemaSnapshot = {
   version: 1,
@@ -109,11 +117,23 @@ describe("SchemaDiffView migration confirmation", () => {
       activeProjectName: "Project",
     });
     useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
+    useConnectionStore.setState({
+      ...initialConnectionState,
+      connections: [],
+      activeConnectionId: null,
+      connectedConnectionIds: [],
+      isConnected: false,
+    });
+    mocks.compareSnapshotToLive.mockResolvedValue({
+      target: target("postgres"),
+      plan: { ...plan("postgres"), id: "plan-postgres-recaught" },
+    });
   });
 
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    useConnectionStore.setState(initialConnectionState, true);
   });
 
   async function renderPlan(driver: "postgres" | "mysql") {
@@ -227,5 +247,66 @@ describe("SchemaDiffView migration confirmation", () => {
     expect(apply?.disabled).toBe(true);
     expect(apply?.title).toContain("Project DDL baselines are review-only");
     expect(container.textContent).toContain("Capture a live baseline before creating an executable migration");
+  });
+
+  it("recaptures an interrupted target into a new plan instead of resuming DDL", async () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "target-connection",
+          name: "Production",
+          driver: "postgres",
+          connectionUrl: "postgres://localhost/app",
+          database: "app",
+        },
+      ],
+      activeConnectionId: "target-connection",
+      connectedConnectionIds: ["target-connection"],
+      isConnected: true,
+    });
+    mocks.listJournal.mockResolvedValueOnce([
+      {
+        id: "journal-interrupted",
+        projectId: "project-1",
+        connectionId: "target-connection",
+        connectionName: "Production",
+        databaseName: "app",
+        schemaName: "public",
+        planId: "plan-postgres",
+        sourceFingerprint: source.fingerprint,
+        targetFingerprintBefore: "old-target",
+        status: "interrupted",
+        startedAt: 1,
+        finishedAt: 2,
+        statementCount: 1,
+        committedStatements: 0,
+        preflightResults: [],
+        rollback: { available: false, changeCount: 0, requiresManualReview: true },
+        warnings: [],
+        error: "Target may be partially changed",
+      },
+    ]);
+    await renderPlan("postgres");
+    await act(async () => Promise.resolve());
+
+    const recapture = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Recapture & recompare"),
+    );
+    expect(recapture).toBeTruthy();
+    await act(async () => recapture?.click());
+
+    expect(mocks.executeMigration).not.toHaveBeenCalled();
+    expect(mocks.compareSnapshotToLive).toHaveBeenCalledWith(source, {
+      projectId: "project-1",
+      connectionId: "target-connection",
+      connectionName: "Production",
+      driver: "postgres",
+      databaseName: "app",
+      schemaName: "public",
+    });
+    const tabs = useTabStore.getState().tabs;
+    expect(tabs[tabs.length - 1]?.schemaDiffPlan?.id).toBe(
+      "plan-postgres-recaught",
+    );
   });
 });

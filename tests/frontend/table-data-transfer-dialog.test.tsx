@@ -15,6 +15,7 @@ import type {
   TableDataTransferPreview,
   TableDataTransferReport,
 } from "@/services/tauri/types";
+import transferReportFixture from "../fixtures/table-data-transfer-report.json";
 
 const mocks = vi.hoisted(() => ({
   ensureConnectionReady: vi.fn(),
@@ -169,6 +170,25 @@ describe("TableDataTransferDialog", () => {
     ).toBe(false);
   });
 
+  it("keeps the cross-layer transfer report fixture privacy-bounded and backward compatible", () => {
+    const reports = transferReportFixture as {
+      current: TableDataTransferReport;
+      legacy: TableDataTransferReport;
+    };
+
+    expect(reports.current.targetRowsBefore).toBe(41);
+    expect(reports.current.verification).toMatchObject({
+      status: "verified",
+      expectedRows: 43,
+      observedRows: 43,
+    });
+    expect(reports.legacy.targetRowsBefore).toBeUndefined();
+    expect(reports.legacy.verification).toBeUndefined();
+    expect(JSON.stringify(reports)).not.toMatch(
+      /password|credential|connectionString|\bsql\b|parameters|rows?Values/i,
+    );
+  });
+
   it("keeps upsert behind the bundled semantic SQL boundary", () => {
     expect(supportsTableDataTransferUpsert("bundled")).toBe(true);
     expect(supportsTableDataTransferUpsert("external")).toBe(false);
@@ -231,6 +251,129 @@ describe("TableDataTransferDialog", () => {
     expect(
       canExecuteTableDataTransfer(preview, "TRANSFER A13F9C", true),
     ).toBe(false);
+  });
+
+  it("retains the reviewed target baseline in recent transfer history", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "postgres",
+      supportsDatabaseCatalogs: false,
+      supportsTableDataTransfer: true,
+    });
+    mocks.listTableDataTransferReports.mockResolvedValue([
+      {
+        id: "table-transfer-report-append",
+        projectId: "project-a",
+        transferId: "transfer-append",
+        source: {
+          connectionId: "source",
+          driver: "postgres",
+          schema: "public",
+          table: "users",
+        },
+        target: {
+          connectionId: "target",
+          driver: "postgres",
+          schema: "public",
+          table: "users_copy",
+        },
+        mode: "append",
+        planDigest: "b".repeat(64),
+        maxRows: 100,
+        rowsTransferred: 2,
+        batches: 1,
+        limitReached: false,
+        targetRowsBefore: 41,
+        status: "done",
+        startedAt: 1,
+        finishedAt: 2,
+        error: null,
+      } satisfies TableDataTransferReport,
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataTransferDialog
+          open
+          projectId="project-a"
+          source={{
+            connectionId: "source",
+            driver: "postgres",
+            schema: "public",
+            table: "users",
+          }}
+          connections={[
+            { id: "source", name: "Source", driver: "postgres", url: "postgres://source" },
+            { id: "target", name: "Target", driver: "postgres", url: "postgres://target" },
+          ]}
+          onClose={vi.fn()}
+          onTransferred={vi.fn()}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("baseline 41");
+    });
+  });
+
+  it("shows the reviewed target baseline for append transfer previews", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "postgres",
+      supportsDatabaseCatalogs: false,
+      supportsTableDataTransfer: true,
+    });
+    mocks.previewTableDataTransfer.mockResolvedValue({
+      mode: "append",
+      mappedColumns: [],
+      skippedSourceColumns: [],
+      previewRows: 2,
+      maxRows: 100,
+      batchSize: 20,
+      targetRowsBefore: 41,
+      targetRowsToDelete: null,
+      upsertKeyColumns: [],
+      identityReseedColumns: [],
+      canExecute: true,
+      confirmationToken: "TRANSFER B4SELINE",
+      warnings: [],
+    } satisfies TableDataTransferPreview);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataTransferDialog
+          open
+          source={{
+            connectionId: "source",
+            driver: "postgres",
+            schema: "public",
+            table: "users",
+          }}
+          connections={[
+            { id: "source", name: "Source", driver: "postgres", url: "postgres://source" },
+            { id: "target", name: "Target", driver: "postgres", url: "postgres://target" },
+          ]}
+          onClose={vi.fn()}
+          onTransferred={vi.fn()}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        Array.from(document.body.querySelectorAll("button")).find(
+          (button) => button.textContent?.includes("Preview transfer"),
+        )?.hasAttribute("disabled"),
+      ).toBe(false);
+    });
+    const previewButton = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Preview transfer"),
+    );
+    await act(async () => previewButton?.click());
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("target baseline 41 row(s)");
+    });
   });
 
   it("uses the regular schema path when the target driver has no catalog layer", async () => {
@@ -321,5 +464,68 @@ describe("TableDataTransferDialog", () => {
       expect(document.body.textContent).toContain("2 selected");
     });
     expect(document.body.textContent).not.toContain("users_view");
+  });
+
+  it("keeps database-level transfer scoped to one explicitly selected source schema", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "postgres",
+      displayName: "PostgreSQL",
+      supportsDatabaseCatalogs: false,
+      supportsTableDataTransfer: true,
+    });
+    mocks.getDatabaseSchemas.mockResolvedValue(["public", "audit"]);
+    mocks.getDatabaseTables.mockImplementation(
+      async (connectionId: string, _database: string, schema: string) =>
+        connectionId === "source" && schema === "public"
+          ? [
+              { name: "orders", type: "BASE TABLE" },
+              { name: "users", type: "BASE TABLE" },
+            ]
+          : [{ name: "target_table", type: "BASE TABLE" }],
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataTransferDialog
+          open
+          initialSourceScope="database"
+          sourceSchemas={["public", "audit"]}
+          source={{
+            connectionId: "source",
+            driver: "postgres",
+            database: "app",
+            schema: "public",
+            table: "orders",
+          }}
+          sourceCapabilities={
+            {
+              displayName: "PostgreSQL",
+              supportsTableDataTransfer: true,
+            } as Parameters<typeof TableDataTransferDialog>[0]["sourceCapabilities"]
+          }
+          connections={[
+            { id: "source", name: "Source", driver: "postgres", url: "postgres://source" },
+            { id: "target", name: "Target", driver: "postgres", url: "postgres://target" },
+          ]}
+          onClose={vi.fn()}
+          onTransferred={vi.fn()}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("Transfer database data");
+      expect(document.body.textContent).toContain("Source schema");
+      expect(document.body.textContent).toContain("2 selected");
+    });
+    expect(mocks.getDatabaseTables).toHaveBeenCalledWith(
+      "source",
+      "app",
+      "public",
+    );
+    expect(document.body.textContent).toContain(
+      "Choose a schema, then review all its tables as one bounded batch.",
+    );
   });
 });

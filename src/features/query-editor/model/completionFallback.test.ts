@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { mergeCompletionFallbackSuggestions } from "./completionFallback";
+import {
+  limitCompletionSuggestions,
+  mergeCompletionFallbackSuggestions,
+} from "./completionFallback";
 import { sqlSyntaxFallbackCompletions } from "./sqlSyntaxFallback";
 
 describe("mergeCompletionFallbackSuggestions", () => {
+  it("keeps the source-priority prefix when the final completion union is bounded", () => {
+    expect(limitCompletionSuggestions(["join", "lsp", "cached"], 2)).toEqual([
+      "join",
+      "lsp",
+    ]);
+  });
+
   it("keeps function overloads with distinct signatures", () => {
     expect(
       mergeCompletionFallbackSuggestions(

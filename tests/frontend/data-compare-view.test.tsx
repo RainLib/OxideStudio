@@ -3,9 +3,13 @@
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataCompareView } from "@/components/workspace/DataCompareView";
+import { tableService } from "@/services/tauri";
+import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
+import type { TableDataCompareResult } from "@/services/tauri";
+import compareResultFixture from "../fixtures/table-data-compare-result.json";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -17,6 +21,7 @@ describe("DataCompareView", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
+    useConnectionStore.setState({ connections: [] });
     useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
     const leftId = useTabStore.getState().createTab("table", "Before");
     const rightId = useTabStore.getState().createTab("table", "After");
@@ -92,5 +97,128 @@ describe("DataCompareView", () => {
     expect(container.textContent).toContain("Changed 0");
     expect(container.textContent).toContain("Equal 1");
     expect(container.textContent).not.toContain("id=1");
+  });
+
+  it("keeps the full-compare IPC fixture bounded while totals remain exact", () => {
+    const result = compareResultFixture as TableDataCompareResult;
+    expect(result.addedCount).toBe(2_500);
+    expect(result.modifiedCount).toBe(1_400);
+    expect(result.detailLimitPerStatus).toBe(1_000);
+    expect(result.detailsTruncated).toBe(true);
+    expect(result.added).toHaveLength(1);
+    expect(result.modified).toHaveLength(1);
+  });
+
+  it("keeps full-compare totals exact when the host returns a bounded detail preview", async () => {
+    const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
+      (tab) => tab.type === "table",
+    );
+    if (!leftTab || !rightTab) throw new Error("Expected source table tabs");
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === leftTab.id
+          ? { ...tab, connectionId: "left", databaseName: "app", schemaName: "public", tableName: "users" }
+          : tab.id === rightTab.id
+            ? { ...tab, connectionId: "right", databaseName: "app", schemaName: "public", tableName: "users" }
+            : tab.type === "data_compare"
+              ? {
+                  ...tab,
+                  dataCompareLeft: tab.dataCompareLeft && {
+                    ...tab.dataCompareLeft,
+                    connectionId: "left",
+                    databaseName: "app",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                  dataCompareRight: tab.dataCompareRight && {
+                    ...tab.dataCompareRight,
+                    connectionId: "right",
+                    databaseName: "app",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                }
+            : tab,
+      ),
+    }));
+    useConnectionStore.setState({
+      connections: [
+        { id: "left", name: "Left", driver: "postgresql", connectionUrl: "postgresql://left" },
+        { id: "right", name: "Right", driver: "postgresql", connectionUrl: "postgresql://right" },
+      ] as never,
+    });
+    const compare = vi.spyOn(tableService, "compareTableDataFull").mockResolvedValue({
+      added: [{ key: "1", values: { id: 1, score: 100 } }],
+      removed: [],
+      modified: [],
+      addedCount: 2_500,
+      removedCount: 0,
+      modifiedCount: 0,
+      equalCount: 42,
+      sourceRowCount: 2_542,
+      targetRowCount: 42,
+      comparedKeyCount: 2_542,
+      batchSize: 1_000,
+      detailLimitPerStatus: 1_000,
+      detailsTruncated: true,
+    });
+
+    await act(async () => {
+      root.render(<DataCompareView />);
+    });
+    const button = [...container.querySelectorAll("button")].find((item) =>
+      item.textContent?.includes("Compare full tables"),
+    );
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(compare).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("Left only 2,500");
+    expect(container.textContent).toContain("Showing up to 1,000 details per status; totals remain exact.");
+    expect(container.textContent).toContain("Difference details are limited to 1,000 rows per status. Counts above remain exact.");
+    compare.mockRestore();
+  });
+
+  it("requires the complete shared primary key before enabling full-table compare", async () => {
+    const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
+      (tab) => tab.type === "table",
+    );
+    if (!leftTab || !rightTab) throw new Error("Expected source table tabs");
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === leftTab.id
+          ? { ...tab, connectionId: "left", databaseName: "app", schemaName: "public", tableName: "users" }
+          : tab.id === rightTab.id
+            ? { ...tab, connectionId: "right", databaseName: "app", schemaName: "public", tableName: "users" }
+            : tab.type === "data_compare"
+              ? {
+                  ...tab,
+                  dataCompareLeft: tab.dataCompareLeft && { ...tab.dataCompareLeft, connectionId: "left", databaseName: "app", schemaName: "public", objectName: "users" },
+                  dataCompareRight: tab.dataCompareRight && { ...tab.dataCompareRight, connectionId: "right", databaseName: "app", schemaName: "public", objectName: "users" },
+                }
+              : tab,
+      ),
+    }));
+    useConnectionStore.setState({
+      connections: [
+        { id: "left", name: "Left", driver: "postgresql", connectionUrl: "postgresql://left" },
+        { id: "right", name: "Right", driver: "postgresql", connectionUrl: "postgresql://right" },
+      ] as never,
+    });
+    await act(async () => {
+      root.render(<DataCompareView />);
+    });
+    const fullCompare = () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((item) => item.textContent?.includes("Compare full tables"));
+    expect(fullCompare()?.disabled).toBe(false);
+
+    const key = container.querySelector<HTMLInputElement>(
+      'aside input[type="checkbox"]',
+    );
+    await act(async () => key?.click());
+    expect(fullCompare()?.disabled).toBe(true);
+    expect(container.textContent).toContain("complete shared primary key");
   });
 });

@@ -1,0 +1,24 @@
+{
+  "added": [
+    { "key": "id=1", "values": { "id": 1, "score": 100 } }
+  ],
+  "removed": [],
+  "modified": [
+    {
+      "key": "id=2",
+      "sourceValues": { "id": 2, "score": 20 },
+      "targetValues": { "id": 2, "score": 21 },
+      "changedColumns": ["score"]
+    }
+  ],
+  "addedCount": 2500,
+  "removedCount": 3,
+  "modifiedCount": 1400,
+  "equalCount": 42,
+  "sourceRowCount": 3942,
+  "targetRowCount": 1445,
+  "comparedKeyCount": 3945,
+  "batchSize": 1000,
+  "detailLimitPerStatus": 1000,
+  "detailsTruncated": true
+}

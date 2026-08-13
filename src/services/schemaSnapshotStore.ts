@@ -17,16 +17,24 @@ export interface SchemaSnapshotIdentity {
   driver: DatabaseDriver;
   databaseName?: string | null;
   schemaName: string;
+  /**
+   * Optional UI origin only. A table-initiated migration still captures the
+   * containing schema so foreign keys and dependent relations are reviewed.
+   * It is intentionally not sent to the snapshot backend or persistence key.
+   */
+  tableName?: string | null;
 }
 
 export function schemaSnapshotParentId(identity: SchemaSnapshotIdentity) {
-  return `oxide:schema-snapshots:v1:${encodeURIComponent(JSON.stringify([
-    identity.projectId,
-    identity.connectionId,
-    identity.driver,
-    identity.databaseName || null,
-    identity.schemaName,
-  ]))}`;
+  return `oxide:schema-snapshots:v1:${encodeURIComponent(
+    JSON.stringify([
+      identity.projectId,
+      identity.connectionId,
+      identity.driver,
+      identity.databaseName || null,
+      identity.schemaName,
+    ]),
+  )}`;
 }
 
 export async function captureLiveSchemaSnapshot(
@@ -127,7 +135,9 @@ function parseSnapshotResource(resource: Resource): SchemaSnapshot | null {
   return snapshot as SchemaSnapshot;
 }
 
-function identityFromSnapshot(snapshot: SchemaSnapshot): SchemaSnapshotIdentity {
+function identityFromSnapshot(
+  snapshot: SchemaSnapshot,
+): SchemaSnapshotIdentity {
   return {
     projectId: snapshot.projectId,
     connectionId: snapshot.connectionId,

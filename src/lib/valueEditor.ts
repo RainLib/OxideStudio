@@ -1,5 +1,15 @@
 export type ValueEditorKind =
-  "text" | "json" | "array" | "date" | "binary" | "number" | "boolean";
+  | "text"
+  | "json"
+  | "xml"
+  | "map"
+  | "array"
+  | "image"
+  | "geometry"
+  | "date"
+  | "binary"
+  | "number"
+  | "boolean";
 
 export type ValueEditorState = "unloaded" | "value" | "empty" | "null";
 
@@ -23,8 +33,12 @@ export type JsonPreviewResult =
 /** Keep inspection parsing bounded so a cell preview cannot stall the editor. */
 export const JSON_TREE_PREVIEW_MAX_CHARACTERS = 1_000_000;
 
-const JSON_TYPE = /\b(jsonb?|object|map|document)\b/i;
+const JSON_TYPE = /\b(jsonb?|object|document)\b/i;
+const XML_TYPE = /\b(xml|xmltype|sqlxml)\b/i;
+const MAP_TYPE = /\b(hstore|map)\b/i;
 const ARRAY_TYPE = /(?:\[\]\s*$|\barray\b)/i;
+const IMAGE_TYPE = /\b(image|picture)\b/i;
+const GEOMETRY_TYPE = /\b(geometry|geography|point|linestring|polygon|multipolygon|multilinestring|multipoint)\b/i;
 const BINARY_TYPE =
   /\b(bytea|binary|varbinary|tinyblob|blob|mediumblob|longblob|raw)\b/i;
 const DATE_TYPE = /\b(date|time|timestamp|datetime|timestamptz|timetz)\b/i;
@@ -41,6 +55,10 @@ export function inferValueEditorKind(
 ): ValueEditorKind {
   const normalizedType = columnType?.trim() || "";
   if (ARRAY_TYPE.test(normalizedType)) return "array";
+  if (MAP_TYPE.test(normalizedType)) return "map";
+  if (XML_TYPE.test(normalizedType)) return "xml";
+  if (IMAGE_TYPE.test(normalizedType)) return "image";
+  if (GEOMETRY_TYPE.test(normalizedType)) return "geometry";
   if (JSON_TYPE.test(normalizedType)) return "json";
   if (BINARY_TYPE.test(normalizedType)) return "binary";
   if (DATE_TYPE.test(normalizedType)) return "date";
@@ -71,7 +89,7 @@ export function valueEditorDraft(
   kind: ValueEditorKind,
 ): string {
   if (value === undefined || value === null) return "";
-  if (kind === "json" || typeof value === "object") {
+  if (kind === "json" || (kind === "map" && typeof value === "object")) {
     try {
       return JSON.stringify(value, null, 2);
     } catch {
@@ -123,6 +141,12 @@ export function parseValueEditorDraft(options: {
       };
     }
   }
+
+  // XML is retained as source text. The preview parser below is deliberately
+  // inspection-only: it does not normalize entities, namespaces, whitespace,
+  // or a database-specific XML representation before staging the update.
+  if (kind === "xml") return { ok: true, value: draft };
+  if (kind === "image" || kind === "geometry") return { ok: true, value: draft };
 
   if (kind === "array") {
     const preview = parseArrayPreview(draft);
@@ -286,6 +310,252 @@ export function parseArrayPreview(draft: string): JsonPreviewResult {
   }
 }
 
+/**
+ * Parses map-shaped cells strictly for the read-only tree. Staging preserves
+ * the source text because hstore-like syntaxes have database-specific casts
+ * and escaping rules that the application must not rewrite.
+ */
+export function parseMapPreview(draft: string): JsonPreviewResult {
+  if (draft.length > JSON_TREE_PREVIEW_MAX_CHARACTERS) {
+    return {
+      ok: false,
+      error: "Map value is too large for the tree preview. Use the text view instead.",
+    };
+  }
+  const input = draft.trim();
+  if (input.startsWith("{")) {
+    try {
+      const value = JSON.parse(input);
+      return value && !Array.isArray(value) && typeof value === "object"
+        ? { ok: true, value }
+        : { ok: false, error: "The JSON value is not an object map." };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Invalid JSON map: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+  try {
+    return { ok: true, value: parseHstoreLiteral(input) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Bounded XML tokenizer for the read-only value tree. This is intentionally
+ * not a DOM parser: no external entities, DTDs, stylesheets, or network work
+ * can be activated while inspecting a database cell.
+ */
+export function parseXmlPreview(draft: string): JsonPreviewResult {
+  if (draft.length > JSON_TREE_PREVIEW_MAX_CHARACTERS) {
+    return { ok: false, error: "XML is too large for the tree preview. Use the text view instead." };
+  }
+  if (/<!DOCTYPE|<!ENTITY/i.test(draft)) {
+    return { ok: false, error: "XML declarations with DTD or entity definitions are not shown in the tree preview." };
+  }
+  const root: { elements: unknown[] } = { elements: [] };
+  const stack: Array<{ name: string; node: Record<string, unknown>; children: unknown[] }> = [];
+  const token = /<([^>]+)>|([^<]+)/g;
+  let cursor = 0;
+  let nodes = 0;
+  let match: RegExpExecArray | null;
+  while ((match = token.exec(draft))) {
+    if (match.index !== cursor) return { ok: false, error: "Invalid XML markup." };
+    cursor = token.lastIndex;
+    const markup = match[1];
+    const text = match[2];
+    if (text !== undefined) {
+      const value = text.trim();
+      if (value) {
+        if (!stack.length) return { ok: false, error: "Text must be contained by an XML element." };
+        stack[stack.length - 1]!.children.push({ "#text": value });
+      }
+      continue;
+    }
+    const source = markup!.trim();
+    if (source.startsWith("?") || source.startsWith("!--")) continue;
+    if (source.startsWith("/")) {
+      const name = source.slice(1).trim();
+      const open = stack.pop();
+      if (!open || open.name !== name) return { ok: false, error: `Mismatched XML closing tag: ${name}.` };
+      continue;
+    }
+    if (source.startsWith("!")) return { ok: false, error: "Unsupported XML declaration in tree preview." };
+    const selfClosing = source.endsWith("/");
+    const element = (selfClosing ? source.slice(0, -1) : source).trim();
+    const name = element.match(/^([A-Za-z_][\w:.-]*)/);
+    if (!name) return { ok: false, error: "Invalid XML element name." };
+    if (++nodes > 100_000) return { ok: false, error: "XML exceeds the 100,000-node preview limit." };
+    const attributes: Record<string, string> = {};
+    const attributeSource = element.slice(name[0].length).trim();
+    const attribute = /([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+    let attributeMatch: RegExpExecArray | null;
+    let attributeCursor = 0;
+    while ((attributeMatch = attribute.exec(attributeSource))) {
+      if (!/^\s*$/.test(attributeSource.slice(attributeCursor, attributeMatch.index))) {
+        return { ok: false, error: "Invalid XML attribute syntax." };
+      }
+      attributes[attributeMatch[1]!] = attributeMatch[2] ?? attributeMatch[3] ?? "";
+      attributeCursor = attribute.lastIndex;
+    }
+    if (!/^\s*$/.test(attributeSource.slice(attributeCursor))) {
+      return { ok: false, error: "Invalid XML attribute syntax." };
+    }
+    const children: unknown[] = [];
+    const node: Record<string, unknown> = Object.keys(attributes).length ? { "@attributes": attributes, children } : { children };
+    const wrapped = { [name[0]]: node };
+    const parent = stack[stack.length - 1];
+    (parent ? parent.children : root.elements).push(wrapped);
+    if (!selfClosing) {
+      if (stack.length >= 64) return { ok: false, error: "XML nesting exceeds the 64-level preview limit." };
+      stack.push({ name: name[0], node, children });
+    }
+  }
+  if (cursor !== draft.length || stack.length) return { ok: false, error: "Unclosed or invalid XML element." };
+  if (root.elements.length !== 1) return { ok: false, error: "XML requires exactly one root element." };
+  return { ok: true, value: root.elements[0] };
+}
+
+export type ImagePreviewResult =
+  | { ok: true; dataUrl: string }
+  | { ok: false; error: string };
+
+/**
+ * Accept only inert, raster data URLs. In particular SVG is intentionally not
+ * accepted because database content must not become executable document
+ * markup inside the desktop renderer.
+ */
+export function parseImagePreview(draft: string): ImagePreviewResult {
+  const value = draft.trim();
+  if (value.length > 8 * 1024 * 1024) {
+    return { ok: false, error: "Image source is too large for the inline preview." };
+  }
+  const match = value.match(/^data:image\/(png|jpeg|gif|webp|bmp);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) {
+    return {
+      ok: false,
+      error: "Use a raster data URL (PNG, JPEG, GIF, WebP, or BMP) to preview this image value.",
+    };
+  }
+  const payload = match[2]!.replace(/\s/g, "");
+  if (payload.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) {
+    return { ok: false, error: "Image data URL contains invalid base64 data." };
+  }
+  return { ok: true, dataUrl: `data:image/${match[1]!.toLowerCase()};base64,${payload}` };
+}
+
+/**
+ * Provides structural, read-only WKT inspection without invoking a geometry
+ * library or changing the database's original textual representation.
+ */
+export function parseGeometryPreview(draft: string): JsonPreviewResult {
+  if (draft.length > JSON_TREE_PREVIEW_MAX_CHARACTERS) {
+    return { ok: false, error: "Geometry is too large for the tree preview. Use the text view instead." };
+  }
+  const source = draft.trim();
+  const match = source.match(/^(?:SRID=(\d+);)?\s*(POINT|LINESTRING|POLYGON|MULTIPOINT|MULTILINESTRING|MULTIPOLYGON|GEOMETRYCOLLECTION)\s*(EMPTY|\(.+\))$/i);
+  if (!match) return { ok: false, error: "Expected WKT geometry text (for example POINT(1 2))." };
+  const body = match[3]!.toUpperCase() === "EMPTY" ? "" : match[3]!;
+  const coordinateTokens = body.match(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/gi) || [];
+  if (coordinateTokens.length > 100_000) {
+    return { ok: false, error: "Geometry exceeds the 100,000-coordinate preview limit." };
+  }
+  let currentDepth = 0;
+  let depth = 0;
+  for (const character of body) {
+    if (character === "(") currentDepth += 1;
+    if (character === ")") currentDepth -= 1;
+    depth = Math.max(depth, currentDepth);
+  }
+  if (depth > 64) return { ok: false, error: "Geometry nesting exceeds the 64-level preview limit." };
+  if (body && !balancedGeometryParens(body)) return { ok: false, error: "Geometry parentheses are unbalanced." };
+  return {
+    ok: true,
+    value: {
+      type: match[2]!.toUpperCase(),
+      ...(match[1] ? { srid: match[1] } : {}),
+      empty: body.length === 0,
+      coordinateCount: coordinateTokens.length,
+      coordinates: coordinateTokens.slice(0, 128),
+      ...(coordinateTokens.length > 128 ? { coordinatesTruncated: true } : {}),
+    },
+  };
+}
+
+function balancedGeometryParens(source: string) {
+  let depth = 0;
+  for (const character of source) {
+    if (character === "(") depth += 1;
+    if (character === ")" && --depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+function parseHstoreLiteral(source: string): Record<string, string | null> {
+  let index = 0;
+  let pairCount = 0;
+  const result: Record<string, string | null> = {};
+
+  const skipSpace = () => {
+    while (/\s/.test(source[index] || "")) index += 1;
+  };
+  const readQuoted = () => {
+    index += 1;
+    let value = "";
+    while (index < source.length) {
+      const char = source[index++]!;
+      if (char === "\\") {
+        if (index >= source.length) throw new Error("Invalid hstore escape sequence.");
+        value += source[index++]!;
+      } else if (char === '"') {
+        return value;
+      } else {
+        value += char;
+      }
+    }
+    throw new Error("Unterminated quoted hstore value.");
+  };
+  const readToken = (terminator: "=>" | ",") => {
+    skipSpace();
+    if (source[index] === '"') return readQuoted();
+    const start = index;
+    while (index < source.length && !source.startsWith(terminator, index)) index += 1;
+    const value = source.slice(start, index).trim();
+    if (!value) throw new Error("hstore contains an empty unquoted value.");
+    return value;
+  };
+
+  skipSpace();
+  if (!source) return result;
+  while (index < source.length) {
+    if (++pairCount > 100_000) throw new Error("Map exceeds the 100,000-entry preview limit.");
+    const key = readToken("=>");
+    if (!source.startsWith("=>", index)) throw new Error("hstore entries must use => between key and value.");
+    index += 2;
+    skipSpace();
+    const value = source.slice(index, index + 4).toUpperCase() === "NULL" &&
+      !/[A-Za-z0-9_]/.test(source[index + 4] || "")
+      ? (index += 4, null)
+      : readToken(",");
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      throw new Error(`hstore contains duplicate key ${JSON.stringify(key)}.`);
+    }
+    result[key] = value;
+    skipSpace();
+    if (index >= source.length) return result;
+    if (source[index] !== ",") throw new Error("hstore entries must be separated by commas.");
+    index += 1;
+    skipSpace();
+    if (index >= source.length) throw new Error("hstore cannot end with a comma.");
+  }
+  return result;
+}
+
 function parsePostgresArrayLiteral(source: string): unknown[] {
   const dimensions = source.startsWith("[") ? source.indexOf("=") : -1;
   let input = source;
@@ -372,8 +642,16 @@ export function kindLabel(kind: ValueEditorKind) {
   switch (kind) {
     case "json":
       return "JSON";
+    case "xml":
+      return "XML";
+    case "map":
+      return "Map";
     case "array":
       return "Array";
+    case "image":
+      return "Image";
+    case "geometry":
+      return "Geometry";
     case "date":
       return "Date / time";
     case "binary":

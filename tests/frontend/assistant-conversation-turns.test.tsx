@@ -4,6 +4,30 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const renderMocks = vi.hoisted(() => ({
+  messageContent: vi.fn(),
+}));
+
+vi.mock(
+  "@/components/workspace/assistant/AssistantMessageContent",
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import("@/components/workspace/assistant/AssistantMessageContent")
+      >();
+    return {
+      ...original,
+      AssistantMessageContent: (
+        props: Parameters<typeof original.AssistantMessageContent>[0],
+      ) => {
+        renderMocks.messageContent(props.content);
+        return <original.AssistantMessageContent {...props} />;
+      },
+    };
+  },
+);
+
 import { createAssistantTurn, type AssistantTurn } from "@/ai/assistant/turns";
 import { AssistantConversation } from "@/components/workspace/assistant/AssistantConversation";
 
@@ -14,6 +38,7 @@ describe("AssistantConversation turns", () => {
   let root: Root;
 
   beforeEach(() => {
+    renderMocks.messageContent.mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -22,6 +47,148 @@ describe("AssistantConversation turns", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("does not rerender unchanged completed turns when the composer changes or a turn is appended", async () => {
+    const completedTurn: AssistantTurn = {
+      ...createAssistantTurn({
+        id: "turn-completed",
+        requestId: "request-completed",
+        projectId: "project-1",
+        requestedMode: "agent",
+        mode: "agent",
+        userMessage: "Explain the active SQL",
+        now: 1,
+      }),
+      status: "completed",
+      final: {
+        content: "The query reads one indexed row.",
+        attachments: [],
+        createdAt: 2,
+      },
+    };
+    const onUsePrompt = vi.fn();
+    const onExecuteAttachment = vi.fn(async (request) => ({
+      actionId: request.id,
+      status: "success" as const,
+      code: "OK" as const,
+    }));
+    const renderConversation = (
+      turns: AssistantTurn[],
+      composerDraft: string,
+      usePrompt: (prompt: string) => void,
+    ) => (
+      <div data-composer-draft={composerDraft}>
+        <AssistantConversation
+          turns={turns}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={usePrompt}
+          onExecuteAttachment={onExecuteAttachment}
+        />
+      </div>
+    );
+
+    await act(async () => {
+      root.render(renderConversation([completedTurn], "", onUsePrompt));
+    });
+    expect(renderMocks.messageContent).toHaveBeenCalledTimes(1);
+
+    const latestUsePrompt = vi.fn();
+    await act(async () => {
+      root.render(
+        renderConversation([completedTurn], "typed draft", latestUsePrompt),
+      );
+    });
+    expect(renderMocks.messageContent).toHaveBeenCalledTimes(1);
+
+    const appendedTurn = createAssistantTurn({
+      id: "turn-appended",
+      requestId: "request-appended",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Inspect the next query",
+      now: 3,
+    });
+    await act(async () => {
+      root.render(
+        renderConversation(
+          [completedTurn, appendedTurn],
+          "typed draft",
+          latestUsePrompt,
+        ),
+      );
+    });
+    expect(renderMocks.messageContent).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-assistant-turn-id="turn-completed"] [aria-label="Use prompt again"]',
+        )
+        ?.click();
+    });
+    expect(onUsePrompt).not.toHaveBeenCalled();
+    expect(latestUsePrompt).toHaveBeenCalledWith("Explain the active SQL");
+  });
+
+  it("windows completed history while keeping older active turns mounted", async () => {
+    const turns = Array.from({ length: 45 }, (_, index) => ({
+      ...createAssistantTurn({
+        id: `turn-${index}`,
+        requestId: `request-${index}`,
+        projectId: "project-1",
+        requestedMode: "agent" as const,
+        mode: "agent" as const,
+        userMessage: `Prompt ${index}`,
+        now: index + 1,
+      }),
+      status: "completed" as const,
+      final: {
+        content: `Answer ${index}`,
+        attachments: [],
+        createdAt: index + 2,
+      },
+    }));
+    turns[2] = { ...turns[2], status: "awaiting_approval", final: undefined };
+
+    await act(async () => {
+      root.render(
+        <AssistantConversation
+          turns={turns}
+          isResponding={false}
+          pendingLabel="Working"
+          onUsePrompt={vi.fn()}
+          onExecuteAttachment={vi.fn(async (request) => ({
+            actionId: request.id,
+            status: "success" as const,
+            code: "OK" as const,
+          }))}
+        />,
+      );
+    });
+
+    expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(
+      31,
+    );
+    expect(
+      container.querySelector('[data-assistant-turn-id="turn-2"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-assistant-turn-id="turn-1"]'),
+    ).toBeNull();
+
+    const showEarlier = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Show 14 earlier assistant turns"]',
+    );
+    expect(showEarlier).not.toBeNull();
+    await act(async () => showEarlier?.click());
+
+    expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(
+      45,
+    );
+    expect(container.querySelector("[data-assistant-history-window]")).toBeNull();
   });
 
   it("keeps pending and answered clarifications out of the conversation transcript", async () => {
@@ -95,8 +262,12 @@ describe("AssistantConversation turns", () => {
       '[aria-label="Assistant process"]',
     );
     expect(process).not.toBeNull();
-    expect(container.textContent).not.toContain("Which data source should I use?");
-    expect(container.textContent).not.toContain("Which region should I inspect?");
+    expect(container.textContent).not.toContain(
+      "Which data source should I use?",
+    );
+    expect(container.textContent).not.toContain(
+      "Which region should I inspect?",
+    );
     expect(container.textContent).not.toContain("Warehouse");
     expect(container.textContent).not.toContain(
       "I will inspect the selected source after your answer.",
@@ -365,9 +536,7 @@ describe("AssistantConversation turns", () => {
       fileLink?.click();
       await Promise.resolve();
     });
-    expect(onOpenProjectFile).toHaveBeenCalledWith(
-      "sql/ai_model_select.sql",
-    );
+    expect(onOpenProjectFile).toHaveBeenCalledWith("sql/ai_model_select.sql");
   });
 
   it("collapses all Agent activity into one Codex-style disclosure", async () => {
@@ -485,7 +654,9 @@ describe("AssistantConversation turns", () => {
         ?.querySelector("[data-assistant-process-chevron]")
         ?.getAttribute("class"),
     ).toContain("opacity-0");
-    expect(toolActivity?.textContent).not.toContain("query.runReadOnly · 10 rows");
+    expect(toolActivity?.textContent).not.toContain(
+      "query.runReadOnly · 10 rows",
+    );
     expect(toolActivity?.querySelector("pre")).toBeNull();
 
     await act(async () => {

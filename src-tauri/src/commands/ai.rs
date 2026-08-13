@@ -1,8 +1,9 @@
 use crate::{
     ai_cli::{
         codebuddy, codex, setup, CliAuthenticationLaunchResult, CliCommandInfo,
-        CliConnectionTestResult, CliDetectionResult, CliEnvironmentRequest, CliInstallResult,
-        CliModelInfo, CliProfileRequest, CliProviderConfig, CliProviderKind,
+        CliConnectionTestResult, CliDetectionResult, CliEnvironmentRequest,
+        CliEnvironmentSaveResult, CliInstallationLaunchResult, CliModelInfo, CliProfileRequest,
+        CliProviderConfig, CliProviderKind,
     },
     core::{
         cli_provider_secret::{load_cli_environment, save_cli_environment},
@@ -22,6 +23,38 @@ use tauri::{AppHandle, State};
 use tokio::sync::{watch, Mutex};
 
 const MAX_EARLY_CANCELLATIONS: usize = 256;
+
+/// Provider CLIs produce rich but provider-specific diagnostics. Preserve the
+/// raw diagnostic as the response message while exposing a small, stable code
+/// family to the desktop UI so recovery does not depend on English wording.
+fn cli_operation_error_code(fallback: &'static str, diagnostic: &str) -> &'static str {
+    let value = diagnostic.to_ascii_lowercase();
+    if value.contains("not authenticated")
+        || value.contains("not logged in")
+        || value.contains("login required")
+        || value.contains("sign in")
+        || value.contains("unauthorized")
+        || value.contains("authentication failed")
+    {
+        "AI_CLI_AUTH_REQUIRED"
+    } else if value.contains("not installed")
+        || value.contains("not found")
+        || value.contains("no such file")
+        || value.contains("failed to start")
+    {
+        "AI_CLI_NOT_INSTALLED"
+    } else if value.contains("timed out") || value.contains("timeout") {
+        "AI_CLI_TIMEOUT"
+    } else if value.contains("acp")
+        || value.contains("app-server")
+        || value.contains("protocol")
+        || value.contains("stream-json")
+    {
+        "AI_CLI_PROTOCOL_ERROR"
+    } else {
+        fallback
+    }
+}
 
 #[derive(Default)]
 struct AiCancellationInner {
@@ -195,7 +228,7 @@ async fn cli_environment(
 pub async fn ai_cli_set_environment(
     app: AppHandle,
     request: CliEnvironmentRequest,
-) -> Result<Response<Vec<String>>, String> {
+) -> Result<Response<CliEnvironmentSaveResult>, String> {
     match save_cli_environment(
         &app,
         request.provider.as_str(),
@@ -204,7 +237,11 @@ pub async fn ai_cli_set_environment(
     )
     .await
     {
-        Ok(keys) => Ok(Response::ok(keys)),
+        Ok(keys) => Ok(Response::ok(CliEnvironmentSaveResult {
+            keys,
+            // Opaque cache invalidation only; never derive this from secrets.
+            revision: uuid::Uuid::new_v4().to_string(),
+        })),
         Err(error) => Ok(Response::err(
             "AI_CLI_ENVIRONMENT_ERROR",
             &error.to_string(),
@@ -258,10 +295,13 @@ pub async fn ai_cli_list_models(
     };
     match result {
         Ok(models) => Ok(Response::ok(models)),
-        Err(error) => Ok(Response::err(
-            "AI_CLI_MODEL_DISCOVERY_ERROR",
-            &error.to_string(),
-        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_MODEL_DISCOVERY_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
 }
 
@@ -275,26 +315,30 @@ pub async fn ai_cli_list_efforts(
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
     let result = match config.kind {
-        CliProviderKind::CodexCli => {
-            codex::list_models(&config, &environment)
-                .await
-                .map(|models| {
-                    models
-                        .into_iter()
-                        .find(|model| model.id == config.model || model.id == "default")
-                        .map(|model| model.reasoning_efforts)
-                        .unwrap_or_default()
-                })
-        }
+        CliProviderKind::CodexCli => codex::list_models(&config, &environment)
+            .await
+            .map(|models| model_efforts_for_selection(&models, &config.model)),
         CliProviderKind::CodebuddyCli => codebuddy::list_efforts(&config, &environment).await,
     };
     match result {
         Ok(efforts) => Ok(Response::ok(efforts)),
-        Err(error) => Ok(Response::err(
-            "AI_CLI_EFFORT_DISCOVERY_ERROR",
-            &error.to_string(),
-        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_EFFORT_DISCOVERY_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
+}
+
+fn model_efforts_for_selection(models: &[CliModelInfo], requested_model: &str) -> Vec<String> {
+    models
+        .iter()
+        .find(|model| model.id == requested_model)
+        .or_else(|| models.iter().find(|model| model.id == "default"))
+        .map(|model| model.reasoning_efforts.clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -312,10 +356,13 @@ pub async fn ai_cli_list_commands(
     };
     match result {
         Ok(commands) => Ok(Response::ok(commands)),
-        Err(error) => Ok(Response::err(
-            "AI_CLI_COMMAND_DISCOVERY_ERROR",
-            &error.to_string(),
-        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_COMMAND_DISCOVERY_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
 }
 
@@ -334,7 +381,13 @@ pub async fn ai_cli_test_provider(
     };
     match result {
         Ok(result) => Ok(Response::ok(result)),
-        Err(error) => Ok(Response::err("AI_CLI_TEST_ERROR", &error.to_string())),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_TEST_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
 }
 
@@ -342,10 +395,29 @@ pub async fn ai_cli_test_provider(
 pub async fn ai_cli_install_provider(
     app: AppHandle,
     provider: CliProviderKind,
-) -> Result<Response<CliInstallResult>, String> {
-    match setup::install_provider(&app, provider).await {
+) -> Result<Response<CliInstallationLaunchResult>, String> {
+    match setup::begin_installation(&app, provider).await {
         Ok(result) => Ok(Response::ok(result)),
-        Err(error) => Ok(Response::err("AI_CLI_INSTALL_ERROR", &error.to_string())),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_INSTALL_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn ai_cli_installation_status(
+    session_id: String,
+) -> Result<Response<crate::ai_cli::CliInstallationStatus>, String> {
+    match setup::installation_status(&session_id).await {
+        Ok(status) => Ok(Response::ok(status)),
+        Err(error) => Ok(Response::err(
+            "AI_CLI_INSTALL_STATUS_ERROR",
+            &error.to_string(),
+        )),
     }
 }
 
@@ -361,10 +433,13 @@ pub async fn ai_cli_begin_authentication(
     };
     match setup::begin_authentication(&app, &config, &environment, method_id.as_deref()).await {
         Ok(result) => Ok(Response::ok(result)),
-        Err(error) => Ok(Response::err(
-            "AI_CLI_AUTH_LAUNCH_ERROR",
-            &error.to_string(),
-        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_AUTH_LAUNCH_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
 }
 
@@ -379,10 +454,13 @@ pub async fn ai_cli_list_authentication_methods(
     };
     match setup::authentication_methods(&config, &environment).await {
         Ok(methods) => Ok(Response::ok(methods)),
-        Err(error) => Ok(Response::err(
-            "AI_CLI_AUTH_METHODS_ERROR",
-            &error.to_string(),
-        )),
+        Err(error) => {
+            let diagnostic = error.to_string();
+            Ok(Response::err(
+                cli_operation_error_code("AI_CLI_AUTH_METHODS_ERROR", &diagnostic),
+                &diagnostic,
+            ))
+        }
     }
 }
 
@@ -851,6 +929,47 @@ mod tests {
             provider_endpoint_url("http://localhost:11434/v1/completions", "chat/completions")
                 .unwrap(),
             "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn cli_effort_lookup_prefers_the_requested_model_over_synthetic_default() {
+        let mut default = CliModelInfo::new("default", "Default", true);
+        default.reasoning_efforts = vec!["low".to_string(), "medium".to_string()];
+        let mut selected = CliModelInfo::new("gpt-selected", "GPT selected", false);
+        selected.reasoning_efforts = vec!["high".to_string(), "xhigh".to_string()];
+        let models = vec![default, selected];
+
+        assert_eq!(
+            model_efforts_for_selection(&models, "gpt-selected"),
+            ["high", "xhigh"]
+        );
+        assert_eq!(
+            model_efforts_for_selection(&models, "missing"),
+            ["low", "medium"]
+        );
+    }
+
+    #[test]
+    fn classifies_cli_recovery_errors_without_exposing_provider_wording_to_ui_logic() {
+        assert_eq!(
+            cli_operation_error_code("AI_CLI_TEST_ERROR", "CodeBuddy Code is not authenticated"),
+            "AI_CLI_AUTH_REQUIRED"
+        );
+        assert_eq!(
+            cli_operation_error_code("AI_CLI_MODEL_DISCOVERY_ERROR", "failed to start codex"),
+            "AI_CLI_NOT_INSTALLED"
+        );
+        assert_eq!(
+            cli_operation_error_code(
+                "AI_CLI_COMMAND_DISCOVERY_ERROR",
+                "ACP capability discovery timed out"
+            ),
+            "AI_CLI_TIMEOUT"
+        );
+        assert_eq!(
+            cli_operation_error_code("AI_CLI_TEST_ERROR", "unexpected provider output"),
+            "AI_CLI_TEST_ERROR"
         );
     }
 

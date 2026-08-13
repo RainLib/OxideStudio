@@ -3,7 +3,7 @@ use crate::core::{
     manager::ConnectionManager,
     protocol::{
         ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-        QueryResult, Response, TableInfo,
+        QueryResult, Response, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
     },
     statement::{validate_sql_filter_expression, StatementScanDialect},
     store::{MetaStore, Resource},
@@ -77,6 +77,14 @@ const MAX_TRANSFER_ROWS: u32 = 10_000;
 const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
 const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
 const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
+/// A full table compare can inspect up to 100,000 rows per side, but its IPC
+/// response must not materialize every difference in the renderer. Totals are
+/// always exact; this only bounds the row-level preview returned to the UI.
+const MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS: usize = 1_000;
+/// Parameterized query drivers deliberately cap a result set at this value.
+/// Keep full-compare pages within that contract so a 5,000-row request can
+/// never be silently shortened by a driver and mistaken for the final page.
+const MAX_FULL_DATA_COMPARE_BATCH_SIZE: u32 = DEFAULT_QUERY_RESULT_ROW_LIMIT as u32;
 pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://progress";
 pub const TABLE_EXPORT_PROGRESS_EVENT: &str = "table-export://progress";
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
@@ -146,14 +154,14 @@ pub struct TableDataCompareRequest {
     pub max_rows: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataCompareRow {
     pub key: String,
     pub values: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataCompareModifiedRow {
     pub key: String,
@@ -162,17 +170,23 @@ pub struct TableDataCompareModifiedRow {
     pub changed_columns: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataCompareResult {
     pub added: Vec<TableDataCompareRow>,
     pub removed: Vec<TableDataCompareRow>,
     pub modified: Vec<TableDataCompareModifiedRow>,
+    /// Exact totals. The corresponding arrays above are bounded previews.
+    pub added_count: u64,
+    pub removed_count: u64,
+    pub modified_count: u64,
     pub equal_count: u64,
     pub source_row_count: u64,
     pub target_row_count: u64,
     pub compared_key_count: u64,
     pub batch_size: u32,
+    pub detail_limit_per_status: u32,
+    pub details_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -640,6 +654,8 @@ pub struct TableDataTransferBatchTableResult {
     pub rows_transferred: u64,
     pub batches: u64,
     pub limit_reached: bool,
+    #[serde(default)]
+    pub target_rows_before: Option<u64>,
     /// Exact PostgreSQL generators synchronized by the reviewed table plan.
     #[serde(default)]
     pub identity_reseed_columns: Vec<String>,
@@ -684,6 +700,8 @@ pub struct TableDataTransferPreview {
     pub preview_rows: u32,
     pub max_rows: u32,
     pub batch_size: u32,
+    /// Read-only target count captured for append/overwrite verification.
+    pub target_rows_before: Option<u64>,
     pub target_rows_to_delete: Option<u64>,
     /// Exact target primary-key columns used as the conflict identity in
     /// upsert mode. Empty for append and overwrite plans.
@@ -744,6 +762,8 @@ pub struct TableDataTransferResult {
     pub rows_transferred: u64,
     pub batches: u64,
     pub limit_reached: bool,
+    #[serde(default)]
+    pub target_rows_before: Option<u64>,
     pub mapped_columns: Vec<TableDataTransferColumnMapping>,
     /// Exact PostgreSQL generators synchronized by the reviewed plan.
     #[serde(default)]
@@ -817,6 +837,11 @@ pub struct TableDataTransferReport {
     pub rows_transferred: u64,
     pub batches: u64,
     pub limit_reached: bool,
+    /// Read-only target count captured during the reviewed append/overwrite
+    /// plan. This makes an append verification auditable without retaining
+    /// any copied values or SQL.
+    #[serde(default)]
+    pub target_rows_before: Option<u64>,
     pub status: TableDataTransferProgressStatus,
     pub started_at: i64,
     pub finished_at: i64,
@@ -4858,6 +4883,27 @@ fn column_for<'a>(
         .ok_or_else(|| format!("Unknown column: {column}"))
 }
 
+/// Generated and hidden columns are database-owned values. They can be used
+/// to identify or filter a row, but never as an INSERT/UPDATE assignment.
+fn writable_column_for<'a>(
+    columns: &'a BTreeMap<String, ColumnInfo>,
+    column_name: &str,
+) -> Result<&'a ColumnInfo, String> {
+    let column = column_for(columns, column_name)?;
+    if column.is_hidden.is_none() || column.is_generated.is_none() {
+        return Err(format!(
+            "Column {column_name} cannot be written because generated/hidden metadata is unavailable"
+        ));
+    }
+    if column.is_hidden == Some(true) {
+        return Err(format!("Hidden column {column_name} cannot be written"));
+    }
+    if column.is_generated == Some(true) {
+        return Err(format!("Generated column {column_name} cannot be written"));
+    }
+    Ok(column)
+}
+
 fn query_parameter(column: &ColumnInfo, value: &Value) -> QueryParameter {
     QueryParameter {
         value: value.clone(),
@@ -5016,7 +5062,7 @@ fn build_insert_mutation(
     let mut params = Vec::new();
 
     for (column_name, value) in values {
-        let column = column_for(columns, column_name)?;
+        let column = writable_column_for(columns, column_name)?;
         names.push(kind.quote_identifier(column_name));
         placeholders.push(kind.parameter_placeholder(params.len() + 1, &column.data_type));
         params.push(query_parameter(column, value));
@@ -5112,13 +5158,16 @@ fn validate_insert_values(
     values: &BTreeMap<String, Value>,
 ) -> Result<(), String> {
     for (column_name, value) in values {
-        let column = column_for(columns, column_name)?;
+        let column = writable_column_for(columns, column_name)?;
         if value.is_null() && !column.is_nullable {
             return Err(format!("Required column {column_name} cannot be NULL"));
         }
     }
 
     for column in columns.values() {
+        if column.is_generated == Some(true) || column.is_hidden == Some(true) {
+            continue;
+        }
         let has_server_default = column
             .default_value
             .as_deref()
@@ -5162,7 +5211,7 @@ fn build_update_mutation(
         return Err("A column cannot use both a value and an SQL expression".to_string());
     }
     for (column_name, value) in &update.values {
-        let column = column_for(columns, column_name)?;
+        let column = writable_column_for(columns, column_name)?;
         let placeholder = kind.parameter_placeholder(params.len() + 1, &column.data_type);
         assignments.push(format!(
             "{} = {}",
@@ -5172,7 +5221,7 @@ fn build_update_mutation(
         params.push(query_parameter(column, value));
     }
     for (column_name, expression) in &update.expressions {
-        column_for(columns, column_name)?;
+        writable_column_for(columns, column_name)?;
         let dialect = match kind {
             DatabaseKind::Postgres => StatementScanDialect::Postgres,
             DatabaseKind::Mysql => StatementScanDialect::Mysql,
@@ -5602,6 +5651,7 @@ struct ResolvedTableDataTransferPlan {
     target_columns: BTreeMap<String, ColumnInfo>,
     max_rows: u32,
     batch_size: u32,
+    target_rows_before: Option<u64>,
     target_rows_to_delete: Option<u64>,
     upsert_key_columns: Vec<String>,
     identity_reseed_columns: Vec<String>,
@@ -5662,16 +5712,25 @@ async fn verify_completed_table_data_transfer(
     let target_kind = table_data_transfer_dialect(manager, &request.target).await;
     let mut verification = if request.mode != TableDataTransferMode::Overwrite {
         TableDataTransferVerification {
-            status: TableDataTransferVerificationStatus::NotAvailable,
-            expected_rows: None,
+            status: TableDataTransferVerificationStatus::NeedsReview,
+            expected_rows: if request.mode == TableDataTransferMode::Append {
+                transfer
+                    .target_rows_before
+                    .and_then(|baseline| baseline.checked_add(transfer.rows_transferred))
+            } else {
+                None
+            },
             observed_rows: None,
             identity_reseed_columns: Vec::new(),
             identity_reseed_verified: None,
-            message: if request.mode == TableDataTransferMode::Upsert {
+            message: if request.mode == TableDataTransferMode::Append {
+                "Append verification needs the reviewed target baseline and a post-commit count."
+                    .to_string()
+            } else if request.mode == TableDataTransferMode::Upsert {
                 "Row-count verification is inconclusive for upsert because existing rows may be updated."
                     .to_string()
             } else {
-                "Append verification requires a stable baseline count and is not recorded for this transfer."
+                "No deterministic row-count verification is available for this transfer."
                     .to_string()
             },
         }
@@ -5713,6 +5772,39 @@ async fn verify_completed_table_data_transfer(
         overwrite_transfer_verification(transfer.rows_transferred, observed_rows)
     };
 
+    if request.mode == TableDataTransferMode::Append {
+        let observed_rows = match target_kind.as_ref() {
+            Ok(kind) => {
+                let count_sql = kind.count_table_query(
+                    schema_option(&request.target.schema),
+                    &request.target.table,
+                    None,
+                );
+                query_target(
+                    manager,
+                    &request.target.connection_id,
+                    request.target.database.as_deref(),
+                    &count_sql,
+                )
+                .await
+                .ok()
+                .and_then(|results| {
+                    results
+                        .first()
+                        .and_then(|result| result.rows.first())
+                        .and_then(|row| row.first())
+                        .and_then(value_to_u64)
+                })
+            }
+            Err(_) => None,
+        };
+        verification = append_transfer_verification(
+            transfer.target_rows_before,
+            transfer.rows_transferred,
+            observed_rows,
+        );
+    }
+
     if transfer.identity_reseed_columns.is_empty() {
         return verification;
     }
@@ -5749,6 +5841,40 @@ async fn verify_completed_table_data_transfer(
         }
     }
     verification
+}
+
+fn append_transfer_verification(
+    baseline_rows: Option<u64>,
+    transferred_rows: u64,
+    observed_rows: Option<u64>,
+) -> TableDataTransferVerification {
+    let expected_rows = baseline_rows.and_then(|baseline| baseline.checked_add(transferred_rows));
+    match (expected_rows, observed_rows) {
+        (Some(expected), Some(observed)) if expected == observed => TableDataTransferVerification {
+            status: TableDataTransferVerificationStatus::Verified,
+            expected_rows: Some(expected), observed_rows: Some(observed),
+            identity_reseed_columns: Vec::new(), identity_reseed_verified: None,
+            message: "Post-commit target row count matches the reviewed append baseline plus copied rows.".to_string(),
+        },
+        (Some(expected), Some(observed)) => TableDataTransferVerification {
+            status: TableDataTransferVerificationStatus::NeedsReview,
+            expected_rows: Some(expected), observed_rows: Some(observed),
+            identity_reseed_columns: Vec::new(), identity_reseed_verified: None,
+            message: "The append transfer committed, but the target count differs from the reviewed baseline plus copied rows; review concurrent writes before retrying.".to_string(),
+        },
+        (Some(expected), None) => TableDataTransferVerification {
+            status: TableDataTransferVerificationStatus::NeedsReview,
+            expected_rows: Some(expected), observed_rows: None,
+            identity_reseed_columns: Vec::new(), identity_reseed_verified: None,
+            message: "The append transfer committed, but the target row count could not be verified after commit.".to_string(),
+        },
+        (None, observed) => TableDataTransferVerification {
+            status: TableDataTransferVerificationStatus::NeedsReview,
+            expected_rows: None, observed_rows: observed,
+            identity_reseed_columns: Vec::new(), identity_reseed_verified: None,
+            message: "The append transfer committed without a usable reviewed target baseline; review the target before retrying.".to_string(),
+        },
+    }
 }
 
 async fn verify_postgres_identity_reseed(
@@ -6066,6 +6192,7 @@ fn transfer_confirmation_token(
     mapped_columns: &[TableDataTransferColumnMapping],
     max_rows: u32,
     batch_size: u32,
+    target_rows_before: Option<u64>,
     target_rows_to_delete: Option<u64>,
     upsert_key_columns: &[String],
 ) -> Result<String, String> {
@@ -6077,6 +6204,7 @@ fn transfer_confirmation_token(
         "mappedColumns": mapped_columns,
         "maxRows": max_rows,
         "batchSize": batch_size,
+        "targetRowsBefore": target_rows_before,
         "targetRowsToDelete": target_rows_to_delete,
         "upsertKeyColumns": upsert_key_columns,
         "reseedIdentity": request.reseed_identity,
@@ -7119,7 +7247,10 @@ async fn resolve_table_data_transfer_plan(
         postgres_identity_reseed_columns(target_kind, &target_columns, request.reseed_identity)?;
     let max_rows = normalized_transfer_limit(request.max_rows);
     let batch_size = normalized_transfer_batch_size(request.batch_size);
-    let target_rows_to_delete = if request.mode == TableDataTransferMode::Overwrite {
+    let target_rows_before = if matches!(
+        request.mode,
+        TableDataTransferMode::Append | TableDataTransferMode::Overwrite
+    ) {
         let count_sql = target_kind.count_table_query(
             schema_option(&request.target.schema),
             &request.target.table,
@@ -7141,7 +7272,16 @@ async fn resolve_table_data_transfer_plan(
             .ok_or_else(|| {
                 "Target row count could not be verified for overwrite mode".to_string()
             })?;
-        Some(validate_table_data_transfer_overwrite_rows(count)?)
+        Some(if request.mode == TableDataTransferMode::Overwrite {
+            validate_table_data_transfer_overwrite_rows(count)?
+        } else {
+            count
+        })
+    } else {
+        None
+    };
+    let target_rows_to_delete = if request.mode == TableDataTransferMode::Overwrite {
+        target_rows_before
     } else {
         None
     };
@@ -7150,6 +7290,7 @@ async fn resolve_table_data_transfer_plan(
         &mapped_columns,
         max_rows,
         batch_size,
+        target_rows_before,
         target_rows_to_delete,
         &upsert_key_columns,
     )?;
@@ -7166,8 +7307,9 @@ async fn resolve_table_data_transfer_plan(
             upsert_key_columns.join(", ")
         ),
         TableDataTransferMode::Append => format!(
-            "Append mode adds rows to {} and does not delete or update existing rows.",
-            endpoint_label(&request.target)
+            "Append mode adds rows to {} and does not delete or update existing rows. The reviewed target baseline is {count} row(s); post-commit verification expects the baseline plus copied rows.",
+            endpoint_label(&request.target),
+            count = target_rows_before.unwrap_or_default(),
         ),
     }];
     if request.mode == TableDataTransferMode::Upsert {
@@ -7206,6 +7348,7 @@ async fn resolve_table_data_transfer_plan(
         target_columns: column_lookup(target_columns),
         max_rows,
         batch_size,
+        target_rows_before,
         target_rows_to_delete,
         upsert_key_columns,
         identity_reseed_columns,
@@ -7639,6 +7782,7 @@ pub async fn preview_table_data_transfer(
             preview_rows,
             max_rows: plan.max_rows,
             batch_size: plan.batch_size,
+            target_rows_before: plan.target_rows_before,
             target_rows_to_delete: plan.target_rows_to_delete,
             upsert_key_columns: plan.upsert_key_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
@@ -7866,6 +8010,11 @@ pub async fn execute_table_data_transfer(
     };
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
+    // Keep the reviewed baseline outside the transactional result. A failed
+    // transaction has no transfer result, but its terminal audit report must
+    // still record the non-sensitive count that was bound to the reviewed
+    // plan before execution began.
+    let mut reviewed_target_rows_before = None;
     let result: Result<TableDataTransferResult, String> = async {
         let plan = resolve_table_data_transfer_plan(&manager, &request).await?;
         if confirmation_token.trim() != plan.confirmation_token {
@@ -7874,6 +8023,7 @@ pub async fn execute_table_data_transfer(
         if !transfer_plan_can_execute(&plan.mapped_columns) {
             return Err("Transfer contains unsupported column mappings. Preview the plan and change the target schema before copying rows.".to_string());
         }
+        reviewed_target_rows_before = plan.target_rows_before;
 
         let transaction_id = format!("table-transfer-{}", uuid::Uuid::new_v4());
         match request.target.database.as_deref() {
@@ -7952,6 +8102,7 @@ pub async fn execute_table_data_transfer(
             rows_transferred,
             batches,
             limit_reached,
+            target_rows_before: plan.target_rows_before,
             mapped_columns: plan.mapped_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
             report_id: None,
@@ -8018,6 +8169,16 @@ pub async fn execute_table_data_transfer(
                 false,
                 Some("Transfer cancelled and target changes were rolled back.".to_string()),
             ),
+            Err(error) if error.contains("rollback also failed") => (
+                TableDataTransferProgressStatus::Error,
+                last_progress_rows,
+                last_progress_batches,
+                false,
+                Some(
+                    "Transfer failed and rollback could not be confirmed; inspect the target before retrying."
+                        .to_string(),
+                ),
+            ),
             Err(_) => (
                 TableDataTransferProgressStatus::Error,
                 last_progress_rows,
@@ -8038,6 +8199,7 @@ pub async fn execute_table_data_transfer(
             rows_transferred,
             batches,
             limit_reached,
+            target_rows_before: reviewed_target_rows_before,
             status,
             started_at,
             finished_at: current_table_timestamp_millis(),
@@ -8092,6 +8254,10 @@ pub async fn execute_table_data_transfer_batch(
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
     let mut expected_tables = Vec::<TableDataTransferRequest>::new();
+    // This parallels expected_tables and is intentionally captured before
+    // the shared target transaction starts. Reports remain useful if a later
+    // table fails and the entire batch rolls back.
+    let mut reviewed_target_rows_before = Vec::<Option<u64>>::new();
     let result: Result<TableDataTransferBatchResult, String> = async {
         let batch_plan = resolve_table_data_transfer_batch_plan(&manager, request.plan.clone()).await?;
         if confirmation_token.trim() != batch_plan.confirmation_token {
@@ -8139,6 +8305,7 @@ pub async fn execute_table_data_transfer_batch(
                 return Err(format!("Batch table {table} contains unsupported column mappings."));
             }
             expected_tables.push(table_request.clone());
+            reviewed_target_rows_before.push(table_plan.target_rows_before);
             resolved_tables.push((table_request, table_plan));
         }
 
@@ -8197,6 +8364,7 @@ pub async fn execute_table_data_transfer_batch(
                 tables.push(TableDataTransferBatchTableResult {
                     table: table_request.target.table.clone(), rows_transferred: table_rows,
                     batches: table_batches, limit_reached: table_limit_reached,
+                    target_rows_before: table_plan.target_rows_before,
                     identity_reseed_columns: table_plan.identity_reseed_columns.clone(), report_id: None,
                 });
             }
@@ -8261,6 +8429,13 @@ pub async fn execute_table_data_transfer_batch(
         let (status, error) = match &result {
             Ok(_) => (TableDataTransferProgressStatus::Done, None),
             Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => (TableDataTransferProgressStatus::Cancelled, Some("Batch transfer cancelled and target changes were rolled back.".to_string())),
+            Err(error) if error.contains("rollback also failed") => (
+                TableDataTransferProgressStatus::Error,
+                Some(
+                    "Batch transfer failed and rollback could not be confirmed; inspect the target before retrying."
+                        .to_string(),
+                ),
+            ),
             Err(_) => (TableDataTransferProgressStatus::Error, Some("Batch transfer failed. The target transaction was rolled back when supported; capture a fresh batch preview before retrying.".to_string())),
         };
         for (index, table_request) in expected_tables.iter().enumerate() {
@@ -8277,6 +8452,7 @@ pub async fn execute_table_data_transfer_batch(
                         rows_transferred: table.rows_transferred,
                         batches: table.batches,
                         limit_reached: table.limit_reached,
+                        target_rows_before: table.target_rows_before,
                         mapped_columns: Vec::new(),
                         identity_reseed_columns: table.identity_reseed_columns.clone(),
                         report_id: None,
@@ -8310,6 +8486,7 @@ pub async fn execute_table_data_transfer_batch(
                 rows_transferred,
                 batches,
                 limit_reached,
+                target_rows_before: reviewed_target_rows_before.get(index).copied().flatten(),
                 status,
                 started_at,
                 finished_at: current_table_timestamp_millis(),
@@ -8457,11 +8634,33 @@ fn data_compare_key(values: &BTreeMap<String, Value>, key_columns: &[String]) ->
         .join("\u{001f}")
 }
 
+fn data_compare_key_columns_are_declared_unique(
+    columns: &BTreeMap<String, ColumnInfo>,
+    key_columns: &[String],
+) -> bool {
+    let selected = key_columns.iter().collect::<HashSet<_>>();
+    let primary = columns
+        .values()
+        .filter(|column| column.is_primary_key)
+        .map(|column| &column.name)
+        .collect::<Vec<_>>();
+    let selects_full_primary_key =
+        !primary.is_empty() && primary.iter().all(|column| selected.contains(column));
+    selects_full_primary_key
+        || key_columns.iter().any(|column| {
+            columns
+                .get(column)
+                .map(|metadata| metadata.is_unique)
+                .unwrap_or(false)
+        })
+}
+
 async fn fetch_full_data_compare_rows(
     manager: &ConnectionManager,
     endpoint: &TableDataCompareEndpoint,
     kind: DatabaseKind,
     columns: &[String],
+    column_metadata: &BTreeMap<String, ColumnInfo>,
     key_columns: &[String],
     batch_size: u32,
 ) -> Result<Vec<BTreeMap<String, Value>>, String> {
@@ -8476,36 +8675,117 @@ async fn fetch_full_data_compare_rows(
         .collect::<Vec<_>>()
         .join(", ");
     let relation = kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
-    let mut offset = 0_u64;
+    let key_metadata = key_columns
+        .iter()
+        .map(|column| {
+            column_metadata.get(column).cloned().ok_or_else(|| {
+                format!("Missing metadata for full data compare key column {column}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(column) = key_metadata.iter().find(|column| column.is_nullable) {
+        return Err(format!(
+            "Full data compare key column {} must be NOT NULL for keyset pagination",
+            column.name
+        ));
+    }
+    let mut cursor: Option<Vec<Value>> = None;
     let mut rows = Vec::new();
     loop {
+        let (continuation, params) =
+            data_compare_keyset_continuation(kind, &key_metadata, cursor.as_deref())?;
+        let where_clause = continuation
+            .as_deref()
+            .map(|condition| format!(" WHERE {condition}"))
+            .unwrap_or_default();
         let sql = format!(
-            "SELECT {selected} FROM {relation} ORDER BY {order} LIMIT {batch_size} OFFSET {offset};"
+            "SELECT {selected} FROM {relation}{where_clause} ORDER BY {order} LIMIT {batch_size};"
         );
-        let mut result = query_target(
-            manager,
-            &endpoint.connection_id,
-            endpoint.database.as_deref(),
-            &sql,
-        )
-        .await
+        let mut result = if params.is_empty() {
+            query_target(
+                manager,
+                &endpoint.connection_id,
+                endpoint.database.as_deref(),
+                &sql,
+            )
+            .await
+        } else {
+            query_target_parameterized(
+                manager,
+                &endpoint.connection_id,
+                endpoint.database.as_deref(),
+                &sql,
+                &params,
+            )
+            .await
+        }
         .map_err(|error| error.to_string())?;
         let page = result
             .drain(..)
             .next()
             .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
         let fetched = page.rows.len() as u32;
-        rows.extend(
-            page.rows
+        let page_values = page
+            .rows
+            .iter()
+            .map(|row| data_compare_row_values(columns, row))
+            .collect::<Vec<_>>();
+        cursor = page_values.last().map(|values| {
+            key_columns
                 .iter()
-                .map(|row| data_compare_row_values(columns, row)),
-        );
+                .map(|column| values.get(column).cloned().unwrap_or(Value::Null))
+                .collect()
+        });
+        rows.extend(page_values);
         if fetched < batch_size {
             break;
         }
-        offset += u64::from(fetched);
     }
     Ok(rows)
+}
+
+/// Builds `(key_1 > $1) OR (key_1 = $2 AND key_2 > $3) ...` with bound
+/// values. Identifier names and placeholders remain host owned, while row
+/// values never enter SQL text.
+fn data_compare_keyset_continuation(
+    kind: DatabaseKind,
+    key_columns: &[ColumnInfo],
+    cursor: Option<&[Value]>,
+) -> Result<(Option<String>, Vec<QueryParameter>), String> {
+    let Some(cursor) = cursor else {
+        return Ok((None, Vec::new()));
+    };
+    if cursor.len() != key_columns.len() {
+        return Err(
+            "Full data compare keyset cursor does not match selected key columns".to_string(),
+        );
+    }
+    if cursor.iter().any(Value::is_null) {
+        return Err("Full data compare keyset cannot continue from a NULL key value".to_string());
+    }
+    let mut clauses = Vec::with_capacity(key_columns.len());
+    let mut params = Vec::with_capacity(key_columns.len() * (key_columns.len() + 1) / 2);
+    for index in 0..key_columns.len() {
+        let mut comparisons = Vec::with_capacity(index + 1);
+        for prefix in 0..index {
+            let column = &key_columns[prefix];
+            params.push(query_parameter(column, &cursor[prefix]));
+            comparisons.push(format!(
+                "{} = {}",
+                kind.quote_identifier(&column.name),
+                kind.parameter_placeholder(params.len(), &column.data_type),
+            ));
+        }
+        let column = &key_columns[index];
+        params.push(query_parameter(column, &cursor[index]));
+        comparisons.push(format!(
+            "{} > {}",
+            kind.quote_identifier(&column.name),
+            kind.parameter_placeholder(params.len(), &column.data_type),
+        ));
+        clauses.push(format!("({})", comparisons.join(" AND ")));
+    }
+    Ok((Some(format!("({})", clauses.join(" OR "))), params))
 }
 
 #[tauri::command]
@@ -8541,8 +8821,45 @@ pub async fn compare_table_data_full(
         let target_endpoint = data_compare_transfer_endpoint(&request.target);
         let source_kind = table_data_transfer_dialect(&manager, &source_endpoint).await?;
         let target_kind = table_data_transfer_dialect(&manager, &target_endpoint).await?;
-        let batch_size = request.batch_size.unwrap_or(1_000).clamp(100, 5_000);
+        let batch_size = request
+            .batch_size
+            .unwrap_or(1_000)
+            .clamp(100, MAX_FULL_DATA_COMPARE_BATCH_SIZE);
         let max_rows = request.max_rows.unwrap_or(100_000).clamp(1, 100_000) as u64;
+        let (source_columns, target_columns) = tokio::try_join!(
+            get_target_columns(
+                &manager,
+                &request.source.connection_id,
+                request.source.database.as_deref(),
+                &request.source.schema,
+                &request.source.table,
+            ),
+            get_target_columns(
+                &manager,
+                &request.target.connection_id,
+                request.target.database.as_deref(),
+                &request.target.schema,
+                &request.target.table,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let source_columns = column_lookup(source_columns);
+        let target_columns = column_lookup(target_columns);
+        for key in &key_columns {
+            if !source_columns.contains_key(key) || !target_columns.contains_key(key) {
+                return Err(format!(
+                    "Full data compare key column {key} is not available on both table endpoints"
+                ));
+            }
+        }
+        if !data_compare_key_columns_are_declared_unique(&source_columns, &key_columns)
+            || !data_compare_key_columns_are_declared_unique(&target_columns, &key_columns)
+        {
+            return Err(
+                "Full data compare requires keys declared unique on both table endpoints for stable keyset pagination"
+                    .to_string(),
+            );
+        }
         let source_count_sql = source_kind.count_table_query(schema_option(&request.source.schema), &request.source.table, None);
         let target_count_sql = target_kind.count_table_query(schema_option(&request.target.schema), &request.target.table, None);
         let (source_count_result, target_count_result) = tokio::try_join!(
@@ -8557,8 +8874,8 @@ pub async fn compare_table_data_full(
             ));
         }
         let (source_rows, target_rows) = tokio::try_join!(
-            fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &key_columns, batch_size),
-            fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &key_columns, batch_size),
+            fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &source_columns, &key_columns, batch_size),
+            fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &target_columns, &key_columns, batch_size),
         )?;
         let mut source = HashMap::with_capacity(source_rows.len());
         for values in source_rows {
@@ -8577,10 +8894,18 @@ pub async fn compare_table_data_full(
         let mut added = Vec::new();
         let mut removed = Vec::new();
         let mut modified = Vec::new();
+        let mut added_count = 0_u64;
+        let mut removed_count = 0_u64;
+        let mut modified_count = 0_u64;
         let mut equal_count = 0_u64;
-        for (key, source_values) in &source {
+        let mut source_entries = source.iter().collect::<Vec<_>>();
+        source_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, source_values) in source_entries {
             let Some(target_values) = target.get(key) else {
-                added.push(TableDataCompareRow { key: key.clone(), values: source_values.clone() });
+                added_count += 1;
+                if added.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                    added.push(TableDataCompareRow { key: key.clone(), values: source_values.clone() });
+                }
                 continue;
             };
             let changed_columns = columns
@@ -8592,21 +8917,50 @@ pub async fn compare_table_data_full(
             if changed_columns.is_empty() {
                 equal_count += 1;
             } else {
-                modified.push(TableDataCompareModifiedRow {
-                    key: key.clone(),
-                    source_values: source_values.clone(),
-                    target_values: target_values.clone(),
-                    changed_columns,
-                });
+                modified_count += 1;
+                if modified.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                    modified.push(TableDataCompareModifiedRow {
+                        key: key.clone(),
+                        source_values: source_values.clone(),
+                        target_values: target_values.clone(),
+                        changed_columns,
+                    });
+                }
             }
         }
-        for (key, values) in &target {
+        let mut target_entries = target.iter().collect::<Vec<_>>();
+        target_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, values) in target_entries {
             if !source.contains_key(key) {
-                removed.push(TableDataCompareRow { key: key.clone(), values: values.clone() });
+                removed_count += 1;
+                if removed.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                    removed.push(TableDataCompareRow { key: key.clone(), values: values.clone() });
+                }
             }
         }
-        let compared_key_count = (source.len() + target.len() - equal_count as usize - modified.len()) as u64;
-        Ok(TableDataCompareResult { added, removed, modified, equal_count, source_row_count, target_row_count, compared_key_count, batch_size })
+        let compared_key_count = (source.len() + target.len() - equal_count as usize - modified_count as usize) as u64;
+        let detail_limit_per_status = MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS as u32;
+        let details_truncated = added_count > added.len() as u64
+            || removed_count > removed.len() as u64
+            || modified_count > modified.len() as u64;
+        // HashMap is only used for efficient key matching. Entries are sorted
+        // before the bounded preview is selected so repeated runs keep the
+        // same review sample even when the host hash seed changes.
+        Ok(TableDataCompareResult {
+            added,
+            removed,
+            modified,
+            added_count,
+            removed_count,
+            modified_count,
+            equal_count,
+            source_row_count,
+            target_row_count,
+            compared_key_count,
+            batch_size,
+            detail_limit_per_status,
+            details_truncated,
+        })
     }
     .await;
     match result {
@@ -12513,21 +12867,23 @@ pub async fn get_table_ddl(
 mod tests {
     use super::{
         analytical_binary, analytical_column_kind, analytical_date32, analytical_timestamp_micros,
-        apply_transfer_conversion, bounded_table_data_transfer_message,
-        build_add_table_column_statements, build_alter_table_column_statements,
-        build_create_check_constraint_statement, build_create_foreign_key_statement,
-        build_create_materialized_view_statement, build_create_primary_key_statement,
-        build_create_table_index_statement, build_create_table_statements,
-        build_create_unique_constraint_statement, build_create_view_statement,
-        build_data_transfer_column_mapping, build_drop_table_column_statement,
-        build_drop_table_constraint_statement, build_drop_table_index_statement,
-        build_insert_mutation, build_rename_table_column_statement,
-        build_rename_table_index_statement, build_sqlite_add_column_statements,
-        build_sqlite_create_index_statement, build_sqlite_create_table_statements,
-        build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
-        build_structured_filter_where, build_table_order_by, build_transfer_target_columns,
-        build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
-        csv_delimiter, csv_escape, csv_record_values, data_compare_key, data_compare_row_values,
+        append_transfer_verification, apply_transfer_conversion,
+        bounded_table_data_transfer_message, build_add_table_column_statements,
+        build_alter_table_column_statements, build_create_check_constraint_statement,
+        build_create_foreign_key_statement, build_create_materialized_view_statement,
+        build_create_primary_key_statement, build_create_table_index_statement,
+        build_create_table_statements, build_create_unique_constraint_statement,
+        build_create_view_statement, build_data_transfer_column_mapping,
+        build_drop_table_column_statement, build_drop_table_constraint_statement,
+        build_drop_table_index_statement, build_insert_mutation,
+        build_rename_table_column_statement, build_rename_table_index_statement,
+        build_sqlite_add_column_statements, build_sqlite_create_index_statement,
+        build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
+        build_sqlite_drop_index_statement, build_structured_filter_where, build_table_order_by,
+        build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
+        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_record_values,
+        data_compare_key, data_compare_key_columns_are_declared_unique,
+        data_compare_keyset_continuation, data_compare_row_values,
         delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
@@ -12561,11 +12917,11 @@ mod tests {
         TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
         TableDataTransferColumnMapping, TableDataTransferCompatibility,
         TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferRequest, TableDataTransferTargetColumn,
+        TableDataTransferReport, TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableRowUpdate, TableSort, MAX_JSON_IMPORT_PREVIEW_ROWS,
-        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        TableFilter, TableRowUpdate, TableSort, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
+        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -12596,6 +12952,7 @@ mod tests {
     struct TransferTransactionDriver {
         events: Arc<Mutex<Vec<String>>>,
         delete_rows: u64,
+        rollback_error: Option<String>,
     }
 
     #[test]
@@ -12762,6 +13119,9 @@ mod tests {
                 .lock()
                 .expect("transfer event mutex")
                 .push(format!("rollback:{session_id}"));
+            if let Some(error) = &self.rollback_error {
+                return Err(anyhow::anyhow!(error.clone()));
+            }
             Ok(())
         }
     }
@@ -13615,32 +13975,46 @@ mod tests {
             build_data_transfer_column_mapping(&[target_column("id")], &[target_column("id")])
                 .unwrap()
                 .0;
-        let token = transfer_confirmation_token(&request, &mappings, 500, 100, None, &[]).unwrap();
+        let token =
+            transfer_confirmation_token(&request, &mappings, 500, 100, Some(4), None, &[]).unwrap();
         assert!(token.starts_with("TRANSFER "));
 
         let mut changed = request.clone();
         changed.target.table = "other_users".to_string();
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, None, &[]).unwrap()
+            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(4), None, &[]).unwrap()
         );
         changed = request.clone();
         changed.transfer_id = "transfer-test-0002".to_string();
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, None, &[]).unwrap()
+            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(4), None, &[]).unwrap()
         );
         changed = request.clone();
         changed.mode = TableDataTransferMode::Overwrite;
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(12), &[]).unwrap()
+            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(12), Some(12), &[])
+                .unwrap()
         );
         changed.mode = TableDataTransferMode::Upsert;
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, None, &["id".to_string()],)
-                .unwrap()
+            transfer_confirmation_token(
+                &changed,
+                &mappings,
+                500,
+                100,
+                None,
+                None,
+                &["id".to_string()],
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            token,
+            transfer_confirmation_token(&request, &mappings, 500, 100, Some(5), None, &[]).unwrap()
         );
     }
 
@@ -13915,6 +14289,7 @@ mod tests {
                 Box::new(TransferTransactionDriver {
                     events: Arc::clone(&events),
                     delete_rows: 12,
+                    rollback_error: None,
                 }),
             )
             .await;
@@ -13963,6 +14338,7 @@ mod tests {
                 Box::new(TransferTransactionDriver {
                     events: Arc::clone(&events),
                     delete_rows: 0,
+                    rollback_error: None,
                 }),
             )
             .await;
@@ -13993,6 +14369,7 @@ mod tests {
                 Box::new(TransferTransactionDriver {
                     events: Arc::clone(&events),
                     delete_rows: 0,
+                    rollback_error: None,
                 }),
             )
             .await;
@@ -14011,6 +14388,39 @@ mod tests {
         assert_eq!(
             events.lock().expect("transfer event mutex").as_slice(),
             ["rollback:transfer-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn data_transfer_marks_the_target_for_manual_inspection_when_rollback_fails() {
+        let manager = ConnectionManager::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "target".to_string(),
+                Box::new(TransferTransactionDriver {
+                    events: Arc::clone(&events),
+                    delete_rows: 0,
+                    rollback_error: Some("target connection was lost".to_string()),
+                }),
+            )
+            .await;
+
+        let error = finish_table_data_transfer_transaction(
+            &manager,
+            "target",
+            "transfer-rollback-failure",
+            Err("batch 4 rejected a value".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("rollback also failed"));
+        assert!(error.contains("inspect the target before retrying"));
+        assert!(error.contains("target connection was lost"));
+        assert_eq!(
+            events.lock().expect("transfer event mutex").as_slice(),
+            ["rollback:transfer-rollback-failure"]
         );
     }
 
@@ -14683,6 +15093,69 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
     }
 
     #[test]
+    fn append_transfer_post_verify_binds_baseline_and_copied_rows() {
+        let verified = append_transfer_verification(Some(8), 4, Some(12));
+        assert_eq!(
+            verified.status,
+            TableDataTransferVerificationStatus::Verified
+        );
+        assert_eq!(verified.expected_rows, Some(12));
+
+        let concurrent_write = append_transfer_verification(Some(8), 4, Some(13));
+        assert_eq!(
+            concurrent_write.status,
+            TableDataTransferVerificationStatus::NeedsReview
+        );
+        assert_eq!(concurrent_write.expected_rows, Some(12));
+        assert_eq!(concurrent_write.observed_rows, Some(13));
+
+        let missing_baseline = append_transfer_verification(None, 4, Some(12));
+        assert_eq!(
+            missing_baseline.status,
+            TableDataTransferVerificationStatus::NeedsReview
+        );
+        assert_eq!(missing_baseline.expected_rows, None);
+    }
+
+    #[test]
+    fn transfer_report_fixture_preserves_baseline_and_legacy_compatibility() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/table-data-transfer-report.json"
+        ))
+        .expect("transfer report fixture JSON should remain valid");
+        let current: TableDataTransferReport = serde_json::from_value(
+            fixture
+                .get("current")
+                .cloned()
+                .expect("fixture should contain the current report"),
+        )
+        .expect("current transfer report fixture should deserialize");
+        let legacy: TableDataTransferReport = serde_json::from_value(
+            fixture
+                .get("legacy")
+                .cloned()
+                .expect("fixture should contain the legacy report"),
+        )
+        .expect("legacy transfer report fixture should deserialize");
+
+        assert_eq!(current.target_rows_before, Some(41));
+        assert_eq!(
+            current
+                .verification
+                .as_ref()
+                .and_then(|value| value.expected_rows),
+            Some(43)
+        );
+        assert_eq!(legacy.target_rows_before, None);
+        assert!(legacy.verification.is_none());
+        let encoded = serde_json::to_value(&current)
+            .expect("current transfer report fixture should serialize");
+        assert!(encoded.get("connectionString").is_none());
+        assert!(encoded.get("sql").is_none());
+        assert!(encoded.get("parameters").is_none());
+    }
+
+    #[test]
     fn escapes_csv_values() {
         assert_eq!(csv_escape(&json!("plain")), "plain");
         assert_eq!(csv_escape(&json!("a,b")), "\"a,b\"");
@@ -14936,7 +15409,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
 
     #[test]
     fn builds_table_update_with_an_explicit_validated_expression() {
-        let columns = column_lookup(vec![
+        let mut columns = column_lookup(vec![
             ColumnInfo {
                 name: "id".to_string(),
                 data_type: "integer".to_string(),
@@ -14998,6 +15471,44 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         )
         .unwrap_err()
         .contains("statement separators"));
+
+        let mut generated = columns["updated_at"].clone();
+        generated.is_generated = Some(true);
+        columns.insert("updated_at".to_string(), generated);
+        let generated_error = build_update_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &TableRowUpdate {
+                key: BTreeMap::from([("id".to_string(), json!(7))]),
+                values: BTreeMap::from([("updated_at".to_string(), json!("2026-01-01"))]),
+                expressions: BTreeMap::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(generated_error.contains("Generated column updated_at cannot be written"));
+
+        let mut hidden = columns["updated_at"].clone();
+        hidden.is_generated = Some(false);
+        hidden.is_hidden = Some(true);
+        columns.insert("updated_at".to_string(), hidden);
+        let hidden_error = build_update_mutation(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &TableRowUpdate {
+                key: BTreeMap::from([("id".to_string(), json!(7))]),
+                values: BTreeMap::new(),
+                expressions: BTreeMap::from([(
+                    "updated_at".to_string(),
+                    "CURRENT_TIMESTAMP".to_string(),
+                )]),
+            },
+        )
+        .unwrap_err();
+        assert!(hidden_error.contains("Hidden column updated_at cannot be written"));
     }
 
     #[test]
@@ -16538,6 +17049,116 @@ WITH DATA;"#
             data_compare_key(&values, &columns),
             "\"a\\u001fb\"\u{001f}7"
         );
+    }
+
+    #[test]
+    fn full_data_compare_preview_is_bounded_per_status() {
+        let mut preview = Vec::new();
+        for index in 0..=MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+            if preview.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                preview.push(index);
+            }
+        }
+        assert_eq!(preview.len(), MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS);
+        assert_eq!(preview.first(), Some(&0));
+        assert_eq!(
+            preview.last(),
+            Some(&(MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS - 1))
+        );
+    }
+
+    #[test]
+    fn full_data_compare_fixture_preserves_exact_counts_and_bounded_preview() {
+        let result: TableDataCompareResult = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/table-data-compare-result.json"
+        ))
+        .expect("full data compare fixture should deserialize");
+
+        assert_eq!(result.added_count, 2_500);
+        assert_eq!(result.modified_count, 1_400);
+        assert_eq!(result.detail_limit_per_status, 1_000);
+        assert!(result.details_truncated);
+        assert_eq!(result.added.len(), 1);
+        assert_eq!(result.modified.len(), 1);
+        assert!(result.added.len() < result.added_count as usize);
+        assert!(result.modified.len() < result.modified_count as usize);
+    }
+
+    #[test]
+    fn full_data_compare_keyset_uses_bound_values_and_lexicographic_order() {
+        let keys = vec![
+            ColumnInfo {
+                name: "tenant_id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: true,
+                is_indexed: true,
+                is_auto_increment: false,
+                default_value: None,
+                comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
+            },
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                is_unique: true,
+                is_indexed: true,
+                is_auto_increment: false,
+                default_value: None,
+                comment: None,
+                is_generated: Some(false),
+                is_hidden: Some(false),
+            },
+        ];
+        let (predicate, params) = data_compare_keyset_continuation(
+            DatabaseKind::Postgres,
+            &keys,
+            Some(&[json!(7), json!(42)]),
+        )
+        .unwrap();
+        assert_eq!(
+            predicate.as_deref(),
+            Some("(\"tenant_id\" > $1::integer OR (\"tenant_id\" = $2::integer AND \"id\" > $3::bigint))")
+        );
+        assert_eq!(
+            params
+                .into_iter()
+                .map(|item| item.value)
+                .collect::<Vec<_>>(),
+            vec![json!(7), json!(7), json!(42)]
+        );
+        assert!(data_compare_keyset_continuation(
+            DatabaseKind::Mysql,
+            &keys,
+            Some(&[Value::Null, json!(42)]),
+        )
+        .unwrap_err()
+        .contains("NULL key"));
+    }
+
+    #[test]
+    fn full_data_compare_requires_a_declared_unique_key() {
+        let mut id = target_column("id");
+        id.is_nullable = false;
+        id.is_primary_key = true;
+        let tenant = target_column("tenant_id");
+        let columns = column_lookup(vec![id, tenant]);
+        assert!(data_compare_key_columns_are_declared_unique(
+            &columns,
+            &["id".to_string()]
+        ));
+        assert!(data_compare_key_columns_are_declared_unique(
+            &columns,
+            &["tenant_id".to_string(), "id".to_string()]
+        ));
+        assert!(!data_compare_key_columns_are_declared_unique(
+            &columns,
+            &["tenant_id".to_string()]
+        ));
     }
 
     #[test]

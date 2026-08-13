@@ -15,7 +15,7 @@ import {
   DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
   type AssistantContextSettings,
 } from "@/ai/assistant/contextPreview";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AssistantHeader } from "./assistant/AssistantHeader";
 import { AssistantConversation } from "./assistant/AssistantConversation";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
@@ -41,6 +41,10 @@ import {
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { cn } from "@/lib/utils";
 import { useAssistantAgentSession } from "@/hooks/useAssistantAgentSession";
+import {
+  useAiCliCatalog,
+  useCliEnvironmentRevision,
+} from "@/hooks/useAiCliCatalog";
 import { assistantConversationHistoryFromTurns } from "@/ai/assistant/turns";
 import { APP_EVENT_OPEN_SETTINGS } from "@/lib/actionEvents";
 import { createAssistantSqlPatchPreview } from "@/lib/assistantSqlPatch";
@@ -50,7 +54,9 @@ import {
 } from "@/lib/projectFileOpen";
 import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
 import { useAssistantChangeStore } from "@/store/useAssistantChangeStore";
+import { useAssistantCliSetupStore } from "@/store/useAssistantCliSetupStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { useI18n } from "@/i18n";
 import {
   agentHostService,
   type AgentProfile,
@@ -59,12 +65,11 @@ import {
 } from "@/services/tauri/agent-host.service";
 import {
   aiService,
-  type AiCliCommandInfo,
-  type AiCliModelInfo,
   type AiCliProviderConfig,
   type AiProviderConfig,
   type AiProviderKind,
 } from "@/services/tauri/ai.service";
+import { ApiError } from "@/services/tauri/types";
 import { ArrowDown, Sparkles, X } from "lucide-react";
 import {
   AssistantPendingChangesPanel,
@@ -76,16 +81,9 @@ import {
   type AgentFileReviewDecisionDetail,
 } from "@/lib/agentFileReview";
 
+const CLI_PROBE_TTL_MS = 5 * 60 * 1_000;
+
 type PendingTextAttachment = AgentTextAttachment & { id: string };
-type CliProviderKind = AiCliProviderConfig["kind"];
-type CliSetupStateByProvider = Partial<
-  Record<CliProviderKind, AssistantCliSetupState>
->;
-type CliModelsByProvider = Partial<Record<CliProviderKind, AiCliModelInfo[]>>;
-type CliCommandsByProvider = Partial<Record<CliProviderKind, AiCliCommandInfo[]>>;
-type CliSetupStateUpdate =
-  | AssistantCliSetupState
-  | ((current: AssistantCliSetupState | null) => AssistantCliSetupState);
 
 export function assistantToolManifestForProfile(
   profile: AgentProfile,
@@ -95,9 +93,10 @@ export function assistantToolManifestForProfile(
     return tools.filter((tool) => tool.name === "workspace.getActiveTab");
   }
   if (profile === "plan") {
-    return tools.filter((tool) =>
-      tool.name !== "project.writeFile" &&
-      tool.permissions.every((permission) => permission === "read"),
+    return tools.filter(
+      (tool) =>
+        tool.name !== "project.writeFile" &&
+        tool.permissions.every((permission) => permission === "read"),
     );
   }
   return [...tools];
@@ -108,6 +107,7 @@ export function AssistantSidebar() {
 }
 
 function AgentHostAssistantSidebar() {
+  const { t } = useI18n();
   const setToolWindowVisible = useWorkbenchLayoutStore(
     (state) => state.setToolWindowVisible,
   );
@@ -121,6 +121,9 @@ function AgentHostAssistantSidebar() {
   const codexCliReasoningEffort = useAiSettingsStore(
     (state) => state.codexCliReasoningEffort,
   );
+  const codexCliReasoningEffortByModel = useAiSettingsStore(
+    (state) => state.codexCliReasoningEffortByModel,
+  );
   const codeBuddyCliPath = useAiSettingsStore(
     (state) => state.codeBuddyCliPath,
   );
@@ -129,6 +132,15 @@ function AgentHostAssistantSidebar() {
   );
   const codeBuddyCliReasoningEffort = useAiSettingsStore(
     (state) => state.codeBuddyCliReasoningEffort,
+  );
+  const codeBuddyCliReasoningEffortByModel = useAiSettingsStore(
+    (state) => state.codeBuddyCliReasoningEffortByModel,
+  );
+  const codexCliEnvironmentKeys = useAiSettingsStore(
+    (state) => state.codexCliEnvironmentKeys,
+  );
+  const codeBuddyCliEnvironmentKeys = useAiSettingsStore(
+    (state) => state.codeBuddyCliEnvironmentKeys,
   );
   const assistantProviderConfig = useAiSettingsStore(
     (state) => state.assistantProviderConfig,
@@ -151,48 +163,48 @@ function AgentHostAssistantSidebar() {
   );
   const updateAiSettings = useAiSettingsStore((state) => state.updateSettings);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
-  const setProjectTurns = useAssistantChangeStore((state) => state.setProjectTurns);
+  const setProjectTurns = useAssistantChangeStore(
+    (state) => state.setProjectTurns,
+  );
   const activeProjectRoot = useProjectStore(
     (state) =>
       state.projects.find((project) => project.id === state.activeProjectId)
         ?.root_path ?? null,
   );
-  const activeConnectionId = useConnectionStore(
-    (state) => {
+  const activeConnectionId = useConnectionStore((state) => {
+    const connection = state.connections.find(
+      (candidate) => candidate.id === state.activeConnectionId,
+    );
+    return connection && !isManagedConnection(connection)
+      ? connection.id
+      : null;
+  });
+  const activeDriver = useConnectionStore((state) =>
+    (() => {
       const connection = state.connections.find(
-        (candidate) => candidate.id === state.activeConnectionId,
+        (connection) => connection.id === state.activeConnectionId,
       );
       return connection && !isManagedConnection(connection)
-        ? connection.id
+        ? connection.driver
         : null;
-    },
+    })(),
   );
-  const activeDriver = useConnectionStore(
-    (state) =>
-      (() => {
-        const connection = state.connections.find(
+  const activeConnectionDatabase = useConnectionStore((state) =>
+    (() => {
+      const connection = state.connections.find(
         (connection) => connection.id === state.activeConnectionId,
-        );
-        return connection && !isManagedConnection(connection)
-          ? connection.driver
-          : null;
-      })(),
-  );
-  const activeConnectionDatabase = useConnectionStore(
-    (state) =>
-      (() => {
-        const connection = state.connections.find(
-        (connection) => connection.id === state.activeConnectionId,
-        );
-        return connection && !isManagedConnection(connection)
-          ? connection.database ?? null
-          : null;
-      })(),
+      );
+      return connection && !isManagedConnection(connection)
+        ? (connection.database ?? null)
+        : null;
+    })(),
   );
   const activeNamespace = useSchemaStore((state) => state.currentSchema);
   const activeTab = useTabStore(
     useShallow((state) => {
-      const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+      const tab = state.tabs.find(
+        (candidate) => candidate.id === state.activeTabId,
+      );
       return tab
         ? {
             title: tab.title,
@@ -215,8 +227,7 @@ function AgentHostAssistantSidebar() {
         ? codeBuddyAssistantMode
         : oxideAssistantMode;
   const providerConfigured = Boolean(modelConfig);
-  const conversationId =
-    aiProvider === "openai-compatible" ? undefined : `provider:${aiProvider}`;
+  const conversationId = assistantConversationId(modelConfig);
   const session = useAssistantAgentSession(
     activeProjectId,
     providerConfigured,
@@ -233,88 +244,89 @@ function AgentHostAssistantSidebar() {
   const [dismissedAuthIssueId, setDismissedAuthIssueId] = useState<
     string | null
   >(null);
-  const [cliSetupByProvider, setCliSetupByProvider] =
-    useState<CliSetupStateByProvider>({});
-  const [cliModelsByProvider, setCliModelsByProvider] =
-    useState<CliModelsByProvider>({});
-  const [cliCommandsByProvider, setCliCommandsByProvider] =
-    useState<CliCommandsByProvider>({});
-  const [cliDetectionRevision, setCliDetectionRevision] = useState(0);
+  const cliSetupByProvider = useAssistantCliSetupStore(
+    (state) => state.setupByProvider,
+  );
+  const cliDetectionRevisionByProvider = useAssistantCliSetupStore(
+    (state) => state.detectionRevisionByProvider,
+  );
+  const cliProbeIdentityByProvider = useAssistantCliSetupStore(
+    (state) => state.probeIdentityByProvider,
+  );
+  const updateCliSetup = useAssistantCliSetupStore(
+    (state) => state.updateSetup,
+  );
+  const requestCliDetection = useAssistantCliSetupStore(
+    (state) => state.requestDetection,
+  );
+  const completeCliProbe = useAssistantCliSetupStore(
+    (state) => state.completeProbe,
+  );
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoFollowConversationRef = useRef(true);
-  const providerFingerprintRef = useRef(
-    JSON.stringify(modelConfig),
-  );
+  const providerFingerprintRef = useRef(JSON.stringify(modelConfig));
   const uiActionRegistry = useMemo(() => createWorkspaceUiActionRegistry(), []);
   const workspaceToolManifest = useMemo(
-    () =>
-      [
-        ...createWorkspaceAiToolRegistry()
-          .list()
-          .map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-            permissions: tool.permissions,
-            timeoutMs: tool.timeoutMs,
-            resultLimit: tool.resultLimit,
-          })),
-        ...AGENT_HOST_ONLY_TOOLS,
-      ],
+    () => [
+      ...createWorkspaceAiToolRegistry()
+        .list()
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          permissions: tool.permissions,
+          timeoutMs: tool.timeoutMs,
+          resultLimit: tool.resultLimit,
+        })),
+      ...AGENT_HOST_ONLY_TOOLS,
+    ],
     [],
   );
   const agentToolManifest = useMemo(() => {
     const installedTools = new Set(session.hostStatus?.installedTools ?? []);
-    return workspaceToolManifest.filter((tool) => installedTools.has(tool.name));
+    return workspaceToolManifest.filter((tool) =>
+      installedTools.has(tool.name),
+    );
   }, [session.hostStatus?.installedTools, workspaceToolManifest]);
   const conversationHistory = useMemo(
     () => assistantConversationHistoryFromTurns(session.turns),
     [session.turns],
   );
-  const previousCompaction = useMemo(
-    () => {
-      if (session.contextMetrics?.compaction) {
-        return session.contextMetrics.compaction;
-      }
-      return session.turns.reduce<NonNullable<
-        (typeof session.turns)[number]["contextCompaction"]
-      > | null>((aggregate, turn) => {
-        const stats = turn.contextCompaction;
-        if (!stats) return aggregate;
-        return {
-          count: (aggregate?.count ?? 0) + stats.count,
-          lastInputTokens: stats.lastInputTokens,
-          lastRetainedTokens: stats.lastRetainedTokens,
-          offloadedArtifacts:
-            (aggregate?.offloadedArtifacts ?? 0) + stats.offloadedArtifacts,
-        };
-      }, null);
-    },
-    [session.contextMetrics?.compaction, session.turns],
-  );
-  const previousModelUsage = useMemo(
-    () => {
-      if (session.contextMetrics?.modelUsage) {
-        return session.contextMetrics.modelUsage;
-      }
-      return session.turns.reduce<NonNullable<
-        (typeof session.turns)[number]["modelUsage"]
-      > | null>((aggregate, turn) => {
-        const usage = turn.modelUsage;
-        if (!usage) return aggregate;
-        return {
-          calls: (aggregate?.calls ?? 0) + usage.calls,
-          inputTokens:
-            (aggregate?.inputTokens ?? 0) + usage.inputTokens,
-          outputTokens:
-            (aggregate?.outputTokens ?? 0) + usage.outputTokens,
-          totalTokens:
-            (aggregate?.totalTokens ?? 0) + usage.totalTokens,
-        };
-      }, null);
-    },
-    [session.contextMetrics?.modelUsage, session.turns],
-  );
+  const previousCompaction = useMemo(() => {
+    if (session.contextMetrics?.compaction) {
+      return session.contextMetrics.compaction;
+    }
+    return session.turns.reduce<NonNullable<
+      (typeof session.turns)[number]["contextCompaction"]
+    > | null>((aggregate, turn) => {
+      const stats = turn.contextCompaction;
+      if (!stats) return aggregate;
+      return {
+        count: (aggregate?.count ?? 0) + stats.count,
+        lastInputTokens: stats.lastInputTokens,
+        lastRetainedTokens: stats.lastRetainedTokens,
+        offloadedArtifacts:
+          (aggregate?.offloadedArtifacts ?? 0) + stats.offloadedArtifacts,
+      };
+    }, null);
+  }, [session.contextMetrics?.compaction, session.turns]);
+  const previousModelUsage = useMemo(() => {
+    if (session.contextMetrics?.modelUsage) {
+      return session.contextMetrics.modelUsage;
+    }
+    return session.turns.reduce<NonNullable<
+      (typeof session.turns)[number]["modelUsage"]
+    > | null>((aggregate, turn) => {
+      const usage = turn.modelUsage;
+      if (!usage) return aggregate;
+      return {
+        calls: (aggregate?.calls ?? 0) + usage.calls,
+        inputTokens: (aggregate?.inputTokens ?? 0) + usage.inputTokens,
+        outputTokens: (aggregate?.outputTokens ?? 0) + usage.outputTokens,
+        totalTokens: (aggregate?.totalTokens ?? 0) + usage.totalTokens,
+      };
+    }, null);
+  }, [session.contextMetrics?.modelUsage, session.turns]);
   const previewContext = useMemo(
     () => createWorkspaceAiToolContext("assistant-agent-context-preview"),
     [
@@ -329,25 +341,33 @@ function AgentHostAssistantSidebar() {
   const contextProviderLabel = modelConfig
     ? providerDestinationLabel(modelConfig)
     : null;
-  const cliProviderFingerprint =
-    modelConfig && modelConfig.kind !== "openai-compatible"
-      ? JSON.stringify(modelConfig)
-      : null;
+  const cliEnvironmentRevision = useCliEnvironmentRevision(
+    modelConfig?.kind === "codex-cli" || modelConfig?.kind === "codebuddy-cli"
+      ? modelConfig
+      : null,
+  );
+  const cliProviderFingerprint = cliProviderIdentityFingerprint(
+    modelConfig,
+    cliEnvironmentRevision,
+  );
   const cliSetup =
     modelConfig && modelConfig.kind !== "openai-compatible"
-      ? cliSetupByProvider[modelConfig.kind] ?? null
+      ? (cliSetupByProvider[modelConfig.kind] ?? null)
       : null;
-  const updateCliSetup = useCallback(
-    (provider: CliProviderKind, update: CliSetupStateUpdate) => {
-      setCliSetupByProvider((currentByProvider) => {
-        const current = currentByProvider[provider] ?? null;
-        const next = typeof update === "function" ? update(current) : update;
-        if (current === next) return currentByProvider;
-        return { ...currentByProvider, [provider]: next };
-      });
-    },
-    [],
+  const cliCatalog = useAiCliCatalog(
+    modelConfig?.kind === "codex-cli" || modelConfig?.kind === "codebuddy-cli"
+      ? modelConfig
+      : null,
+    cliSetup?.phase === "ready",
   );
+  const cliDetectionRevision =
+    modelConfig && modelConfig.kind !== "openai-compatible"
+      ? cliDetectionRevisionByProvider[modelConfig.kind]
+      : 0;
+  const cliProbeIdentity =
+    modelConfig && modelConfig.kind !== "openai-compatible"
+      ? cliProbeIdentityByProvider[modelConfig.kind]
+      : null;
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
     [attachments, message],
@@ -388,9 +408,13 @@ function AgentHostAssistantSidebar() {
         `${turn.id}:${turn.updatedAt}:${turn.status}:${turn.process.length}:${turn.final?.content.length || 0}`,
     )
     .join("|");
-  const latestTurnWithError = [...session.turns]
-    .reverse()
-    .find((turn) => Boolean(turn.error?.trim()));
+  // Provider health follows the newest turn only. Reusing an older failed turn
+  // after a later successful request would incorrectly send a ready CLI back to
+  // its authentication screen whenever the Assistant panel remounts.
+  const latestTurn = session.turns[session.turns.length - 1];
+  const latestTurnWithError = latestTurn?.error?.trim()
+    ? latestTurn
+    : undefined;
   const providerError = latestTurnWithError?.error || session.hostError;
   const providerErrorSignal = [
     latestTurnWithError?.error,
@@ -420,10 +444,30 @@ function AgentHostAssistantSidebar() {
         : aiBaseUrl;
   const displayedReasoningEffort =
     aiProvider === "codex-cli"
-      ? codexCliReasoningEffort
+      ? selectedCliReasoningEffort(
+          codexCliReasoningEffortByModel,
+          displayedModel,
+          codexCliReasoningEffort,
+        )
       : aiProvider === "codebuddy-cli"
-        ? codeBuddyCliReasoningEffort
+        ? selectedCliReasoningEffort(
+            codeBuddyCliReasoningEffortByModel,
+            displayedModel,
+            codeBuddyCliReasoningEffort,
+          )
         : undefined;
+  const cliModelOptions = useMemo(() => {
+    if (aiProvider !== "codebuddy-cli") return cliCatalog.models;
+    const selectedModel = displayedModel.trim() || "default";
+    return cliCatalog.models.map((option) =>
+      option.id === selectedModel
+        ? { ...option, reasoningEfforts: cliCatalog.efforts }
+        : option,
+    );
+  }, [aiProvider, cliCatalog.efforts, cliCatalog.models, displayedModel]);
+  const cliCatalogWarning = [cliCatalog.warning, cliCatalog.effortWarning]
+    .filter((warning): warning is string => Boolean(warning))
+    .join(" ");
   const { modelStatus, submissionBlockReason } = resolveModelUiState({
     enabled: aiEnabled,
     providerKind: aiProvider,
@@ -436,14 +480,16 @@ function AgentHostAssistantSidebar() {
     hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
     cliSetup,
+    t,
   });
-  const showProviderWelcome = !aiEnabled && session.turns.length === 0;
+  const showProviderWelcome =
+    !session.isHydrating && !aiEnabled && session.turns.length === 0;
   const cliSetupRequired = Boolean(
     modelConfig &&
-      modelConfig.kind !== "openai-compatible" &&
-      cliSetup &&
-      cliSetup.phase !== "ready" &&
-      cliSetup.phase !== "checking",
+    modelConfig.kind !== "openai-compatible" &&
+    cliSetup &&
+    cliSetup.phase !== "ready" &&
+    cliSetup.phase !== "checking",
   );
 
   const openAiSettings = () => {
@@ -461,17 +507,17 @@ function AgentHostAssistantSidebar() {
       aiProvider !== provider
     ) {
       const activeSetup = cliSetupByProvider[aiProvider];
-      if (activeSetup?.phase === "authorizing" && activeSetup.authenticationSessionId) {
+      if (
+        activeSetup?.phase === "authorizing" &&
+        activeSetup.authenticationSessionId
+      ) {
         void aiService
           .cancelCliAuthentication(activeSetup.authenticationSessionId)
           .catch(() => undefined);
       }
     }
     if (authIssueId) setDismissedAuthIssueId(authIssueId);
-    if (
-      provider !== "openai-compatible" &&
-      !cliSetupByProvider[provider]
-    ) {
+    if (provider !== "openai-compatible" && !cliSetupByProvider[provider]) {
       updateCliSetup(provider, {
         phase: "checking",
         message: "Verifying installation and account sign-in…",
@@ -498,7 +544,7 @@ function AgentHostAssistantSidebar() {
               message: "Checking installation and account sign-in again…",
             },
       );
-      setCliDetectionRevision((value) => value + 1);
+      requestCliDetection(aiProvider);
       return;
     }
     void session.refreshStatus();
@@ -507,23 +553,13 @@ function AgentHostAssistantSidebar() {
   const installAssistantProvider = async () => {
     if (!modelConfig || modelConfig.kind === "openai-compatible") return;
     const provider = modelConfig.kind;
-    updateCliSetup(provider, {
-      phase: "installing",
-      message: `Installing ${assistantProviderDefinition(provider).label} in OxideStudio's managed agent directory…`,
-    });
     try {
-      const result = await aiService.installCliProvider(provider);
-      updateAiSettings(
-        provider === "codex-cli"
-          ? { codexCliPath: result.executablePath }
-          : { codeBuddyCliPath: result.executablePath },
-      );
+      const installation = await aiService.beginCliInstallation(provider);
       updateCliSetup(provider, {
         phase: "installing",
-        message: "Installation complete. Verifying account sign-in…",
-        executablePath: result.executablePath,
+        message: installation.message,
+        installationSessionId: installation.sessionId,
       });
-      setCliDetectionRevision((value) => value + 1);
     } catch (error) {
       updateCliSetup(provider, {
         phase: "error",
@@ -542,7 +578,10 @@ function AgentHostAssistantSidebar() {
         message: "Starting the provider's secure browser sign-in…",
         authenticationMethodId: methodId,
       }));
-      const result = await aiService.beginCliAuthentication(modelConfig, methodId);
+      const result = await aiService.beginCliAuthentication(
+        modelConfig,
+        methodId,
+      );
       updateCliSetup(provider, (current) => ({
         ...current,
         phase: "authorizing",
@@ -552,10 +591,12 @@ function AgentHostAssistantSidebar() {
       }));
     } catch (error) {
       updateCliSetup(provider, (current) => ({
-        phase: "error",
+        phase: cliSetupPhaseForFailure(error),
         message: error instanceof Error ? error.message : String(error),
         executablePath: current?.executablePath,
         version: current?.version,
+        authenticationSessionId: undefined,
+        refreshing: false,
       }));
     }
   };
@@ -567,7 +608,8 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(modelConfig.kind, (current) => ({
         ...current,
         phase: "auth-required",
-        message: "Sign-in was cancelled. Choose an account method to try again.",
+        message:
+          "Sign-in was cancelled. Choose an account method to try again.",
       }));
       return;
     }
@@ -589,10 +631,111 @@ function AgentHostAssistantSidebar() {
   };
 
   useEffect(() => {
+    if (
+      cliSetup?.phase !== "installing" ||
+      !modelConfig ||
+      modelConfig.kind === "openai-compatible"
+    ) {
+      return;
+    }
+    const provider = modelConfig.kind;
+    const installationSessionId = cliSetup.installationSessionId;
+    if (!installationSessionId) {
+      updateCliSetup(provider, (current) => ({
+        ...current,
+        phase: "error",
+        message:
+          "The CLI installation session was interrupted. Start the installation again.",
+      }));
+      return;
+    }
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = () => {
+      void aiService
+        .getCliInstallationStatus(installationSessionId)
+        .then((status) => {
+          if (disposed) return;
+          if (status.phase === "succeeded" && status.result) {
+            const executablePath = status.result.executablePath;
+            updateAiSettings(
+              provider === "codex-cli"
+                ? { codexCliPath: executablePath }
+                : { codeBuddyCliPath: executablePath },
+            );
+            updateCliSetup(provider, (current) => ({
+              ...current,
+              phase: "checking",
+              message: "Installation complete. Verifying account sign-in...",
+              executablePath,
+              installationSessionId: undefined,
+              refreshing: true,
+            }));
+            requestCliDetection(provider);
+            return;
+          }
+          if (status.phase === "failed") {
+            updateCliSetup(provider, (current) => ({
+              ...current,
+              phase: "error",
+              message: status.message,
+              installationSessionId: undefined,
+              refreshing: false,
+            }));
+            return;
+          }
+          updateCliSetup(provider, (current) => ({
+            ...current,
+            phase: "installing",
+            message: status.message,
+            installationSessionId,
+          }));
+          timer = window.setTimeout(poll, 750);
+        })
+        .catch((error) => {
+          if (disposed) return;
+          updateCliSetup(provider, (current) => ({
+            ...current,
+            phase: "error",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unable to resume the CLI installation status.",
+            installationSessionId: undefined,
+          }));
+        });
+    };
+    poll();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    cliProviderFingerprint,
+    cliSetup?.installationSessionId,
+    cliSetup?.phase,
+    requestCliDetection,
+    updateAiSettings,
+    updateCliSetup,
+  ]);
+
+  useEffect(() => {
     if (!modelConfig || modelConfig.kind === "openai-compatible") {
       return;
     }
     const provider = modelConfig.kind;
+    const probeFingerprint =
+      cliProviderFingerprint ?? `provider:${modelConfig.kind}`;
+    const probeFresh =
+      cliProbeIdentity?.verifiedAt !== undefined &&
+      Date.now() - cliProbeIdentity.verifiedAt < CLI_PROBE_TTL_MS;
+    if (
+      cliProbeIdentity?.fingerprint === probeFingerprint &&
+      cliProbeIdentity.completedRevision === cliDetectionRevision &&
+      probeFresh
+    ) {
+      return;
+    }
     let disposed = false;
     updateCliSetup(provider, (current) =>
       current && current.phase !== "ready" && current.phase !== "checking"
@@ -617,11 +760,15 @@ function AgentHostAssistantSidebar() {
             executablePath: result.executablePath,
             version: result.version,
           });
+          completeCliProbe(
+            provider,
+            probeFingerprint,
+            cliDetectionRevision,
+          );
           return;
         }
         updateCliSetup(provider, (current) => ({
-          phase:
-            current?.phase === "installing" ? "installing" : "checking",
+          phase: current?.phase === "installing" ? "installing" : "checking",
           message: "CLI detected. Verifying account sign-in and capabilities…",
           executablePath: result.executablePath,
           version: result.version,
@@ -635,26 +782,26 @@ function AgentHostAssistantSidebar() {
             executablePath: tested.executablePath || result.executablePath,
             version: tested.version || result.version,
           });
-          if (
-            modelConfig.model.trim().toLowerCase() === "default" &&
-            tested.model.trim() &&
-            tested.model.trim().toLowerCase() !== "default"
-          ) {
-            updateAiSettings(
-              modelConfig.kind === "codex-cli"
-                ? { codexCliModel: tested.model }
-                : { codeBuddyCliModel: tested.model },
-            );
-          }
+          completeCliProbe(
+            provider,
+            probeFingerprint,
+            cliDetectionRevision,
+          );
         } catch (error) {
           if (disposed) return;
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           updateCliSetup(provider, {
-            phase: isAuthenticationError(message) ? "auth-required" : "error",
+            phase: isAuthenticationError(error) ? "auth-required" : "error",
             message,
             executablePath: result.executablePath,
             version: result.version,
           });
+          completeCliProbe(
+            provider,
+            probeFingerprint,
+            cliDetectionRevision,
+          );
         }
       })
       .catch((error) => {
@@ -663,56 +810,25 @@ function AgentHostAssistantSidebar() {
           phase: "error",
           message: error instanceof Error ? error.message : String(error),
         });
+        completeCliProbe(
+          provider,
+          probeFingerprint,
+          cliDetectionRevision,
+        );
       });
     return () => {
       disposed = true;
     };
   }, [
     cliDetectionRevision,
+    cliProbeIdentity?.completedRevision,
+    cliProbeIdentity?.fingerprint,
+    cliProbeIdentity?.verifiedAt,
     cliProviderFingerprint,
+    completeCliProbe,
     updateAiSettings,
     updateCliSetup,
   ]);
-
-  useEffect(() => {
-    if (
-      cliSetup?.phase !== "ready" ||
-      !modelConfig ||
-      modelConfig.kind === "openai-compatible"
-    ) {
-      return;
-    }
-    let disposed = false;
-    const config = modelConfig;
-    void Promise.all([
-      aiService.listCliModels(config),
-      aiService.listCliCommands(config).catch(() => []),
-    ])
-      .then(([models, commands]) => {
-        if (disposed) return;
-        setCliModelsByProvider((current) => ({
-          ...current,
-          [config.kind]: models,
-        }));
-        setCliCommandsByProvider((current) => ({
-          ...current,
-          [config.kind]: commands,
-        }));
-      })
-      .catch((error) => {
-        if (disposed) return;
-        updateCliSetup(config.kind, (current) => ({
-          ...current,
-          phase: "ready",
-          message: `Provider session is ready, but its capability catalog could not be refreshed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        }));
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [cliProviderFingerprint, cliSetup?.phase, updateCliSetup]);
 
   useEffect(() => {
     if (
@@ -724,7 +840,6 @@ function AgentHostAssistantSidebar() {
     ) {
       return;
     }
-    let disposed = false;
     const provider = modelConfig.kind;
     updateCliSetup(provider, (current) => ({
       ...current,
@@ -735,17 +850,16 @@ function AgentHostAssistantSidebar() {
     void aiService
       .listCliAuthenticationMethods(modelConfig)
       .then((methods) => {
-        if (disposed) return;
         updateCliSetup(provider, (current) => ({
           ...current,
           phase: "auth-required",
-          message: current?.message ?? "Choose a secure browser sign-in method.",
+          message:
+            current?.message ?? "Choose a secure browser sign-in method.",
           authenticationMethods: methods,
           authMethodsLoading: false,
         }));
       })
       .catch((error) => {
-        if (disposed) return;
         updateCliSetup(provider, (current) => ({
           ...current,
           phase: "auth-required",
@@ -753,14 +867,7 @@ function AgentHostAssistantSidebar() {
           authMethodsLoading: false,
         }));
       });
-    return () => {
-      disposed = true;
-    };
-  }, [
-    cliProviderFingerprint,
-    cliSetup?.phase,
-    updateCliSetup,
-  ]);
+  }, [cliProviderFingerprint, cliSetup?.phase, updateCliSetup]);
 
   useEffect(() => {
     if (
@@ -778,7 +885,8 @@ function AgentHostAssistantSidebar() {
       updateCliSetup(provider, (current) => ({
         ...current,
         phase: "auth-required",
-        message: "The sign-in session was interrupted. Choose a sign-in method to restart it.",
+        message:
+          "The sign-in session was interrupted. Choose a sign-in method to restart it.",
       }));
       return;
     }
@@ -789,7 +897,25 @@ function AgentHostAssistantSidebar() {
         .then(async (status) => {
           if (disposed) return;
           if (status.phase === "succeeded") {
-            const result = await aiService.testProvider(config);
+            let result;
+            try {
+              result = await aiService.testProvider(config);
+            } catch (error) {
+              if (disposed) return;
+              updateCliSetup(provider, (current) => ({
+                ...current,
+                phase: cliSetupPhaseForFailure(error),
+                message:
+                  cliSetupPhaseForFailure(error) === "auth-required"
+                    ? "Sign-in completed, but the CLI still needs account access. Choose a sign-in method to try again."
+                    : error instanceof Error
+                      ? error.message
+                      : String(error),
+                authenticationSessionId: undefined,
+                refreshing: false,
+              }));
+              return;
+            }
             if (disposed) return;
             updateCliSetup(provider, (current) => ({
               ...current,
@@ -800,17 +926,6 @@ function AgentHostAssistantSidebar() {
               authenticationSessionId: undefined,
               refreshing: false,
             }));
-            if (
-              config.model.trim().toLowerCase() === "default" &&
-              result.model.trim() &&
-              result.model.trim().toLowerCase() !== "default"
-            ) {
-              updateAiSettings(
-                config.kind === "codex-cli"
-                  ? { codexCliModel: result.model }
-                  : { codeBuddyCliModel: result.model },
-              );
-            }
             void session.refreshStatus();
             return;
           }
@@ -835,7 +950,8 @@ function AgentHostAssistantSidebar() {
         })
         .catch((error) => {
           if (disposed) return;
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           updateCliSetup(provider, (current) => ({
             ...current,
             phase: "error",
@@ -888,9 +1004,13 @@ function AgentHostAssistantSidebar() {
     codeBuddyCliModel,
     codeBuddyCliPath,
     codeBuddyCliReasoningEffort,
+    codeBuddyCliReasoningEffortByModel,
+    codeBuddyCliEnvironmentKeys,
     codexCliModel,
     codexCliPath,
     codexCliReasoningEffort,
+    codexCliReasoningEffortByModel,
+    codexCliEnvironmentKeys,
     modelConfig,
   ]);
 
@@ -1168,7 +1288,11 @@ function AgentHostAssistantSidebar() {
       <AssistantProviderControl
         provider={aiProvider}
         enabled={aiEnabled}
-        destination={contextProviderLabel}
+        destination={
+          modelConfig?.kind === "openai-compatible"
+            ? contextProviderLabel
+            : null
+        }
         modelStatus={modelStatus}
         cliSetup={cliSetup}
         isBusy={session.isBusy}
@@ -1192,21 +1316,39 @@ function AgentHostAssistantSidebar() {
             session.turns.length >= 4 && "wb-assistant-scroll-with-minimap",
           )}
         >
-          {showProviderWelcome ? (
+          {session.isHydrating ? (
+            <div
+              className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center"
+              aria-live="polite"
+              data-assistant-hydrating
+            >
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[hsl(var(--wb-border))] border-t-[hsl(var(--wb-accent))]" />
+              <div className="text-[10px] font-medium">Restoring Assistant conversation</div>
+              <div className="max-w-xs text-[9px] leading-4 wb-muted">
+                Reconciling the encrypted snapshot and any unfinished activity before accepting a new request.
+              </div>
+            </div>
+          ) : showProviderWelcome ? (
             <AssistantProviderWelcome
               isBusy={session.isBusy}
               onSelect={selectAssistantProvider}
               onOpenSettings={openAiSettings}
             />
-          ) : cliSetupRequired && modelConfig?.kind !== "openai-compatible" && cliSetup ? (
+          ) : cliSetupRequired &&
+            modelConfig?.kind !== "openai-compatible" &&
+            cliSetup ? (
             <AssistantProviderSetup
               provider={
                 aiProvider === "codex-cli" ? "codex-cli" : "codebuddy-cli"
               }
               state={cliSetup}
               onInstall={() => void installAssistantProvider()}
-              onAuthenticate={(methodId) => void authenticateAssistantProvider(methodId)}
-              onCancelAuthentication={() => void cancelAssistantAuthentication()}
+              onAuthenticate={(methodId) =>
+                void authenticateAssistantProvider(methodId)
+              }
+              onCancelAuthentication={() =>
+                void cancelAssistantAuthentication()
+              }
               onRetry={retryAssistantProvider}
               onOpenSettings={openAiSettings}
             />
@@ -1237,7 +1379,9 @@ function AgentHostAssistantSidebar() {
                 onExecuteAttachment={handleExecuteAttachment}
                 onOpenProjectFile={openProjectFileInEditor}
                 onOpenProjectFileProposal={(turnId, callId) => {
-                  const item = pendingAssistantFileProposals(session.turns).find(
+                  const item = pendingAssistantFileProposals(
+                    session.turns,
+                  ).find(
                     (candidate) =>
                       candidate.turnId === turnId &&
                       candidate.proposal.callId === callId,
@@ -1369,13 +1513,23 @@ function AgentHostAssistantSidebar() {
             modelStatus={modelStatus}
             modelOptions={
               aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
-                ? cliModelsByProvider[aiProvider]
+                ? cliModelOptions
+                : undefined
+            }
+            modelCatalogStatus={
+              aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
+                ? cliCatalog.status
+                : undefined
+            }
+            modelCatalogWarning={
+              aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
+                ? cliCatalogWarning || undefined
                 : undefined
             }
             reasoningEffort={displayedReasoningEffort}
             commandOptions={
               aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
-                ? cliCommandsByProvider[aiProvider]
+                ? cliCatalog.commands
                 : undefined
             }
             onModelChange={(model) =>
@@ -1399,7 +1553,19 @@ function AgentHostAssistantSidebar() {
             onOpenAiSettings={openAiSettings}
             onRetryModel={() => {
               if (authIssueId) setDismissedAuthIssueId(authIssueId);
-              void session.refreshStatus();
+              const catalogNeedsRefresh =
+                (aiProvider === "codex-cli" || aiProvider === "codebuddy-cli") &&
+                (cliCatalog.status === "error" ||
+                  cliCatalog.warning ||
+                  cliCatalog.effortWarning);
+              if (catalogNeedsRefresh) {
+                cliCatalog.refresh();
+                // A catalog retry is not an installation or authentication
+                // retry. Re-probing here briefly replaces a usable composer
+                // with the setup surface and makes model selection flicker.
+                return;
+              }
+              retryAssistantProvider();
             }}
             submissionBlockReason={submissionBlockReason}
             modeOptions={assistantProviderDefinition(aiProvider).modeOptions}
@@ -1443,6 +1609,7 @@ function resolveModelUiState({
   hostInstalledTools,
   authenticationError,
   cliSetup,
+  t,
 }: {
   enabled: boolean;
   providerKind: AiProviderKind;
@@ -1455,6 +1622,7 @@ function resolveModelUiState({
   hostInstalledTools: string[] | null;
   authenticationError: string | null;
   cliSetup: AssistantCliSetupState | null;
+  t: ReturnType<typeof useI18n>["t"];
 }): {
   modelStatus: AssistantModelStatus;
   submissionBlockReason: string | null;
@@ -1462,12 +1630,12 @@ function resolveModelUiState({
   const endpoint = endpointLabel(baseUrl);
   if (!enabled || !baseUrl.trim() || !model.trim()) {
     const detail = !enabled
-      ? "Configure an AI provider and enable it before sending a request."
+      ? t("assistant.status.configureProvider")
       : !baseUrl.trim()
-        ? "Add an OpenAI-compatible endpoint before sending a request."
-        : "Choose a model identifier before sending a request.";
+        ? t("assistant.status.configureEndpoint")
+        : t("assistant.status.chooseModel");
     return {
-      modelStatus: { kind: "missing", label: "AI setup required", detail },
+      modelStatus: { kind: "missing", label: t("assistant.status.setupRequired"), detail },
       submissionBlockReason: detail,
     };
   }
@@ -1479,15 +1647,17 @@ function resolveModelUiState({
         kind:
           cliSetup.phase === "checking" || cliSetup.phase === "installing"
             ? "checking"
-            : cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
+            : cliSetup.phase === "auth-required" ||
+                cliSetup.phase === "authorizing"
               ? "authentication-error"
               : "unavailable",
         label:
           cliSetup.phase === "installing"
-            ? "Installing CLI"
-            : cliSetup.phase === "auth-required" || cliSetup.phase === "authorizing"
-              ? "Authentication required"
-              : "CLI setup required",
+            ? t("assistant.status.installingCli")
+            : cliSetup.phase === "auth-required" ||
+                cliSetup.phase === "authorizing"
+              ? t("assistant.status.authenticationRequired")
+              : t("assistant.status.cliSetupRequired"),
         detail,
       },
       submissionBlockReason: detail,
@@ -1497,12 +1667,12 @@ function resolveModelUiState({
   if (authenticationError) {
     const detail =
       providerKind === "openai-compatible"
-        ? "The provider rejected the credential. Update the API key in AI settings, then retry."
-        : "The CLI session is no longer authenticated. Open the provider sign-in flow, then retry.";
+        ? t("assistant.status.httpAuthenticationDetail")
+        : t("assistant.status.cliAuthenticationDetail");
     return {
       modelStatus: {
         kind: "authentication-error",
-        label: "Authentication failed",
+        label: t("assistant.status.authenticationFailed"),
         detail,
       },
       submissionBlockReason: detail,
@@ -1510,11 +1680,13 @@ function resolveModelUiState({
   }
 
   if (resolvedMode !== "chat" && !toolCalling) {
-    const detail = `${resolvedMode === "plan" ? "Plan" : "Agent"} mode requires a model with tool calling. Switch to Chat or enable tool calling in AI settings.`;
+    const detail = t("assistant.status.toolCallingRequired", {
+      mode: assistantModeLabel(resolvedMode, t),
+    });
     return {
       modelStatus: {
         kind: "incompatible",
-        label: "Model capability required",
+        label: t("assistant.status.modelCapabilityRequired"),
         detail,
       },
       submissionBlockReason: detail,
@@ -1527,11 +1699,13 @@ function resolveModelUiState({
     hostCapabilities.length > 0 &&
     !hostCapabilities.includes(resolvedMode)
   ) {
-    const detail = `The AI runtime does not support ${resolvedMode === "chat" ? "Chat" : resolvedMode === "plan" ? "Plan" : "Agent"} mode.`;
+    const detail = t("assistant.status.runtimeDoesNotSupport", {
+      mode: assistantModeLabel(resolvedMode, t),
+    });
     return {
       modelStatus: {
         kind: "incompatible",
-        label: "Mode unavailable",
+        label: t("assistant.status.modeUnavailable"),
         detail,
       },
       submissionBlockReason: detail,
@@ -1543,18 +1717,17 @@ function resolveModelUiState({
     resolvedMode !== "chat" &&
     (!hostInstalledTools || hostInstalledTools.length === 0)
   ) {
-    const detail =
-      "The AI runtime has not published its installed tool catalog. Tool modes stay paused to avoid advertising actions that cannot run.";
+    const detail = t("assistant.status.toolsUnavailable");
     return {
-      modelStatus: { kind: "checking", label: "Checking AI tools", detail },
+      modelStatus: { kind: "checking", label: t("assistant.status.checkingTools"), detail },
       submissionBlockReason: detail,
     };
   }
 
   if (availability === "checking") {
-    const detail = "Starting the AI runtime. You can keep typing while it starts.";
+    const detail = t("assistant.status.runtimeStarting");
     return {
-      modelStatus: { kind: "checking", label: "Starting AI runtime", detail },
+      modelStatus: { kind: "checking", label: t("assistant.status.startingRuntime"), detail },
       submissionBlockReason: detail,
     };
   }
@@ -1563,36 +1736,60 @@ function resolveModelUiState({
     availability === "available" &&
     (!hostCapabilities || hostCapabilities.length === 0)
   ) {
-    const detail = "Checking the AI runtime capabilities. You can keep typing.";
+    const detail = t("assistant.status.runtimeChecking");
     return {
-      modelStatus: { kind: "checking", label: "Checking AI runtime", detail },
+      modelStatus: { kind: "checking", label: t("assistant.status.checkingRuntime"), detail },
       submissionBlockReason: detail,
     };
   }
 
   if (availability === "unavailable") {
-    const detail =
-      "The AI runtime is unavailable. The database workspace remains usable.";
+    const detail = t("assistant.status.runtimeUnavailable");
     return {
-      modelStatus: { kind: "unavailable", label: "AI unavailable", detail },
-      submissionBlockReason: `${detail} Retry the runtime or open AI settings.`,
+      modelStatus: { kind: "unavailable", label: t("assistant.status.unavailable"), detail },
+      submissionBlockReason: t("assistant.status.runtimeUnavailableAction", { detail }),
     };
   }
 
   return {
     modelStatus: {
       kind: "configured",
-      label: "Model configured",
-      detail: `Requests use ${endpoint}. Credentials are verified when a request is sent.`,
+      label: t("assistant.status.modelConfigured"),
+      detail: t("assistant.status.requestDestination", { endpoint }),
     },
     submissionBlockReason: null,
   };
 }
 
-function isAuthenticationError(message: string) {
+function assistantModeLabel(
+  mode: "chat" | "plan" | "agent",
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(
+    mode === "chat"
+      ? "assistant.status.modeChat"
+      : mode === "plan"
+        ? "assistant.status.modePlan"
+        : "assistant.status.modeAgent",
+  );
+}
+
+function isAuthenticationError(error: unknown) {
+  if (error instanceof ApiError) {
+    return error.code === "AI_CLI_AUTH_REQUIRED";
+  }
+  const message = error instanceof Error ? error.message : String(error);
   return /\b401\b|unauthori[sz]ed|not\s+authenticated|not\s+logged\s+in|sign\s+in|authentication\s+failed|incorrect\s+(?:api[- ]?)?key|invalid\s+(?:api[- ]?)?key/iu.test(
     message,
   );
+}
+
+function cliSetupPhaseForFailure(error: unknown): AssistantCliSetupState["phase"] {
+  if (error instanceof ApiError) {
+    if (error.code === "AI_CLI_AUTH_REQUIRED") return "auth-required";
+    if (error.code === "AI_CLI_NOT_INSTALLED") return "missing";
+  }
+  return isAuthenticationError(error) ? "auth-required" : "error";
 }
 
 function endpointLabel(baseUrl: string) {
@@ -1618,22 +1815,102 @@ function agentTurnPendingLabel(status: string) {
   return "Working...";
 }
 
-function providerDestinationLabel(
-  provider: AiProviderConfig,
-) {
+function providerDestinationLabel(provider: AiProviderConfig) {
   if (provider.kind === "codex-cli") return `${provider.model} · Codex CLI`;
   if (provider.kind === "codebuddy-cli") {
     return `${provider.model} · CodeBuddy Code CLI`;
   }
 
   try {
-    const hostname = new URL(
-      "baseUrl" in provider ? provider.baseUrl : "",
-    ).hostname;
+    const hostname = new URL("baseUrl" in provider ? provider.baseUrl : "")
+      .hostname;
     return hostname
       ? `${provider.model} · ${hostname}`
       : `${provider.model} · custom endpoint`;
   } catch {
     return `${provider.model} · custom endpoint`;
   }
+}
+
+function cliProviderIdentityFingerprint(
+  provider: AiProviderConfig | null,
+  environmentRevision?: string,
+) {
+  if (!provider || provider.kind === "openai-compatible") return null;
+  return JSON.stringify({
+    kind: provider.kind,
+    profileId: provider.profileId,
+    executablePath: provider.executablePath || "",
+    environmentKeys: [...(provider.environmentKeys || [])].sort(),
+    environmentRevision:
+      environmentRevision ??
+      aiService.getCliEnvironmentRevision(provider.kind, provider.profileId),
+  });
+}
+
+function selectedCliReasoningEffort(
+  preferences: Record<string, string>,
+  model: string,
+  legacyEffort: string,
+) {
+  const selected = preferences[model.trim() || "default"]?.trim();
+  if (selected) return selected;
+  return Object.keys(preferences).length === 0 ? legacyEffort : "default";
+}
+
+export function assistantConversationId(provider: AiProviderConfig | null) {
+  if (!provider) return undefined;
+  if (provider.kind !== "openai-compatible") {
+    return `provider:${provider.kind}`;
+  }
+  // Keep HTTP conversation history inside one non-secret destination boundary.
+  // The API key is intentionally excluded: rotating a credential for the same
+  // endpoint must not leak it into identifiers or discard a valid conversation.
+  const identity = JSON.stringify({
+    kind: provider.kind,
+    baseUrl: canonicalHttpDestination(provider.baseUrl),
+  });
+  return `provider:http:${nonSecretDestinationDigest(identity)}`;
+}
+
+function canonicalHttpDestination(baseUrl: string) {
+  const fallback = baseUrl.trim().replace(/\/+$/u, "");
+  try {
+    const url = new URL(fallback);
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/u, "") || "/";
+    return url.toString();
+  } catch {
+    return fallback;
+  }
+}
+
+// A synchronous 128-bit avalanche digest keeps conversation ids within the
+// Host's 80-character boundary. It is an identity key, not a credential hash;
+// the configured API credential is never included in the source value.
+function nonSecretDestinationDigest(value: string) {
+  let h1 = 1_779_033_703;
+  let h2 = 3_144_134_277;
+  let h3 = 1_013_904_242;
+  let h4 = 2_773_480_762;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    h1 = h2 ^ Math.imul(h1 ^ code, 597_399_067);
+    h2 = h3 ^ Math.imul(h2 ^ code, 2_869_860_233);
+    h3 = h4 ^ Math.imul(h3 ^ code, 951_274_213);
+    h4 = h1 ^ Math.imul(h4 ^ code, 2_716_044_179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597_399_067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2_869_860_233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951_274_213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2_716_044_179);
+  h1 ^= h2 ^ h3 ^ h4;
+  h2 ^= h1;
+  h3 ^= h1;
+  h4 ^= h1;
+  return [h1, h2, h3, h4]
+    .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
+    .join("");
 }

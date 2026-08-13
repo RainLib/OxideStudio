@@ -80,30 +80,31 @@ export function closeSideToolWindow(
       },
     };
   }
-  const history = workbench.layout.sideHistory[side].filter(
-    (candidate) =>
-      candidate !== id &&
-      workbench.toolWindows[candidate].enabled &&
-      workbench.toolWindows[candidate].side === side,
+  const closedSideVisibility = SIDE_TOOL_WINDOW_IDS.reduce(
+    (visibility, candidate) => {
+      if (workbench.toolWindows[candidate].side === side) {
+        visibility[candidate] = false;
+      }
+      return visibility;
+    },
+    { ...workbench.layout.visibility },
   );
-  const restore = history.shift() ?? null;
   return {
     ...workbench,
     layout: {
       ...workbench.layout,
-      visibility: {
-        ...workbench.layout.visibility,
-        [id]: false,
-        ...(restore ? { [restore]: true } : {}),
-      },
-      activeToolWindow: restore ?? "editor",
+      visibility: closedSideVisibility,
+      activeToolWindow: "editor",
       activeSideToolWindows: {
         ...workbench.layout.activeSideToolWindows,
-        [side]: restore,
+        [side]: null,
       },
       sideHistory: {
         ...workbench.layout.sideHistory,
-        [side]: history,
+        // A side is one shared panel, not a stack of independently visible
+        // panes. Keep the recent tools while switching, but closing the active
+        // tool closes the entire panel and must not reveal an older tool.
+        [side]: [],
       },
     },
   };

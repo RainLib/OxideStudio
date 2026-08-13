@@ -10,6 +10,7 @@ import {
   Clipboard,
   FileText,
   Hash,
+  Image,
   LoaderCircle,
   ListTree,
   Code2,
@@ -36,6 +37,10 @@ import {
   valueEditorSupportsEmpty,
   parseJsonPreview,
   parseArrayPreview,
+  parseMapPreview,
+  parseXmlPreview,
+  parseImagePreview,
+  parseGeometryPreview,
   type ValueEditorKind,
   type ValueEditorState,
 } from "@/lib/valueEditor";
@@ -63,6 +68,11 @@ export interface ValueEditorTarget {
   defaultValue?: string | null;
   expression?: string | null;
   expressionAllowed?: boolean;
+  readOnlyReason?:
+    | "query-result"
+    | "generated-column"
+    | "hidden-column"
+    | "unclassified-column";
 }
 
 interface ValueEditorDialogProps {
@@ -96,7 +106,14 @@ function kindIcon(kind: ValueEditorKind) {
   const props = { size: 13, "aria-hidden": true };
   switch (kind) {
     case "json":
+    case "map":
       return <Braces {...props} />;
+    case "xml":
+      return <Code2 {...props} />;
+    case "image":
+      return <Image {...props} />;
+    case "geometry":
+      return <ListTree {...props} />;
     case "array":
       return <ListTree {...props} />;
     case "binary":
@@ -204,7 +221,7 @@ export function ValueEditorDialog({
     [draft],
   );
   const canUseEmpty = valueEditorSupportsEmpty(kind);
-  const editorLanguage = kind === "json" ? "json" : "plaintext";
+  const editorLanguage = kind === "json" ? "json" : kind === "xml" ? "xml" : "plaintext";
   const jsonPreview = useMemo(
     () =>
       kind === "json" && semanticState === "value"
@@ -219,12 +236,67 @@ export function ValueEditorDialog({
         : null,
     [draft, kind, semanticState],
   );
-  const structuredPreview = kind === "array" ? arrayPreview : jsonPreview;
+  const mapPreview = useMemo(
+    () =>
+      kind === "map" && semanticState === "value"
+        ? parseMapPreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const xmlPreview = useMemo(
+    () =>
+      kind === "xml" && semanticState === "value"
+        ? parseXmlPreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const geometryPreview = useMemo(
+    () =>
+      kind === "geometry" && semanticState === "value"
+        ? parseGeometryPreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const imagePreview = useMemo(
+    () =>
+      kind === "image" && semanticState === "value"
+        ? parseImagePreview(draft)
+        : null,
+    [draft, kind, semanticState],
+  );
+  const structuredPreview =
+    kind === "array"
+      ? arrayPreview
+      : kind === "map"
+        ? mapPreview
+        : kind === "xml"
+          ? xmlPreview
+          : kind === "geometry"
+            ? geometryPreview
+          : jsonPreview;
   const canShowStructuredTree = structuredPreview?.ok === true;
+  const canShowPreview = kind === "image"
+    ? imagePreview?.ok === true
+    : canShowStructuredTree;
+  const previewError = kind === "image"
+    ? imagePreview && !imagePreview.ok
+      ? imagePreview.error
+      : undefined
+    : structuredPreview && !structuredPreview.ok
+      ? structuredPreview.error
+      : undefined;
 
   if (!target) return null;
 
   const isReadOnly = !target.editable;
+  const readOnlyMessage =
+    target.readOnlyReason === "generated-column"
+      ? "Generated database columns are computed and cannot be edited."
+      : target.readOnlyReason === "hidden-column"
+        ? "Hidden database columns cannot be edited here."
+        : target.readOnlyReason === "unclassified-column"
+          ? "Column write metadata is unavailable, so editing is disabled."
+        : "Query results are read-only.";
 
   const selectState = (next: ValueEditorState) => {
     if (next === "empty" && !canUseEmpty) return;
@@ -483,7 +555,7 @@ export function ValueEditorDialog({
                     </button>
                   </>
                 )}
-                {editMode === "value" && (kind === "json" || kind === "array") &&
+                {editMode === "value" && (kind === "json" || kind === "xml" || kind === "array" || kind === "map" || kind === "geometry" || kind === "image") &&
                   semanticState === "value" && (
                     <button
                       type="button"
@@ -493,26 +565,32 @@ export function ValueEditorDialog({
                           "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]",
                       )}
                       title={
-                        canShowStructuredTree
+                        canShowPreview
                           ? jsonPresentation === "tree"
                             ? `Show ${kindLabel(kind)} text`
-                            : `Inspect ${kindLabel(kind)} as a tree`
-                          : structuredPreview?.error || "Tree preview is unavailable"
+                            : kind === "image"
+                              ? "Preview image"
+                              : `Inspect ${kindLabel(kind)} as a tree`
+                          : kind === "image"
+                            ? previewError || "Image preview is unavailable"
+                            : previewError || "Tree preview is unavailable"
                       }
                       aria-label={
                         jsonPresentation === "tree"
                           ? `Show ${kindLabel(kind)} text`
-                          : `Inspect ${kindLabel(kind)} as a tree`
+                          : kind === "image"
+                            ? "Preview image"
+                            : `Inspect ${kindLabel(kind)} as a tree`
                       }
                       aria-pressed={jsonPresentation === "tree"}
-                      disabled={!canShowStructuredTree}
+                      disabled={!canShowPreview}
                       onClick={() =>
                         setJsonPresentation((current) =>
                           current === "tree" ? "text" : "tree",
                         )
                       }
                     >
-                      Tree
+                      {kind === "image" ? "Preview" : "Tree"}
                     </button>
                   )}
                 <button
@@ -604,7 +682,15 @@ export function ValueEditorDialog({
                     </span>
                   </label>
                 </div>
-              ) : (kind === "json" || kind === "array") &&
+              ) : kind === "image" && jsonPresentation === "tree" && imagePreview?.ok ? (
+                <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-[hsl(var(--wb-panel))] p-6">
+                  <img
+                    src={imagePreview.dataUrl}
+                    alt="Database image value preview"
+                    className="max-h-full max-w-full rounded-[4px] object-contain"
+                  />
+                </div>
+              ) : (kind === "json" || kind === "xml" || kind === "array" || kind === "map" || kind === "geometry") &&
                 jsonPresentation === "tree" &&
                 structuredPreview?.ok ? (
                 <JsonTreePreview value={structuredPreview.value} />
@@ -646,7 +732,7 @@ export function ValueEditorDialog({
               </div>
             ) : isReadOnly ? (
               <div className="text-[10px] text-[hsl(var(--wb-text-muted))]">
-                Query results are read-only.
+                {readOnlyMessage}
               </div>
             ) : (
               <div className="text-[10px] text-[hsl(var(--wb-text-muted))]">

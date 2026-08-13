@@ -9,10 +9,11 @@ use crate::ai_cli::{
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
+    future::Future,
     hash::{Hash, Hasher},
     process::Stdio,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -23,15 +24,32 @@ use tokio::{
 
 const ACP_TIMEOUT: Duration = Duration::from_secs(15);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+const CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const EFFORT_CACHE_TTL: Duration = Duration::from_secs(30);
+const COMMAND_NOTIFICATION_GRACE: Duration = Duration::from_millis(350);
 
-#[derive(Clone)]
-struct CachedModels {
-    key: u64,
+#[derive(Clone, Debug)]
+struct CachedCapabilities {
     loaded_at: Instant,
     models: Vec<CliModelInfo>,
+    commands: Option<Vec<CliCommandInfo>>,
+    current_model: Option<String>,
 }
 
-static MODEL_CACHE: LazyLock<Mutex<Option<CachedModels>>> = LazyLock::new(|| Mutex::new(None));
+#[derive(Clone)]
+struct CachedEfforts {
+    loaded_at: Instant,
+    efforts: Vec<String>,
+}
+
+static CAPABILITY_CACHE: LazyLock<Mutex<HashMap<u64, CachedCapabilities>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CAPABILITY_DISCOVERY_LOCKS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static EFFORT_CACHE: LazyLock<Mutex<HashMap<u64, CachedEfforts>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static EFFORT_DISCOVERY_LOCKS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const EMBEDDED_COMMANDS: &[&str] = &[
     "btw",
@@ -56,6 +74,7 @@ struct AcpCatalog {
     models: Vec<CliModelInfo>,
     current_model: Option<String>,
     efforts: Vec<String>,
+    commands: Option<Vec<CliCommandInfo>>,
 }
 
 pub async fn detect(
@@ -98,28 +117,12 @@ pub async fn list_models(
         config.executable_path.as_deref(),
     )
     .await?;
-    let key = model_cache_key(&command, environment);
-    let now = Instant::now();
-    if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
-        if cached.key == key
-            && now.saturating_duration_since(cached.loaded_at) < Duration::from_secs(5 * 60)
-        {
-            return Ok(cached.models.clone());
-        }
-    }
-    let catalog = discover_catalog_via_acp(&command, environment, config.model.trim()).await?;
-    if catalog.models.is_empty() {
-        return Err(anyhow!("CodeBuddy ACP session returned no usable models"));
-    }
-    *MODEL_CACHE.lock().await = Some(CachedModels {
-        key,
-        loaded_at: now,
-        models: catalog.models.clone(),
-    });
-    Ok(catalog.models)
+    Ok(get_or_discover_capabilities(&command, environment)
+        .await?
+        .models)
 }
 
-fn model_cache_key(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> u64 {
+fn provider_identity_key(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> u64 {
     let mut hasher = DefaultHasher::new();
     command.program.hash(&mut hasher);
     command.prefix_args.hash(&mut hasher);
@@ -136,11 +139,70 @@ pub async fn list_efforts(
         config.executable_path.as_deref(),
     )
     .await?;
-    Ok(
-        discover_catalog_via_acp(&command, environment, config.model.trim())
+    let model = normalize_model_id(config.model.trim());
+    let key = effort_cache_key(&command, environment, &model);
+    get_or_discover_efforts_by_key(key, || async {
+        Ok(discover_catalog_via_acp(&command, environment, &model)
             .await?
-            .efforts,
-    )
+            .efforts)
+    })
+    .await
+}
+
+fn effort_cache_key(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+    model: &str,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    command.program.hash(&mut hasher);
+    command.prefix_args.hash(&mut hasher);
+    environment.hash(&mut hasher);
+    model.hash(&mut hasher);
+    hasher.finish()
+}
+
+async fn get_or_discover_efforts_by_key<F, Fut>(key: u64, discover: F) -> Result<Vec<String>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<String>>>,
+{
+    let now = Instant::now();
+    if let Some(cached) = EFFORT_CACHE.lock().await.get(&key) {
+        if now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL {
+            return Ok(cached.efforts.clone());
+        }
+    }
+
+    let discovery_lock = {
+        let mut locks = EFFORT_DISCOVERY_LOCKS.lock().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _discovery_guard = discovery_lock.lock().await;
+
+    // A concurrent request for the same executable, environment and model may
+    // have finished while this task waited for the model-scoped lock.
+    let now = Instant::now();
+    if let Some(cached) = EFFORT_CACHE.lock().await.get(&key) {
+        if now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL {
+            return Ok(cached.efforts.clone());
+        }
+    }
+
+    let efforts = discover().await?;
+    let mut cache = EFFORT_CACHE.lock().await;
+    cache.retain(|_, cached| now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL);
+    cache.insert(
+        key,
+        CachedEfforts {
+            loaded_at: now,
+            efforts: efforts.clone(),
+        },
+    );
+    Ok(efforts)
 }
 
 pub async fn list_commands(
@@ -152,119 +214,10 @@ pub async fn list_commands(
         config.executable_path.as_deref(),
     )
     .await?;
-    tokio::time::timeout(
-        ACP_TIMEOUT,
-        discover_commands_via_acp(&command, environment),
-    )
-    .await
-    .map_err(|_| anyhow!("CodeBuddy ACP command discovery timed out"))?
-}
-
-async fn discover_commands_via_acp(
-    command: &CliCommandSpec,
-    environment: &BTreeMap<String, String>,
-) -> Result<Vec<CliCommandInfo>> {
-    let cwd = isolated_working_directory()?;
-    let mcp_config = cwd.path().join("mcp.json");
-    std::fs::write(&mcp_config, br#"{"mcpServers":{}}"#)
-        .context("failed to create isolated CodeBuddy MCP configuration")?;
-    let mut process = Command::new(&command.program);
-    process
-        .args(&command.prefix_args)
-        .args([
-            "--acp",
-            "--acp-transport",
-            "stdio",
-            "--strict-mcp-config",
-            "--mcp-config",
-            &mcp_config.to_string_lossy(),
-            "--setting-sources",
-            "user",
-        ])
-        .envs(environment)
-        .current_dir(cwd.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let mut child = process
-        .spawn()
-        .context("failed to start CodeBuddy ACP command discovery")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("CodeBuddy ACP stdin is unavailable"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("CodeBuddy ACP stdout is unavailable"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    write_rpc(
-        &mut stdin,
-        1,
-        "initialize",
-        json!({
-            "protocolVersion": 1,
-            "clientCapabilities": {
-                "fs": { "readTextFile": false, "writeTextFile": false },
-                "terminal": false
-            },
-            "clientInfo": { "name": "OxideStudio", "version": env!("CARGO_PKG_VERSION") }
-        }),
-    )
-    .await?;
-    read_rpc_result(&mut lines, 1).await?;
-    write_rpc(&mut stdin, 2, "_codebuddy.ai/getUserInfo", json!({})).await?;
-    let account = read_rpc_result(&mut lines, 2).await?;
-    if !has_authenticated_user(&account) {
-        let _ = child.kill().await;
-        return Err(anyhow!(
-            "CodeBuddy Code is not authenticated. Sign in from OxideStudio and try again."
-        ));
-    }
-    write_rpc(
-        &mut stdin,
-        3,
-        "session/new",
-        json!({ "cwd": cwd.path().to_string_lossy(), "mcpServers": [] }),
-    )
-    .await?;
-
-    let mut session_ready = false;
-    let mut commands = Vec::new();
-    while let Some(line) = lines.next_line().await? {
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("id").and_then(Value::as_u64) == Some(3) {
-            if let Some(error) = value.get("error") {
-                return Err(anyhow!("CodeBuddy ACP session failed: {error}"));
-            }
-            session_ready = true;
-        }
-        if value.get("method").and_then(Value::as_str) == Some("session/update") {
-            let update = value
-                .pointer("/params/update")
-                .or_else(|| value.get("params"))
-                .unwrap_or(&Value::Null);
-            if matches!(
-                update
-                    .get("sessionUpdate")
-                    .or_else(|| update.get("session_update"))
-                    .and_then(Value::as_str),
-                Some("available_commands_update")
-            ) {
-                commands = parse_available_commands(update);
-            }
-        }
-        if session_ready && !commands.is_empty() {
-            let _ = child.kill().await;
-            return Ok(commands);
-        }
-    }
-    Err(anyhow!(
-        "CodeBuddy ACP session did not publish its command catalog"
-    ))
+    get_or_discover_capabilities(&command, environment)
+        .await?
+        .commands
+        .ok_or_else(|| anyhow!("CodeBuddy ACP session did not publish its command catalog"))
 }
 
 fn parse_available_commands(value: &Value) -> Vec<CliCommandInfo> {
@@ -324,11 +277,11 @@ pub async fn test_connection(
     // Account state, model catalog and session creation are all verified over
     // ACP. Stream-json's apiKeySource is only a service origin and must never
     // be interpreted as proof that a user is signed in.
-    let catalog = discover_catalog_via_acp(&command, environment, config.model.trim())
+    let capabilities = get_or_discover_capabilities(&command, environment)
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
     let configured = config.model.trim();
-    let model = catalog
+    let model = capabilities
         .current_model
         .or_else(|| (!configured.is_empty()).then(|| configured.to_string()))
         .unwrap_or_else(|| "default".to_string());
@@ -371,11 +324,85 @@ async fn version(
 
 fn normalize_model_id(value: &str) -> String {
     let value = value.trim();
-    if value.eq_ignore_ascii_case("default-model") {
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("default")
+        || value.eq_ignore_ascii_case("default-model")
+    {
         "default".to_string()
     } else {
         value.to_string()
     }
+}
+
+fn fresh_cached_capabilities(
+    cache: &HashMap<u64, CachedCapabilities>,
+    key: u64,
+    now: Instant,
+) -> Option<CachedCapabilities> {
+    cache
+        .get(&key)
+        .filter(|cached| now.saturating_duration_since(cached.loaded_at) < CAPABILITY_CACHE_TTL)
+        .cloned()
+}
+
+async fn get_or_discover_capabilities(
+    command: &CliCommandSpec,
+    environment: &BTreeMap<String, String>,
+) -> Result<CachedCapabilities> {
+    let key = provider_identity_key(command, environment);
+    get_or_discover_capabilities_by_key(key, || async {
+        let catalog = discover_catalog_via_acp(command, environment, "").await?;
+        if catalog.models.is_empty() {
+            return Err(anyhow!("CodeBuddy ACP session returned no usable models"));
+        }
+        Ok(CachedCapabilities {
+            loaded_at: Instant::now(),
+            models: catalog.models,
+            commands: catalog.commands,
+            current_model: catalog.current_model,
+        })
+    })
+    .await
+}
+
+async fn get_or_discover_capabilities_by_key<F, Fut>(
+    key: u64,
+    discover: F,
+) -> Result<CachedCapabilities>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<CachedCapabilities>>,
+{
+    if let Some(cached) =
+        fresh_cached_capabilities(&*CAPABILITY_CACHE.lock().await, key, Instant::now())
+    {
+        return Ok(cached);
+    }
+
+    let discovery_lock = {
+        let mut locks = CAPABILITY_DISCOVERY_LOCKS.lock().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _discovery_guard = discovery_lock.lock().await;
+
+    // A concurrent caller may have completed discovery while this caller was
+    // waiting for the identity-scoped lock.
+    if let Some(cached) =
+        fresh_cached_capabilities(&*CAPABILITY_CACHE.lock().await, key, Instant::now())
+    {
+        return Ok(cached);
+    }
+
+    let now = Instant::now();
+    let mut cached = discover().await?;
+    cached.loaded_at = now;
+    let mut cache = CAPABILITY_CACHE.lock().await;
+    cache.retain(|_, entry| now.saturating_duration_since(entry.loaded_at) < CAPABILITY_CACHE_TTL);
+    cache.insert(key, cached.clone());
+    Ok(cached)
 }
 
 async fn discover_catalog_via_acp(
@@ -443,9 +470,10 @@ async fn discover_catalog_via_acp_inner(
         }),
     )
     .await?;
-    read_rpc_result(&mut lines, 1).await?;
+    let mut commands = None;
+    read_rpc_result_collecting_commands(&mut lines, 1, &mut commands).await?;
     write_rpc(&mut stdin, 2, "_codebuddy.ai/getUserInfo", json!({})).await?;
-    let account = read_rpc_result(&mut lines, 2).await?;
+    let account = read_rpc_result_collecting_commands(&mut lines, 2, &mut commands).await?;
     if !has_authenticated_user(&account) {
         let _ = child.kill().await;
         return Err(anyhow!(
@@ -462,7 +490,7 @@ async fn discover_catalog_via_acp_inner(
         }),
     )
     .await?;
-    let session = read_rpc_result(&mut lines, 3).await?;
+    let session = read_rpc_result_collecting_commands(&mut lines, 3, &mut commands).await?;
     let session_id = session
         .get("sessionId")
         .or_else(|| session.get("session_id"))
@@ -480,25 +508,30 @@ async fn discover_catalog_via_acp_inner(
             }),
         )
         .await?;
-        read_rpc_result(&mut lines, 4).await?
+        read_rpc_result_collecting_commands(&mut lines, 4, &mut commands).await?
     } else {
         session
     };
-    let efforts = parse_effort_options(&options);
-    let mut models = parse_acp_model_options(&options, &efforts);
+    let efforts = if model.is_empty() {
+        // Catalog discovery must not attach the session's current model effort
+        // options to every model in the provider catalog.
+        Vec::new()
+    } else {
+        parse_effort_options(&options)
+    };
+    let models = parse_acp_model_options(&options);
     let current_model = current_config_value(&options, "model")
         .as_deref()
         .map(normalize_model_id);
-    if let Some(current_model) = current_model.as_deref() {
-        for model in &mut models {
-            model.is_default = model.id == current_model;
-        }
+    if model.is_empty() && commands.is_none() {
+        collect_command_notification_with_grace(&mut lines, &mut commands).await?;
     }
     let _ = child.kill().await;
     Ok(AcpCatalog {
         models,
         current_model,
         efforts,
+        commands,
     })
 }
 
@@ -535,7 +568,7 @@ fn config_options(value: &Value) -> Option<&Vec<Value>> {
         .and_then(Value::as_array)
 }
 
-fn parse_acp_model_options(value: &Value, efforts: &[String]) -> Vec<CliModelInfo> {
+fn parse_acp_model_options(value: &Value) -> Vec<CliModelInfo> {
     let Some(model_config) = config_options(value).and_then(|options| {
         options
             .iter()
@@ -543,20 +576,20 @@ fn parse_acp_model_options(value: &Value, efforts: &[String]) -> Vec<CliModelInf
     }) else {
         return Vec::new();
     };
-    let current = current_config_value(value, "model");
     let mut seen = HashSet::new();
-    model_config
+    let mut models: Vec<CliModelInfo> = model_config
         .get("options")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|option| {
-            let id = option
+            let raw_id = option
                 .get("value")
                 .and_then(Value::as_str)
                 .or_else(|| option.as_str())?
                 .trim();
-            if id.is_empty() || !seen.insert(id.to_string()) {
+            let id = normalize_model_id(raw_id);
+            if id == "default" || !seen.insert(id.clone()) {
                 return None;
             }
             let label = option
@@ -565,16 +598,12 @@ fn parse_acp_model_options(value: &Value, efforts: &[String]) -> Vec<CliModelInf
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or(id);
-            let mut model = CliModelInfo::new(
-                normalize_model_id(id),
-                label,
-                current.as_deref() == Some(id),
-            );
-            model.reasoning_efforts = efforts.to_vec();
-            Some(model)
+                .unwrap_or(raw_id);
+            Some(CliModelInfo::new(id, label, false))
         })
-        .collect()
+        .collect();
+    models.insert(0, CliModelInfo::new("default", "Default", true));
+    models
 }
 
 async fn write_rpc(
@@ -595,14 +624,19 @@ async fn write_rpc(
     Ok(())
 }
 
-async fn read_rpc_result(
+async fn read_rpc_result_collecting_commands(
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     id: u64,
+    commands: &mut Option<Vec<CliCommandInfo>>,
 ) -> Result<Value> {
     while let Some(line) = lines.next_line().await? {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if let Some(parsed) = parse_available_commands_notification(&value) {
+            *commands = Some(parsed);
+            continue;
+        }
         if value.get("id").and_then(Value::as_u64) != Some(id) {
             continue;
         }
@@ -612,6 +646,50 @@ async fn read_rpc_result(
         return Ok(value.get("result").cloned().unwrap_or(Value::Null));
     }
     Err(anyhow!("CodeBuddy ACP exited before responding"))
+}
+
+async fn collect_command_notification_with_grace(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    commands: &mut Option<Vec<CliCommandInfo>>,
+) -> Result<()> {
+    let deadline = tokio::time::sleep(COMMAND_NOTIFICATION_GRACE);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return Ok(()),
+            next = lines.next_line() => {
+                let Some(line) = next? else {
+                    return Ok(());
+                };
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if let Some(parsed) = parse_available_commands_notification(&value) {
+                    *commands = Some(parsed);
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn parse_available_commands_notification(value: &Value) -> Option<Vec<CliCommandInfo>> {
+    if value.get("method").and_then(Value::as_str) != Some("session/update") {
+        return None;
+    }
+    let update = value
+        .pointer("/params/update")
+        .or_else(|| value.get("params"))?;
+    if !matches!(
+        update
+            .get("sessionUpdate")
+            .or_else(|| update.get("session_update"))
+            .and_then(Value::as_str),
+        Some("available_commands_update")
+    ) {
+        return None;
+    }
+    Some(parse_available_commands(update))
 }
 
 fn parse_effort_options(value: &Value) -> Vec<String> {
@@ -673,6 +751,7 @@ fn classify_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn requires_a_real_acp_user_payload() {
@@ -686,14 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_acp_model_catalog_with_dynamic_efforts() {
+    fn parses_acp_model_catalog_without_cross_model_effort_pollution() {
         let value = json!({
             "configOptions": [
                 {
                     "id": "model",
                     "currentValue": "hy3",
                     "options": [
+                        { "value": "default-model", "name": "Provider Default" },
+                        { "value": "default", "name": "Duplicate Default" },
                         { "value": "hy3", "name": "Hy3" },
+                        { "value": " hy3 ", "name": "Duplicate Hy3" },
                         { "value": "glm-5.2", "name": "GLM-5.2" }
                     ]
                 },
@@ -705,16 +787,40 @@ mod tests {
             ]
         });
         let efforts = parse_effort_options(&value);
-        let models = parse_acp_model_options(&value, &efforts);
+        let models = parse_acp_model_options(&value);
         assert_eq!(
             models
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["hy3", "glm-5.2"]
+            ["default", "hy3", "glm-5.2"]
         );
         assert!(models[0].is_default);
-        assert_eq!(models[1].reasoning_efforts, ["minimal", "max", "enabled"]);
+        assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
+        assert!(models.iter().skip(1).all(|model| !model.is_default));
+        assert!(models
+            .iter()
+            .all(|model| model.reasoning_efforts.is_empty()));
+        assert_eq!(efforts, ["minimal", "max", "enabled"]);
+    }
+
+    #[test]
+    fn effort_cache_key_is_model_specific_and_normalized() {
+        let command = CliCommandSpec {
+            program: "codebuddy".to_string(),
+            prefix_args: vec!["--profile".to_string(), "work".to_string()],
+            resolved_path: None,
+        };
+        let environment = BTreeMap::from([("CODEBUDDY_REGION".to_string(), "cn".to_string())]);
+
+        let hy3 = effort_cache_key(&command, &environment, &normalize_model_id(" hy3 "));
+        let glm = effort_cache_key(&command, &environment, &normalize_model_id("glm-5.2"));
+        let default_model =
+            effort_cache_key(&command, &environment, &normalize_model_id("default-model"));
+        let default = effort_cache_key(&command, &environment, &normalize_model_id("default"));
+
+        assert_ne!(hy3, glm);
+        assert_eq!(default_model, default);
     }
 
     #[test]
@@ -734,6 +840,99 @@ mod tests {
             ["goal", "compact"]
         );
         assert!(commands[0].argument_hint.is_some());
+    }
+
+    #[test]
+    fn parses_available_command_notifications_without_exposing_unknown_commands() {
+        let commands = parse_available_commands_notification(&json!({
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        { "name": "review", "description": "Review context" },
+                        { "name": "unsafe-internal", "description": "Not embedded" }
+                    ]
+                }
+            }
+        }))
+        .expect("command notification");
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "review");
+        assert!(parse_available_commands_notification(&json!({
+            "method": "session/update",
+            "params": { "update": { "sessionUpdate": "other" } }
+        }))
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_capability_requests_share_one_discovery() {
+        static NEXT_KEY: AtomicUsize = AtomicUsize::new(10_000);
+        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed) as u64;
+        let discoveries = Arc::new(AtomicUsize::new(0));
+        let discover_one = discoveries.clone();
+        let discover_two = discoveries.clone();
+
+        let first = get_or_discover_capabilities_by_key(key, move || async move {
+            discover_one.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(CachedCapabilities {
+                loaded_at: Instant::now(),
+                models: vec![CliModelInfo::new("default", "Default", true)],
+                commands: Some(vec![CliCommandInfo::new("review", "Review context")]),
+                current_model: Some("hy3".to_string()),
+            })
+        });
+        let second = get_or_discover_capabilities_by_key(key, move || async move {
+            discover_two.fetch_add(1, Ordering::SeqCst);
+            Ok(CachedCapabilities {
+                loaded_at: Instant::now(),
+                models: vec![CliModelInfo::new("default", "Default", true)],
+                commands: None,
+                current_model: None,
+            })
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(discoveries.load(Ordering::SeqCst), 1);
+        assert_eq!(first.current_model, Some("hy3".to_string()));
+        assert_eq!(second.current_model, Some("hy3".to_string()));
+        assert_eq!(second.commands.unwrap()[0].name, "review");
+
+        CAPABILITY_CACHE.lock().await.remove(&key);
+        CAPABILITY_DISCOVERY_LOCKS.lock().await.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn concurrent_effort_requests_share_one_model_scoped_discovery() {
+        static NEXT_KEY: AtomicUsize = AtomicUsize::new(20_000);
+        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed) as u64;
+        let discoveries = Arc::new(AtomicUsize::new(0));
+        let discover_one = discoveries.clone();
+        let discover_two = discoveries.clone();
+
+        let first = get_or_discover_efforts_by_key(key, move || async move {
+            discover_one.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(vec!["low".to_string(), "high".to_string()])
+        });
+        let second = get_or_discover_efforts_by_key(key, move || async move {
+            discover_two.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["incorrect-second-result".to_string()])
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(discoveries.load(Ordering::SeqCst), 1);
+        let expected = vec!["low".to_string(), "high".to_string()];
+        assert_eq!(first.unwrap(), expected);
+        assert_eq!(second.unwrap(), expected);
+
+        EFFORT_CACHE.lock().await.remove(&key);
+        EFFORT_DISCOVERY_LOCKS.lock().await.remove(&key);
     }
 
     #[test]

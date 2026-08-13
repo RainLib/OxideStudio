@@ -39,6 +39,7 @@ export interface LspCompletionPresentationOptions {
 const LSP_COMPLETION_ITEM_PROPERTY = "__oxideLspCompletionItem";
 const LSP_COMPLETION_RESOLVE_SOURCE = Symbol("oxideLspCompletionResolveSource");
 const LSP_COMPLETION_RESOLVE_CONTEXT = Symbol("oxideLspCompletionResolveContext");
+export const MAX_LSP_COMPLETION_PRESENTATION_ITEMS = 512;
 
 type LspBackedMonacoSuggestion = {
   [LSP_COMPLETION_ITEM_PROPERTY]?: CompletionItem;
@@ -56,6 +57,48 @@ export type LspCompletionResolveContext = {
 type LspBackedMonacoSuggestionWithContext = LspBackedMonacoSuggestion & {
   [LSP_COMPLETION_RESOLVE_CONTEXT]?: LspCompletionResolveContext;
 };
+
+type LspCompletionPresentationLimitOptions = {
+  maxItems?: number;
+  rankByUsage: boolean;
+  usageScope: string;
+};
+
+/**
+ * Language servers can legitimately return every object in a large catalog.
+ * Monaco has to materialize each suggestion, so passing an unbounded list can
+ * make a single completion request noticeably stall the editor. Keep the
+ * server ordering authoritative, while letting the existing local usage
+ * preference break ties in exactly the same way as the rendered suggestions.
+ */
+export function limitLspCompletionPresentationItems(
+  items: CompletionItem[],
+  {
+    maxItems = MAX_LSP_COMPLETION_PRESENTATION_ITEMS,
+    rankByUsage,
+    usageScope,
+  }: LspCompletionPresentationLimitOptions,
+) {
+  const limit = Math.max(1, Math.trunc(maxItems));
+  if (items.length <= limit) return items;
+  if (!rankByUsage) return items.slice(0, limit);
+
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      sortText: usageRankedCompletionSortText(
+        completionSortText(item),
+        completionUsageScore(usageScope, item.label),
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        left.sortText.localeCompare(right.sortText) || left.index - right.index,
+    )
+    .slice(0, limit)
+    .map(({ item }) => item);
+}
 
 /**
  * Keep the exact server item attached while context filters adapt a candidate.
@@ -160,7 +203,10 @@ export function lspCompletionItemsToMonacoSuggestions({
   requestUri,
   requestModelVersion,
 }: LspCompletionPresentationOptions) {
-  return items.map((item) => {
+  return limitLspCompletionPresentationItems(items, {
+    rankByUsage,
+    usageScope,
+  }).map((item) => {
     const resolveSource = (item as ResolvableLspCompletionItem)[
       LSP_COMPLETION_RESOLVE_SOURCE
     ];

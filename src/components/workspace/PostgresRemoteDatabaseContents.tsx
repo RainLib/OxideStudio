@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
+  ArrowRightLeft,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -47,11 +48,22 @@ interface PostgresRemoteDatabaseContentsProps {
   filterText?: string;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
   onOpenSchemaSnapshots?: (database: string, schema: string) => void;
+  onOpenSchemaDataTransfer?: (database: string, schema: string) => void;
+  onOpenTableSchemaSnapshots?: (
+    database: string,
+    schema: string,
+    table: string,
+  ) => void;
+  onOpenTableDataTransfer?: (
+    database: string,
+    schema: string,
+    table: string,
+  ) => void;
   onImportSqlScript?: (database: string, schema: string) => void;
   onOpenTable: (
     database: string,
     schema: string,
-    table: TableInfo
+    table: TableInfo,
   ) => void | Promise<void>;
 }
 
@@ -68,21 +80,24 @@ export function PostgresRemoteDatabaseContents({
   filterText = "",
   onTablesLoaded,
   onOpenSchemaSnapshots,
+  onOpenSchemaDataTransfer,
+  onOpenTableSchemaSnapshots,
+  onOpenTableDataTransfer,
   onImportSqlScript,
   onOpenTable,
 }: PostgresRemoteDatabaseContentsProps) {
   const databaseRevealRequest = useDatabaseNavigationStore(
-    (state) => state.revealRequest
+    (state) => state.revealRequest,
   );
   const clearDatabaseReveal = useDatabaseNavigationStore(
-    (state) => state.clearReveal
+    (state) => state.clearReveal,
   );
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(
-    () => new Set()
+    () => new Set(),
   );
-  const [schemaLoads, setSchemaLoads] = useState<Record<string, SchemaLoadState>>(
-    {}
-  );
+  const [schemaLoads, setSchemaLoads] = useState<
+    Record<string, SchemaLoadState>
+  >({});
   const mountedRef = useRef(true);
   const requestVersionsRef = useRef<Record<string, number>>({});
   const inFlightSchemasRef = useRef<Set<string>>(new Set());
@@ -128,11 +143,13 @@ export function PostgresRemoteDatabaseContents({
               .then((objects) => ({ objects, error: null }))
               .catch(() => ({
                 objects: [] as SchemaObjectInfo[],
-                error: "Schema object metadata is unavailable for this server role",
+                error:
+                  "Schema object metadata is unavailable for this server role",
               }))
           : Promise.resolve({
               objects: [] as SchemaObjectInfo[],
-              error: "Schema object metadata is unavailable in this application build",
+              error:
+                "Schema object metadata is unavailable in this application build",
             });
       const [tables, objectResult] = await Promise.all([
         schemaService.getDatabaseTables(connectionId, database, schema),
@@ -216,9 +233,7 @@ export function PostgresRemoteDatabaseContents({
     }
     const schemaName = target.schemaName;
     setExpandedSchemas((current) =>
-      current.has(schemaName)
-        ? current
-        : new Set([...current, schemaName])
+      current.has(schemaName) ? current : new Set([...current, schemaName]),
     );
     const loadState = schemaLoads[schemaName];
     if (
@@ -244,7 +259,10 @@ export function PostgresRemoteDatabaseContents({
     }
     window.requestAnimationFrame(() => {
       const key = target.objectName
-        ? databaseObjectNavigationKey({ ...target, objectName: target.objectName })
+        ? databaseObjectNavigationKey({
+            ...target,
+            objectName: target.objectName,
+          })
         : databaseSchemaNavigationKey(target);
       const element = document.querySelector<HTMLElement>(
         target.objectName
@@ -269,8 +287,8 @@ export function PostgresRemoteDatabaseContents({
         (schema) =>
           schema.toLocaleLowerCase().includes(normalizedFilter) ||
           schemaLoads[schema]?.tables.some((table) =>
-            table.name.toLocaleLowerCase().includes(normalizedFilter)
-          )
+            table.name.toLocaleLowerCase().includes(normalizedFilter),
+          ),
       )
     : schemas;
 
@@ -304,18 +322,20 @@ export function PostgresRemoteDatabaseContents({
         const schemaMatchesFilter = schema
           .toLocaleLowerCase()
           .includes(normalizedFilter);
-        const visibleTables = normalizedFilter && !schemaMatchesFilter
-          ? loadState.tables.filter((table) =>
-              table.name.toLocaleLowerCase().includes(normalizedFilter)
-            )
-          : loadState.tables;
-        const visibleObjects = normalizedFilter && !schemaMatchesFilter
-          ? loadState.objects.filter((object) =>
-              `${object.name} ${object.objectType} ${object.parentName || ""}`
-                .toLocaleLowerCase()
-                .includes(normalizedFilter)
-            )
-          : loadState.objects;
+        const visibleTables =
+          normalizedFilter && !schemaMatchesFilter
+            ? loadState.tables.filter((table) =>
+                table.name.toLocaleLowerCase().includes(normalizedFilter),
+              )
+            : loadState.tables;
+        const visibleObjects =
+          normalizedFilter && !schemaMatchesFilter
+            ? loadState.objects.filter((object) =>
+                `${object.name} ${object.objectType} ${object.parentName || ""}`
+                  .toLocaleLowerCase()
+                  .includes(normalizedFilter),
+              )
+            : loadState.objects;
 
         return (
           <div key={schema} className="min-w-0">
@@ -355,6 +375,14 @@ export function PostgresRemoteDatabaseContents({
                 >
                   <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
                   Schema Snapshots / Diff...
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                  disabled={!onOpenSchemaDataTransfer}
+                  onClick={() => onOpenSchemaDataTransfer?.(database, schema)}
+                >
+                  <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                  Transfer Schema Data...
                 </ContextMenuItem>
                 <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
                 <ContextMenuItem
@@ -396,7 +424,10 @@ export function PostgresRemoteDatabaseContents({
                     className="flex min-h-6 min-w-0 items-center gap-1 px-1.5 py-0.5 text-[10px] text-destructive"
                   >
                     <AlertCircle size={11} className="shrink-0" />
-                    <span className="min-w-0 flex-1 truncate" title={loadState.error || undefined}>
+                    <span
+                      className="min-w-0 flex-1 truncate"
+                      title={loadState.error || undefined}
+                    >
                       {loadState.error}
                     </span>
                     <button
@@ -409,11 +440,14 @@ export function PostgresRemoteDatabaseContents({
                   </div>
                 )}
 
-                {loadState.status === "success" && visibleTables.length === 0 && (
-                  <div className="min-h-6 px-1.5 py-1 text-[10px] wb-muted">
-                    {normalizedFilter ? "No matching tables" : "No tables found"}
-                  </div>
-                )}
+                {loadState.status === "success" &&
+                  visibleTables.length === 0 && (
+                    <div className="min-h-6 px-1.5 py-1 text-[10px] wb-muted">
+                      {normalizedFilter
+                        ? "No matching tables"
+                        : "No tables found"}
+                    </div>
+                  )}
 
                 {loadState.status === "success" &&
                   visibleTables.map((table) => {
@@ -453,6 +487,38 @@ export function PostgresRemoteDatabaseContents({
                         <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
                           <ContextMenuItem
                             className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                            disabled={!onOpenTableSchemaSnapshots}
+                            onClick={() =>
+                              onOpenTableSchemaSnapshots?.(
+                                database,
+                                schema,
+                                table.name,
+                              )
+                            }
+                          >
+                            <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                            Schema Snapshots / Diff...
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                            disabled={
+                              isViewObject(table.type) ||
+                              !onOpenTableDataTransfer
+                            }
+                            onClick={() =>
+                              onOpenTableDataTransfer?.(
+                                database,
+                                schema,
+                                table.name,
+                              )
+                            }
+                          >
+                            <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                            Transfer Table Data...
+                          </ContextMenuItem>
+                          <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
+                          <ContextMenuItem
+                            className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
                             disabled={!onImportSqlScript}
                             onClick={() =>
                               onImportSqlScript?.(database, schema)
@@ -465,29 +531,47 @@ export function PostgresRemoteDatabaseContents({
                       </ContextMenu>
                     );
                   })}
-                {loadState.status === "success" && visibleObjects.length > 0 && (
-                  <>
-                    <div className="mt-1 flex h-5 min-w-0 items-center gap-1 px-1.5 text-[10px] font-medium wb-muted">
-                      <Folder size={11} className="shrink-0" />
-                      <span className="truncate">schema objects</span>
-                      <span className="ml-auto text-[9px] tabular-nums">{visibleObjects.length}</span>
-                    </div>
-                    {visibleObjects.map((object) => (
-                      <div
-                        key={`${object.objectType}:${object.name}:${object.parentName || ""}`}
-                        className="flex min-w-0 items-center gap-2 px-2 py-1 text-[11px] text-[hsl(var(--wb-text-muted))]"
-                        title={[object.objectType, object.parentName, object.comment].filter(Boolean).join(" · ")}
-                      >
-                        {object.objectType === "sequence" ? <KeyRound size={12} className="shrink-0 opacity-75" /> : <Folder size={12} className="shrink-0 opacity-75" />}
-                        <span className="truncate">
-                          {object.name}
-                          {object.parentName ? ` · ${object.parentName}` : ""}
+                {loadState.status === "success" &&
+                  visibleObjects.length > 0 && (
+                    <>
+                      <div className="mt-1 flex h-5 min-w-0 items-center gap-1 px-1.5 text-[10px] font-medium wb-muted">
+                        <Folder size={11} className="shrink-0" />
+                        <span className="truncate">schema objects</span>
+                        <span className="ml-auto text-[9px] tabular-nums">
+                          {visibleObjects.length}
                         </span>
-                        <span className="ml-auto shrink-0 text-[9px] wb-muted">{object.objectType}</span>
                       </div>
-                    ))}
-                  </>
-                )}
+                      {visibleObjects.map((object) => (
+                        <div
+                          key={`${object.objectType}:${object.name}:${object.parentName || ""}`}
+                          className="flex min-w-0 items-center gap-2 px-2 py-1 text-[11px] text-[hsl(var(--wb-text-muted))]"
+                          title={[
+                            object.objectType,
+                            object.parentName,
+                            object.comment,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        >
+                          {object.objectType === "sequence" ? (
+                            <KeyRound
+                              size={12}
+                              className="shrink-0 opacity-75"
+                            />
+                          ) : (
+                            <Folder size={12} className="shrink-0 opacity-75" />
+                          )}
+                          <span className="truncate">
+                            {object.name}
+                            {object.parentName ? ` · ${object.parentName}` : ""}
+                          </span>
+                          <span className="ml-auto shrink-0 text-[9px] wb-muted">
+                            {object.objectType}
+                          </span>
+                        </div>
+                      ))}
+                    </>
+                  )}
                 {loadState.status === "success" && loadState.objectError && (
                   <div className="px-1.5 py-1 text-[10px] wb-muted">
                     {loadState.objectError}

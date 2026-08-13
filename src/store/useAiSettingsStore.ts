@@ -16,6 +16,8 @@ export type InlineCompletionProtocol =
   | "chat-completions"
   | "text-completions-fim";
 
+export type AiCliReasoningPreferences = Record<string, AiCliReasoningEffort>;
+
 export interface AiSettingsState {
   enabled: boolean;
   provider: AiProviderKind;
@@ -34,6 +36,7 @@ export interface AiSettingsState {
   codexCliPath: string;
   codexCliModel: string;
   codexCliReasoningEffort: AiCliReasoningEffort;
+  codexCliReasoningEffortByModel: AiCliReasoningPreferences;
   codexCliEnvironmentKeys: string[];
   codexCliEnvironmentDraft: Record<string, string>;
 
@@ -41,6 +44,7 @@ export interface AiSettingsState {
   codeBuddyCliPath: string;
   codeBuddyCliModel: string;
   codeBuddyCliReasoningEffort: AiCliReasoningEffort;
+  codeBuddyCliReasoningEffortByModel: AiCliReasoningPreferences;
   codeBuddyCliEnvironmentKeys: string[];
   codeBuddyCliEnvironmentDraft: Record<string, string>;
 
@@ -92,9 +96,7 @@ function cliProviderConfig(
     model:
       (codex ? state.codexCliModel : state.codeBuddyCliModel).trim() ||
       "default",
-    reasoningEffort: codex
-      ? state.codexCliReasoningEffort
-      : state.codeBuddyCliReasoningEffort,
+    reasoningEffort: cliReasoningEffortForModel(state, kind),
     timeoutMs: state.timeoutMs,
     environmentKeys: codex
       ? state.codexCliEnvironmentKeys
@@ -107,6 +109,71 @@ type PersistedAiSettings = Partial<AiSettingsValues> & {
   model?: string;
   enabled?: boolean;
 };
+
+function normalizedCliModel(model: string | undefined) {
+  return model?.trim() || "default";
+}
+
+function cliReasoningEffortForModel(
+  state: Pick<
+    AiSettingsState,
+    | "codexCliModel"
+    | "codexCliReasoningEffort"
+    | "codexCliReasoningEffortByModel"
+    | "codeBuddyCliModel"
+    | "codeBuddyCliReasoningEffort"
+    | "codeBuddyCliReasoningEffortByModel"
+  >,
+  kind: "codex-cli" | "codebuddy-cli",
+) {
+  const codex = kind === "codex-cli";
+  const model = normalizedCliModel(
+    codex ? state.codexCliModel : state.codeBuddyCliModel,
+  );
+  const preferences = codex
+    ? state.codexCliReasoningEffortByModel
+    : state.codeBuddyCliReasoningEffortByModel;
+  const legacy = codex
+    ? state.codexCliReasoningEffort
+    : state.codeBuddyCliReasoningEffort;
+  // Version 4 seeds the previously selected model with the legacy value.
+  // Once any per-model preference exists, an unseen model must use the
+  // provider default instead of inheriting an incompatible prior override.
+  return (
+    preferences[model]?.trim() ||
+    (Object.keys(preferences).length === 0 ? legacy : "default") ||
+    "default"
+  );
+}
+
+function withCliReasoningPreferences(
+  state: AiSettingsState,
+  settings: Partial<AiSettingsValues>,
+): Partial<AiSettingsValues> {
+  const next: Partial<AiSettingsValues> = { ...settings };
+  const codexModel = normalizedCliModel(
+    settings.codexCliModel ?? state.codexCliModel,
+  );
+  const codeBuddyModel = normalizedCliModel(
+    settings.codeBuddyCliModel ?? state.codeBuddyCliModel,
+  );
+
+  if (settings.codexCliReasoningEffort !== undefined) {
+    next.codexCliReasoningEffortByModel = {
+      ...state.codexCliReasoningEffortByModel,
+      ...settings.codexCliReasoningEffortByModel,
+      [codexModel]: settings.codexCliReasoningEffort,
+    };
+  }
+  if (settings.codeBuddyCliReasoningEffort !== undefined) {
+    next.codeBuddyCliReasoningEffortByModel = {
+      ...state.codeBuddyCliReasoningEffortByModel,
+      ...settings.codeBuddyCliReasoningEffortByModel,
+      [codeBuddyModel]: settings.codeBuddyCliReasoningEffort,
+    };
+  }
+  return next;
+}
 
 export function migratePersistedAiSettings(
   persisted: unknown,
@@ -128,11 +195,28 @@ export function migratePersistedAiSettings(
           codexCliProfileId: DEFAULT_CODEX_CLI_PROFILE_ID,
           codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
         };
-  if (version >= 3) return versionTwo;
+  const versionThree =
+    version >= 3
+      ? versionTwo
+      : {
+          ...versionTwo,
+          codexCliAssistantMode: state.codexCliAssistantMode || assistantMode,
+          codeBuddyCliAssistantMode:
+            state.codeBuddyCliAssistantMode || assistantMode,
+        };
+  if (version >= 4) return versionThree;
   return {
-    ...versionTwo,
-    codexCliAssistantMode: state.codexCliAssistantMode || assistantMode,
-    codeBuddyCliAssistantMode: state.codeBuddyCliAssistantMode || assistantMode,
+    ...versionThree,
+    codexCliReasoningEffortByModel: {
+      ...(state.codexCliReasoningEffortByModel || {}),
+      [normalizedCliModel(state.codexCliModel)]:
+        state.codexCliReasoningEffort || "default",
+    },
+    codeBuddyCliReasoningEffortByModel: {
+      ...(state.codeBuddyCliReasoningEffortByModel || {}),
+      [normalizedCliModel(state.codeBuddyCliModel)]:
+        state.codeBuddyCliReasoningEffort || "default",
+    },
   };
 }
 
@@ -152,12 +236,14 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       codexCliPath: "",
       codexCliModel: "default",
       codexCliReasoningEffort: "default",
+      codexCliReasoningEffortByModel: {},
       codexCliEnvironmentKeys: [],
       codexCliEnvironmentDraft: {},
       codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
       codeBuddyCliPath: "",
       codeBuddyCliModel: "default",
       codeBuddyCliReasoningEffort: "default",
+      codeBuddyCliReasoningEffortByModel: {},
       codeBuddyCliEnvironmentKeys: [],
       codeBuddyCliEnvironmentDraft: {},
       timeoutMs: 30_000,
@@ -172,7 +258,8 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       inlineCompletionProtocol: "chat-completions",
       inlineCompletionModel: DEFAULT_AI_MODEL,
       setEnabled: (enabled) => set({ enabled }),
-      updateSettings: (settings) => set(settings),
+      updateSettings: (settings) =>
+        set((state) => withCliReasoningPreferences(state, settings)),
       assistantProviderConfig: () => {
         const state = get();
         if (!state.enabled) return null;
@@ -206,7 +293,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "oxide-ai-settings",
-      version: 3,
+      version: 4,
       migrate: migratePersistedAiSettings,
       partialize: (state) => ({
         enabled: state.enabled,
@@ -227,11 +314,14 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         codexCliPath: state.codexCliPath,
         codexCliModel: state.codexCliModel,
         codexCliReasoningEffort: state.codexCliReasoningEffort,
+        codexCliReasoningEffortByModel: state.codexCliReasoningEffortByModel,
         codexCliEnvironmentKeys: state.codexCliEnvironmentKeys,
         codeBuddyCliProfileId: state.codeBuddyCliProfileId,
         codeBuddyCliPath: state.codeBuddyCliPath,
         codeBuddyCliModel: state.codeBuddyCliModel,
         codeBuddyCliReasoningEffort: state.codeBuddyCliReasoningEffort,
+        codeBuddyCliReasoningEffortByModel:
+          state.codeBuddyCliReasoningEffortByModel,
         codeBuddyCliEnvironmentKeys: state.codeBuddyCliEnvironmentKeys,
         inlineBaseUrl: state.inlineBaseUrl,
         inlineTimeoutMs: state.inlineTimeoutMs,

@@ -60,7 +60,12 @@ import {
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
 import { useTableOperations } from "@/hooks/useTableOperations";
-import { databaseService, getPostgresRoutineDefinitions, queryService, schemaService } from "@/services/tauri";
+import {
+  databaseService,
+  getPostgresRoutineDefinitions,
+  queryService,
+  schemaService,
+} from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
@@ -214,7 +219,7 @@ interface PostgresRemoteDatabaseState {
 interface ExplorerDataTransferRequest {
   source: TableDataTransferEndpoint;
   sourceCapabilities: DatabaseCapabilities;
-  initialSourceScope: "schema" | "database";
+  initialSourceScope: "table" | "schema" | "database";
   sourceSchemas: string[];
 }
 
@@ -252,7 +257,9 @@ function connectionTreeColor(
   return color || DRIVER_TREE_COLORS[driver || ""] || "#75a7ff";
 }
 
-function supportsDatabaseCatalogTree(driver: DatabaseDriver | null | undefined) {
+function supportsDatabaseCatalogTree(
+  driver: DatabaseDriver | null | undefined,
+) {
   return Boolean(
     driver && defaultDatabaseCapabilities(driver).supportsDatabaseCatalogs,
   );
@@ -465,8 +472,10 @@ export function SchemaSidebar() {
   >([]);
   const [schemaObjectDescriptorScope, setSchemaObjectDescriptorScope] =
     useState<string | null>(null);
-  const [isSchemaObjectDescriptorsLoading, setIsSchemaObjectDescriptorsLoading] =
-    useState(false);
+  const [
+    isSchemaObjectDescriptorsLoading,
+    setIsSchemaObjectDescriptorsLoading,
+  ] = useState(false);
   const [expandedSchemaObjectMemberKeys, setExpandedSchemaObjectMemberKeys] =
     useState<string[]>([]);
   const [schemaObjectMemberStates, setSchemaObjectMemberStates] = useState<
@@ -480,8 +489,10 @@ export function SchemaSidebar() {
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
   const [isCreateRedisKeyOpen, setIsCreateRedisKeyOpen] = useState(false);
-  const [databaseAdministrationConnectionId, setDatabaseAdministrationConnectionId] =
-    useState<string | null>(null);
+  const [
+    databaseAdministrationConnectionId,
+    setDatabaseAdministrationConnectionId,
+  ] = useState<string | null>(null);
   const [connectingConnectionIds, setConnectingConnectionIds] = useState<
     string[]
   >([]);
@@ -1504,9 +1515,7 @@ export function SchemaSidebar() {
   );
   const loadTablePage = useTabStore((state) => state.loadTablePage);
   const createTableTab = useTabStore((state) => state.createTableTab);
-  const openDatabaseBrowser = useTabStore(
-    (state) => state.openDatabaseBrowser,
-  );
+  const openDatabaseBrowser = useTabStore((state) => state.openDatabaseBrowser);
   const createTab = useTabStore((state) => state.createTab);
   const openSchemaDiagramTab = useTabStore(
     (state) => state.openSchemaDiagramTab,
@@ -1553,9 +1562,10 @@ export function SchemaSidebar() {
     connection: (typeof connections)[number];
     database?: string;
     schema?: string;
-    scope: "schema" | "database";
+    table?: string;
+    scope: "table" | "schema" | "database";
   }) => {
-    const { connection, database, scope } = options;
+    const { connection, database, scope, table } = options;
     setNamespaceError(null);
     try {
       const connectionError = await setActiveConnection(connection.id);
@@ -1586,15 +1596,24 @@ export function SchemaSidebar() {
         throw new Error("No transferable schema was found in this database.");
       }
 
-      const relations = database
-        ? await schemaService.getDatabaseTables(connection.id, database, schema)
-        : await schemaService.getTables(connection.id, schema);
-      const firstTable = relations
-        .filter((relation) => !relation.type?.toUpperCase().includes("VIEW"))
-        .map((relation) => relation.name)
-        .sort((left, right) => left.localeCompare(right))[0];
-      if (!firstTable) {
-        throw new Error(`No transferable tables were found in ${[database, schema].filter(Boolean).join(".")}.`);
+      let sourceTable = table;
+      if (!sourceTable) {
+        const relations = database
+          ? await schemaService.getDatabaseTables(
+              connection.id,
+              database,
+              schema,
+            )
+          : await schemaService.getTables(connection.id, schema);
+        sourceTable = relations
+          .filter((relation) => !relation.type?.toUpperCase().includes("VIEW"))
+          .map((relation) => relation.name)
+          .sort((left, right) => left.localeCompare(right))[0];
+      }
+      if (!sourceTable) {
+        throw new Error(
+          `No transferable tables were found in ${[database, schema].filter(Boolean).join(".")}.`,
+        );
       }
 
       setDataTransferRequest({
@@ -1603,7 +1622,7 @@ export function SchemaSidebar() {
           driver: connection.driver,
           database,
           schema,
-          table: firstTable,
+          table: sourceTable,
         },
         sourceCapabilities: capabilityContext.capabilities,
         initialSourceScope: scope,
@@ -1735,10 +1754,7 @@ export function SchemaSidebar() {
     await loadTablePage(tabId, 0);
   };
 
-  const handleTableCsvImport = async (
-    table: TableInfo,
-    schemaName: string,
-  ) => {
+  const handleTableCsvImport = async (table: TableInfo, schemaName: string) => {
     if (!activeConnectionId) return;
     await handleTableDoubleClick(table, schemaName);
     const detail: TableCsvImportRequest = {
@@ -2141,7 +2157,10 @@ export function SchemaSidebar() {
     if (connectionId !== activeConnectionId) {
       await setActiveConnection(connectionId);
     }
-    if (wasActiveConnection && supportsDatabaseCatalogTree(connection?.driver)) {
+    if (
+      wasActiveConnection &&
+      supportsDatabaseCatalogTree(connection?.driver)
+    ) {
       setPostgresDatabaseRefreshVersion((version) => version + 1);
     }
     await loadSchemas(connectionId, true);
@@ -2436,7 +2455,9 @@ export function SchemaSidebar() {
           setFilterText("");
           window.requestAnimationFrame(() => {
             const databaseRow = Array.from(
-              document.querySelectorAll<HTMLElement>("[data-postgres-database]"),
+              document.querySelectorAll<HTMLElement>(
+                "[data-postgres-database]",
+              ),
             ).find(
               (element) =>
                 element.dataset.postgresDatabase === target.databaseName,
@@ -2454,7 +2475,8 @@ export function SchemaSidebar() {
           const databaseRow = Array.from(
             document.querySelectorAll<HTMLElement>("[data-postgres-database]"),
           ).find(
-            (element) => element.dataset.postgresDatabase === target.databaseName,
+            (element) =>
+              element.dataset.postgresDatabase === target.databaseName,
           );
           databaseRow?.querySelector<HTMLElement>("button")?.focus();
           clearDatabaseReveal(requestId);
@@ -2862,7 +2884,9 @@ export function SchemaSidebar() {
       const renderRoutineRow = (routine: FunctionInfo, index: number) => {
         const signature = routineSignature(routine);
         const returnType = routine.return_type || "unknown";
-        const qualifiedName = schema ? `${schema}.${routine.name}` : routine.name;
+        const qualifiedName = schema
+          ? `${schema}.${routine.name}`
+          : routine.name;
 
         return (
           <ContextMenu key={`${routine.name}:${signature}:${index}`}>
@@ -2889,29 +2913,43 @@ export function SchemaSidebar() {
               </ContextMenuItem>
               <ContextMenuItem
                 className={menuItemClass}
-                onClick={() => void copyText(routineCallTemplate(schema, routine))}
+                onClick={() =>
+                  void copyText(routineCallTemplate(schema, routine))
+                }
               >
                 Copy call template
               </ContextMenuItem>
-              {activeConnectionId && ["postgres", "postgresql", "pgsql"].includes(activeDriver.toLowerCase()) && (
-                <ContextMenuItem
-                  className={menuItemClass}
-                  onClick={() => void getPostgresRoutineDefinitions(activeConnectionId, schema, routine.name)
-                    .then((definitions) => copyText(definitions.join("\n\n")))
-                    .catch((error) => window.alert(`Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`))}
-                >
-                  Copy source definition
-                </ContextMenuItem>
-              )}
+              {activeConnectionId &&
+                ["postgres", "postgresql", "pgsql"].includes(
+                  activeDriver.toLowerCase(),
+                ) && (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      void getPostgresRoutineDefinitions(
+                        activeConnectionId,
+                        schema,
+                        routine.name,
+                      )
+                        .then((definitions) =>
+                          copyText(definitions.join("\n\n")),
+                        )
+                        .catch((error) =>
+                          window.alert(
+                            `Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`,
+                          ),
+                        )
+                    }
+                  >
+                    Copy source definition
+                  </ContextMenuItem>
+                )}
             </ContextMenuContent>
           </ContextMenu>
         );
       };
 
-      const renderRoutineKind = (
-        label: string,
-        routines: FunctionInfo[],
-      ) => {
+      const renderRoutineKind = (label: string, routines: FunctionInfo[]) => {
         if (routines.length === 0) return null;
 
         return (
@@ -3089,17 +3127,22 @@ export function SchemaSidebar() {
               Schema objects
             </span>
             {!isSchemaObjectDescriptorsLoading && (
-              <span className="text-[9px] wb-muted">{descriptorObjects.length}</span>
+              <span className="text-[9px] wb-muted">
+                {descriptorObjects.length}
+              </span>
             )}
           </button>
           {isExpanded &&
-            (isSchemaObjectDescriptorsLoading && descriptorObjects.length === 0 ? (
+            (isSchemaObjectDescriptorsLoading &&
+            descriptorObjects.length === 0 ? (
               <div className="pl-7 text-[11px] italic wb-muted">
                 Loading schema objects...
               </div>
             ) : descriptorObjects.length === 0 ? (
               <div className="pl-7 text-[11px] italic wb-muted">
-                {filterText ? `No schema objects match "${filterText}"` : "No supported schema objects found"}
+                {filterText
+                  ? `No schema objects match "${filterText}"`
+                  : "No supported schema objects found"}
               </div>
             ) : (
               descriptorObjects.map((object) => {
@@ -3107,7 +3150,9 @@ export function SchemaSidebar() {
                 const parentSuffix = object.parentName
                   ? ` on ${object.parentName}`
                   : "";
-                const qualifiedName = schema ? `${schema}.${object.name}` : object.name;
+                const qualifiedName = schema
+                  ? `${schema}.${object.name}`
+                  : object.name;
                 const memberKey = [
                   connectionId,
                   navigationDatabaseName || "",
@@ -3116,7 +3161,8 @@ export function SchemaSidebar() {
                   object.name,
                 ].join("\u0000");
                 const membersState = schemaObjectMemberStates[memberKey];
-                const membersExpanded = expandedSchemaObjectMemberKeys.includes(memberKey);
+                const membersExpanded =
+                  expandedSchemaObjectMemberKeys.includes(memberKey);
                 const toggleMembers = () => {
                   if (!object.membersExpandable) return;
                   // Retry keeps a failed node expanded so the operation does
@@ -3155,78 +3201,115 @@ export function SchemaSidebar() {
                     .catch(() => {
                       setSchemaObjectMemberStates((current) => ({
                         ...current,
-                        [memberKey]: { loading: false, error: true, members: [] },
+                        [memberKey]: {
+                          loading: false,
+                          error: true,
+                          members: [],
+                        },
                       }));
                     });
                 };
                 return (
-                  <div key={`${objectType}:${object.name}:${object.parentName || ""}`}>
-                  <ContextMenu>
-                    <ContextMenuTrigger asChild>
-                      <div
-                        className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                        title={`${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`}
-                      >
-                        {object.membersExpandable ? (
+                  <div
+                    key={`${objectType}:${object.name}:${object.parentName || ""}`}
+                  >
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <div
+                          className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                          title={`${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`}
+                        >
+                          {object.membersExpandable ? (
+                            <button
+                              type="button"
+                              className="-ml-1 -mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                              aria-label={`${membersExpanded ? "Collapse" : "Expand"} ${object.name} members`}
+                              aria-expanded={membersExpanded}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleMembers();
+                              }}
+                              onDoubleClick={(event) => event.stopPropagation()}
+                            >
+                              {membersExpanded ? (
+                                <ChevronDown size={10} />
+                              ) : (
+                                <ChevronRight size={10} />
+                              )}
+                            </button>
+                          ) : null}
+                          {objectType === "sequence" ? (
+                            <KeyRound
+                              size={12}
+                              className="shrink-0 text-amber-400/80"
+                            />
+                          ) : objectType === "trigger" ? (
+                            <Network
+                              size={12}
+                              className="shrink-0 text-sky-400/80"
+                            />
+                          ) : (
+                            <Folder
+                              size={12}
+                              className="shrink-0 text-violet-400/80"
+                            />
+                          )}
+                          <span className="min-w-0 flex-1 truncate">
+                            {highlightMatch(object.name, filterText)}
+                          </span>
+                          <span className="shrink-0 text-[9px] uppercase opacity-50">
+                            {object.objectType}
+                            {parentSuffix}
+                          </span>
+                        </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className={menuContentClass}>
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() => void copyText(qualifiedName)}
+                        >
+                          Copy qualified name
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                    {object.membersExpandable && membersExpanded && (
+                      <div className="ml-10 border-l border-[hsl(var(--wb-border-subtle))] pl-2">
+                        {membersState?.loading ? (
+                          <div className="py-1 text-[10px] italic wb-muted">
+                            Loading members...
+                          </div>
+                        ) : membersState?.error ? (
                           <button
                             type="button"
-                            className="-ml-1 -mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                            aria-label={`${membersExpanded ? "Collapse" : "Expand"} ${object.name} members`}
-                            aria-expanded={membersExpanded}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleMembers();
-                            }}
-                            onDoubleClick={(event) => event.stopPropagation()}
+                            className="wb-text-button h-5 px-1 text-[10px] text-[hsl(var(--wb-danger))]"
+                            onClick={toggleMembers}
                           >
-                            {membersExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                            Unable to load members; retry
                           </button>
-                        ) : null}
-                        {objectType === "sequence" ? (
-                          <KeyRound size={12} className="shrink-0 text-amber-400/80" />
-                        ) : objectType === "trigger" ? (
-                          <Network size={12} className="shrink-0 text-sky-400/80" />
+                        ) : membersState?.members.length ? (
+                          membersState.members.map((member) => (
+                            <div
+                              key={`${member.objectType}:${member.name}`}
+                              className="flex min-w-0 items-center gap-1 py-0.5 text-[10px] text-[hsl(var(--wb-text-muted))]"
+                              title={member.comment || member.objectType}
+                            >
+                              <Folder
+                                size={10}
+                                className="shrink-0 text-violet-400/70"
+                              />
+                              <span className="truncate">{member.name}</span>
+                              <span className="ml-auto shrink-0 uppercase opacity-50">
+                                {member.objectType}
+                              </span>
+                            </div>
+                          ))
                         ) : (
-                          <Folder size={12} className="shrink-0 text-violet-400/80" />
-                        )}
-                        <span className="min-w-0 flex-1 truncate">
-                          {highlightMatch(object.name, filterText)}
-                        </span>
-                        <span className="shrink-0 text-[9px] uppercase opacity-50">
-                          {object.objectType}{parentSuffix}
-                        </span>
-                      </div>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className={menuContentClass}>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() => void copyText(qualifiedName)}
-                      >
-                        Copy qualified name
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                  {object.membersExpandable && membersExpanded && (
-                    <div className="ml-10 border-l border-[hsl(var(--wb-border-subtle))] pl-2">
-                      {membersState?.loading ? (
-                        <div className="py-1 text-[10px] italic wb-muted">Loading members...</div>
-                      ) : membersState?.error ? (
-                        <button type="button" className="wb-text-button h-5 px-1 text-[10px] text-[hsl(var(--wb-danger))]" onClick={toggleMembers}>
-                          Unable to load members; retry
-                        </button>
-                      ) : membersState?.members.length ? (
-                        membersState.members.map((member) => (
-                          <div key={`${member.objectType}:${member.name}`} className="flex min-w-0 items-center gap-1 py-0.5 text-[10px] text-[hsl(var(--wb-text-muted))]" title={member.comment || member.objectType}>
-                            <Folder size={10} className="shrink-0 text-violet-400/70" />
-                            <span className="truncate">{member.name}</span>
-                            <span className="ml-auto shrink-0 uppercase opacity-50">{member.objectType}</span>
+                          <div className="py-1 text-[10px] italic wb-muted">
+                            No members found
                           </div>
-                        ))
-                      ) : (
-                        <div className="py-1 text-[10px] italic wb-muted">No members found</div>
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })
@@ -3258,125 +3341,125 @@ export function SchemaSidebar() {
 
       return (
         <div key={`${schema}:${collection.name}`}>
-        <ContextMenu>
-          <ContextMenuTrigger>
-            <div
-              data-database-object-key={databaseObjectNavigationKey({
-                connectionId,
-                databaseName: navigationDatabaseName,
-                schemaName: schema,
-                objectName: collection.name,
-              })}
-              tabIndex={-1}
-              className={cn(
-                "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
-                isSelectedCollection
-                  ? "wb-tree-row-selected"
-                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
-              )}
-              style={{ paddingLeft: `${8 + depth * 14}px` }}
-              onClick={() =>
-                void runForSchema(schema, () =>
-                  handleCollectionSelect(collection.name),
-                )
-              }
-              onDoubleClick={() =>
-                void runForSchema(schema, () =>
-                  handleCollectionDoubleClick(collection),
-                )
-              }
-              title={collection.name}
-            >
-              {canExpandCollectionMetadata && (
-                <button
-                  type="button"
-                  className="-mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                  aria-label={`${isCollectionExpanded ? "Collapse" : "Expand"} ${collection.name} metadata`}
-                  aria-expanded={isCollectionExpanded}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setExpandedTableKeys((current) =>
-                      current.includes(collectionTreeKey)
-                        ? current.filter((key) => key !== collectionTreeKey)
-                        : [...current, collectionTreeKey],
-                    );
-                  }}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                >
-                  {isCollectionExpanded ? (
-                    <ChevronDown size={10} />
-                  ) : (
-                    <ChevronRight size={10} />
-                  )}
-                </button>
-              )}
-              <KeyRound
-                size={12}
+          <ContextMenu>
+            <ContextMenuTrigger>
+              <div
+                data-database-object-key={databaseObjectNavigationKey({
+                  connectionId,
+                  databaseName: navigationDatabaseName,
+                  schemaName: schema,
+                  objectName: collection.name,
+                })}
+                tabIndex={-1}
                 className={cn(
-                  "shrink-0 text-red-400/80",
-                  isSelectedCollection && "opacity-100",
+                  "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
+                  isSelectedCollection
+                    ? "wb-tree-row-selected"
+                    : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                 )}
-              />
-              <span className="min-w-0 flex-1 truncate">
-                {highlightMatch(label || "(empty)", filterText)}
-              </span>
-              {collection.type && (
-                <span className="shrink-0 text-[9px] uppercase opacity-50">
-                  {collection.type}
+                style={{ paddingLeft: `${8 + depth * 14}px` }}
+                onClick={() =>
+                  void runForSchema(schema, () =>
+                    handleCollectionSelect(collection.name),
+                  )
+                }
+                onDoubleClick={() =>
+                  void runForSchema(schema, () =>
+                    handleCollectionDoubleClick(collection),
+                  )
+                }
+                title={collection.name}
+              >
+                {canExpandCollectionMetadata && (
+                  <button
+                    type="button"
+                    className="-mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                    aria-label={`${isCollectionExpanded ? "Collapse" : "Expand"} ${collection.name} metadata`}
+                    aria-expanded={isCollectionExpanded}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setExpandedTableKeys((current) =>
+                        current.includes(collectionTreeKey)
+                          ? current.filter((key) => key !== collectionTreeKey)
+                          : [...current, collectionTreeKey],
+                      );
+                    }}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                  >
+                    {isCollectionExpanded ? (
+                      <ChevronDown size={10} />
+                    ) : (
+                      <ChevronRight size={10} />
+                    )}
+                  </button>
+                )}
+                <KeyRound
+                  size={12}
+                  className={cn(
+                    "shrink-0 text-red-400/80",
+                    isSelectedCollection && "opacity-100",
+                  )}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {highlightMatch(label || "(empty)", filterText)}
                 </span>
-              )}
-            </div>
-          </ContextMenuTrigger>
-          <ContextMenuContent className="w-48">
-            <ContextMenuItem
-              onClick={() =>
-                void runForSchema(schema, () =>
-                  handleCollectionDoubleClick(collection),
-                )
-              }
-            >
-              <TableProperties className="mr-2 h-3.5 w-3.5" />
-              Open Data
-            </ContextMenuItem>
-            <ContextMenuItem
-              onClick={() =>
-                void runForSchema(schema, () =>
-                  handleCopyCollectionPreview(collection),
-                )
-              }
-            >
-              <Clipboard className="mr-2 h-3.5 w-3.5" />
-              Copy Preview Query
-            </ContextMenuItem>
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              onClick={() =>
-                void runForSchema(schema, () =>
-                  handleDeleteCollectionClick(collection),
-                )
-              }
-              disabled={!canDeleteCollection}
-              className="text-destructive focus:text-destructive"
-            >
-              <Trash2 className="mr-2 h-3.5 w-3.5" />
-              Delete {collectionLabel}
-            </ContextMenuItem>
-          </ContextMenuContent>
-        </ContextMenu>
-        {canExpandCollectionMetadata && isCollectionExpanded && (
-          <TableObjectTree
-            identity={{
-              projectId: activeProjectId,
-              connectionId,
-              driver: driver || activeDriver,
-              databaseName: navigationDatabaseName || undefined,
-              schema,
-              table: collection.name,
-            }}
-            includeIndexes={activeCapabilities.supportsTableIndexes}
-            includeConstraints={false}
-          />
-        )}
+                {collection.type && (
+                  <span className="shrink-0 text-[9px] uppercase opacity-50">
+                    {collection.type}
+                  </span>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent className="w-48">
+              <ContextMenuItem
+                onClick={() =>
+                  void runForSchema(schema, () =>
+                    handleCollectionDoubleClick(collection),
+                  )
+                }
+              >
+                <TableProperties className="mr-2 h-3.5 w-3.5" />
+                Open Data
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() =>
+                  void runForSchema(schema, () =>
+                    handleCopyCollectionPreview(collection),
+                  )
+                }
+              >
+                <Clipboard className="mr-2 h-3.5 w-3.5" />
+                Copy Preview Query
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                onClick={() =>
+                  void runForSchema(schema, () =>
+                    handleDeleteCollectionClick(collection),
+                  )
+                }
+                disabled={!canDeleteCollection}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="mr-2 h-3.5 w-3.5" />
+                Delete {collectionLabel}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
+          {canExpandCollectionMetadata && isCollectionExpanded && (
+            <TableObjectTree
+              identity={{
+                projectId: activeProjectId,
+                connectionId,
+                driver: driver || activeDriver,
+                databaseName: navigationDatabaseName || undefined,
+                schema,
+                table: collection.name,
+              }}
+              includeIndexes={activeCapabilities.supportsTableIndexes}
+              includeConstraints={false}
+            />
+          )}
         </div>
       );
     };
@@ -3593,622 +3676,758 @@ export function SchemaSidebar() {
                   // the same contract: an unreviewed sidecar must not show a
                   // download action that the host will later reject.
                   const supportsRelationExport = (
-                    format: "csv" | "json" | "jsonl" | "markdown" | "sql" | "tsv" | "xlsx" | "parquet" | "arrow",
-                  ) => relationCapabilities.tableExportFormats?.includes(format) === true;
+                    format:
+                      | "csv"
+                      | "json"
+                      | "jsonl"
+                      | "markdown"
+                      | "sql"
+                      | "tsv"
+                      | "xlsx"
+                      | "parquet"
+                      | "arrow",
+                  ) =>
+                    relationCapabilities.tableExportFormats?.includes(
+                      format,
+                    ) === true;
                   const canImportRelationRows =
                     !isReadOnlyRelation &&
                     relationCapabilities.supportsTableRowMutation;
 
                   return (
                     <div key={`${schema}:${table.name}`}>
-                    <ContextMenu
-                      onOpenChange={(open) => {
-                        if (open) {
-                          void runForSchema(schema, () =>
-                            handleTableSelect(table.name),
-                          );
-                        }
-                      }}
-                    >
-                      <ContextMenuTrigger asChild>
-                        <div
-                          data-database-object-key={databaseObjectNavigationKey(
-                            {
-                              connectionId,
-                              databaseName: navigationDatabaseName,
-                              schemaName: schema,
-                              objectName: table.name,
-                            },
-                          )}
-                          tabIndex={-1}
-                          aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. Double-click to open data; right-click for actions; expand for columns and indexes.`}
-                          className={cn(
-                            "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
-                            isSelectedTable
-                              ? "wb-tree-row-selected"
-                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
-                          )}
-                          onClick={() =>
+                      <ContextMenu
+                        onOpenChange={(open) => {
+                          if (open) {
                             void runForSchema(schema, () =>
                               handleTableSelect(table.name),
-                            )
+                            );
                           }
-                          onDoubleClick={() =>
-                            void handleTableDoubleClick(table, schema)
-                          }
-                          title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\nDouble-click to open data · Right-click for actions · Expand for columns and indexes`}
-                        >
-                          <button
-                            type="button"
-                            className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                            aria-label={`${isTableExpanded ? "Collapse" : "Expand"} ${table.name} metadata`}
-                            aria-expanded={isTableExpanded}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setExpandedTableKeys((current) =>
-                                current.includes(relationTreeKey)
-                                  ? current.filter(
-                                      (key) => key !== relationTreeKey,
-                                    )
-                                  : [...current, relationTreeKey],
-                              );
-                            }}
-                            onDoubleClick={(event) => event.stopPropagation()}
-                          >
-                            {isTableExpanded ? (
-                              <ChevronDown size={10} />
-                            ) : (
-                              <ChevronRight size={10} />
+                        }}
+                      >
+                        <ContextMenuTrigger asChild>
+                          <div
+                            data-database-object-key={databaseObjectNavigationKey(
+                              {
+                                connectionId,
+                                databaseName: navigationDatabaseName,
+                                schemaName: schema,
+                                objectName: table.name,
+                              },
                             )}
-                          </button>
-                          <Table
-                            size={12}
+                            tabIndex={-1}
+                            aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. Double-click to open data; right-click for actions; expand for columns and indexes.`}
                             className={cn(
-                              "shrink-0 opacity-70",
-                              isSelectedTable && "opacity-100",
-                              isPinned && "text-primary opacity-100",
+                              "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
+                              isSelectedTable
+                                ? "wb-tree-row-selected"
+                                : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                             )}
-                          />
-                          <span
-                            className={cn(
-                              "min-w-0 flex-1 truncate",
-                              isPinned && "font-bold text-foreground",
-                            )}
+                            onClick={() =>
+                              void runForSchema(schema, () =>
+                                handleTableSelect(table.name),
+                              )
+                            }
+                            onDoubleClick={() =>
+                              void handleTableDoubleClick(table, schema)
+                            }
+                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\nDouble-click to open data · Right-click for actions · Expand for columns and indexes`}
                           >
-                            {table.name}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className={cn(
-                                "h-4 w-4 shrink-0 transition-all duration-200",
-                                isPinned
-                                  ? "text-primary opacity-100"
-                                  : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100",
-                              )}
+                            <button
+                              type="button"
+                              className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                              aria-label={`${isTableExpanded ? "Collapse" : "Expand"} ${table.name} metadata`}
+                              aria-expanded={isTableExpanded}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                void runForSchema(schema, () =>
-                                  togglePinTable(table.name),
+                                setExpandedTableKeys((current) =>
+                                  current.includes(relationTreeKey)
+                                    ? current.filter(
+                                        (key) => key !== relationTreeKey,
+                                      )
+                                    : [...current, relationTreeKey],
                                 );
                               }}
-                              title={isPinned ? "Unpin Table" : "Pin Table"}
+                              onDoubleClick={(event) => event.stopPropagation()}
                             >
-                              {isPinned ? (
-                                <PinOff size={10} />
+                              {isTableExpanded ? (
+                                <ChevronDown size={10} />
                               ) : (
-                                <Pin size={10} />
+                                <ChevronRight size={10} />
                               )}
-                            </Button>
+                            </button>
+                            <Table
+                              size={12}
+                              className={cn(
+                                "shrink-0 opacity-70",
+                                isSelectedTable && "opacity-100",
+                                isPinned && "text-primary opacity-100",
+                              )}
+                            />
+                            <span
+                              className={cn(
+                                "min-w-0 flex-1 truncate",
+                                isPinned && "font-bold text-foreground",
+                              )}
+                            >
+                              {table.name}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className={cn(
+                                  "h-4 w-4 shrink-0 transition-all duration-200",
+                                  isPinned
+                                    ? "text-primary opacity-100"
+                                    : "text-muted-foreground opacity-0 group-hover:opacity-60 hover:opacity-100",
+                                )}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void runForSchema(schema, () =>
+                                    togglePinTable(table.name),
+                                  );
+                                }}
+                                title={isPinned ? "Unpin Table" : "Pin Table"}
+                              >
+                                {isPinned ? (
+                                  <PinOff size={10} />
+                                ) : (
+                                  <Pin size={10} />
+                                )}
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent className={menuContentClass}>
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            <Plus className="mr-2 h-3.5 w-3.5" />
-                            New
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () => {
-                                  if (activeConnectionId) {
-                                    createTableTab(activeConnectionId, schema);
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className={menuContentClass}>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={
+                              !objectConnection ||
+                              !(
+                                supportsTableWorkspace(relationCapabilities) ||
+                                relationCapabilities.supportsCollectionBrowsing
+                              )
+                            }
+                            onClick={() => {
+                              if (!objectConnection) return;
+                              void setActiveConnection(connectionId).then(
+                                (connectionError) => {
+                                  if (connectionError) {
+                                    setNamespaceError(connectionError);
+                                    return;
                                   }
-                                })
-                              }
-                              disabled={
-                                !activeConnectionId ||
-                                !canBrowseTables ||
-                                !activeCapabilities.supportsTableDdl
-                              }
-                            >
-                              Table
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, handleCreateView)
-                              }
-                              disabled={!activeCapabilities.supportsViews}
-                            >
-                              View
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(
-                                  schema,
-                                  handleCreateMaterializedView,
-                                )
-                              }
-                              disabled={
-                                !activeCapabilities.supportsMaterializedViews
-                              }
-                            >
-                              Materialized View
-                            </ContextMenuItem>
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
+                                  setSchemaSnapshotIdentity({
+                                    projectId: activeProjectId,
+                                    connectionId,
+                                    connectionName: objectConnection.name,
+                                    driver: objectConnection.driver,
+                                    databaseName: navigationDatabaseName,
+                                    schemaName: schema,
+                                    tableName: table.name,
+                                  });
+                                },
+                              );
+                            }}
+                          >
+                            <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                            Schema Snapshots / Diff...
+                          </ContextMenuItem>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              <Plus className="mr-2 h-3.5 w-3.5" />
+                              New
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () => {
+                                    if (activeConnectionId) {
+                                      createTableTab(
+                                        activeConnectionId,
+                                        schema,
+                                      );
+                                    }
+                                  })
+                                }
+                                disabled={
+                                  !activeConnectionId ||
+                                  !canBrowseTables ||
+                                  !activeCapabilities.supportsTableDdl
+                                }
+                              >
+                                Table
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, handleCreateView)
+                                }
+                                disabled={!activeCapabilities.supportsViews}
+                              >
+                                View
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(
+                                    schema,
+                                    handleCreateMaterializedView,
+                                  )
+                                }
+                                disabled={
+                                  !activeCapabilities.supportsMaterializedViews
+                                }
+                              >
+                                Materialized View
+                              </ContextMenuItem>
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
 
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            Copy/Paste
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() => void copyText(table.name)}
-                            >
-                              Copy Name
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleCopyTableDdl(table),
-                                )
-                              }
-                            >
-                              Copy DDL
-                            </ContextMenuItem>
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              Copy/Paste
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() => void copyText(table.name)}
+                              >
+                                Copy Name
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleCopyTableDdl(table),
+                                  )
+                                }
+                              >
+                                Copy DDL
+                              </ContextMenuItem>
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
 
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, async () => {
-                              if (!activeConnectionId) return;
-                              if (canBrowseTables) {
-                                await loadTables(
-                                  activeConnectionId,
-                                  schema,
-                                  true,
-                                );
-                                if (activeCapabilities.supportsFunctions) {
-                                  await loadFunctions(
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              void runForSchema(schema, async () => {
+                                if (!activeConnectionId) return;
+                                if (canBrowseTables) {
+                                  await loadTables(
+                                    activeConnectionId,
+                                    schema,
+                                    true,
+                                  );
+                                  if (activeCapabilities.supportsFunctions) {
+                                    await loadFunctions(
+                                      activeConnectionId,
+                                      schema,
+                                      true,
+                                    );
+                                  }
+                                }
+                                if (canBrowseCollections) {
+                                  await loadCollections(
                                     activeConnectionId,
                                     schema,
                                     true,
                                   );
                                 }
-                              }
-                              if (canBrowseCollections) {
-                                await loadCollections(
-                                  activeConnectionId,
+                                const metadata = await loadTableMetadata({
+                                  connectionId: activeConnectionId,
+                                  driver: activeDriver,
                                   schema,
-                                  true,
-                                );
-                              }
-                              const metadata = await loadTableMetadata({
-                                connectionId: activeConnectionId,
-                                driver: activeDriver,
-                                schema,
-                                table: table.name,
-                                includeIndexes:
-                                  activeCapabilities.supportsTableIndexes,
-                                includeConstraints:
-                                  activeCapabilities.supportsTableConstraints,
-                                force: true,
-                              });
-                              for (const tab of useTabStore.getState().tabs) {
-                                if (
-                                  tab.type === "table" &&
-                                  tab.connectionId === activeConnectionId &&
-                                  tab.schemaName === schema &&
-                                  tab.tableName === table.name
-                                ) {
-                                  setTableMetadata(tab.id, metadata);
+                                  table: table.name,
+                                  includeIndexes:
+                                    activeCapabilities.supportsTableIndexes,
+                                  includeConstraints:
+                                    activeCapabilities.supportsTableConstraints,
+                                  force: true,
+                                });
+                                for (const tab of useTabStore.getState().tabs) {
+                                  if (
+                                    tab.type === "table" &&
+                                    tab.connectionId === activeConnectionId &&
+                                    tab.schemaName === schema &&
+                                    tab.tableName === table.name
+                                  ) {
+                                    setTableMetadata(tab.id, metadata);
+                                  }
                                 }
-                              }
-                            })
-                          }
-                          disabled={isLoading}
-                        >
-                          <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                          Refresh
-                          <ContextMenuShortcut>⌘R</ContextMenuShortcut>
-                        </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          disabled={!relationCapabilities.supportsTableDdl}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleRenameClick(table),
-                            )
-                          }
-                        >
-                          Rename...
-                          <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
-                        </ContextMenuItem>
-                        <ContextMenuSeparator className={menuSeparatorClass} />
+                              })
+                            }
+                            disabled={isLoading}
+                          >
+                            <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                            Refresh
+                            <ContextMenuShortcut>⌘R</ContextMenuShortcut>
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={!relationCapabilities.supportsTableDdl}
+                            onClick={() =>
+                              void runForSchema(schema, () =>
+                                handleRenameClick(table),
+                              )
+                            }
+                          >
+                            Rename...
+                            <ContextMenuShortcut>⇧F6</ContextMenuShortcut>
+                          </ContextMenuItem>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
 
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleDdlClick(table),
-                            )
-                          }
-                        >
-                          Quick Documentation
-                          <ContextMenuShortcut>F1</ContextMenuShortcut>
-                        </ContextMenuItem>
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            Navigation
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void handleTableDoubleClick(table, schema)
-                              }
-                            >
-                              Open Data
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleDdlClick(table),
-                                )
-                              }
-                            >
-                              Go to DDL
-                            </ContextMenuItem>
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
-                        <ContextMenuSeparator className={menuSeparatorClass} />
-
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            SQL Scripts
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleDdlClick(table),
-                                )
-                              }
-                            >
-                              Show DDL
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleCopyTableDdl(table),
-                                )
-                              }
-                            >
-                              Copy DDL
-                            </ContextMenuItem>
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
-
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            Tools
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  togglePinTable(table.name),
-                                )
-                              }
-                            >
-                              {isPinned ? "Unpin" : "Pin"}
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleEditColumnsClick(table),
-                                )
-                              }
-                              disabled={
-                                isReadOnlyRelation ||
-                                !relationCapabilities.supportsTableDdl ||
-                                !relationCapabilities.supportsColumnAlteration
-                              }
-                            >
-                              Edit Columns
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleTruncateClick(table),
-                                )
-                              }
-                              disabled={
-                                isReadOnlyRelation ||
-                                !relationCapabilities.supportsTableDdl
-                              }
-                            >
-                              Empty Table
-                            </ContextMenuItem>
-                            {isView && !isMaterializedView && (
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              void runForSchema(schema, () =>
+                                handleDdlClick(table),
+                              )
+                            }
+                          >
+                            Quick Documentation
+                            <ContextMenuShortcut>F1</ContextMenuShortcut>
+                          </ContextMenuItem>
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              Navigation
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void handleTableDoubleClick(table, schema)
+                                }
+                              >
+                                Open Data
+                              </ContextMenuItem>
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleEditViewClick(table),
+                                    handleDdlClick(table),
                                   )
                                 }
                               >
-                                Edit View
+                                Go to DDL
                               </ContextMenuItem>
-                            )}
-                            {isMaterializedView && (
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
+
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              SQL Scripts
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleRefreshMaterializedViewClick(table),
+                                    handleDdlClick(table),
                                   )
                                 }
                               >
-                                Refresh Materialized View
+                                Show DDL
                               </ContextMenuItem>
-                            )}
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleCopyTableDdl(table),
+                                  )
+                                }
+                              >
+                                Copy DDL
+                              </ContextMenuItem>
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
 
-                        <ContextMenuSub>
-                          <ContextMenuSubTrigger className={menuSubClass}>
-                            Import/Export
-                          </ContextMenuSubTrigger>
-                          <ContextMenuSubContent className={menuContentClass}>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              disabled={!canImportRelationRows}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleTableCsvImport(table, schema),
-                                )
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import CSV...
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              disabled={!canImportRelationRows}
-                              title="Stream a UTF-8 comma-separated CSV with a header row. Use Import CSV… when you need encoding, delimiter, or column mapping."
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  importTableData(table.name, "csv"),
-                                )
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import CSV (streaming)...
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              disabled={!canImportRelationRows}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleTableJsonImport(table, schema),
-                                )
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import JSON...
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              disabled={!canImportRelationRows}
-                              onClick={() =>
-                                void runForSchema(schema, () =>
-                                  handleTableXlsxImport(table, schema),
-                                )
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import XLSX...
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              disabled={
-                                !relationCapabilities.supportsSqlQuery
-                              }
-                              onClick={() =>
-                                void handleImportSqlScript({
-                                  connectionId,
-                                  schema,
-                                  database:
-                                    supportsDatabaseCatalogTree(driver)
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              Tools
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    togglePinTable(table.name),
+                                  )
+                                }
+                              >
+                                {isPinned ? "Unpin" : "Pin"}
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleEditColumnsClick(table),
+                                  )
+                                }
+                                disabled={
+                                  isReadOnlyRelation ||
+                                  !relationCapabilities.supportsTableDdl ||
+                                  !relationCapabilities.supportsColumnAlteration
+                                }
+                              >
+                                Edit Columns
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleTruncateClick(table),
+                                  )
+                                }
+                                disabled={
+                                  isReadOnlyRelation ||
+                                  !relationCapabilities.supportsTableDdl
+                                }
+                              >
+                                Empty Table
+                              </ContextMenuItem>
+                              {isView && !isMaterializedView && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      handleEditViewClick(table),
+                                    )
+                                  }
+                                >
+                                  Edit View
+                                </ContextMenuItem>
+                              )}
+                              {isMaterializedView && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      handleRefreshMaterializedViewClick(table),
+                                    )
+                                  }
+                                >
+                                  Refresh Materialized View
+                                </ContextMenuItem>
+                              )}
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              Import/Export
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!canImportRelationRows}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleTableCsvImport(table, schema),
+                                  )
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import CSV...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!canImportRelationRows}
+                                title="Stream a UTF-8 comma-separated CSV with a header row. Use Import CSV… when you need encoding, delimiter, or column mapping."
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    importTableData(table.name, "csv"),
+                                  )
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import CSV (streaming)...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!canImportRelationRows}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleTableJsonImport(table, schema),
+                                  )
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import JSON...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!canImportRelationRows}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    handleTableXlsxImport(table, schema),
+                                  )
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import XLSX...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={
+                                  !relationCapabilities.supportsSqlQuery
+                                }
+                                onClick={() =>
+                                  void handleImportSqlScript({
+                                    connectionId,
+                                    schema,
+                                    database: supportsDatabaseCatalogTree(
+                                      driver,
+                                    )
                                       ? connectionCatalogDatabaseName(
                                           connections.find(
                                             (item) => item.id === connectionId,
                                           ) || {},
                                         )
                                       : undefined,
-                                })
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import SQL Script...
-                            </ContextMenuItem>
-                            <ContextMenuSeparator
-                              className={menuSeparatorClass}
-                            />
-                            {supportsRelationExport("csv") && (
-                              <>
+                                  })
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import SQL Script...
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                              {supportsRelationExport("csv") && (
+                                <>
+                                  <ContextMenuItem
+                                    className={menuItemClass}
+                                    onClick={() =>
+                                      void runForSchema(schema, () =>
+                                        exportTableData(table.name, "csv"),
+                                      )
+                                    }
+                                  >
+                                    <Download className="mr-2 h-3.5 w-3.5" />
+                                    Export CSV
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    className={menuItemClass}
+                                    onClick={() =>
+                                      void runForSchema(schema, () =>
+                                        exportTableData(
+                                          table.name,
+                                          "csv",
+                                          "utf8Bom",
+                                        ),
+                                      )
+                                    }
+                                  >
+                                    <Download className="mr-2 h-3.5 w-3.5" />
+                                    Export CSV (UTF-8 BOM)
+                                  </ContextMenuItem>
+                                </>
+                              )}
+                              {supportsRelationExport("json") && (
                                 <ContextMenuItem
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "csv"),
+                                      exportTableData(table.name, "json"),
                                     )
                                   }
                                 >
                                   <Download className="mr-2 h-3.5 w-3.5" />
-                                  Export CSV
+                                  Export JSON
                                 </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("jsonl") && (
                                 <ContextMenuItem
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "csv", "utf8Bom"),
+                                      exportTableData(table.name, "jsonl"),
                                     )
                                   }
                                 >
                                   <Download className="mr-2 h-3.5 w-3.5" />
-                                  Export CSV (UTF-8 BOM)
+                                  Export JSON Lines
                                 </ContextMenuItem>
-                              </>
-                            )}
-                            {supportsRelationExport("json") && (
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, () =>
-                                    exportTableData(table.name, "json"),
-                                  )
-                                }
-                              >
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export JSON
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("jsonl") && (
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, () =>
-                                    exportTableData(table.name, "jsonl"),
-                                  )
-                                }
-                              >
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export JSON Lines
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("sql") && (
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, () =>
-                                    exportTableData(table.name, "sql"),
-                                  )
-                                }
-                              >
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export SQL Inserts
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("tsv") && (
-                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "tsv"))}>
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export TSV
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("xlsx") && (
-                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "xlsx", "binary"))}>
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export Excel workbook (.xlsx)
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("parquet") && (
-                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "parquet", "binary"))}>
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export Apache Parquet (.parquet)
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("arrow") && (
-                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "arrow", "binary"))}>
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export Arrow IPC (.arrow)
-                              </ContextMenuItem>
-                            )}
-                            {supportsRelationExport("markdown") && (
-                              <ContextMenuItem className={menuItemClass} onClick={() => void runForSchema(schema, () => exportTableData(table.name, "markdown"))}>
-                                <Download className="mr-2 h-3.5 w-3.5" />
-                                Export Markdown table (.md)
-                              </ContextMenuItem>
-                            )}
-                            {activeTableExport?.tableName === table.name && (
-                              <ContextMenuItem
-                                className={cn(menuItemClass, "text-destructive")}
-                                onClick={() => void cancelActiveTableExport()}
-                              >
-                                <X className="mr-2 h-3.5 w-3.5" />
-                                Cancel active export
-                              </ContextMenuItem>
-                            )}
-                          </ContextMenuSubContent>
-                        </ContextMenuSub>
-                        <ContextMenuSeparator className={menuSeparatorClass} />
-                        <ContextMenuItem
-                          disabled={!relationCapabilities.supportsTableDdl}
-                          onClick={() =>
-                            void runForSchema(schema, () =>
-                              handleDropClick(table),
+                              )}
+                              {supportsRelationExport("sql") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(table.name, "sql"),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export SQL Inserts
+                                </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("tsv") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(table.name, "tsv"),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export TSV
+                                </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("xlsx") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(
+                                        table.name,
+                                        "xlsx",
+                                        "binary",
+                                      ),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export Excel workbook (.xlsx)
+                                </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("parquet") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(
+                                        table.name,
+                                        "parquet",
+                                        "binary",
+                                      ),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export Apache Parquet (.parquet)
+                                </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("arrow") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(
+                                        table.name,
+                                        "arrow",
+                                        "binary",
+                                      ),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export Arrow IPC (.arrow)
+                                </ContextMenuItem>
+                              )}
+                              {supportsRelationExport("markdown") && (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void runForSchema(schema, () =>
+                                      exportTableData(table.name, "markdown"),
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export Markdown table (.md)
+                                </ContextMenuItem>
+                              )}
+                              {activeTableExport?.tableName === table.name && (
+                                <ContextMenuItem
+                                  className={cn(
+                                    menuItemClass,
+                                    "text-destructive",
+                                  )}
+                                  onClick={() => void cancelActiveTableExport()}
+                                >
+                                  <X className="mr-2 h-3.5 w-3.5" />
+                                  Cancel active export
+                                </ContextMenuItem>
+                              )}
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={
+                              isView ||
+                              !objectConnection ||
+                              !relationCapabilities.supportsTableDataTransfer
+                            }
+                            onClick={() => {
+                              if (!objectConnection) return;
+                              void handleOpenDataTransfer({
+                                connection: objectConnection,
+                                database: navigationDatabaseName,
+                                schema,
+                                table: table.name,
+                                scope: "table",
+                              });
+                            }}
+                          >
+                            <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                            Transfer Table Data...
+                          </ContextMenuItem>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
+                          <ContextMenuItem
+                            disabled={!relationCapabilities.supportsTableDdl}
+                            onClick={() =>
+                              void runForSchema(schema, () =>
+                                handleDropClick(table),
+                              )
+                            }
+                            className={cn(menuItemClass, "text-destructive")}
+                          >
+                            <Trash2 className="mr-2 h-3.5 w-3.5" />
+                            Drop {relationObjectLabel(table.type)}...
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
+                      {isTableExpanded && (
+                        <TableObjectTree
+                          identity={{
+                            projectId: activeProjectId,
+                            connectionId,
+                            driver: driver || activeDriver,
+                            databaseName: navigationDatabaseName || undefined,
+                            schema,
+                            table: table.name,
+                          }}
+                          includeIndexes={
+                            relationCapabilities.supportsTableIndexes
+                          }
+                          includeConstraints={
+                            relationCapabilities.supportsTableConstraints
+                          }
+                          onReferenceSelect={({
+                            schema: referencedSchema,
+                            table: referencedTable,
+                          }) =>
+                            void handleTableDoubleClick(
+                              { name: referencedTable },
+                              referencedSchema,
                             )
                           }
-                          className={cn(menuItemClass, "text-destructive")}
-                        >
-                          <Trash2 className="mr-2 h-3.5 w-3.5" />
-                          Drop {relationObjectLabel(table.type)}...
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
-                    {isTableExpanded && (
-                      <TableObjectTree
-                        identity={{
-                          projectId: activeProjectId,
-                          connectionId,
-                          driver: driver || activeDriver,
-                          databaseName: navigationDatabaseName || undefined,
-                          schema,
-                          table: table.name,
-                        }}
-                        includeIndexes={
-                          relationCapabilities.supportsTableIndexes
-                        }
-                        includeConstraints={
-                          relationCapabilities.supportsTableConstraints
-                        }
-                        onReferenceSelect={({ schema: referencedSchema, table: referencedTable }) =>
-                          void handleTableDoubleClick(
-                            { name: referencedTable },
-                            referencedSchema,
-                          )
-                        }
-                      />
-                    )}
+                        />
+                      )}
                     </div>
                   );
                 })}
@@ -4216,7 +4435,7 @@ export function SchemaSidebar() {
             )}
           </>
         )}
-      {renderRoutines()}
+        {renderRoutines()}
         {renderSchemaObjectDescriptors()}
         {renderVirtualViews()}
       </div>
@@ -4241,8 +4460,8 @@ export function SchemaSidebar() {
           canCreateNamespace={activeCapabilities.supportsCreateDatabase}
           canCreateTable={Boolean(
             currentSchema &&
-              canBrowseTables &&
-              activeCapabilities.supportsTableDdl,
+            canBrowseTables &&
+            activeCapabilities.supportsTableDdl,
           )}
           canCreateView={Boolean(
             currentSchema && activeCapabilities.supportsViews,
@@ -4417,8 +4636,7 @@ export function SchemaSidebar() {
               const isConnecting = connectingConnectionIds.includes(
                 connection.id,
               );
-              const connectionRuntime =
-                connectionRuntimeStates[connection.id];
+              const connectionRuntime = connectionRuntimeStates[connection.id];
               const connectionMetadata = metadataForConnection(
                 connection.id,
                 connection.driver,
@@ -4514,9 +4732,11 @@ export function SchemaSidebar() {
                           size={14}
                           className="shrink-0"
                           style={{ color: connectionColor }}
-                          title={isManagedConnection
-                            ? `${databaseDriverProfile(connection.driver).capabilities.displayName} through managed Gateway`
-                            : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`}
+                          title={
+                            isManagedConnection
+                              ? `${databaseDriverProfile(connection.driver).capabilities.displayName} through managed Gateway`
+                              : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`
+                          }
                         />
                         <span className="truncate font-medium">
                           {connection.name}
@@ -4550,14 +4770,14 @@ export function SchemaSidebar() {
                           state={connectionMetadata.nodeState}
                         />
                         {isActive &&
-                            isFlatKeyValueTree &&
-                            (isLoading || isCollectionsLoading) && (
-                          <RefreshCw
-                            size={11}
-                            className="ml-auto shrink-0 animate-spin wb-muted"
-                            aria-label="Loading Redis keys"
-                          />
-                        )}
+                          isFlatKeyValueTree &&
+                          (isLoading || isCollectionsLoading) && (
+                            <RefreshCw
+                              size={11}
+                              className="ml-auto shrink-0 animate-spin wb-muted"
+                              aria-label="Loading Redis keys"
+                            />
+                          )}
                         {isActive ? renderSchemaVisibilityPicker() : null}
                       </div>
                     </ContextMenuTrigger>
@@ -4675,7 +4895,9 @@ export function SchemaSidebar() {
                           <ContextMenuItem
                             className={menuItemClass}
                             onClick={() => {
-                              setDatabaseAdministrationConnectionId(connection.id);
+                              setDatabaseAdministrationConnectionId(
+                                connection.id,
+                              );
                             }}
                           >
                             Database Administration...
@@ -4698,10 +4920,9 @@ export function SchemaSidebar() {
                             onClick={() =>
                               void handleImportSqlScript({
                                 connectionId: connection.id,
-                                database:
-                                  connectionCanBrowseDatabaseCatalogs
-                                    ? connectedPostgresDatabase
-                                    : undefined,
+                                database: connectionCanBrowseDatabaseCatalogs
+                                  ? connectedPostgresDatabase
+                                  : undefined,
                               })
                             }
                           >
@@ -4712,7 +4933,9 @@ export function SchemaSidebar() {
                       </ContextMenuSub>
                       {!isManagedConnection && (
                         <>
-                          <ContextMenuSeparator className={menuSeparatorClass} />
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
                           <ContextMenuItem
                             className={cn(menuItemClass, "text-destructive")}
                             onSelect={() => {
@@ -4740,7 +4963,9 @@ export function SchemaSidebar() {
                             ? postgresDatabaseRefreshVersion
                             : 0
                         }:${isActive ? "active" : "inactive"}`}
-                        enabled={isActive && connectionCanBrowseDatabaseCatalogs}
+                        enabled={
+                          isActive && connectionCanBrowseDatabaseCatalogs
+                        }
                         databases={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
@@ -4805,58 +5030,109 @@ export function SchemaSidebar() {
                               }
                             : undefined
                         }
-                        renderDatabaseContextMenu={(database) => (
-                          <>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() => void copyText(database)}
-                            >
-                              Copy Name
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void handleImportSqlScript({
-                                  connectionId: connection.id,
-                                  database,
-                                })
-                              }
-                            >
-                              <Upload className="mr-2 h-3.5 w-3.5" />
-                              Import SQL Script...
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void handleOpenDataTransfer({
-                                  connection,
-                                  database,
-                                  scope: "database",
-                                })
-                              }
-                            >
-                              <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
-                              Transfer Database Data...
-                            </ContextMenuItem>
-                            <ContextMenuSeparator
-                              className={menuSeparatorClass}
-                            />
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() =>
-                                void (database === connectedPostgresDatabase
-                                  ? handleRefreshConnection(connection.id)
-                                  : loadPostgresRemoteDatabase(
+                        renderDatabaseContextMenu={(database) => {
+                          const databaseSchemas =
+                            postgresRemoteDatabases.connectionId ===
+                            connection.id
+                              ? postgresRemoteDatabases.schemas[database] || []
+                              : [];
+
+                          return (
+                            <>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() => void copyText(database)}
+                              >
+                                Copy Name
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void handleImportSqlScript({
+                                    connectionId: connection.id,
+                                    database,
+                                  })
+                                }
+                              >
+                                <Upload className="mr-2 h-3.5 w-3.5" />
+                                Import SQL Script...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void handleOpenDataTransfer({
+                                    connection,
+                                    database,
+                                    scope: "database",
+                                  })
+                                }
+                              >
+                                <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                                Transfer Database Data...
+                              </ContextMenuItem>
+                              {databaseSchemas.length > 0 ? (
+                                <ContextMenuSub>
+                                  <ContextMenuSubTrigger
+                                    className={menuItemClass}
+                                  >
+                                    <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                    Schema Snapshots / Diff
+                                  </ContextMenuSubTrigger>
+                                  <ContextMenuSubContent className="min-w-[190px]">
+                                    {databaseSchemas.map((schema) => (
+                                      <ContextMenuItem
+                                        key={schema}
+                                        className={menuItemClass}
+                                        onClick={() => {
+                                          setSchemaSnapshotIdentity({
+                                            projectId: activeProjectId,
+                                            connectionId: connection.id,
+                                            connectionName: connection.name,
+                                            driver: connection.driver,
+                                            databaseName: database,
+                                            schemaName: schema,
+                                          });
+                                        }}
+                                      >
+                                        {schema}
+                                      </ContextMenuItem>
+                                    ))}
+                                  </ContextMenuSubContent>
+                                </ContextMenuSub>
+                              ) : (
+                                <ContextMenuItem
+                                  className={menuItemClass}
+                                  onClick={() =>
+                                    void loadPostgresRemoteDatabase(
                                       connection.id,
                                       database,
-                                    ))
-                              }
-                            >
-                              <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                              Refresh Selected
-                            </ContextMenuItem>
-                          </>
-                        )}
+                                    )
+                                  }
+                                >
+                                  <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                  Load schemas for migration...
+                                </ContextMenuItem>
+                              )}
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void (database === connectedPostgresDatabase
+                                    ? handleRefreshConnection(connection.id)
+                                    : loadPostgresRemoteDatabase(
+                                        connection.id,
+                                        database,
+                                      ))
+                                }
+                              >
+                                <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                                Refresh Selected
+                              </ContextMenuItem>
+                            </>
+                          );
+                        }}
                         renderDatabaseChildren={(database) =>
                           database === connectedPostgresDatabase ? null : (
                             <PostgresRemoteDatabaseContents
@@ -4897,6 +5173,45 @@ export function SchemaSidebar() {
                                   schemaName: schema,
                                 });
                               }}
+                              onOpenSchemaDataTransfer={(
+                                databaseName,
+                                schema,
+                              ) =>
+                                void handleOpenDataTransfer({
+                                  connection,
+                                  database: databaseName,
+                                  schema,
+                                  scope: "schema",
+                                })
+                              }
+                              onOpenTableSchemaSnapshots={(
+                                databaseName,
+                                schema,
+                                table,
+                              ) => {
+                                setSchemaSnapshotIdentity({
+                                  projectId: activeProjectId,
+                                  connectionId: connection.id,
+                                  connectionName: connection.name,
+                                  driver: connection.driver,
+                                  databaseName,
+                                  schemaName: schema,
+                                  tableName: table,
+                                });
+                              }}
+                              onOpenTableDataTransfer={(
+                                databaseName,
+                                schema,
+                                table,
+                              ) =>
+                                void handleOpenDataTransfer({
+                                  connection,
+                                  database: databaseName,
+                                  schema,
+                                  table,
+                                  scope: "table",
+                                })
+                              }
                               onImportSqlScript={(databaseName, schema) =>
                                 void handleImportSqlScript({
                                   connectionId: connection.id,
@@ -4955,16 +5270,19 @@ export function SchemaSidebar() {
                                     <button
                                       type="button"
                                       aria-expanded={isSchemaExpanded}
-                                      data-database-schema-key={databaseSchemaNavigationKey({
-                                        connectionId: connection.id,
-                                        databaseName:
-                                          connectionCanBrowseDatabaseCatalogs
-                                            ? connectionCatalogDatabaseName(
-                                                connection,
-                                              )
-                                            : connection.database || undefined,
-                                        schemaName: schema,
-                                      })}
+                                      data-database-schema-key={databaseSchemaNavigationKey(
+                                        {
+                                          connectionId: connection.id,
+                                          databaseName:
+                                            connectionCanBrowseDatabaseCatalogs
+                                              ? connectionCatalogDatabaseName(
+                                                  connection,
+                                                )
+                                              : connection.database ||
+                                                undefined,
+                                          schemaName: schema,
+                                        },
+                                      )}
                                       className={cn(
                                         "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
                                         isCurrentSchema
@@ -5219,8 +5537,7 @@ export function SchemaSidebar() {
                                               connectionId: connection.id,
                                               schema,
                                               database:
-                                                connection.driver ===
-                                                "postgres"
+                                                connection.driver === "postgres"
                                                   ? connectedPostgresDatabase
                                                   : undefined,
                                             })

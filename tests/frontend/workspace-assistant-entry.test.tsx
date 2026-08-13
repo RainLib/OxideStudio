@@ -258,4 +258,81 @@ describe("database workspace entry", () => {
       container.querySelector("[data-tool-window-content='projectFiles']"),
     ).toBeNull();
   });
+
+  it("closes the shared secondary panel without revealing its previous tool", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<WorkspacePage />);
+    });
+
+    const toggle = (label: string) =>
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.getAttribute("aria-label") === label,
+      );
+
+    await act(async () => toggle("Toggle AI Assistant")?.click());
+    expect(
+      container.querySelector("[data-tool-window-content='assistant']"),
+    ).not.toBeNull();
+
+    await act(async () => toggle("Toggle Project Files")?.click());
+    expect(
+      container.querySelector("[data-tool-window-content='assistant']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).not.toBeNull();
+
+    const secondaryPanelToggle = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.getAttribute("title") === "Toggle Secondary Panel");
+    expect(secondaryPanelToggle?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => secondaryPanelToggle?.click());
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-tool-window-content='assistant']"),
+    ).toBeNull();
+    expect(secondaryPanelToggle?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("closes the shared first panel without revealing its previous tool", async () => {
+    useSettingsStore.setState({
+      settings: {
+        ...DEFAULT_APP_SETTINGS,
+        workbench: {
+          ...DEFAULT_APP_SETTINGS.workbench,
+          toolWindows: {
+            ...DEFAULT_APP_SETTINGS.workbench.toolWindows,
+            projectFiles: { enabled: true, side: "left" },
+          },
+        },
+      },
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<WorkspacePage />);
+    });
+
+    const toggle = (label: string) =>
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.getAttribute("aria-label") === label,
+      );
+
+    await act(async () => toggle("Toggle Project Files")?.click());
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).not.toBeNull();
+    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeNull();
+
+    await act(async () => toggle("Toggle Project Files")?.click());
+    expect(
+      container.querySelector("[data-tool-window-content='projectFiles']"),
+    ).toBeNull();
+    expect(container.querySelector("[data-testid='schema-sidebar']")).toBeNull();
+    expect(container.querySelector("[data-tool-window-side='left']")).toBeNull();
+  });
 });

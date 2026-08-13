@@ -1,9 +1,10 @@
 import { assistantProviderDefinition } from "@/ai/assistant/providerDefinitions";
 import { cn } from "@/lib/utils";
+import type { AiCliProviderConfig } from "@/services/tauri/ai.service";
 import type {
-  AiCliAuthenticationMethod,
-  AiCliProviderConfig,
-} from "@/services/tauri/ai.service";
+  AssistantCliSetupPhase,
+  AssistantCliSetupState,
+} from "@/store/useAssistantCliSetupStore";
 import {
   Check,
   Circle,
@@ -16,26 +17,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 
-export type AssistantCliSetupPhase =
-  | "checking"
-  | "missing"
-  | "installing"
-  | "auth-required"
-  | "authorizing"
-  | "ready"
-  | "error";
-
-export type AssistantCliSetupState = {
-  phase: AssistantCliSetupPhase;
-  message: string;
-  executablePath?: string;
-  version?: string;
-  refreshing?: boolean;
-  authenticationMethods?: AiCliAuthenticationMethod[];
-  authenticationSessionId?: string;
-  authenticationMethodId?: string;
-  authMethodsLoading?: boolean;
-};
+export type { AssistantCliSetupPhase, AssistantCliSetupState };
 
 type AssistantProviderSetupProps = {
   provider: AiCliProviderConfig["kind"];

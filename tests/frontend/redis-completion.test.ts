@@ -136,4 +136,17 @@ describe("Redis editor completion", () => {
       type: "value",
     });
   });
+
+  it("bounds Redis key completions without dropping command argument hints", () => {
+    const keyContext = getRedisCompletionContext("SET ", 4, { commands });
+    const keys = Array.from({ length: 700 }, (_, index) =>
+      `cache:${String(index).padStart(3, "0")}`,
+    );
+
+    const items = buildRedisCompletionItems(keyContext, { commands, keys });
+
+    expect(items.filter((item) => item.type === "key")).toHaveLength(512);
+    expect(items[0]?.label).toBe("cache:000");
+    expect(items.some((item) => item.label === "EX")).toBe(true);
+  });
 });

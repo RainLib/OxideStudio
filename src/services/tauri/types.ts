@@ -511,11 +511,17 @@ export interface TableDataCompareResult {
   added: TableDataCompareRow[];
   removed: TableDataCompareRow[];
   modified: TableDataCompareModifiedRow[];
+  /** Exact totals; row arrays are a bounded preview for the renderer. */
+  addedCount: number;
+  removedCount: number;
+  modifiedCount: number;
   equalCount: number;
   sourceRowCount: number;
   targetRowCount: number;
   comparedKeyCount: number;
   batchSize: number;
+  detailLimitPerStatus: number;
+  detailsTruncated: boolean;
 }
 
 export interface TableExportResult {
@@ -783,6 +789,8 @@ export interface TableDataTransferBatchTableResult {
   rowsTransferred: number;
   batches: number;
   limitReached: boolean;
+  /** Reviewed target baseline used to verify append/overwrite results. */
+  targetRowsBefore?: number | null;
   identityReseedColumns: string[];
   reportId?: string | null;
 }
@@ -823,6 +831,8 @@ export interface TableDataTransferPreview {
   previewRows: number;
   maxRows: number;
   batchSize: number;
+  /** Read-only target row-count baseline bound to append/overwrite preview. */
+  targetRowsBefore?: number | null;
   targetRowsToDelete?: number | null;
   /** Target primary-key columns used as the conflict identity in upsert mode. */
   upsertKeyColumns: string[];
@@ -865,6 +875,8 @@ export interface TableDataTransferResult {
   rowsTransferred: number;
   batches: number;
   limitReached: boolean;
+  /** Reviewed target baseline used to verify append/overwrite results. */
+  targetRowsBefore?: number | null;
   mappedColumns: TableDataTransferColumnMapping[];
   identityReseedColumns: string[];
   /** Set when the terminal transfer report was stored successfully. */
@@ -915,6 +927,8 @@ export interface TableDataTransferReport {
   rowsTransferred: number;
   batches: number;
   limitReached: boolean;
+  /** Missing for reports written before baseline auditing existed. */
+  targetRowsBefore?: number | null;
   status: Exclude<TableDataTransferProgressStatus, "running">;
   startedAt: number;
   finishedAt: number;

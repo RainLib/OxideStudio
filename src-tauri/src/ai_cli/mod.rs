@@ -51,6 +51,10 @@ pub struct CliProviderConfig {
 pub struct CliModelInfo {
     pub id: String,
     pub label: String,
+    /// Keeps a concrete provider default distinct from the OxideStudio
+    /// `default` sentinel stored in `is_default`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_provider_default: bool,
     pub is_default: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<String>,
@@ -61,10 +65,15 @@ impl CliModelInfo {
         Self {
             id: id.into(),
             label: label.into(),
+            is_provider_default: false,
             is_default,
             reasoning_efforts: Vec::new(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -117,6 +126,42 @@ pub struct CliInstallResult {
     pub provider: CliProviderKind,
     pub executable_path: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInstallationLaunchResult {
+    pub provider: CliProviderKind,
+    pub session_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliInstallationPhase {
+    Starting,
+    Downloading,
+    Installing,
+    Verifying,
+    Succeeded,
+    Failed,
+}
+
+impl CliInstallationPhase {
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInstallationStatus {
+    pub session_id: String,
+    pub provider: CliProviderKind,
+    pub phase: CliInstallationPhase,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<CliInstallResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +221,13 @@ pub struct CliEnvironmentRequest {
     pub profile_id: String,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliEnvironmentSaveResult {
+    pub keys: Vec<String>,
+    pub revision: String,
 }
 
 #[derive(Debug, Deserialize)]

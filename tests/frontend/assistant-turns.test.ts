@@ -2,11 +2,73 @@ import { describe, expect, it } from "vitest";
 import {
   assistantConversationHistoryFromTurns,
   createAssistantTurn,
+  upsertAssistantProcessItem,
 } from "@/ai/assistant/turns";
-import { reduceAgentHostEvent } from "@/hooks/useAssistantAgentSession";
+import {
+  applyBufferedAgentEvents,
+  reduceAgentHostEvent,
+} from "@/hooks/useAssistantAgentSession";
 import type { AgentHostEvent } from "@/services/tauri/agent-host.service";
 
 describe("assistant turn projection", () => {
+  it("keeps the process order stable while updating a hot item", () => {
+    const first = {
+      id: "tool-1",
+      sequence: 1,
+      kind: "tool" as const,
+      title: "Inspect schema",
+      status: "running" as const,
+      startedAt: 10,
+    };
+    const second = {
+      id: "tool-2",
+      sequence: 2,
+      kind: "tool" as const,
+      title: "Read rows",
+      status: "running" as const,
+      startedAt: 20,
+    };
+
+    const appended = upsertAssistantProcessItem(
+      upsertAssistantProcessItem([], first),
+      second,
+    );
+    const updated = upsertAssistantProcessItem(appended, {
+      ...first,
+      sequence: 99,
+      startedAt: 99,
+      status: "completed",
+    });
+
+    expect(updated.map((item) => item.id)).toEqual(["tool-1", "tool-2"]);
+    expect(updated[0]).toMatchObject({
+      sequence: 1,
+      startedAt: 10,
+      status: "completed",
+    });
+  });
+
+  it("replays events buffered while an encrypted conversation hydrates", () => {
+    const turn = createAssistantTurn({
+      id: "turn-1",
+      requestId: "request-1",
+      projectId: "project-1",
+      requestedMode: "agent",
+      mode: "agent",
+      userMessage: "Inspect users",
+      now: 10,
+    });
+    const restored = applyBufferedAgentEvents(
+      [{ ...turn, threadId: "thread-1" }],
+      [
+        event("answer.delta", 1, { content: "Ready", reset: true }),
+        event("turn.status", 2, { status: "completed" }),
+      ],
+    );
+
+    expect(restored[0]).toMatchObject({ draft: "Ready", status: "completed" });
+  });
+
   it("projects CLI activity as bounded process commentary", () => {
     const turn = reduceAgentHostEvent(
       createAssistantTurn({
@@ -199,6 +261,7 @@ describe("assistant turn projection", () => {
         artifacts: [],
       }),
     );
+    expect(turn.status).toBe("completed");
     turn = reduceAgentHostEvent(
       turn,
       event("turn.status", 9, { status: "completed" }),

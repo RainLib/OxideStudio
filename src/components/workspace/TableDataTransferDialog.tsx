@@ -1291,9 +1291,12 @@ export function TableDataTransferDialog({
                     <div key={report.id} className="flex items-center justify-between gap-2 leading-4">
                       <span
                         className="min-w-0 truncate wb-muted"
-                        title={`${report.source.schema}.${report.source.table} → ${report.rowsTransferred.toLocaleString()} rows`}
+                        title={`${report.source.schema}.${report.source.table} → ${report.rowsTransferred.toLocaleString()} rows${report.targetRowsBefore != null ? ` · target baseline ${report.targetRowsBefore.toLocaleString()} rows` : ""}`}
                       >
                         {report.status} · {report.source.schema}.{report.source.table} · {report.rowsTransferred.toLocaleString()} rows
+                        {report.targetRowsBefore != null
+                          ? ` · baseline ${report.targetRowsBefore.toLocaleString()}`
+                          : ""}
                       </span>
                       {report.verification && (
                         <span
@@ -1554,7 +1557,9 @@ export function TableDataTransferDialog({
                     {preview.previewRows} sample row(s) · limit {preview.maxRows.toLocaleString()}
                     {preview.targetRowsToDelete != null
                       ? ` · deletes ${preview.targetRowsToDelete.toLocaleString()} target row(s)`
-                      : ""}
+                      : preview.targetRowsBefore != null
+                        ? ` · target baseline ${preview.targetRowsBefore.toLocaleString()} row(s)`
+                        : ""}
                     {preview.upsertKeyColumns.length > 0
                       ? ` · conflict key ${preview.upsertKeyColumns.join(", ")}`
                       : ""}

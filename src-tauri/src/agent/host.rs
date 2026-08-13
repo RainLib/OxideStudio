@@ -10,9 +10,9 @@ use crate::{
             AgentContextCompactionMetrics, AgentContextMetrics, AgentConversationSnapshot,
             AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentModelUsageMetrics,
             AgentProfile, AgentProjectStateCleared, AgentProviderConfig, AgentProviderKind,
-            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnRequest, ApprovalDecision,
-            ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation, CheckpointRequest,
-            GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
+            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnJournal, AgentTurnRequest,
+            ApprovalDecision, ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation,
+            CheckpointRequest, GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
             GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
             GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
             ToolInvokeRequest, ToolPreflightRequest, AGENT_HOST_EVENT_CHANNEL,
@@ -253,6 +253,7 @@ struct AgentHostInner {
     turns: RwLock<HashMap<TurnKey, ActiveTurn>>,
     cli_turns: Mutex<HashMap<TurnKey, CliTurnHandle>>,
     event_sequences: RwLock<HashMap<TurnKey, u64>>,
+    turn_journals: RwLock<HashMap<TurnKey, TurnJournalBuffer>>,
     clarifications: RwLock<HashMap<String, PendingClarification>>,
     approvals: RwLock<HashMap<String, PendingApproval>>,
     approval_waiters: Mutex<HashMap<String, oneshot::Sender<BridgeApprovalDecision>>>,
@@ -335,6 +336,15 @@ impl LifecycleState {
 struct TurnKey {
     thread_id: String,
     turn_id: String,
+}
+
+const MAX_TURN_JOURNAL_EVENTS: usize = 160;
+const MAX_TURN_JOURNAL_EVENT_BYTES: usize = 24 * 1024;
+
+#[derive(Default)]
+struct TurnJournalBuffer {
+    events: Vec<Value>,
+    truncated: bool,
 }
 
 #[derive(Clone)]
@@ -503,6 +513,7 @@ impl AgentHostManager {
                 turns: RwLock::new(HashMap::new()),
                 cli_turns: Mutex::new(HashMap::new()),
                 event_sequences: RwLock::new(HashMap::new()),
+                turn_journals: RwLock::new(HashMap::new()),
                 clarifications: RwLock::new(HashMap::new()),
                 approvals: RwLock::new(HashMap::new()),
                 approval_waiters: Mutex::new(HashMap::new()),
@@ -536,6 +547,44 @@ impl AgentHostManager {
         request: AgentCancelTurnRequest,
     ) -> Result<AgentActionAccepted> {
         self.inner.cancel_turn(request).await
+    }
+
+    pub async fn turn_runtime_status(
+        &self,
+        request: AgentCancelTurnRequest,
+    ) -> Result<crate::agent::protocol::AgentTurnRuntimeStatus> {
+        request.metadata.validate().map_err(anyhow::Error::msg)?;
+        let key = TurnKey::from_metadata(&request.metadata);
+        Ok(crate::agent::protocol::AgentTurnRuntimeStatus {
+            active: self.inner.turns.read().await.contains_key(&key),
+        })
+    }
+
+    pub async fn turn_journal(
+        &self,
+        project_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<AgentTurnJournal>> {
+        let Some(value) = self
+            .inner
+            .store
+            .load_turn_journal(project_id, turn_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let journal: AgentTurnJournal =
+            serde_json::from_value(value).context("stored agent turn journal is invalid")?;
+        if journal.project_id != project_id
+            || journal.thread_id != thread_id
+            || journal.turn_id != turn_id
+        {
+            return Err(anyhow!(
+                "stored agent turn journal scope does not match the request"
+            ));
+        }
+        Ok(Some(journal))
     }
 
     pub async fn answer_clarification(
@@ -731,6 +780,21 @@ impl AgentHostInner {
             .await
             .insert(key.clone(), provider.clone());
         self.turns.write().await.insert(key.clone(), active);
+        self.turn_journals.write().await.remove(&key);
+        self.persist_turn_journal_event(
+            &key,
+            &request.project_id,
+            &json!({
+                "type": "turn.status",
+                "threadId": request.metadata.thread_id.clone(),
+                "turnId": request.metadata.turn_id.clone(),
+                "sequence": 0,
+                "occurredAt": now_millis(),
+                "status": "starting",
+                "label": if resume { "Resuming" } else { "Starting" },
+            }),
+        )
+        .await;
 
         if cli_provider {
             if let Err(error) = self
@@ -1155,6 +1219,10 @@ impl AgentHostInner {
         );
         event.insert("sequence".to_string(), json!(sequence));
         event.insert("occurredAt".to_string(), json!(occurred_at));
+        if let Some(active) = self.turns.read().await.get(key).cloned() {
+            self.persist_turn_journal_event(key, &active.project_id, &Value::Object(event.clone()))
+                .await;
+        }
         if let Err(error) = self
             .app
             .emit(AGENT_HOST_EVENT_CHANNEL, Value::Object(event))
@@ -1994,7 +2062,7 @@ impl AgentHostInner {
         let key = TurnKey::from_metadata(metadata);
         let sequence = {
             let mut sequences = self.event_sequences.write().await;
-            let sequence = sequences.entry(key).or_insert(0);
+            let sequence = sequences.entry(key.clone()).or_insert(0);
             *sequence = sequence.saturating_add(1);
             *sequence
         };
@@ -2035,6 +2103,10 @@ impl AgentHostInner {
                     }),
                 );
             }
+        }
+        if let Some(active) = self.turns.read().await.get(&key).cloned() {
+            self.persist_turn_journal_event(&key, &active.project_id, &event)
+                .await;
         }
         if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
             tracing::warn!("failed to emit private bridge approval: {error}");
@@ -4683,6 +4755,8 @@ impl AgentHostInner {
                 Some("completed" | "failed" | "cancelled")
             );
 
+        self.persist_turn_journal_event(&key, &active.project_id, &event)
+            .await;
         if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event.clone()) {
             tracing::warn!("failed to emit agent event: {error}");
         }
@@ -4721,12 +4795,74 @@ impl AgentHostInner {
         Ok(())
     }
 
+    async fn persist_turn_journal_event(&self, key: &TurnKey, project_id: &str, event: &Value) {
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // Answer deltas are already checkpointed by the desktop and can arrive
+        // thousands of times. The journal retains state transitions only.
+        if matches!(event_type, "answer.delta" | "model.chunk") {
+            return;
+        }
+        let encoded_len = serde_json::to_vec(event)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        let mut entry = event.clone();
+        let entry_was_truncated = encoded_len > MAX_TURN_JOURNAL_EVENT_BYTES;
+        if entry_was_truncated {
+            entry = json!({
+                "type": event_type,
+                "threadId": key.thread_id,
+                "turnId": key.turn_id,
+                "sequence": event.get("sequence").cloned().unwrap_or(Value::Null),
+                "occurredAt": event.get("occurredAt").cloned().unwrap_or(Value::Null),
+                "detail": "Event payload exceeded the encrypted recovery journal limit.",
+            });
+        }
+        let (events, truncated) = {
+            let mut journals = self.turn_journals.write().await;
+            let journal = journals.entry(key.clone()).or_default();
+            journal.events.push(entry);
+            if journal.events.len() > MAX_TURN_JOURNAL_EVENTS {
+                let overflow = journal.events.len() - MAX_TURN_JOURNAL_EVENTS;
+                journal.events.drain(0..overflow);
+                journal.truncated = true;
+            }
+            journal.truncated |= entry_was_truncated;
+            (journal.events.clone(), journal.truncated)
+        };
+        let journal = AgentTurnJournal {
+            project_id: project_id.to_string(),
+            thread_id: key.thread_id.clone(),
+            turn_id: key.turn_id.clone(),
+            events,
+            truncated,
+            updated_at: now_millis(),
+        };
+        let value = match serde_json::to_value(journal) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("failed to encode agent recovery journal: {error}");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .store
+            .save_turn_journal(project_id, &key.turn_id, &value)
+            .await
+        {
+            tracing::warn!("failed to persist agent recovery journal: {error}");
+        }
+    }
+
     async fn clear_turn(&self, key: &TurnKey) {
         if let Some(handle) = self.cli_turns.lock().await.remove(key) {
             let _ = handle.cancellation.send(true);
         }
         self.providers.write().await.remove(key);
         self.turns.write().await.remove(key);
+        self.turn_journals.write().await.remove(key);
         self.event_sequences.write().await.remove(key);
         self.clarifications
             .write()

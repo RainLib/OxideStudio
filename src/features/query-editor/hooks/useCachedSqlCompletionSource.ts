@@ -28,6 +28,7 @@ import {
 import { sqlCompletionIdentifierPrefix } from "../model/sqlCompletionTriggerPolicy";
 
 const SQL_COMPLETION_CONTEXT_MAX_CHARACTERS = 128 * 1024;
+const MAX_CACHED_RELATION_COMPLETION_ITEMS = 512;
 const RELATION_COMPLETION_CONTEXTS = new Set([
   "from",
   "join",
@@ -166,8 +167,15 @@ export function cachedRelationCompletionSuggestions(
   );
   const query = relationPrefix ?? "";
   return tables
-    .filter((table) => completionMatches(table.name, query))
-    .map((table) => ({
+    .map((table, index) => ({
+      table,
+      index,
+      score: completionMatchScore(table.name, query),
+    }))
+    .filter(({ score }) => score >= 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, MAX_CACHED_RELATION_COMPLETION_ITEMS)
+    .map(({ table, score }) => ({
       label: table.name,
       kind: monaco.languages.CompletionItemKind.Struct,
       detail: "Cached database object",
@@ -176,7 +184,7 @@ export function cachedRelationCompletionSuggestions(
         : { value: "Available from cached database metadata." },
       insertText: table.name,
       filterText: completionFilterTextForQuery(table.name, query),
-      sortText: completionSortText(table.name, query),
+      sortText: `0:${String(9_999 - Math.max(0, score)).padStart(4, "0")}:${table.name.toLocaleLowerCase()}`,
       range,
     }));
 }

@@ -14,16 +14,20 @@ const mocks = vi.hoisted(() => ({
   startTurn: vi.fn(),
   resumeTurn: vi.fn(),
   cancelTurn: vi.fn(),
+  getTurnRuntimeStatus: vi.fn(),
+  loadTurnJournal: vi.fn(),
   answerClarification: vi.fn(),
   approveAction: vi.fn(),
   detectCliProvider: vi.fn(),
   testAiProvider: vi.fn(),
-  installCliProvider: vi.fn(),
+  beginCliInstallation: vi.fn(),
+  getCliInstallationStatus: vi.fn(),
   beginCliAuthentication: vi.fn(),
   listCliAuthenticationMethods: vi.fn(),
   getCliAuthenticationStatus: vi.fn(),
   cancelCliAuthentication: vi.fn(),
   listCliModels: vi.fn(),
+  listCliEfforts: vi.fn(),
   listCliCommands: vi.fn(),
   listener: null as ((event: any) => void) | null,
 }));
@@ -39,6 +43,8 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
     startTurn: mocks.startTurn,
     resumeTurn: mocks.resumeTurn,
     cancelTurn: mocks.cancelTurn,
+    getTurnRuntimeStatus: mocks.getTurnRuntimeStatus,
+    loadTurnJournal: mocks.loadTurnJournal,
     answerClarification: mocks.answerClarification,
     approveAction: mocks.approveAction,
     listen: vi.fn(async (listener) => {
@@ -53,21 +59,22 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
 }));
 
 vi.mock("@/services/tauri/ai.service", async (importOriginal) => {
-  const original = await importOriginal<
-    typeof import("@/services/tauri/ai.service")
-  >();
+  const original =
+    await importOriginal<typeof import("@/services/tauri/ai.service")>();
   return {
     ...original,
     aiService: {
       ...original.aiService,
       detectCliProvider: mocks.detectCliProvider,
       testProvider: mocks.testAiProvider,
-      installCliProvider: mocks.installCliProvider,
+      beginCliInstallation: mocks.beginCliInstallation,
+      getCliInstallationStatus: mocks.getCliInstallationStatus,
       beginCliAuthentication: mocks.beginCliAuthentication,
       listCliAuthenticationMethods: mocks.listCliAuthenticationMethods,
       getCliAuthenticationStatus: mocks.getCliAuthenticationStatus,
       cancelCliAuthentication: mocks.cancelCliAuthentication,
       listCliModels: mocks.listCliModels,
+      listCliEfforts: mocks.listCliEfforts,
       listCliCommands: mocks.listCliCommands,
     },
   };
@@ -75,14 +82,19 @@ vi.mock("@/services/tauri/ai.service", async (importOriginal) => {
 
 import {
   AssistantSidebar,
+  assistantConversationId,
   assistantToolManifestForProfile,
 } from "@/components/workspace/AssistantSidebar";
+import { resetAiCliCatalogForTests } from "@/hooks/useAiCliCatalog";
+import { resetAssistantAgentRuntimeForTests } from "@/hooks/useAssistantAgentSession";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useAssistantComposerStore } from "@/store/useAssistantComposerStore";
+import { useAssistantCliSetupStore } from "@/store/useAssistantCliSetupStore";
+import { ApiError } from "@/services/tauri/types";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -93,6 +105,46 @@ const initialSchemaState = useSchemaStore.getState();
 const initialTabState = useTabStore.getState();
 
 describe("AssistantSidebar Agent Host path", () => {
+  it("isolates HTTP conversation history by non-secret destination", () => {
+    const first = assistantConversationId({
+      kind: "openai-compatible",
+      baseUrl: "https://one.example.com/v1/",
+      apiKey: "secret-one",
+      model: "model-a",
+    });
+    const rotatedCredential = assistantConversationId({
+      kind: "openai-compatible",
+      baseUrl: "https://one.example.com/v1",
+      apiKey: "secret-two",
+      model: "model-b",
+    });
+    const otherDestination = assistantConversationId({
+      kind: "openai-compatible",
+      baseUrl: "https://two.example.com/v1",
+      apiKey: "secret-one",
+      model: "model-a",
+    });
+    const caseSensitivePath = assistantConversationId({
+      kind: "openai-compatible",
+      baseUrl: "https://one.example.com/V1",
+      apiKey: "secret-one",
+      model: "model-a",
+    });
+    const embeddedCredential = assistantConversationId({
+      kind: "openai-compatible",
+      baseUrl: "https://user:password@one.example.com/v1",
+      apiKey: "secret-one",
+      model: "model-a",
+    });
+
+    expect(first).toBe(rotatedCredential);
+    expect(otherDestination).not.toBe(first);
+    expect(caseSensitivePath).not.toBe(first);
+    expect(embeddedCredential).toBe(first);
+    expect(first).not.toContain("secret");
+    expect(first).toMatch(/^provider:http:[0-9a-f]{32}$/u);
+  });
+
   it("filters tools by Chat, Plan, and Agent authority", () => {
     const tools = [
       {
@@ -133,9 +185,12 @@ describe("AssistantSidebar Agent Host path", () => {
   let container: HTMLDivElement;
   let root: Root | null = null;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.stubEnv("VITE_ASSISTANT_LEGACY_RUNTIME", "0");
     vi.clearAllMocks();
+    resetAiCliCatalogForTests();
+    await resetAssistantAgentRuntimeForTests();
+    useAssistantCliSetupStore.getState().reset();
     mocks.listener = null;
     mocks.loadConversationSnapshot.mockResolvedValue(null);
     mocks.saveConversationSnapshot.mockResolvedValue({
@@ -183,6 +238,8 @@ describe("AssistantSidebar Agent Host path", () => {
       threadId: request.threadId,
     }));
     mocks.cancelTurn.mockResolvedValue({ accepted: true });
+    mocks.getTurnRuntimeStatus.mockResolvedValue({ active: false });
+    mocks.loadTurnJournal.mockResolvedValue(null);
     mocks.answerClarification.mockResolvedValue({ accepted: true });
     mocks.approveAction.mockResolvedValue({ accepted: true });
     mocks.detectCliProvider.mockResolvedValue({
@@ -198,10 +255,21 @@ describe("AssistantSidebar Agent Host path", () => {
       executablePath: "C:/tools/codex.cmd",
       version: "codex 1.0.0",
     });
-    mocks.installCliProvider.mockResolvedValue({
+    mocks.beginCliInstallation.mockResolvedValue({
       provider: "codex-cli",
-      executablePath: "C:/managed/codex.cmd",
+      sessionId: "install-session-1",
+      message: "Preparing Codex CLI installation",
+    });
+    mocks.getCliInstallationStatus.mockResolvedValue({
+      provider: "codex-cli",
+      sessionId: "install-session-1",
+      phase: "succeeded",
       message: "Codex CLI installed",
+      result: {
+        provider: "codex-cli",
+        executablePath: "C:/managed/codex.cmd",
+        message: "Codex CLI installed",
+      },
     });
     mocks.beginCliAuthentication.mockResolvedValue({
       provider: "codex-cli",
@@ -232,6 +300,7 @@ describe("AssistantSidebar Agent Host path", () => {
     mocks.listCliModels.mockResolvedValue([
       { id: "default", label: "Default", isDefault: true },
     ]);
+    mocks.listCliEfforts.mockResolvedValue(["low", "medium", "high"]);
     mocks.listCliCommands.mockResolvedValue([]);
     mocks.resumeTurn.mockImplementation(async (request) => ({
       accepted: true,
@@ -353,7 +422,9 @@ describe("AssistantSidebar Agent Host path", () => {
         namespace: "public",
       }),
     );
-    expect(firstRequest.tools.map((tool: { name: string }) => tool.name)).toEqual([
+    expect(
+      firstRequest.tools.map((tool: { name: string }) => tool.name),
+    ).toEqual([
       "connection.list",
       "connection.capabilities",
       "metadata.listCollections",
@@ -410,11 +481,11 @@ describe("AssistantSidebar Agent Host path", () => {
 
     expect(container.textContent).toContain("Worked for");
     expect(container.textContent).not.toContain("Read schema metadata");
-    expect(container.textContent).toContain("The users table has five columns.");
+    expect(container.textContent).toContain(
+      "The users table has five columns.",
+    );
     expect(
-      container.querySelector<HTMLElement>(
-        '[aria-label="Assistant process"]',
-      ),
+      container.querySelector<HTMLElement>('[aria-label="Assistant process"]'),
     ).not.toBeNull();
     const activityDisclosure = container.querySelector<HTMLElement>(
       `[data-assistant-process-disclosure="${firstRequest.turnId}"]`,
@@ -425,7 +496,9 @@ describe("AssistantSidebar Agent Host path", () => {
         ?.className,
     ).not.toContain("text-[hsl(var(--wb-accent))]");
     expect(
-      activityDisclosure?.querySelector("button")?.getAttribute("aria-expanded"),
+      activityDisclosure
+        ?.querySelector("button")
+        ?.getAttribute("aria-expanded"),
     ).toBe("false");
     await act(async () => {
       activityDisclosure?.querySelector("button")?.click();
@@ -449,7 +522,247 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(JSON.stringify(secondRequest.messages)).not.toContain(
       "Read schema metadata",
     );
-    expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(2);
+    expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(
+      2,
+    );
+  });
+
+  it("replays buffered activity after the Assistant panel is hidden and reopened without starting another turn", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect users", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      await flushAsyncWork();
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "final.answer",
+      content: "Buffered while the shared panel was closed.",
+      artifacts: [],
+      citations: [],
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain(
+      "Buffered while the shared panel was closed.",
+    );
+    expect(mocks.startTurn).toHaveBeenCalledTimes(1);
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Resume",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("persists a restart checkpoint before handing a turn to Agent Host", async () => {
+    const order: string[] = [];
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    vi.clearAllMocks();
+    mocks.saveConversationSnapshot.mockImplementation(async (snapshot) => {
+      order.push("snapshot");
+      expect(snapshot.turns.at(-1)).toEqual(
+        expect.objectContaining({
+          userMessage: "Persist this before starting",
+          status: "planning",
+        }),
+      );
+      expect(snapshot.resumeRequests).toHaveLength(1);
+      return snapshot;
+    });
+    mocks.startTurn.mockImplementation(async (request) => {
+      order.push("start");
+      return {
+        accepted: true,
+        requestId: request.requestId,
+        threadId: request.threadId,
+        turnId: request.turnId,
+      };
+    });
+
+    await submitPrompt(container, "Persist this before starting", "Run agent");
+
+    expect(order).toEqual(["snapshot", "start"]);
+  });
+
+  it("does not start an uncheckpointed turn when encrypted persistence fails", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    vi.clearAllMocks();
+    mocks.saveConversationSnapshot.mockRejectedValue(
+      new Error("encrypted snapshot unavailable"),
+    );
+
+    await submitPrompt(container, "Do not launch without recovery", "Run agent");
+
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("encrypted snapshot unavailable");
+  });
+
+  it("persists an empty checkpoint when starting a new chat", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Finish this first", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "turn.status",
+      status: "completed",
+    });
+    vi.clearAllMocks();
+
+    await clickButtonByAria(container, "Start a new assistant chat");
+
+    expect(mocks.saveConversationSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        turns: [],
+        resumeRequests: [],
+      }),
+    );
+    expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(
+      0,
+    );
+  });
+
+  it("replays background turn events after the shared Assistant panel remounts", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect while hidden", "Run agent");
+    const request = mocks.startTurn.mock.calls[0]?.[0];
+
+    await act(async () => root?.unmount());
+    root = null;
+    expect(mocks.listener).not.toBeNull();
+
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 1),
+      type: "answer.delta",
+      content: "Recovered background answer",
+      reset: true,
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 2),
+      type: "final.answer",
+      content: "Recovered background answer",
+      artifacts: [],
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 3),
+      type: "turn.status",
+      status: "completed",
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Recovered background answer");
+    expect(container.textContent).not.toContain("Resume");
+    expect(mocks.startTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an active turn and isolates late events when the provider destination changes", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect the original endpoint", "Run agent");
+    const originalRequest = mocks.startTurn.mock.calls[0]?.[0];
+
+    await act(async () => {
+      useAiSettingsStore.getState().updateSettings({
+        baseUrl: "https://replacement.example.test/v1",
+      });
+      await flushAsyncWork();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      await flushAsyncWork();
+    });
+
+    expect(mocks.cancelTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: originalRequest.threadId,
+        turnId: originalRequest.turnId,
+      }),
+    );
+    expect(container.textContent).not.toContain("Inspect the original endpoint");
+
+    await emit({
+      ...baseEvent(originalRequest.threadId, originalRequest.turnId, 1),
+      type: "final.answer",
+      content: "This late response must not cross the endpoint boundary",
+      artifacts: [],
+    });
+
+    expect(container.textContent).not.toContain(
+      "This late response must not cross the endpoint boundary",
+    );
+    expect(container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("cancels an active turn and isolates late events when the project changes", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await submitPrompt(container, "Inspect the original project", "Run agent");
+    const originalRequest = mocks.startTurn.mock.calls[0]?.[0];
+
+    await act(async () => {
+      useProjectStore.setState({
+        ...useProjectStore.getState(),
+        activeProjectId: "project-2",
+        activeProjectName: "Project 2",
+      });
+      await flushAsyncWork();
+    });
+
+    expect(mocks.cancelTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: originalRequest.threadId,
+        turnId: originalRequest.turnId,
+      }),
+    );
+    expect(container.textContent).not.toContain("Inspect the original project");
+
+    await emit({
+      ...baseEvent(originalRequest.threadId, originalRequest.turnId, 1),
+      type: "final.answer",
+      content: "This late response must not cross the project boundary",
+      artifacts: [],
+    });
+
+    expect(container.textContent).not.toContain(
+      "This late response must not cross the project boundary",
+    );
   });
 
   it("does not overwrite an existing draft when a query-error fix prompt arrives", async () => {
@@ -506,7 +819,9 @@ describe("AssistantSidebar Agent Host path", () => {
     )?.set;
 
     await act(async () => {
-      textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true }),
+      );
       setter?.call(textarea, "查询userProfile数据");
       textarea.dispatchEvent(
         new InputEvent("input", {
@@ -542,7 +857,9 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     expect(mocks.startTurn).toHaveBeenCalledOnce();
-    expect(mocks.startTurn.mock.calls[0]?.[0].prompt).toBe("查询userProfile数据");
+    expect(mocks.startTurn.mock.calls[0]?.[0].prompt).toBe(
+      "查询userProfile数据",
+    );
   });
 
   it("restores completed project conversations from the encrypted host snapshot", async () => {
@@ -589,6 +906,112 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Two SQL files changed.");
   });
 
+  it("shows a stable restoring surface instead of the empty Assistant state while a snapshot is pending", async () => {
+    let resolveSnapshot: ((value: null) => void) | undefined;
+    mocks.loadConversationSnapshot.mockImplementationOnce(
+      () => new Promise<null>((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+    });
+
+    expect(container.querySelector("[data-assistant-hydrating]")?.textContent)
+      .toContain("Restoring Assistant conversation");
+    expect(container.textContent).not.toContain("Choose how Assistant runs");
+
+    await act(async () => {
+      resolveSnapshot?.(null);
+      await flushAsyncWork();
+    });
+
+    expect(container.querySelector("[data-assistant-hydrating]")).toBeNull();
+  });
+
+  it("applies a persisted Host journal after an interrupted snapshot", async () => {
+    mocks.loadConversationSnapshot.mockResolvedValueOnce({
+      projectId: "project-1",
+      threadId: "thread:journal",
+      turns: [
+        {
+          id: "turn:journal",
+          requestId: "request:journal",
+          threadId: "thread:journal",
+          projectId: "project-1",
+          requestedMode: "agent",
+          mode: "agent",
+          userMessage: "Was the task completed?",
+          status: "running",
+          process: [],
+          clarifications: [],
+          approvals: [],
+          draft: "",
+          final: null,
+          error: null,
+          errorDetail: null,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      resumeRequests: [
+        {
+          requestId: "request:journal",
+          turnId: "turn:journal",
+          threadId: "thread:journal",
+          projectId: "project-1",
+          profile: "agent",
+          prompt: "Was the task completed?",
+          provider: { kind: "openai-compatible", model: "agent-model" },
+          workspace: { projectId: "project-1" },
+          contextVersion: "ctx-journal",
+        },
+      ],
+      updatedAt: 2,
+    });
+    mocks.loadTurnJournal.mockResolvedValueOnce({
+      projectId: "project-1",
+      threadId: "thread:journal",
+      turnId: "turn:journal",
+      events: [
+        {
+          type: "final.answer",
+          threadId: "thread:journal",
+          turnId: "turn:journal",
+          sequence: 8,
+          occurredAt: 8,
+          content: "The persisted journal confirms completion.",
+          artifacts: [],
+          citations: [],
+        },
+      ],
+      truncated: false,
+      updatedAt: 8,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.loadTurnJournal).toHaveBeenCalledWith(
+      "project-1",
+      "thread:journal",
+      "turn:journal",
+    );
+    expect(container.textContent).toContain(
+      "The persisted journal confirms completion.",
+    );
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Resume",
+      ),
+    ).toBeUndefined();
+  });
+
   it("recovers a legacy snapshot whose final content field is missing", async () => {
     mocks.loadConversationSnapshot.mockResolvedValueOnce({
       projectId: "project-1",
@@ -632,6 +1055,67 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).not.toContain("ErrorBoundary");
   });
 
+  it("does not advertise Resume for an interrupted CLI turn", async () => {
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+    mocks.loadConversationSnapshot.mockResolvedValueOnce({
+      projectId: "project-1",
+      conversationId: "provider:codex-cli",
+      threadId: "thread:cli-interrupted",
+      turns: [
+        {
+          id: "turn:cli-interrupted",
+          requestId: "request:cli-interrupted",
+          threadId: "thread:cli-interrupted",
+          projectId: "project-1",
+          requestedMode: "agent",
+          mode: "agent",
+          userMessage: "Inspect the schema",
+          status: "running",
+          process: [],
+          clarifications: [],
+          approvals: [],
+          draft: "",
+          error: null,
+          errorDetail: null,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      resumeRequests: [
+        {
+          requestId: "request:cli-interrupted",
+          turnId: "turn:cli-interrupted",
+          threadId: "thread:cli-interrupted",
+          projectId: "project-1",
+          profile: "agent",
+          prompt: "Inspect the schema",
+          provider: {
+            kind: "codex-cli",
+            profileId: "codex-cli:default",
+            model: "default",
+          },
+          workspace: { projectId: "project-1" },
+          contextVersion: "ctx-1",
+        },
+      ],
+      updatedAt: 2,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("fresh CLI turn");
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Resume",
+      ),
+    ).toBeUndefined();
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+  });
+
   it("turns an Assistant SQL code block into a review-only editor patch", async () => {
     mocks.loadConversationSnapshot.mockResolvedValueOnce({
       projectId: "project-1",
@@ -651,7 +1135,8 @@ describe("AssistantSidebar Agent Host path", () => {
           approvals: [],
           draft: "",
           final: {
-            content: "Use the corrected statement:\n```sql\nSELECT id FROM users;\n```",
+            content:
+              "Use the corrected statement:\n```sql\nSELECT id FROM users;\n```",
             attachments: [],
             artifactRefs: [],
             createdAt: 2,
@@ -695,7 +1180,9 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("AI agent is unavailable");
     expect(container.querySelector("textarea")).not.toBeNull();
     await submitPrompt(container, "Hello", "Run agent");
-    expect(container.textContent).toContain("database workspace remains fully usable");
+    expect(container.textContent).toContain(
+      "database workspace remains fully usable",
+    );
     expect(container.querySelector("textarea")).not.toBeNull();
   });
 
@@ -705,7 +1192,11 @@ describe("AssistantSidebar Agent Host path", () => {
       root.render(<AssistantSidebar />);
       await flushAsyncWork();
     });
-    await submitPrompt(container, "Compare the selected databases", "Run agent");
+    await submitPrompt(
+      container,
+      "Compare the selected databases",
+      "Run agent",
+    );
     const request = mocks.startTurn.mock.calls[0]?.[0];
 
     await emit({
@@ -754,7 +1245,9 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.querySelector("textarea")).not.toBeNull();
 
     await clickButton(document.body, "Primary");
-    expect(dock?.textContent).not.toContain("Which source should be on the left?");
+    expect(dock?.textContent).not.toContain(
+      "Which source should be on the left?",
+    );
     expect(dock?.textContent).toContain("Which source should be on the right?");
     expect(mocks.answerClarification).not.toHaveBeenCalled();
 
@@ -991,6 +1484,705 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(document.body.textContent).toContain("/status");
   });
 
+  it("opens slash commands above the composer and keeps keyboard focus in the prompt", async () => {
+    mocks.listCliCommands.mockResolvedValue([
+      {
+        name: "review",
+        description: "Start the provider review workflow",
+        argumentHint: "optional review focus",
+      },
+      {
+        name: "status",
+        description: "Show the active provider status",
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await setTextareaValue(textarea, "/");
+    expect(textarea.getAttribute("aria-expanded")).toBe("true");
+    expect(textarea.getAttribute("aria-controls")).toBe(
+      "assistant-provider-commands",
+    );
+    expect(
+      container
+        .querySelector('[data-assistant-composer="true"]')
+        ?.querySelector('[role="listbox"]'),
+    ).toBeNull();
+    expect(
+      document.body.querySelector(
+        '#assistant-provider-commands[role="listbox"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+    expect(textarea.getAttribute("aria-activedescendant")).toBe(
+      "assistant-provider-command-1",
+    );
+
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+    expect(textarea.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      document.body.querySelector("#assistant-provider-commands"),
+    ).toBeNull();
+
+    await setTextareaValue(textarea, "/r");
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+    expect(textarea.value).toBe("/review ");
+    expect(
+      document.body.querySelector("#assistant-provider-commands"),
+    ).toBeNull();
+
+    await setTextareaValue(textarea, "");
+    await setTextareaValue(textarea, "/");
+    expect(textarea.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      document.body.querySelector(
+        '#assistant-provider-commands[role="listbox"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it("filters and replaces only the slash token immediately before the caret", async () => {
+    mocks.listCliCommands.mockResolvedValue([
+      {
+        name: "review",
+        description: "Start the provider review workflow",
+        argumentHint: "optional review focus",
+      },
+      { name: "status", description: "Show the active provider status" },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const original = "Compare /rev with the existing /status output";
+    const caret = original.indexOf("/rev") + "/rev".length;
+    await setTextareaValue(textarea, original, caret);
+
+    expect(textarea.getAttribute("aria-expanded")).toBe("true");
+    const options = Array.from(
+      document.body.querySelectorAll<HTMLElement>(
+        '#assistant-provider-commands [role="option"]',
+      ),
+    );
+    expect(options).toHaveLength(1);
+    expect(options[0]?.textContent).toContain("/review");
+
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(textarea.value).toBe(
+      "Compare /review  with the existing /status output",
+    );
+    expect(textarea.selectionStart).toBe("Compare /review ".length);
+    expect(textarea.selectionEnd).toBe("Compare /review ".length);
+    expect(
+      document.body.querySelector("#assistant-provider-commands"),
+    ).toBeNull();
+
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    await act(async () => {
+      textarea.dispatchEvent(new Event("select", { bubbles: true }));
+      await flushAsyncWork();
+    });
+    expect(textarea.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps slash suggestions closed throughout IME composition and opens after commit", async () => {
+    mocks.listCliCommands.mockResolvedValue([
+      { name: "review", description: "Start review" },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true }),
+      );
+      setter?.call(textarea, "/rev");
+      textarea.setSelectionRange(4, 4);
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          data: "/rev",
+          inputType: "insertCompositionText",
+          isComposing: true,
+        }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(textarea.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      document.body.querySelector("#assistant-provider-commands"),
+    ).toBeNull();
+
+    await act(async () => {
+      textarea.dispatchEvent(
+        new CompositionEvent("compositionend", {
+          bubbles: true,
+          data: "/rev",
+        }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(textarea.getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.textContent).toContain("/review");
+  });
+
+  it("opens one Codex-style model popover with quick reasoning and an advanced model view", async () => {
+    mocks.listCliModels.mockResolvedValue([
+      {
+        id: "default",
+        label: "Default",
+        isDefault: true,
+        reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      },
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6 Sol",
+        isDefault: false,
+        isProviderDefault: true,
+        reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      },
+      {
+        id: "gpt-5.6-terra",
+        label: "GPT-5.6 Terra",
+        isDefault: false,
+        reasoningEfforts: ["low", "medium", "high"],
+      },
+      ...Array.from({ length: 120 }, (_, index) => ({
+        id: `codex-specialized-${index}`,
+        label: `Codex Specialized ${index}`,
+        isDefault: false,
+        reasoningEfforts: ["low", "medium", "high"],
+      })),
+    ]);
+    mocks.testAiProvider.mockResolvedValue({
+      message: "CLI is installed and authenticated",
+      model: "gpt-5.6-sol",
+      executablePath: "C:/tools/codex.cmd",
+      version: "codex 1.0.0",
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    expect(useAiSettingsStore.getState().codexCliModel).toBe("default");
+    const providerTrigger = container.querySelector<HTMLButtonElement>(
+      "button[data-assistant-provider]",
+    );
+    expect(providerTrigger?.textContent).toContain("Codex CLI · Ready");
+    expect(providerTrigger?.textContent).not.toContain("Codex CLI · Codex CLI");
+
+    const detectionCalls = mocks.detectCliProvider.mock.calls.length;
+    const modelTrigger = findButtonByAria(
+      container,
+      "Assistant model: Default",
+    );
+    expect(modelTrigger.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => {
+      modelTrigger.click();
+      await flushAsyncWork();
+    });
+
+    expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    );
+    expect(modelPopover).not.toBeNull();
+    expect(
+      document.body.querySelectorAll("[data-assistant-model-popover]"),
+    ).toHaveLength(1);
+    expect(modelTrigger.querySelector(".lucide-zap")).toBeNull();
+
+    const quickView = modelPopover!.querySelector<HTMLElement>(
+      '[data-assistant-model-view="quick"]',
+    );
+    expect(quickView).not.toBeNull();
+    expect(quickView?.className).toMatch(/transition|animate/);
+    expect(
+      quickView?.querySelector("[data-assistant-current-model]")?.textContent,
+    ).toContain("GPT-5.6 Sol");
+    const reasoningTrack = quickView?.querySelector<HTMLInputElement>(
+      'input[type="range"][data-assistant-reasoning-track]',
+    );
+    expect(reasoningTrack).not.toBeNull();
+    expect(reasoningTrack?.min).toBe("0");
+    expect(reasoningTrack?.max).toBe("4");
+    expect(reasoningTrack?.getAttribute("aria-label")).toBe("Reasoning effort");
+    expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("Default");
+    expect(quickView?.textContent).not.toContain("GPT-5.6 Terra");
+    expect(quickView?.querySelector(".lucide-zap")).toBeNull();
+
+    await setRangeValue(reasoningTrack!, "3");
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("high");
+    expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("High");
+    expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.querySelector("[data-assistant-model-popover]")).toBe(
+      modelPopover,
+    );
+    expect(modelPopover!.querySelector(".lucide-zap")).toBeNull();
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
+
+    await clickButton(modelPopover!, "Advanced");
+
+    const advancedView = modelPopover!.querySelector<HTMLElement>(
+      '[data-assistant-model-view="advanced"]',
+    );
+    expect(advancedView).not.toBeNull();
+    expect(advancedView?.className).toMatch(/transition|animate/);
+    expect(
+      document.body.querySelectorAll("[data-assistant-model-popover]"),
+    ).toHaveLength(1);
+    expect(document.body.querySelector("[data-assistant-model-popover]")).toBe(
+      modelPopover,
+    );
+    expect(advancedView?.textContent).not.toContain("GPT-5.6 Terra");
+
+    const modelListToggle = advancedView!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Toggle model list"]',
+    );
+    expect(modelListToggle).not.toBeNull();
+    expect(modelListToggle?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => {
+      modelListToggle!.click();
+      await flushAsyncWork();
+    });
+    expect(modelListToggle?.getAttribute("aria-expanded")).toBe("true");
+
+    const modelSearch = advancedView!.querySelector<HTMLInputElement>(
+      'input[placeholder="Search models"]',
+    );
+    expect(modelSearch).not.toBeNull();
+    expect(
+      advancedView!.querySelectorAll(
+        '[role="radiogroup"][aria-label="Assistant model"] input[type="radio"]',
+      ),
+    ).toHaveLength(100);
+    expect(advancedView!.textContent).toContain("Showing 100 of 123");
+    await setInputValue(modelSearch!, "terra");
+    expect(
+      advancedView!.querySelectorAll(
+        '[role="radiogroup"][aria-label="Assistant model"] input[type="radio"]',
+      ),
+    ).toHaveLength(1);
+
+    const terraModel = advancedView!.querySelector<HTMLInputElement>(
+      'input[type="radio"][aria-label="GPT-5.6 Terra"]',
+    );
+    expect(terraModel).not.toBeNull();
+    await act(async () => {
+      terraModel!.click();
+      await flushAsyncWork();
+    });
+    expect(useAiSettingsStore.getState().codexCliModel).toBe("gpt-5.6-terra");
+    const terraReasoning = advancedView!.querySelector<HTMLInputElement>(
+      'input[type="range"][data-assistant-reasoning-track]',
+    );
+    expect(terraReasoning).not.toBeNull();
+    expect(terraReasoning?.max).toBe("3");
+    expect(terraReasoning?.getAttribute("aria-valuetext")).toBe("Default");
+    expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(modelPopover!.querySelector(".lucide-zap")).toBeNull();
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
+
+    await act(async () => {
+      modelPopover!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+    expect(modelTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      document.body.querySelector("[data-assistant-model-popover]"),
+    ).toBeNull();
+    expect(document.activeElement).toBe(modelTrigger);
+
+    await act(async () => {
+      modelTrigger.click();
+      await flushAsyncWork();
+    });
+    const reopenedPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    );
+    expect(reopenedPopover).not.toBeNull();
+    expect(
+      reopenedPopover
+        ?.querySelector('[data-assistant-model-view="quick"]')
+        ?.getAttribute("aria-hidden"),
+    ).toBe("false");
+    expect(
+      reopenedPopover
+        ?.querySelector('[data-assistant-model-view="advanced"]')
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  });
+
+  it("deduplicates same-identity CLI catalog loads and does not reload them for model or effort changes", async () => {
+    const models = deferred<
+      Array<{
+        id: string;
+        label: string;
+        isDefault: boolean;
+        reasoningEfforts: string[];
+      }>
+    >();
+    const commands = deferred<Array<{ name: string; description: string }>>();
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+    mocks.listCliModels.mockReturnValue(models.promise);
+    mocks.listCliCommands.mockReturnValue(commands.promise);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <>
+          <AssistantSidebar />
+          <AssistantSidebar />
+        </>,
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+    expect(mocks.listCliCommands).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      models.resolve([
+        {
+          id: "codex-sol",
+          label: "Codex Sol",
+          isDefault: false,
+          isProviderDefault: true,
+          reasoningEfforts: ["low", "high"],
+        },
+      ]);
+      commands.resolve([{ name: "status", description: "Show status" }]);
+      await flushAsyncWork();
+    });
+
+    const detectionCalls = mocks.detectCliProvider.mock.calls.length;
+    await act(async () => {
+      root!.render(
+        <>
+          <AssistantSidebar />
+          <AssistantSidebar />
+        </>,
+      );
+      useAiSettingsStore.setState({
+        codexCliModel: "codex-sol",
+        codexCliReasoningEffort: "high",
+      });
+      await flushAsyncWork();
+    });
+
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+    expect(mocks.listCliCommands).toHaveBeenCalledTimes(1);
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
+  });
+
+  it("keeps CLI models non-editable while the catalog loads and exposes an actionable error", async () => {
+    const models =
+      deferred<Array<{ id: string; label: string; isDefault: boolean }>>();
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+    mocks.listCliModels.mockReturnValue(models.promise);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(container, "Assistant model: Default");
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    );
+    expect(modelPopover).not.toBeNull();
+    await clickButton(modelPopover!, "Advanced");
+
+    expect(
+      modelPopover!.querySelector(
+        '[data-assistant-model-catalog-status="loading"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      modelPopover!.querySelector('input[placeholder="Model identifier"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      models.reject(new Error("catalog offline"));
+      await flushAsyncWork();
+    });
+
+    const catalogError = modelPopover!.querySelector<HTMLElement>(
+      '[data-assistant-model-catalog-status="error"]',
+    );
+    expect(catalogError).not.toBeNull();
+    expect(catalogError?.getAttribute("role")).toBe("alert");
+    expect(catalogError?.textContent).toContain("catalog offline");
+    expect(catalogError?.textContent).toContain("Retry");
+    expect(
+      modelPopover!.querySelector('input[placeholder="Model identifier"]'),
+    ).toBeNull();
+  });
+
+  it("retains a usable partial catalog with a warning and clears stale models after a failed refresh", async () => {
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+    mocks.listCliModels
+      .mockResolvedValueOnce([
+        {
+          id: "codex-sol",
+          label: "Codex Sol",
+          isDefault: false,
+          isProviderDefault: true,
+          reasoningEfforts: ["low", "high"],
+        },
+      ])
+      .mockRejectedValueOnce(new Error("model refresh failed"));
+    mocks.listCliCommands
+      .mockRejectedValueOnce(new Error("command catalog failed"))
+      .mockResolvedValueOnce([]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(container, "Assistant model: Default");
+    const detectionCalls = mocks.detectCliProvider.mock.calls.length;
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    )!;
+    expect(
+      modelPopover.querySelector(
+        '[data-assistant-model-catalog-status="ready"]',
+      )?.textContent,
+    ).toContain("command catalog failed");
+    await clickButton(modelPopover, "Advanced");
+    await clickButtonByAria(modelPopover, "Toggle model list");
+    expect(
+      modelPopover.querySelector('input[aria-label="Codex Sol"]'),
+    ).not.toBeNull();
+
+    await clickButton(
+      modelPopover.querySelector<HTMLElement>(
+        '[data-assistant-model-catalog-status="ready"]',
+      )!,
+      "Retry",
+    );
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(2);
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
+    const refreshError = modelPopover.querySelector<HTMLElement>(
+      '[data-assistant-model-catalog-status="error"]',
+    );
+    expect(refreshError?.textContent).toContain("model refresh failed");
+    expect(refreshError?.textContent).toContain("Retry");
+    expect(
+      modelPopover.querySelector('input[aria-label="Codex Sol"]'),
+    ).toBeNull();
+    expect(
+      modelPopover.querySelector('input[placeholder="Model identifier"]'),
+    ).toBeNull();
+  });
+
+  it("ignores a late catalog result after the CLI provider identity changes", async () => {
+    const lateCodexModels =
+      deferred<Array<{ id: string; label: string; isDefault: boolean }>>();
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+    mocks.detectCliProvider.mockImplementation(async (config) => ({
+      provider: config.kind,
+      available: true,
+      executablePath:
+        config.kind === "codex-cli"
+          ? "C:/tools/codex.cmd"
+          : "C:/tools/codebuddy.cmd",
+      version: "1.0.0",
+      message: "CLI is available",
+    }));
+    mocks.testAiProvider.mockImplementation(async (config) => ({
+      message: "CLI is installed and authenticated",
+      model: "default",
+      executablePath: config.executablePath,
+      version: "1.0.0",
+    }));
+    mocks.listCliModels.mockImplementation((config) =>
+      config.kind === "codex-cli"
+        ? lateCodexModels.promise
+        : Promise.resolve([
+            {
+              id: "buddy-model",
+              label: "Buddy Model",
+              isDefault: false,
+              isProviderDefault: true,
+            },
+          ]),
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+
+    await clickButtonByAria(container, "Assistant provider: Codex CLI");
+    await clickButtonByAria(document.body, "Use CodeBuddy CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(2);
+
+    await clickButtonByAria(container, "Assistant model: Default");
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    )!;
+    await clickButton(modelPopover, "Advanced");
+    await clickButtonByAria(modelPopover, "Toggle model list");
+    expect(
+      modelPopover.querySelector('input[aria-label="Buddy Model"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      lateCodexModels.resolve([
+        { id: "late-codex", label: "Late Codex", isDefault: true },
+      ]);
+      await flushAsyncWork();
+    });
+
+    expect(
+      modelPopover.querySelector('input[aria-label="Buddy Model"]'),
+    ).not.toBeNull();
+    expect(modelPopover.textContent).not.toContain("Late Codex");
+  });
+
+  it("loads CodeBuddy reasoning capability for the selected model without reloading its model catalog", async () => {
+    useAiSettingsStore.setState({ provider: "codebuddy-cli", enabled: true });
+    mocks.detectCliProvider.mockImplementation(async (config) => ({
+      provider: config.kind,
+      available: true,
+      executablePath: "C:/tools/codebuddy.cmd",
+      version: "1.0.0",
+      message: "CodeBuddy CLI is available",
+    }));
+    mocks.testAiProvider.mockImplementation(async (config) => ({
+      message: "CLI is installed and authenticated",
+      model: config.model,
+      executablePath: config.executablePath,
+      version: "1.0.0",
+    }));
+    mocks.listCliModels.mockResolvedValue([
+      { id: "default", label: "Default", isDefault: true },
+      { id: "buddy-sol", label: "Buddy Sol", isDefault: false },
+      { id: "buddy-terra", label: "Buddy Terra", isDefault: false },
+    ]);
+    mocks.listCliEfforts.mockImplementation(async (config) =>
+      config.model === "buddy-terra" ? ["minimal", "high"] : ["low", "medium"],
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+    expect(mocks.listCliEfforts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "codebuddy-cli", model: "default" }),
+    );
+
+    await clickButtonByAria(container, "Assistant model: Default");
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    )!;
+    await clickButton(modelPopover, "Advanced");
+    await clickButtonByAria(modelPopover, "Toggle model list");
+    const terra = modelPopover.querySelector<HTMLInputElement>(
+      'input[aria-label="Buddy Terra"]',
+    );
+    expect(terra).not.toBeNull();
+    await act(async () => {
+      terra!.click();
+      await flushAsyncWork();
+    });
+
+    expect(useAiSettingsStore.getState().codeBuddyCliModel).toBe("buddy-terra");
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+    expect(mocks.listCliEfforts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "codebuddy-cli", model: "buddy-terra" }),
+    );
+    const reasoningTrack = modelPopover.querySelector<HTMLInputElement>(
+      'input[data-assistant-reasoning-track]',
+    );
+    expect(reasoningTrack?.max).toBe("2");
+  });
+
   it("keeps the conversation surface mounted while a ready CLI is revalidated", async () => {
     const detection = deferred<{
       provider: "codex-cli";
@@ -1033,6 +2225,53 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.querySelector("textarea")).not.toBeNull();
   });
 
+  it("keeps a verified CLI ready when the Assistant panel remounts", async () => {
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("textarea")).not.toBeNull();
+
+    await act(async () => root?.unmount());
+    root = null;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("textarea")).not.toBeNull();
+    expect(container.textContent).not.toContain("Set up Codex CLI");
+  });
+
+  it("revalidates a CLI provider after its probe TTL expires", async () => {
+    vi.useFakeTimers();
+    useAiSettingsStore.setState({ provider: "codex-cli", enabled: true });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(1);
+
+    await act(async () => root?.unmount());
+    root = null;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1_000 + 1);
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.detectCliProvider).toHaveBeenCalledTimes(2);
+  });
+
   it("guides a missing CLI through managed install and provider authentication", async () => {
     mocks.detectCliProvider
       .mockResolvedValueOnce({
@@ -1048,7 +2287,10 @@ describe("AssistantSidebar Agent Host path", () => {
         message: "Codex CLI is available",
       });
     mocks.testAiProvider.mockRejectedValueOnce(
-      new Error("Codex CLI is not authenticated. Sign in and try again."),
+      new ApiError(
+        "Provider-specific diagnostic that does not need an English auth regex",
+        "AI_CLI_AUTH_REQUIRED",
+      ),
     );
 
     await act(async () => {
@@ -1070,7 +2312,10 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
 
-    expect(mocks.installCliProvider).toHaveBeenCalledWith("codex-cli");
+    expect(mocks.beginCliInstallation).toHaveBeenCalledWith("codex-cli");
+    expect(mocks.getCliInstallationStatus).toHaveBeenCalledWith(
+      "install-session-1",
+    );
     expect(useAiSettingsStore.getState().codexCliPath).toBe(
       "C:/managed/codex.cmd",
     );
@@ -1090,6 +2335,103 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Complete sign-in in your browser");
   });
 
+  it("returns to account authorization when a completed browser flow still fails the CLI probe", async () => {
+    mocks.getCliAuthenticationStatus.mockResolvedValue({
+      sessionId: "auth-session-1",
+      provider: "codex-cli",
+      phase: "succeeded",
+      message: "Browser sign-in completed",
+      methodId: "browser",
+    });
+    mocks.testAiProvider
+      .mockRejectedValueOnce(
+        new ApiError(
+          "The provider needs a browser sign-in",
+          "AI_CLI_AUTH_REQUIRED",
+        ),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(
+          "The provider did not grant CLI access yet",
+          "AI_CLI_AUTH_REQUIRED",
+        ),
+      );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    await clickButton(container, "ChatGPT / Codex account");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain("Set up Codex CLI");
+    expect(container.textContent).toContain(
+      "Sign-in completed, but the CLI still needs account access",
+    );
+    expect(container.textContent).toContain("ChatGPT / Codex account");
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+
+  it("reattaches an active managed CLI installation after the Assistant panel remounts", async () => {
+    mocks.detectCliProvider.mockResolvedValue({
+      provider: "codex-cli",
+      available: false,
+      message: "Codex CLI is not installed",
+    });
+    mocks.beginCliInstallation.mockResolvedValue({
+      provider: "codex-cli",
+      sessionId: "install-session-remount",
+      message: "Downloading Codex CLI",
+    });
+    mocks.getCliInstallationStatus.mockResolvedValue({
+      provider: "codex-cli",
+      sessionId: "install-session-remount",
+      phase: "downloading",
+      message: "Downloading Codex CLI",
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+    await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
+    await clickButtonByAria(document.body, "Use Codex CLI");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+
+    await clickButton(container, "Install for OxideStudio");
+    await act(async () => {
+      await flushAsyncWork();
+    });
+    expect(mocks.beginCliInstallation).toHaveBeenCalledTimes(1);
+    expect(mocks.getCliInstallationStatus).toHaveBeenCalledWith(
+      "install-session-remount",
+    );
+
+    await act(async () => root?.unmount());
+    root = null;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(mocks.beginCliInstallation).toHaveBeenCalledTimes(1);
+    expect(mocks.getCliInstallationStatus).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Downloading Codex CLI");
+  });
+
   it("manages the model from the composer and opens the AI settings section", async () => {
     const settingsEvents: unknown[] = [];
     const handleSettings = (event: Event) => {
@@ -1104,7 +2446,12 @@ describe("AssistantSidebar Agent Host path", () => {
       });
 
       await clickButtonByAria(container, "Assistant model: agent-model");
-      const modelInput = document.body.querySelector<HTMLInputElement>(
+      const modelPanel = document.body.querySelector<HTMLElement>(
+        "[data-assistant-model-popover]",
+      );
+      expect(modelPanel).not.toBeNull();
+      await clickButton(modelPanel!, "Advanced");
+      const modelInput = modelPanel!.querySelector<HTMLInputElement>(
         'input[placeholder="Model identifier"]',
       );
       expect(modelInput).not.toBeNull();
@@ -1115,8 +2462,13 @@ describe("AssistantSidebar Agent Host path", () => {
         "agent-model-v2",
       );
 
-      await clickButtonByAria(container, "Assistant model: agent-model-v2");
-      await clickButton(document.body, "AI settings");
+      expect(
+        findButtonByAria(
+          container,
+          "Assistant model: agent-model-v2",
+        ).getAttribute("aria-expanded"),
+      ).toBe("true");
+      await clickButton(modelPanel!, "Settings");
       expect(settingsEvents).toEqual([{ section: "ai" }]);
     } finally {
       window.removeEventListener("oxide:open-settings", handleSettings);
@@ -1165,9 +2517,7 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     expect(
-      container.querySelector(
-        'button[aria-label*="Starting AI runtime"]',
-      ),
+      container.querySelector('button[aria-label*="Starting AI runtime"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain(
       "The AI runtime does not support Plan mode",
@@ -1260,9 +2610,7 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     expect(
-      container.querySelector(
-        'button[aria-label*="Authentication failed"]',
-      ),
+      container.querySelector('button[aria-label*="Authentication failed"]'),
     ).not.toBeNull();
     await submitPrompt(container, "Try again", "Run agent");
     expect(mocks.startTurn).toHaveBeenCalledTimes(1);
@@ -1315,11 +2663,21 @@ async function clickButton(container: HTMLElement, label: string) {
 
 async function clickButtonByAria(container: HTMLElement, labelPrefix: string) {
   await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>(`button[aria-label^="${labelPrefix}"]`)
-      ?.click();
+    findButtonByAria(container, labelPrefix).click();
     await flushAsyncWork();
   });
+}
+
+function findButtonByAria(container: HTMLElement, labelPrefix: string) {
+  const button = container.querySelector<HTMLButtonElement>(
+    `button[aria-label^="${labelPrefix}"]`,
+  );
+  if (!button) {
+    throw new Error(
+      `Button with aria-label starting with "${labelPrefix}" not found`,
+    );
+  }
+  return button;
 }
 
 async function setInputValue(input: HTMLInputElement, value: string) {
@@ -1329,7 +2687,41 @@ async function setInputValue(input: HTMLInputElement, value: string) {
   )?.set;
   await act(async () => {
     setter?.call(input, value);
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: value }),
+    );
+    await flushAsyncWork();
+  });
+}
+
+async function setRangeValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushAsyncWork();
+  });
+}
+
+async function setTextareaValue(
+  textarea: HTMLTextAreaElement,
+  value: string,
+  caret = value.length,
+) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(textarea, value);
+    textarea.setSelectionRange(caret, caret);
+    textarea.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: value }),
+    );
     await flushAsyncWork();
   });
 }

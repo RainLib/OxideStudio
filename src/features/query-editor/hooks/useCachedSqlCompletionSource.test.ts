@@ -91,6 +91,25 @@ describe("cached SQL completion source", () => {
     expect(expressionSuggestions).toEqual([]);
   });
 
+  it("bounds large cached relation catalogs in stable metadata order", () => {
+    const tables = Array.from({ length: 600 }, (_, index) => ({
+      name: `archive_${String(index).padStart(3, "0")}`,
+    }));
+    const text = "SELECT * FROM ";
+
+    const suggestions = cachedRelationCompletionSuggestions(
+      monaco,
+      textModel(text),
+      { lineNumber: 1, column: text.length + 1 },
+      tables,
+      text,
+    );
+
+    expect(suggestions).toHaveLength(512);
+    expect(suggestions[0]?.label).toBe("archive_000");
+    expect(suggestions[511]?.label).toBe("archive_511");
+  });
+
   it("resolves declared CTE fields without loading physical metadata", async () => {
     const text = `WITH recent(id, status) AS (
       SELECT id, status FROM orders

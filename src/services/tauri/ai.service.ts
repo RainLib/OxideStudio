@@ -119,6 +119,8 @@ export interface AiCliModelInfo {
   id: string;
   label: string;
   isDefault: boolean;
+  /** Concrete provider default, kept separate from the `default` sentinel. */
+  isProviderDefault?: boolean;
   reasoningEfforts?: string[];
 }
 
@@ -132,6 +134,28 @@ export interface AiCliInstallResult {
   provider: "codex-cli" | "codebuddy-cli";
   executablePath: string;
   message: string;
+}
+
+export interface AiCliInstallationLaunchResult {
+  provider: "codex-cli" | "codebuddy-cli";
+  sessionId: string;
+  message: string;
+}
+
+export type AiCliInstallationPhase =
+  | "starting"
+  | "downloading"
+  | "installing"
+  | "verifying"
+  | "succeeded"
+  | "failed";
+
+export interface AiCliInstallationStatus {
+  sessionId: string;
+  provider: "codex-cli" | "codebuddy-cli";
+  phase: AiCliInstallationPhase;
+  message: string;
+  result?: AiCliInstallResult;
 }
 
 export interface AiCliAuthenticationLaunchResult {
@@ -279,12 +303,21 @@ export async function listCliCommands(
   });
 }
 
-export async function installCliProvider(
+export async function beginCliInstallation(
   provider: AiCliProviderConfig["kind"],
-): Promise<AiCliInstallResult> {
-  return invokeWithInterceptors<AiCliInstallResult>(
+): Promise<AiCliInstallationLaunchResult> {
+  return invokeWithInterceptors<AiCliInstallationLaunchResult>(
     "ai_cli_install_provider",
     { provider },
+  );
+}
+
+export async function getCliInstallationStatus(
+  sessionId: string,
+): Promise<AiCliInstallationStatus> {
+  return invokeWithInterceptors<AiCliInstallationStatus>(
+    "ai_cli_installation_status",
+    { sessionId },
   );
 }
 
@@ -330,9 +363,50 @@ export async function setCliEnvironment(
   profileId: string,
   environment: Record<string, string>,
 ): Promise<string[]> {
-  return invokeWithInterceptors<string[]>("ai_cli_set_environment", {
+  const result = await invokeWithInterceptors<{
+    keys: string[];
+    revision: string;
+  }>("ai_cli_set_environment", {
     request: { provider, profileId, environment },
   });
+  cliEnvironmentRevisions.set(
+    `${provider}\u0000${profileId}`,
+    result.revision,
+  );
+  notifyCliEnvironmentRevision(provider, profileId);
+  return result.keys;
+}
+
+const cliEnvironmentRevisions = new Map<string, string>();
+const cliEnvironmentRevisionListeners = new Set<
+  (provider: AiCliProviderConfig["kind"], profileId: string) => void
+>();
+
+function notifyCliEnvironmentRevision(
+  provider: AiCliProviderConfig["kind"],
+  profileId: string,
+) {
+  for (const listener of cliEnvironmentRevisionListeners) {
+    listener(provider, profileId);
+  }
+}
+
+export function getCliEnvironmentRevision(
+  provider: AiCliProviderConfig["kind"],
+  profileId: string,
+) {
+  return cliEnvironmentRevisions.get(`${provider}\u0000${profileId}`) ?? "";
+}
+
+/**
+ * A revision is intentionally opaque: it tells the renderer that a private
+ * CLI environment changed without exposing a value or deriving a secret hash.
+ */
+export function subscribeCliEnvironmentRevision(
+  listener: (provider: AiCliProviderConfig["kind"], profileId: string) => void,
+) {
+  cliEnvironmentRevisionListeners.add(listener);
+  return () => cliEnvironmentRevisionListeners.delete(listener);
 }
 
 export async function getCliEnvironment(
@@ -354,13 +428,16 @@ export const aiService = {
   listCliModels,
   listCliEfforts,
   listCliCommands,
-  installCliProvider,
+  beginCliInstallation,
+  getCliInstallationStatus,
   listCliAuthenticationMethods,
   beginCliAuthentication,
   getCliAuthenticationStatus,
   cancelCliAuthentication,
   setCliEnvironment,
   getCliEnvironment,
+  getCliEnvironmentRevision,
+  subscribeCliEnvironmentRevision,
   setProviderSecret,
   hasProviderSecret,
 };

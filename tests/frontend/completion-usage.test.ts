@@ -38,7 +38,7 @@ describe("SQL completion usage ranking", () => {
       "2:949:users.email",
     );
     expect(usageRankedCompletionSortText("2:users.email", 0)).toBe(
-      "2:users.email",
+      "2:999:users.email",
     );
     expect("2:949:users.email" < "2:users.name").toBe(true);
     expect("2:949:users.email" > "1:orders").toBe(true);

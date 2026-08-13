@@ -77,7 +77,9 @@ describe("schema snapshot store", () => {
     const captured = snapshot("snapshot-1", 100);
     mocks.captureSchemaSnapshot.mockResolvedValue(captured);
 
-    await expect(captureAndSaveSchemaSnapshot(identity)).resolves.toEqual(captured);
+    await expect(captureAndSaveSchemaSnapshot(identity)).resolves.toEqual(
+      captured,
+    );
     expect(mocks.captureSchemaSnapshot).toHaveBeenCalledWith({
       projectId: identity.projectId,
       connectionId: identity.connectionId,
@@ -99,6 +101,26 @@ describe("schema snapshot store", () => {
     );
   });
 
+  it("keeps table-initiated migration snapshots scoped to the containing schema", async () => {
+    const tableIdentity = { ...identity, tableName: "orders" };
+
+    expect(schemaSnapshotParentId(tableIdentity)).toBe(
+      schemaSnapshotParentId(identity),
+    );
+
+    const captured = snapshot("orders-baseline", 100);
+    mocks.captureSchemaSnapshot.mockResolvedValue(captured);
+
+    await captureAndSaveSchemaSnapshot(tableIdentity);
+
+    expect(mocks.captureSchemaSnapshot).toHaveBeenCalledWith(
+      expect.not.objectContaining({ table: "orders" }),
+    );
+    expect(mocks.captureSchemaSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ schema: "public" }),
+    );
+  });
+
   it("ignores malformed resources and returns newest snapshots first", async () => {
     const older = snapshot("older", 100);
     const newer = snapshot("newer", 200);
@@ -108,7 +130,10 @@ describe("schema snapshot store", () => {
       resource(newer),
     ]);
 
-    await expect(listSchemaSnapshots(identity)).resolves.toEqual([newer, older]);
+    await expect(listSchemaSnapshots(identity)).resolves.toEqual([
+      newer,
+      older,
+    ]);
   });
 
   it("deletes one version by atomically replacing the snapshot collection", async () => {

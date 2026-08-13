@@ -48,7 +48,6 @@ export function completionUsageScore(
 }
 
 export function usageRankedCompletionSortText(base: string, score: number) {
-  if (score <= 0) return base;
   const separator = base.indexOf(":");
   const group = separator >= 0 ? base.slice(0, separator) : "0";
   const remainder = separator >= 0 ? base.slice(separator + 1) : base;

@@ -94,13 +94,16 @@ export function SchemaSnapshotDialog({
   const { startTask, finishTask, failTask } = useTaskStore();
   const supportsRestorePlan =
     identity?.driver === "postgres" || identity?.driver === "mysql";
-  const supportsSchemaReviewPlan = supportsRestorePlan || identity?.driver === "sqlite";
+  const supportsSchemaReviewPlan =
+    supportsRestorePlan || identity?.driver === "sqlite";
   const objectLabel = supportsSchemaReviewPlan ? "relations" : "objects";
   const selected = useMemo(
     () => snapshots.find((snapshot) => snapshot.id === selectedId) || null,
     [selectedId, snapshots],
   );
-  const selectedIsProjectDdl = Boolean(selected && isProjectDdlSnapshot(selected));
+  const selectedIsProjectDdl = Boolean(
+    selected && isProjectDdlSnapshot(selected),
+  );
   const selectedIsDbml = Boolean(selected && isSchemaDbmlSnapshot(selected));
   const selectedIsMetadata = Boolean(
     selected && isChartDbMetadataSnapshot(selected),
@@ -108,22 +111,25 @@ export function SchemaSnapshotDialog({
   const selectedIsOffline =
     selectedIsProjectDdl || selectedIsDbml || selectedIsMetadata;
   const selectedProjectDdlSources = useMemo(
-    () => (selected && isProjectDdlSnapshot(selected)
-      ? projectDdlSnapshotSources(selected)
-      : []),
+    () =>
+      selected && isProjectDdlSnapshot(selected)
+        ? projectDdlSnapshotSources(selected)
+        : [],
     [selected],
   );
   const metadataQuery = useMemo(
-    () => identity
-      ? chartDbMetadataQueryForDriver(
-          identity.driver,
-          identity.schemaName,
-          identity.databaseName,
-        )
-      : null,
+    () =>
+      identity
+        ? chartDbMetadataQueryForDriver(
+            identity.driver,
+            identity.schemaName,
+            identity.databaseName,
+          )
+        : null,
     [identity],
   );
-  const selectedSupportsRestorePlan = supportsSchemaReviewPlan && !selectedIsOffline;
+  const selectedSupportsRestorePlan =
+    supportsSchemaReviewPlan && !selectedIsOffline;
 
   useEffect(() => {
     if (!open || !identity) return;
@@ -139,7 +145,9 @@ export function SchemaSnapshotDialog({
       })
       .catch((nextError) => {
         if (!cancelled) {
-          setError(nextError instanceof Error ? nextError.message : String(nextError));
+          setError(
+            nextError instanceof Error ? nextError.message : String(nextError),
+          );
         }
       })
       .finally(() => {
@@ -212,7 +220,8 @@ export function SchemaSnapshotDialog({
         `${snapshot.relations.length.toLocaleString()} ${objectLabel} captured`,
       );
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -222,17 +231,19 @@ export function SchemaSnapshotDialog({
 
   const importProjectDdl = async () => {
     if (operation || !selectedProjectDdlPath) return;
-    const documents = selectedProjectDdlPath === ALL_PROJECT_DDL_SOURCES
-      ? [...projectDdlDocuments].sort((left, right) =>
-        left.relativePath.localeCompare(right.relativePath),
-      )
-      : projectDdlDocuments.filter(
-        (candidate) => candidate.relativePath === selectedProjectDdlPath,
-      );
+    const documents =
+      selectedProjectDdlPath === ALL_PROJECT_DDL_SOURCES
+        ? [...projectDdlDocuments].sort((left, right) =>
+            left.relativePath.localeCompare(right.relativePath),
+          )
+        : projectDdlDocuments.filter(
+            (candidate) => candidate.relativePath === selectedProjectDdlPath,
+          );
     if (documents.length === 0) return;
-    const sourceLabel = documents.length === 1
-      ? documents[0]!.relativePath
-      : `${documents.length} project SQL files`;
+    const sourceLabel =
+      documents.length === 1
+        ? documents[0]!.relativePath
+        : `${documents.length} project SQL files`;
     const taskId = startTask({
       kind: "introspection",
       title: `Parse project DDL`,
@@ -260,7 +271,8 @@ export function SchemaSnapshotDialog({
         `${snapshot.relations.length.toLocaleString()} relations parsed for review`,
       );
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -285,7 +297,11 @@ export function SchemaSnapshotDialog({
     setImportSource("dbml");
     setError(null);
     try {
-      const snapshot = createSchemaDbmlSnapshot(identity, file.name, await file.text());
+      const snapshot = createSchemaDbmlSnapshot(
+        identity,
+        file.name,
+        await file.text(),
+      );
       if (snapshot.relations.length === 0) {
         throw new Error("No supported DBML Table block was found.");
       }
@@ -300,7 +316,8 @@ export function SchemaSnapshotDialog({
         `${snapshot.relations.length.toLocaleString()} DBML relations parsed for review`,
       );
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -345,7 +362,8 @@ export function SchemaSnapshotDialog({
         `${snapshot.relations.length.toLocaleString()} DDL relations parsed for review`,
       );
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -390,7 +408,8 @@ export function SchemaSnapshotDialog({
         `${snapshot.relations.length.toLocaleString()} metadata relations parsed for review`,
       );
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -433,7 +452,8 @@ export function SchemaSnapshotDialog({
       );
       onClose();
     } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError);
       setError(message);
       failTask(taskId, message);
     } finally {
@@ -451,14 +471,18 @@ export function SchemaSnapshotDialog({
     setError(null);
     try {
       await deleteSchemaSnapshot(snapshot);
-      const remaining = snapshots.filter((candidate) => candidate.id !== snapshot.id);
+      const remaining = snapshots.filter(
+        (candidate) => candidate.id !== snapshot.id,
+      );
       setSnapshots(remaining);
       if (selectedId === snapshot.id) {
         setSelectedId(remaining[0]?.id || null);
       }
       setPendingDeleteId(null);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      setError(
+        nextError instanceof Error ? nextError.message : String(nextError),
+      );
     } finally {
       setDeletingId(null);
     }
@@ -473,7 +497,10 @@ export function SchemaSnapshotDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => !nextOpen && !busy && onClose()}
+    >
       <DialogContent className="h-[min(620px,calc(100vh-32px))] w-[min(820px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
           <div className="flex items-center gap-2">
@@ -482,11 +509,15 @@ export function SchemaSnapshotDialog({
             </span>
             <div>
               <DialogTitle className="text-[13px] tracking-normal">
-                {supportsSchemaReviewPlan ? "Schema" : "Metadata"} snapshots · {identity.schemaName}
+                {supportsSchemaReviewPlan ? "Schema" : "Metadata"} snapshots ·{" "}
+                {identity.schemaName}
               </DialogTitle>
               <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
                 {identity.connectionName}
                 {identity.databaseName ? ` · ${identity.databaseName}` : ""}
+                {identity.tableName
+                  ? ` · started from ${identity.schemaName}.${identity.tableName}; the full schema is included so dependencies can be reviewed`
+                  : ""}
               </DialogDescription>
             </div>
           </div>
@@ -501,14 +532,16 @@ export function SchemaSnapshotDialog({
             <div className="min-h-0 flex-1 overflow-auto p-2">
               {isLoading ? (
                 <div className="flex h-full items-center justify-center gap-2 text-[10px] wb-muted">
-                  <Loader2 size={13} className="animate-spin" /> Loading snapshots
+                  <Loader2 size={13} className="animate-spin" /> Loading
+                  snapshots
                 </div>
               ) : snapshots.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-6 text-center">
                   <Camera size={22} className="mb-2 wb-muted" />
                   <div className="text-[11px] font-medium">No baseline yet</div>
                   <div className="mt-1 text-[9px] leading-4 wb-muted">
-                    Capture the current live structure, then compare future drift against it.
+                    Capture the current live structure, then compare future
+                    drift against it.
                   </div>
                 </div>
               ) : (
@@ -540,7 +573,8 @@ export function SchemaSnapshotDialog({
                       </span>
                       <span className="mt-1 flex items-center gap-1.5 text-[9px] wb-muted">
                         <Database size={9} />
-                        {snapshot.relations.length.toLocaleString()} {objectLabel}
+                        {snapshot.relations.length.toLocaleString()}{" "}
+                        {objectLabel}
                       </span>
                     </button>
                     <button
@@ -583,10 +617,20 @@ export function SchemaSnapshotDialog({
             <div className="mt-3 grid grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)] items-center gap-2">
               <TargetCard
                 eyebrow="Desired source"
-                title={selected ? `Snapshot ${formatTimestamp(selected.capturedAt)}` : "Select a snapshot"}
-                detail={selected ? selected.fingerprint.slice(0, 12) : "No baseline selected"}
+                title={
+                  selected
+                    ? `Snapshot ${formatTimestamp(selected.capturedAt)}`
+                    : "Select a snapshot"
+                }
+                detail={
+                  selected
+                    ? selected.fingerprint.slice(0, 12)
+                    : "No baseline selected"
+                }
               />
-              <div className="text-center text-[16px] text-[hsl(var(--wb-accent))]">→</div>
+              <div className="text-center text-[16px] text-[hsl(var(--wb-accent))]">
+                →
+              </div>
               <TargetCard
                 eyebrow="Actual target"
                 title="Fresh live capture"
@@ -598,10 +642,10 @@ export function SchemaSnapshotDialog({
               {selectedIsOffline
                 ? `This baseline is inferred from bounded ${selectedIsDbml ? "DBML" : selectedIsMetadata ? "metadata JSON" : "SQL DDL"}. It can reveal drift and generate a review diff, but cannot be applied automatically.`
                 : supportsRestorePlan
-                ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
-                : identity?.driver === "sqlite"
-                ? "SQLite differences generate a read-only rebuild review artifact. It may include a temporary table, preserved-column copy, index recreation, and foreign-key checks, but automatic apply remains disabled."
-                : "Document and search snapshots preserve collection or index fields and indexes for drift review and diagrams. Restore plans remain disabled because these stores require driver-specific migration commands."}
+                  ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
+                  : identity?.driver === "sqlite"
+                    ? "SQLite differences generate a read-only rebuild review artifact. It may include a temporary table, preserved-column copy, index recreation, and foreign-key checks, but automatic apply remains disabled."
+                    : "Document and search snapshots preserve collection or index fields and indexes for drift review and diagrams. Restore plans remain disabled because these stores require driver-specific migration commands."}
             </div>
 
             <div className="mt-3 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.32)] p-3">
@@ -610,13 +654,18 @@ export function SchemaSnapshotDialog({
                 SQL DDL baseline
               </div>
               <p className="mt-1 text-[9px] leading-4 wb-muted">
-                Detects PostgreSQL, MySQL, SQL Server, SQLite, and Oracle syntax, then parses a bounded CREATE TABLE / INDEX subset. Results stay review-only until the source contract is fully validated.
+                Detects PostgreSQL, MySQL, SQL Server, SQLite, and Oracle
+                syntax, then parses a bounded CREATE TABLE / INDEX subset.
+                Results stay review-only until the source contract is fully
+                validated.
               </p>
               <div className="mt-2 flex items-center gap-2">
                 <select
                   aria-label="Project DDL source"
                   value={selectedProjectDdlPath}
-                  onChange={(event) => setSelectedProjectDdlPath(event.target.value)}
+                  onChange={(event) =>
+                    setSelectedProjectDdlPath(event.target.value)
+                  }
                   disabled={busy || projectDdlDocuments.length === 0}
                   className="h-7 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[10px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent)/0.65)] disabled:opacity-50"
                 >
@@ -625,10 +674,14 @@ export function SchemaSnapshotDialog({
                   ) : (
                     <>
                       <option value={ALL_PROJECT_DDL_SOURCES}>
-                        All eligible project SQL files ({projectDdlDocuments.length})
+                        All eligible project SQL files (
+                        {projectDdlDocuments.length})
                       </option>
                       {projectDdlDocuments.map((document) => (
-                        <option key={document.relativePath} value={document.relativePath}>
+                        <option
+                          key={document.relativePath}
+                          value={document.relativePath}
+                        >
                           {document.relativePath}
                         </option>
                       ))}
@@ -641,7 +694,11 @@ export function SchemaSnapshotDialog({
                   disabled={busy || !selectedProjectDdlPath}
                   onClick={() => void importProjectDdl()}
                 >
-                  {importSource === "project" ? <Loader2 size={11} className="animate-spin" /> : <FileCode2 size={11} />}
+                  {importSource === "project" ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <FileCode2 size={11} />
+                  )}
                   Create baseline
                 </button>
               </div>
@@ -651,14 +708,18 @@ export function SchemaSnapshotDialog({
                   type="file"
                   accept=".sql,text/sql,text/plain"
                   className="hidden"
-                  onChange={(event) => void importDdl(event.currentTarget.files?.[0])}
+                  onChange={(event) =>
+                    void importDdl(event.currentTarget.files?.[0])
+                  }
                 />
                 <input
                   ref={dbmlInputRef}
                   type="file"
                   accept=".dbml,text/plain"
                   className="hidden"
-                  onChange={(event) => void importDbml(event.currentTarget.files?.[0])}
+                  onChange={(event) =>
+                    void importDbml(event.currentTarget.files?.[0])
+                  }
                 />
                 <input
                   ref={metadataInputRef}
@@ -670,7 +731,9 @@ export function SchemaSnapshotDialog({
                   }
                 />
                 <p className="text-[9px] leading-4 wb-muted">
-                  Import an external DDL, DBML, or ChartDB-compatible metadata file. Use the target-scoped read-only query when metadata was captured outside OxideStudio.
+                  Import an external DDL, DBML, or ChartDB-compatible metadata
+                  file. Use the target-scoped read-only query when metadata was
+                  captured outside OxideStudio.
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <button
@@ -680,7 +743,11 @@ export function SchemaSnapshotDialog({
                     onClick={() => ddlInputRef.current?.click()}
                     title="Import a SQL DDL file as a review-only baseline"
                   >
-                    {importSource === "ddl" ? <Loader2 size={11} className="animate-spin" /> : <FileCode2 size={11} />}
+                    {importSource === "ddl" ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <FileCode2 size={11} />
+                    )}
                     Import DDL
                   </button>
                   <button
@@ -689,7 +756,11 @@ export function SchemaSnapshotDialog({
                     disabled={busy}
                     onClick={() => dbmlInputRef.current?.click()}
                   >
-                    {importSource === "dbml" ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                    {importSource === "dbml" ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <Upload size={11} />
+                    )}
                     Import DBML
                   </button>
                   <button
@@ -703,7 +774,11 @@ export function SchemaSnapshotDialog({
                         : `No ChartDB-compatible metadata query is registered for ${identity.driver}`
                     }
                   >
-                    {copiedMetadataQuery ? <Check size={11} /> : <ClipboardCopy size={11} />}
+                    {copiedMetadataQuery ? (
+                      <Check size={11} />
+                    ) : (
+                      <ClipboardCopy size={11} />
+                    )}
                     {copiedMetadataQuery ? "Query copied" : "Copy query"}
                   </button>
                   <button
@@ -713,7 +788,11 @@ export function SchemaSnapshotDialog({
                     onClick={() => metadataInputRef.current?.click()}
                     title="Import ChartDB metadata-query JSON as a review-only baseline"
                   >
-                    {importSource === "metadata" ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                    {importSource === "metadata" ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <Upload size={11} />
+                    )}
                     Metadata JSON
                   </button>
                 </div>
@@ -727,31 +806,56 @@ export function SchemaSnapshotDialog({
                 {selectedIsOffline && (
                   <>
                     <span className="wb-muted">Source mode</span>
-                    <span>{selectedIsDbml ? "DBML" : selectedIsMetadata ? "Metadata JSON" : "SQL DDL"} · review-only</span>
+                    <span>
+                      {selectedIsDbml
+                        ? "DBML"
+                        : selectedIsMetadata
+                          ? "Metadata JSON"
+                          : "SQL DDL"}{" "}
+                      · review-only
+                    </span>
                     <span className="wb-muted">Source files</span>
                     <span
                       className="truncate font-mono text-[9px]"
-                      title={selectedIsDbml || selectedIsMetadata ? selected.warnings.find((warning) => warning.startsWith("Source: "))?.slice(8) : selectedProjectDdlSources.join("\n")}
+                      title={
+                        selectedIsDbml || selectedIsMetadata
+                          ? selected.warnings
+                              .find((warning) => warning.startsWith("Source: "))
+                              ?.slice(8)
+                          : selectedProjectDdlSources.join("\n")
+                      }
                     >
                       {selectedIsDbml || selectedIsMetadata
-                        ? selected.warnings.find((warning) => warning.startsWith("Source: "))?.slice(8) || (selectedIsDbml ? "Imported DBML" : "Imported metadata JSON")
+                        ? selected.warnings
+                            .find((warning) => warning.startsWith("Source: "))
+                            ?.slice(8) ||
+                          (selectedIsDbml
+                            ? "Imported DBML"
+                            : "Imported metadata JSON")
                         : selectedProjectDdlSources.length === 1
-                        ? selectedProjectDdlSources[0] || "Project SQL"
-                        : `${selectedProjectDdlSources.length} bounded project SQL files`}
+                          ? selectedProjectDdlSources[0] || "Project SQL"
+                          : `${selectedProjectDdlSources.length} bounded project SQL files`}
                     </span>
                   </>
                 )}
-                <span className="wb-muted">{supportsSchemaReviewPlan ? "Relations" : "Objects"}</span>
+                <span className="wb-muted">
+                  {supportsSchemaReviewPlan ? "Relations" : "Objects"}
+                </span>
                 <span>{selected.relations.length.toLocaleString()}</span>
                 <span className="wb-muted">Driver</span>
                 <span>{selected.driver}</span>
                 <span className="wb-muted">Fingerprint</span>
-                <span className="break-all font-mono text-[9px]">{selected.fingerprint}</span>
+                <span className="break-all font-mono text-[9px]">
+                  {selected.fingerprint}
+                </span>
               </div>
             )}
 
             {error && (
-              <div className="mt-auto flex items-start gap-2 rounded-[4px] border border-red-400/20 bg-red-400/5 px-2.5 py-2 text-[10px] text-red-300" role="alert">
+              <div
+                className="mt-auto flex items-start gap-2 rounded-[4px] border border-red-400/20 bg-red-400/5 px-2.5 py-2 text-[10px] text-red-300"
+                role="alert"
+              >
                 <AlertCircle size={12} className="mt-0.5 shrink-0" />
                 <span>{error}</span>
               </div>
@@ -766,11 +870,20 @@ export function SchemaSnapshotDialog({
             disabled={busy}
             onClick={() => void capture()}
           >
-            {operation === "capture" ? <Loader2 size={12} className="animate-spin" /> : <Camera size={12} />}
+            {operation === "capture" ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Camera size={12} />
+            )}
             Capture current {supportsSchemaReviewPlan ? "schema" : "metadata"}
           </button>
           <div className="flex gap-2">
-            <button type="button" className="wb-text-button h-7 px-3 text-[10px]" disabled={busy} onClick={onClose}>
+            <button
+              type="button"
+              className="wb-text-button h-7 px-3 text-[10px]"
+              disabled={busy}
+              onClick={onClose}
+            >
               Cancel
             </button>
             <button
@@ -789,12 +902,16 @@ export function SchemaSnapshotDialog({
                 supportsRestorePlan
                   ? "Compare the selected schema snapshot with live metadata"
                   : identity?.driver === "sqlite"
-                  ? "Compare the selected schema snapshot and generate a blocked rebuild review"
-                  : "Compare document or search metadata without generating restore commands"
+                    ? "Compare the selected schema snapshot and generate a blocked rebuild review"
+                    : "Compare document or search metadata without generating restore commands"
               }
               onClick={() => void compare()}
             >
-              {operation === "compare" ? <Loader2 size={12} className="animate-spin" /> : <GitCompareArrows size={12} />}
+              {operation === "compare" ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <GitCompareArrows size={12} />
+              )}
               {selectedSupportsRestorePlan
                 ? identity?.driver === "sqlite"
                   ? "Preview rebuild plan"
@@ -808,12 +925,29 @@ export function SchemaSnapshotDialog({
   );
 }
 
-function TargetCard({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
+function TargetCard({
+  eyebrow,
+  title,
+  detail,
+}: {
+  eyebrow: string;
+  title: string;
+  detail: string;
+}) {
   return (
     <div className="min-w-0 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.46)] px-3 py-3">
-      <div className="text-[8px] uppercase tracking-[0.13em] wb-muted">{eyebrow}</div>
-      <div className="mt-1.5 truncate text-[10px] font-medium" title={title}>{title}</div>
-      <div className="mt-1 truncate font-mono text-[8px] wb-muted" title={detail}>{detail}</div>
+      <div className="text-[8px] uppercase tracking-[0.13em] wb-muted">
+        {eyebrow}
+      </div>
+      <div className="mt-1.5 truncate text-[10px] font-medium" title={title}>
+        {title}
+      </div>
+      <div
+        className="mt-1 truncate font-mono text-[8px] wb-muted"
+        title={detail}
+      >
+        {detail}
+      </div>
     </div>
   );
 }

@@ -47,6 +47,29 @@ const AI_PROVIDER_REQUIRED_MESSAGE =
 const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1_000;
 const MAX_TURN_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
 const AGENT_STATUS_POLL_DELAY_MS = 300;
+const SNAPSHOT_PERSIST_DEBOUNCE_MS = 750;
+const SNAPSHOT_PERSIST_MAX_WAIT_MS = 5_000;
+const MAX_BUFFERED_HOST_EVENTS = 4_000;
+const MAX_LIVE_CONVERSATION_SCOPES = 8;
+
+type ConversationSnapshotSaveRequest = Parameters<
+  typeof agentHostService.saveConversationSnapshot
+>[0];
+
+type PendingConversationSnapshot = {
+  scope: string;
+  request: ConversationSnapshotSaveRequest;
+};
+
+type LiveConversationState = {
+  threadId: string;
+  turns: AssistantTurn[];
+  resumeRequests: Map<string, AgentStartTurnRequest>;
+  updatedAt: number;
+};
+
+const liveConversationStates = new Map<string, LiveConversationState>();
+const assistantHostEventBroker = createAssistantHostEventBroker();
 
 export type AssistantAgentStartTurnRequest = Omit<
   AgentStartTurnRequest,
@@ -67,6 +90,8 @@ export type AssistantAgentStartTurnRequest = Omit<
 export type AssistantAgentSession = {
   turns: AssistantTurn[];
   activeTurn: AssistantTurn | null;
+  /** A persisted snapshot and its journal are still being reconciled. */
+  isHydrating: boolean;
   availability: AgentHostAvailability;
   hostStatus: AgentHostStatus | null;
   hostError: string | null;
@@ -88,10 +113,7 @@ export type AssistantAgentSession = {
   ) => Promise<void>;
   cancelTurn: (turnId: string) => Promise<void>;
   resumeTurn: (turnId: string, contextFingerprint: string) => Promise<void>;
-  keepFileChange: (
-    turnId: string,
-    callId: string,
-  ) => void;
+  keepFileChange: (turnId: string, callId: string) => void;
   undoFileChange: (
     turnId: string,
     callId: string,
@@ -119,6 +141,7 @@ export function useAssistantAgentSession(
   conversationId?: string,
 ): AssistantAgentSession {
   const [turns, setTurns] = useState<AssistantTurn[]>([]);
+  const [isHydrating, setIsHydrating] = useState(true);
   const [availability, setAvailability] =
     useState<AgentHostAvailability>("checking");
   const [hostStatus, setHostStatus] = useState<AgentHostStatus | null>(null);
@@ -136,15 +159,36 @@ export function useAssistantAgentSession(
   const resumeRequestsRef = useRef(new Map<string, AgentStartTurnRequest>());
   const hydratedScopeRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
+  const persistMaxWaitTimerRef = useRef<number | null>(null);
+  const persistDirtySinceRef = useRef<number | null>(null);
+  const latestPersistSnapshotRef = useRef<PendingConversationSnapshot | null>(
+    null,
+  );
+  const persistQueueRef = useRef(
+    createConversationSnapshotSaveQueue((request) =>
+      agentHostService.saveConversationSnapshot(request),
+    ),
+  );
+  const pendingEventsRef = useRef<AgentHostEvent[]>([]);
+  const pendingDeltaEventsRef = useRef(new Map<string, AgentHostEvent[]>());
+  const deltaFlushFrameRef = useRef<number | null>(null);
   const fileProposalWritesRef = useRef(new Set<string>());
+  const cancellationReconcileTimersRef = useRef(new Map<string, number>());
 
   const mutateTurns = useCallback(
     (update: (current: AssistantTurn[]) => AssistantTurn[]) => {
-      setTurns((current) => {
-        const next = update(current);
-        turnsRef.current = next;
-        return next;
-      });
+      // React may defer a functional state updater. Event handling and the
+      // launch checkpoint both need the latest turn synchronously, so make the
+      // ref the serialized source of truth before scheduling the render.
+      const next = update(turnsRef.current);
+      turnsRef.current = next;
+      retainLiveConversationState(
+        conversationScope(projectIdRef.current, conversationIdRef.current),
+        threadIdRef.current,
+        next,
+        resumeRequestsRef.current,
+      );
+      setTurns(next);
     },
     [],
   );
@@ -212,8 +256,8 @@ export function useAssistantAgentSession(
         !configured || status.state === "skipped" || checking
           ? null
           : status.available
-          ? null
-          : status.lastError || AGENT_UNAVAILABLE_MESSAGE,
+            ? null
+            : status.lastError || AGENT_UNAVAILABLE_MESSAGE,
       );
     } catch (error) {
       handleCommandError(error);
@@ -226,33 +270,15 @@ export function useAssistantAgentSession(
   useEffect(() => {
     const previousProjectId = projectIdRef.current;
     const previousConversationId = conversationIdRef.current;
-    const previousScope = conversationScope(previousProjectId, previousConversationId);
+    const previousScope = conversationScope(
+      previousProjectId,
+      previousConversationId,
+    );
     const nextScope = conversationScope(projectId, conversationId);
     if (previousScope !== nextScope) {
-      const previousTurns = turnsRef.current.slice(-100);
-      if (previousTurns.length > 0) {
-        const resumableTurnIds = new Set(
-          previousTurns
-            .filter(
-              (turn) => assistantTurnIsActive(turn) || turn.status === "paused",
-            )
-            .map((turn) => turn.id),
-        );
-        const resumeRequests = Array.from(resumeRequestsRef.current.entries())
-          .filter(([turnId]) => resumableTurnIds.has(turnId))
-          .map(([, request]) => request)
-          .slice(-8);
-        void agentHostService
-          .saveConversationSnapshot({
-            projectId: previousProjectId,
-            conversationId: previousConversationId,
-            threadId: threadIdRef.current,
-            turns: previousTurns,
-            resumeRequests,
-          })
-          .catch((error) => {
-            console.warn("Failed to persist provider conversation before switching", error);
-          });
+      const previousSnapshot = latestPersistSnapshotRef.current;
+      if (previousSnapshot?.scope === previousScope) {
+        persistQueueRef.current.enqueue(previousSnapshot.request);
       }
       for (const turn of turnsRef.current) {
         const source = resumeRequestsRef.current.get(turn.id);
@@ -278,24 +304,34 @@ export function useAssistantAgentSession(
 
     projectIdRef.current = projectId;
     conversationIdRef.current = conversationId;
-    threadIdRef.current = createAgentId(
-      `thread:${projectId}:${conversationId || "default"}`,
-    );
+    setIsHydrating(true);
+    const retainedState = liveConversationStates.get(nextScope);
+    threadIdRef.current =
+      retainedState?.threadId ??
+      createAgentId(`thread:${projectId}:${conversationId || "default"}`);
     hydratedScopeRef.current = null;
-    if (persistTimerRef.current !== null) {
-      window.clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
+    pendingEventsRef.current = [];
+    pendingDeltaEventsRef.current.clear();
+    if (deltaFlushFrameRef.current !== null) {
+      window.cancelAnimationFrame(deltaFlushFrameRef.current);
+      deltaFlushFrameRef.current = null;
     }
-    resumeRequestsRef.current.clear();
-    turnsRef.current = [];
-    setTurns([]);
+    clearConversationSnapshotTimers(
+      persistTimerRef,
+      persistMaxWaitTimerRef,
+      persistDirtySinceRef,
+    );
+    latestPersistSnapshotRef.current = null;
+    resumeRequestsRef.current = new Map(retainedState?.resumeRequests ?? []);
+    turnsRef.current = retainedState?.turns ?? [];
+    setTurns(turnsRef.current);
     setHostError(null);
     setAvailability("checking");
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void agentHostService
-      .listen((event) => {
+    void assistantHostEventBroker
+      .subscribe((event) => {
         if (disposed) return;
         const eventMetrics = event.projectMetrics;
         if (eventMetrics?.projectId === projectIdRef.current) {
@@ -320,13 +356,41 @@ export function useAssistantAgentSession(
             );
           }
         }
+        if (hydratedScopeRef.current !== nextScope) {
+          pendingEventsRef.current.push(event);
+          if (pendingEventsRef.current.length > 2_000) {
+            pendingEventsRef.current.shift();
+            setHostError(
+              "Assistant event hydration exceeded its safety buffer. The latest activity is retained; verify the active task before retrying it.",
+            );
+          }
+          return;
+        }
+        if (event.type === "answer.delta") {
+          const pending = pendingDeltaEventsRef.current.get(event.turnId) ?? [];
+          pending.push(event);
+          pendingDeltaEventsRef.current.set(event.turnId, pending);
+          if (deltaFlushFrameRef.current === null) {
+            deltaFlushFrameRef.current = window.requestAnimationFrame(() => {
+              deltaFlushFrameRef.current = null;
+              const batches = pendingDeltaEventsRef.current;
+              pendingDeltaEventsRef.current = new Map();
+              mutateTurns((current) =>
+                current.map((turn) =>
+                  applyTurnEvents(turn, batches.get(turn.id) ?? []),
+                ),
+              );
+            });
+          }
+          return;
+        }
+        flushPendingDeltaEvents(
+          pendingDeltaEventsRef.current,
+          deltaFlushFrameRef,
+          mutateTurns,
+        );
         mutateTurns((current) =>
-          current.map((turn) =>
-            turn.id === event.turnId &&
-            (!turn.threadId || turn.threadId === event.threadId)
-              ? reduceAgentHostEvent(turn, event)
-              : turn,
-          ),
+          current.map((turn) => applyTurnEvents(turn, [event])),
         );
       })
       .then((cleanup) => {
@@ -339,12 +403,38 @@ export function useAssistantAgentSession(
 
     void agentHostService
       .loadConversationSnapshot(projectId, conversationId)
-      .then((snapshot) => {
+      .then(async (snapshot) => {
         if (
           disposed ||
-          conversationScope(projectIdRef.current, conversationIdRef.current) !== nextScope
-        ) return;
+          conversationScope(projectIdRef.current, conversationIdRef.current) !==
+            nextScope
+        )
+          return;
         const restoredTurns = restoreConversationTurns(snapshot?.turns);
+        const journals = await Promise.all(
+          restoredTurns.map(async (turn) => {
+            if (!turn.threadId) return null;
+            try {
+              return await agentHostService.loadTurnJournal(
+                projectId,
+                turn.threadId,
+                turn.id,
+              );
+            } catch (error) {
+              // A journal is an extra recovery signal. A missing/expired
+              // record must not make the encrypted conversation snapshot
+              // unreadable or alter the conservative restart policy.
+              console.warn("Failed to load agent recovery journal", error);
+              return null;
+            }
+          }),
+        );
+        if (journals.some((journal) => journal?.truncated)) {
+          setHostError(
+            "The recovered Assistant activity log was truncated. Verify any unfinished work before retrying it.",
+          );
+        }
+        const journalEvents = journals.flatMap((journal) => journal?.events ?? []);
         const restoredRequests = restoreConversationRequests(
           snapshot?.resumeRequests,
         );
@@ -377,16 +467,28 @@ export function useAssistantAgentSession(
           }
           return {
             ...turn,
-            status: "paused" as const,
+            status:
+              cliProvider || !canResume
+                ? ("failed" as const)
+                : ("paused" as const),
             error: cliProvider
               ? "The CLI was interrupted when OxideStudio restarted. Retry manually to start a fresh CLI turn; it will not replay automatically."
               : canResume
                 ? "OxideStudio restarted while this task was running. Resume from its encrypted checkpoint when you are ready."
-              : "OxideStudio restarted while this task was running. Start the request again to continue safely.",
+                : "OxideStudio restarted while this task was running. Start the request again to continue safely.",
             errorDetail: null,
             updatedAt: Date.now(),
           };
         });
+        for (const turn of resumableTurns) {
+          if (
+            turn.status === "paused" &&
+            (turn.error?.includes("fresh CLI turn") ||
+              turn.error?.includes("Start the request again"))
+          ) {
+            requestByTurn.delete(turn.id);
+          }
+        }
         const liveTurns = turnsRef.current;
         const liveTurnIds = new Set(liveTurns.map((turn) => turn.id));
         const mergedTurns = liveTurns.length
@@ -405,64 +507,141 @@ export function useAssistantAgentSession(
             }
           }
         }
-        turnsRef.current = mergedTurns;
+        const replayedEvents = assistantHostEventBroker.replayForTurns(
+          // A remounted shared panel can retain live turns before its snapshot
+          // finishes loading. Replay against the merged set, otherwise events
+          // emitted while the panel was hidden have no matching cursor and
+          // are silently skipped.
+          mergedTurns,
+        );
+        const bufferedEvents = mergeAgentEvents(
+          mergeAgentEvents(replayedEvents, journalEvents),
+          pendingEventsRef.current,
+        );
+        pendingEventsRef.current = [];
+        turnsRef.current = applyBufferedAgentEvents(
+          mergedTurns,
+          bufferedEvents,
+        );
         setTurns(turnsRef.current);
         hydratedScopeRef.current = nextScope;
+        setIsHydrating(false);
+        retainLiveConversationState(
+          nextScope,
+          threadIdRef.current,
+          turnsRef.current,
+          resumeRequestsRef.current,
+        );
       })
       .catch((error) => {
         if (
           disposed ||
-          conversationScope(projectIdRef.current, conversationIdRef.current) !== nextScope
-        ) return;
+          conversationScope(projectIdRef.current, conversationIdRef.current) !==
+            nextScope
+        )
+          return;
         console.warn("Failed to restore encrypted AI conversation", error);
+        const recoveredEvents = mergeAgentEvents(
+          assistantHostEventBroker.replayForTurns(turnsRef.current),
+          pendingEventsRef.current,
+        );
+        pendingEventsRef.current = [];
+        turnsRef.current = applyBufferedAgentEvents(
+          turnsRef.current,
+          recoveredEvents,
+        );
+        setTurns(turnsRef.current);
         hydratedScopeRef.current = nextScope;
+        setIsHydrating(false);
+        retainLiveConversationState(
+          nextScope,
+          threadIdRef.current,
+          turnsRef.current,
+          resumeRequestsRef.current,
+        );
       });
     return () => {
       disposed = true;
+      flushPendingDeltaEvents(
+        pendingDeltaEventsRef.current,
+        deltaFlushFrameRef,
+        mutateTurns,
+      );
+      retainLiveConversationState(
+        nextScope,
+        threadIdRef.current,
+        turnsRef.current,
+        resumeRequestsRef.current,
+      );
       unlisten?.();
+      for (const timer of cancellationReconcileTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      cancellationReconcileTimersRef.current.clear();
     };
-  }, [conversationId, handleCommandError, mutateTurns, projectId, refreshStatus]);
+  }, [
+    conversationId,
+    handleCommandError,
+    mutateTurns,
+    projectId,
+    refreshStatus,
+  ]);
 
   useEffect(() => {
     const scope = conversationScope(projectId, conversationId);
     if (hydratedScopeRef.current !== scope) return;
+    latestPersistSnapshotRef.current = conversationSnapshotRequest(
+      projectId,
+      conversationId,
+      threadIdRef.current,
+      turnsRef.current,
+      resumeRequestsRef.current,
+    );
+    const flushSnapshot = () => {
+      clearConversationSnapshotTimers(
+        persistTimerRef,
+        persistMaxWaitTimerRef,
+        persistDirtySinceRef,
+      );
+      const snapshot = latestPersistSnapshotRef.current;
+      if (
+        snapshot?.scope !== scope ||
+        hydratedScopeRef.current !== scope
+      ) {
+        return;
+      }
+      persistQueueRef.current.enqueue(snapshot.request);
+    };
+    const now = Date.now();
+    persistDirtySinceRef.current ??= now;
     if (persistTimerRef.current !== null) {
       window.clearTimeout(persistTimerRef.current);
     }
     persistTimerRef.current = window.setTimeout(() => {
       persistTimerRef.current = null;
-      if (hydratedScopeRef.current !== scope) return;
-      const persistedTurns = turnsRef.current.slice(-100);
-      const resumableTurnIds = new Set(
-        persistedTurns
-          .filter(
-            (turn) => assistantTurnIsActive(turn) || turn.status === "paused",
-          )
-          .map((turn) => turn.id),
+      flushSnapshot();
+    }, SNAPSHOT_PERSIST_DEBOUNCE_MS);
+    if (persistMaxWaitTimerRef.current === null) {
+      const elapsed = now - persistDirtySinceRef.current;
+      persistMaxWaitTimerRef.current = window.setTimeout(
+        flushSnapshot,
+        Math.max(0, SNAPSHOT_PERSIST_MAX_WAIT_MS - elapsed),
       );
-      const resumeRequests = Array.from(resumeRequestsRef.current.entries())
-        .filter(([turnId]) => resumableTurnIds.has(turnId))
-        .map(([, request]) => request)
-        .slice(-8);
-      void agentHostService
-        .saveConversationSnapshot({
-          projectId,
-          conversationId,
-          threadId: threadIdRef.current,
-          turns: persistedTurns,
-          resumeRequests,
-        })
-        .catch((error) => {
-          console.warn("Failed to persist encrypted AI conversation", error);
-        });
-    }, 250);
-    return () => {
-      if (persistTimerRef.current !== null) {
-        window.clearTimeout(persistTimerRef.current);
-        persistTimerRef.current = null;
-      }
-    };
+    }
   }, [conversationId, projectId, turns]);
+
+  useEffect(() => {
+    const queue = persistQueueRef.current;
+    return () => {
+      clearConversationSnapshotTimers(
+        persistTimerRef,
+        persistMaxWaitTimerRef,
+        persistDirtySinceRef,
+      );
+      const snapshot = latestPersistSnapshotRef.current;
+      if (snapshot) queue.enqueue(snapshot.request);
+    };
+  }, []);
 
   useEffect(() => {
     void refreshStatus();
@@ -476,9 +655,7 @@ export function useAssistantAgentSession(
       .getContextMetrics(projectId)
       .then((metrics) => {
         if (!disposed && metrics.projectId === projectId) {
-          setContextMetrics((current) =>
-            newerContextMetrics(current, metrics),
-          );
+          setContextMetrics((current) => newerContextMetrics(current, metrics));
         }
       })
       .catch(() => {
@@ -555,6 +732,42 @@ export function useAssistantAgentSession(
         provider,
       };
       resumeRequestsRef.current.set(request.turnId, commandRequest);
+      retainLiveConversationState(
+        conversationScope(projectIdRef.current, conversationIdRef.current),
+        threadIdRef.current,
+        turnsRef.current,
+        resumeRequestsRef.current,
+      );
+
+      try {
+        // Persist the accepted intent before a provider process can start. If
+        // the desktop process is interrupted immediately after Host accepts,
+        // restoreConversationTurns can then safely mark the exact turn as
+        // paused (HTTP) or manually retryable (CLI), instead of losing it in
+        // the debounce window.
+        const checkpoint = conversationSnapshotRequest(
+          projectIdRef.current,
+          conversationIdRef.current,
+          threadIdRef.current,
+          turnsRef.current,
+          resumeRequestsRef.current,
+        );
+        latestPersistSnapshotRef.current = checkpoint;
+        await persistQueueRef.current.flush(checkpoint.request);
+        if (projectIdRef.current !== request.projectId) return;
+      } catch (error) {
+        resumeRequestsRef.current.delete(request.turnId);
+        const detail = errorMessage(error);
+        updateTurn(request.turnId, (current) => ({
+          ...current,
+          status: "failed",
+          error:
+            "OxideStudio could not save the recovery checkpoint, so this task was not started.",
+          errorDetail: detail,
+          updatedAt: Date.now(),
+        }));
+        return;
+      }
 
       try {
         const handle = await agentHostService.startTurn(commandRequest);
@@ -583,7 +796,9 @@ export function useAssistantAgentSession(
       answers: Record<string, string>,
       _contextFingerprint: string,
     ) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const source = resumeRequestsRef.current.get(turnId);
       if (!turn?.threadId || !source) return;
 
@@ -676,7 +891,9 @@ export function useAssistantAgentSession(
       _contextFingerprint: string,
       confirmationText?: string,
     ) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const source = resumeRequestsRef.current.get(turnId);
       const approval = turn?.approvals.find(
         (candidate) => candidate.approvalId === approvalId,
@@ -735,7 +952,9 @@ export function useAssistantAgentSession(
 
   const cancelTurn = useCallback(
     async (turnId: string) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const source = resumeRequestsRef.current.get(turnId);
       if (!turn?.threadId || !source || !assistantTurnIsActive(turn)) return;
       updateTurn(turnId, (current) => ({
@@ -745,11 +964,44 @@ export function useAssistantAgentSession(
       }));
       try {
         const acknowledgement = await agentHostService.cancelTurn(
-          requestMetadata(turn, source.contextVersion, source.provider.timeoutMs),
+          requestMetadata(
+            turn,
+            source.contextVersion,
+            source.provider.timeoutMs,
+          ),
         );
         if (!acknowledgement.accepted) {
           throw new Error("Agent Host rejected cancellation.");
         }
+        const timer = window.setTimeout(() => {
+          void agentHostService
+            .getTurnRuntimeStatus(
+              requestMetadata(
+                turn,
+                source.contextVersion,
+                source.provider.timeoutMs,
+              ),
+            )
+            .then((runtime) => {
+              if (runtime.active) return;
+              updateTurn(turnId, (current) =>
+                current.status === "cancelling"
+                  ? {
+                      ...current,
+                      status: "cancelled",
+                      error: null,
+                      errorDetail: null,
+                      updatedAt: Date.now(),
+                    }
+                  : current,
+              );
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              cancellationReconcileTimersRef.current.delete(turnId);
+            });
+        }, 2_000);
+        cancellationReconcileTimersRef.current.set(turnId, timer);
       } catch (error) {
         handleCommandError(error, turnId, true);
       }
@@ -759,7 +1011,9 @@ export function useAssistantAgentSession(
 
   const resumeTurn = useCallback(
     async (turnId: string, _contextFingerprint: string) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const source = resumeRequestsRef.current.get(turnId);
       if (!turn?.threadId || !source || turn.status !== "paused") return;
 
@@ -813,7 +1067,9 @@ export function useAssistantAgentSession(
     (
       turnId: string,
       callId: string,
-      update: (proposal: AssistantProjectFileProposal) => AssistantProjectFileProposal,
+      update: (
+        proposal: AssistantProjectFileProposal,
+      ) => AssistantProjectFileProposal,
     ) => {
       updateTurn(turnId, (turn) => ({
         ...turn,
@@ -833,7 +1089,9 @@ export function useAssistantAgentSession(
       content: string,
       expectedRoot?: string | null,
     ): Promise<ProjectFileWriteResult | null> => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const proposal = turn?.fileProposals?.find(
         (candidate) => candidate.callId === callId,
       );
@@ -928,12 +1186,10 @@ export function useAssistantAgentSession(
   );
 
   const undoFileChange = useCallback(
-    async (
-      turnId: string,
-      callId: string,
-      expectedRoot?: string | null,
-    ) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+    async (turnId: string, callId: string, expectedRoot?: string | null) => {
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const proposal = turn?.fileProposals?.find(
         (candidate) => candidate.callId === callId,
       );
@@ -944,7 +1200,9 @@ export function useAssistantAgentSession(
         proposal.originalContent,
         expectedRoot,
       );
-      const sourceCallIds = new Set(proposal.sourceCallIds ?? [proposal.callId]);
+      const sourceCallIds = new Set(
+        proposal.sourceCallIds ?? [proposal.callId],
+      );
       const partiallyKept = proposal.keptChanges === true;
       updateTurn(turnId, (current) => ({
         ...current,
@@ -953,7 +1211,9 @@ export function useAssistantAgentSession(
             ? {
                 ...candidate,
                 baseRevision: result?.revision ?? candidate.baseRevision,
-                status: partiallyKept ? ("mixed" as const) : ("rejected" as const),
+                status: partiallyKept
+                  ? ("mixed" as const)
+                  : ("rejected" as const),
                 isApplying: false,
                 error: null,
                 resolvedAt: Date.now(),
@@ -961,11 +1221,7 @@ export function useAssistantAgentSession(
             : candidate,
         ),
         fileChanges: partiallyKept
-          ? updateReviewedFileAttribution(
-              current.fileChanges,
-              proposal,
-              result,
-            )
+          ? updateReviewedFileAttribution(current.fileChanges, proposal, result)
           : (current.fileChanges ?? []).filter(
               (change) => !sourceCallIds.has(change.callId),
             ),
@@ -984,7 +1240,10 @@ export function useAssistantAgentSession(
           hunk,
           "accept",
         );
-        const counts = lineDiffCounts(originalContent, proposal.proposedContent);
+        const counts = lineDiffCounts(
+          originalContent,
+          proposal.proposedContent,
+        );
         const completed = counts.additions === 0 && counts.deletions === 0;
         return {
           ...proposal,
@@ -1013,7 +1272,9 @@ export function useAssistantAgentSession(
       hunk: LineDiffHunk,
       expectedRoot?: string | null,
     ) => {
-      const turn = turnsRef.current.find((candidate) => candidate.id === turnId);
+      const turn = turnsRef.current.find(
+        (candidate) => candidate.id === turnId,
+      );
       const proposal = turn?.fileProposals?.find(
         (candidate) => candidate.callId === callId,
       );
@@ -1032,7 +1293,9 @@ export function useAssistantAgentSession(
       );
       const counts = lineDiffCounts(proposal.originalContent, nextContent);
       const completed = counts.additions === 0 && counts.deletions === 0;
-      const sourceCallIds = new Set(proposal.sourceCallIds ?? [proposal.callId]);
+      const sourceCallIds = new Set(
+        proposal.sourceCallIds ?? [proposal.callId],
+      );
       const partiallyKept = proposal.keptChanges === true;
       updateTurn(turnId, (current) => ({
         ...current,
@@ -1041,7 +1304,8 @@ export function useAssistantAgentSession(
             ? {
                 ...candidate,
                 proposedContent: nextContent,
-                proposedRevision: result?.revision ?? candidate.proposedRevision,
+                proposedRevision:
+                  result?.revision ?? candidate.proposedRevision,
                 baseRevision: result?.revision ?? candidate.baseRevision,
                 additions: counts.additions,
                 deletions: counts.deletions,
@@ -1056,15 +1320,16 @@ export function useAssistantAgentSession(
               }
             : candidate,
         ),
-        fileChanges: completed && !partiallyKept
-          ? (current.fileChanges ?? []).filter(
-              (change) => !sourceCallIds.has(change.callId),
-            )
-          : updateReviewedFileAttribution(
-              current.fileChanges,
-              proposal,
-              result,
-            ),
+        fileChanges:
+          completed && !partiallyKept
+            ? (current.fileChanges ?? []).filter(
+                (change) => !sourceCallIds.has(change.callId),
+              )
+            : updateReviewedFileAttribution(
+                current.fileChanges,
+                proposal,
+                result,
+              ),
         updatedAt: Date.now(),
       }));
     },
@@ -1077,18 +1342,42 @@ export function useAssistantAgentSession(
   );
   const clear = useCallback(() => {
     if (turnsRef.current.some(assistantTurnIsActive)) return;
+    const scope = conversationScope(
+      projectIdRef.current,
+      conversationIdRef.current,
+    );
+    // New Chat is a durable boundary, not merely a visual reset. Cancel any
+    // debounce that could otherwise enqueue the prior conversation after this
+    // empty checkpoint, then serialize the empty state before a panel unmount
+    // can hand control back to the shared workspace shell.
+    clearConversationSnapshotTimers(
+      persistTimerRef,
+      persistMaxWaitTimerRef,
+      persistDirtySinceRef,
+    );
     turnsRef.current = [];
-    setTurns([]);
     resumeRequestsRef.current.clear();
     threadIdRef.current = createAgentId(
       `thread:${projectIdRef.current}:${conversationIdRef.current || "default"}`,
     );
+    const clearedSnapshot = conversationSnapshotRequest(
+      projectIdRef.current,
+      conversationIdRef.current,
+      threadIdRef.current,
+      turnsRef.current,
+      resumeRequestsRef.current,
+    );
+    latestPersistSnapshotRef.current = clearedSnapshot;
+    liveConversationStates.delete(scope);
+    setTurns([]);
+    persistQueueRef.current.enqueue(clearedSnapshot.request);
     setHostError(null);
   }, []);
 
   return {
     turns,
     activeTurn,
+    isHydrating,
     availability,
     hostStatus,
     hostError,
@@ -1255,7 +1544,8 @@ export function reduceAgentHostEvent(
           deletions: event.deletions,
           status: "rejected",
           appliedImmediately: false,
-          error: "This legacy proposal was not applied to disk and cannot be reviewed as an immediate Agent edit.",
+          error:
+            "This legacy proposal was not applied to disk and cannot be reviewed as an immediate Agent edit.",
           occurredAt: event.occurredAt,
         }),
       };
@@ -1346,12 +1636,10 @@ export function reduceAgentHostEvent(
         ...common,
         modelUsage: {
           calls: (turn.modelUsage?.calls ?? 0) + event.calls,
-          inputTokens:
-            (turn.modelUsage?.inputTokens ?? 0) + event.inputTokens,
+          inputTokens: (turn.modelUsage?.inputTokens ?? 0) + event.inputTokens,
           outputTokens:
             (turn.modelUsage?.outputTokens ?? 0) + event.outputTokens,
-          totalTokens:
-            (turn.modelUsage?.totalTokens ?? 0) + event.totalTokens,
+          totalTokens: (turn.modelUsage?.totalTokens ?? 0) + event.totalTokens,
         },
       };
     case "provider.activity":
@@ -1397,6 +1685,10 @@ export function reduceAgentHostEvent(
       return {
         ...turn,
         ...common,
+        // The Host emits final.answer only after the provider execution has
+        // completed. Treat it as a terminal fallback when the following
+        // turn.status event is lost during an IPC or panel lifecycle race.
+        status: "completed",
         draft: "",
         final: {
           content: event.content,
@@ -1418,14 +1710,67 @@ export function reduceAgentHostEvent(
         status: event.retryable ? "paused" : "failed",
         error: presentation.message,
         errorDetail: presentation.detail,
-        process: finishRunningProcess(
-          turn.process,
-          "failed",
-          event.occurredAt,
-        ),
+        process: finishRunningProcess(turn.process, "failed", event.occurredAt),
       };
     }
   }
+}
+
+export function applyBufferedAgentEvents(
+  turns: AssistantTurn[],
+  events: readonly AgentHostEvent[],
+) {
+  if (events.length === 0) return turns;
+  const eventsByTurn = new Map<string, AgentHostEvent[]>();
+  const eventsByTurnId = new Map<string, AgentHostEvent[]>();
+  for (const event of events) {
+    const key = `${event.threadId}\u0000${event.turnId}`;
+    const grouped = eventsByTurn.get(key) ?? [];
+    grouped.push(event);
+    eventsByTurn.set(key, grouped);
+    const byId = eventsByTurnId.get(event.turnId) ?? [];
+    byId.push(event);
+    eventsByTurnId.set(event.turnId, byId);
+  }
+  return turns.map((turn) =>
+    applyTurnEvents(
+      turn,
+      turn.threadId
+        ? (eventsByTurn.get(`${turn.threadId}\u0000${turn.id}`) ?? [])
+        : (eventsByTurnId.get(turn.id) ?? []),
+    ),
+  );
+}
+
+function applyTurnEvents(
+  turn: AssistantTurn,
+  events: readonly AgentHostEvent[],
+) {
+  return events.reduce(
+    (current, event) =>
+      current.id === event.turnId &&
+      (!current.threadId || current.threadId === event.threadId)
+        ? reduceAgentHostEvent(current, event)
+        : current,
+    turn,
+  );
+}
+
+function flushPendingDeltaEvents(
+  pending: Map<string, AgentHostEvent[]>,
+  frameRef: { current: number | null },
+  mutateTurns: (update: (current: AssistantTurn[]) => AssistantTurn[]) => void,
+) {
+  if (frameRef.current !== null) {
+    window.cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+  }
+  if (pending.size === 0) return;
+  const batches = new Map(pending);
+  pending.clear();
+  mutateTurns((current) =>
+    current.map((turn) => applyTurnEvents(turn, batches.get(turn.id) ?? [])),
+  );
 }
 
 function hasRecentProcessDescription(
@@ -1437,8 +1782,8 @@ function hasRecentProcessDescription(
     .find((item) => item.kind === "commentary");
   return Boolean(
     latest &&
-      latest.startedAt <= occurredAt &&
-      occurredAt - latest.startedAt <= 15_000,
+    latest.startedAt <= occurredAt &&
+    occurredAt - latest.startedAt <= 15_000,
   );
 }
 
@@ -1509,7 +1854,9 @@ function reduceTurnStatus(
     process,
     error:
       event.status === "failed"
-        ? turn.error || event.label || "The assistant could not complete this task."
+        ? turn.error ||
+          event.label ||
+          "The assistant could not complete this task."
         : event.status === "completed"
           ? null
           : turn.error,
@@ -1659,7 +2006,7 @@ function upsertAppliedFileReview(
           sourceCallIds: Array.from(
             new Set([
               ...(previous.sourceCallIds ?? [previous.callId]),
-              ...((review.sourceCallIds ?? [review.callId])),
+              ...(review.sourceCallIds ?? [review.callId]),
             ]),
           ),
           operation: previous.operation,
@@ -1719,10 +2066,9 @@ function commandDeadline(timeoutMs?: number) {
 }
 
 function nextProcessSequence(process: readonly AssistantProcessItem[]) {
-  return process.reduce(
-    (sequence, item) => Math.max(sequence, item.sequence),
-    0,
-  ) + 1;
+  return (
+    process.reduce((sequence, item) => Math.max(sequence, item.sequence), 0) + 1
+  );
 }
 
 function clarificationAnswerLabel(clarification: AssistantClarification) {
@@ -1748,7 +2094,8 @@ function visibleProgressDetail(content: string) {
 }
 
 function createAgentId(prefix: string) {
-  const suffix = globalThis.crypto?.randomUUID?.() ??
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ??
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   return `${prefix}:${suffix}`;
 }
@@ -1771,6 +2118,241 @@ function contextMetricsScore(metrics: AgentContextMetrics) {
     (metrics.modelUsage?.calls ?? 0) +
     (metrics.modelUsage?.totalTokens ?? 0)
   );
+}
+
+function conversationSnapshotRequest(
+  projectId: string,
+  conversationId: string | undefined,
+  threadId: string,
+  turns: readonly AssistantTurn[],
+  resumeRequestsByTurn: ReadonlyMap<string, AgentStartTurnRequest>,
+): PendingConversationSnapshot {
+  const persistedTurns = turns.slice(-100);
+  const resumableTurnIds = new Set(
+    persistedTurns
+      .filter(
+        (turn) => assistantTurnIsActive(turn) || turn.status === "paused",
+      )
+      .map((turn) => turn.id),
+  );
+  const resumeRequests = Array.from(resumeRequestsByTurn.entries())
+    .filter(([turnId]) => resumableTurnIds.has(turnId))
+    .map(([, request]) => request)
+    .slice(-8);
+  return {
+    scope: conversationScope(projectId, conversationId),
+    request: {
+      projectId,
+      conversationId,
+      threadId,
+      turns: persistedTurns,
+      resumeRequests,
+    },
+  };
+}
+
+function clearConversationSnapshotTimers(
+  trailingTimerRef: { current: number | null },
+  maxWaitTimerRef: { current: number | null },
+  dirtySinceRef: { current: number | null },
+) {
+  if (trailingTimerRef.current !== null) {
+    window.clearTimeout(trailingTimerRef.current);
+    trailingTimerRef.current = null;
+  }
+  if (maxWaitTimerRef.current !== null) {
+    window.clearTimeout(maxWaitTimerRef.current);
+    maxWaitTimerRef.current = null;
+  }
+  dirtySinceRef.current = null;
+}
+
+function createConversationSnapshotSaveQueue(
+  save: (request: ConversationSnapshotSaveRequest) => Promise<unknown>,
+) {
+  type QueuedSnapshot = {
+    request: ConversationSnapshotSaveRequest;
+    sequence: number;
+  };
+  let pending: QueuedSnapshot | null = null;
+  let draining = false;
+  let drainPromise: Promise<void> | null = null;
+  let nextSequence = 0;
+  let settledSequence = 0;
+  const failures = new Map<number, unknown>();
+
+  const enqueueRequest = (request: ConversationSnapshotSaveRequest) => {
+    const sequence = ++nextSequence;
+    pending = { request, sequence };
+    return sequence;
+  };
+
+  const drain = async () => {
+    if (draining) return;
+    draining = true;
+    try {
+      while (pending) {
+        const queued = pending;
+        pending = null;
+        try {
+          await save(queued.request);
+        } catch (error) {
+          failures.set(queued.sequence, error);
+          console.warn("Failed to persist encrypted AI conversation", error);
+        } finally {
+          settledSequence = queued.sequence;
+        }
+      }
+    } finally {
+      draining = false;
+      // An enqueue can race the final await continuation. Re-enter the drain
+      // when that happens without allowing concurrent writes for one scope.
+      if (pending) void drain();
+    }
+  };
+
+  const scheduleDrain = () => {
+    if (!drainPromise) {
+      drainPromise = drain().finally(() => {
+        drainPromise = null;
+        if (pending) void scheduleDrain();
+      });
+    }
+    return drainPromise;
+  };
+
+  return {
+    enqueue(request: ConversationSnapshotSaveRequest) {
+      enqueueRequest(request);
+      void scheduleDrain();
+    },
+    async flush(request: ConversationSnapshotSaveRequest) {
+      const targetSequence = enqueueRequest(request);
+      // A queued older snapshot is always drained before this checkpoint. The
+      // loop also covers a state update that arrives while the previous drain
+      // promise is completing, preserving the queue's single-writer contract.
+      do {
+        await scheduleDrain();
+      } while (settledSequence < targetSequence);
+      const failedSequence = Array.from(failures.keys()).find(
+        (sequence) => sequence >= targetSequence,
+      );
+      if (failedSequence !== undefined) {
+        const failure = failures.get(failedSequence);
+        failures.delete(failedSequence);
+        throw failure;
+      }
+    },
+  };
+}
+
+function createAssistantHostEventBroker() {
+  const subscribers = new Set<(event: AgentHostEvent) => void>();
+  let bufferedEvents: AgentHostEvent[] = [];
+  let startPromise: Promise<void> | null = null;
+  let stopListening: (() => void) | null = null;
+
+  const ensureStarted = () => {
+    if (startPromise) return startPromise;
+    startPromise = agentHostService
+      .listen((event) => {
+        bufferedEvents.push(event);
+        if (bufferedEvents.length > MAX_BUFFERED_HOST_EVENTS) {
+          bufferedEvents = bufferedEvents.slice(-MAX_BUFFERED_HOST_EVENTS);
+        }
+        for (const subscriber of subscribers) subscriber(event);
+      })
+      .then((cleanup) => {
+        stopListening = cleanup;
+      })
+      .catch((error) => {
+        startPromise = null;
+        throw error;
+      });
+    return startPromise;
+  };
+
+  return {
+    async subscribe(listener: (event: AgentHostEvent) => void) {
+      subscribers.add(listener);
+      try {
+        await ensureStarted();
+      } catch (error) {
+        subscribers.delete(listener);
+        throw error;
+      }
+      return () => subscribers.delete(listener);
+    },
+    replayForTurns(turns: readonly AssistantTurn[]) {
+      if (turns.length === 0 || bufferedEvents.length === 0) return [];
+      const cursors = new Map(
+        turns
+          .filter((turn) => Boolean(turn.threadId))
+          .map((turn) => [
+            `${turn.threadId}\u0000${turn.id}`,
+            turn.lastEventSequence ?? 0,
+          ]),
+      );
+      return bufferedEvents.filter((event) => {
+        const cursor = cursors.get(`${event.threadId}\u0000${event.turnId}`);
+        return cursor !== undefined && event.sequence > cursor;
+      });
+    },
+    async resetForTests() {
+      subscribers.clear();
+      bufferedEvents = [];
+      try {
+        await startPromise;
+      } catch {
+        // A failed test listener has no cleanup to run.
+      }
+      stopListening?.();
+      stopListening = null;
+      startPromise = null;
+    },
+  };
+}
+
+function mergeAgentEvents(
+  left: readonly AgentHostEvent[],
+  right: readonly AgentHostEvent[],
+) {
+  const events = new Map<string, AgentHostEvent>();
+  for (const event of [...left, ...right]) {
+    events.set(
+      `${event.threadId}\u0000${event.turnId}\u0000${event.sequence}`,
+      event,
+    );
+  }
+  return Array.from(events.values()).sort(
+    (first, second) =>
+      first.occurredAt - second.occurredAt || first.sequence - second.sequence,
+  );
+}
+
+function retainLiveConversationState(
+  scope: string,
+  threadId: string,
+  turns: readonly AssistantTurn[],
+  resumeRequests: ReadonlyMap<string, AgentStartTurnRequest>,
+) {
+  liveConversationStates.delete(scope);
+  liveConversationStates.set(scope, {
+    threadId,
+    turns: turns.slice(-100),
+    resumeRequests: new Map(resumeRequests),
+    updatedAt: Date.now(),
+  });
+  while (liveConversationStates.size > MAX_LIVE_CONVERSATION_SCOPES) {
+    const oldestScope = liveConversationStates.keys().next().value;
+    if (typeof oldestScope !== "string") break;
+    liveConversationStates.delete(oldestScope);
+  }
+}
+
+export async function resetAssistantAgentRuntimeForTests() {
+  liveConversationStates.clear();
+  await assistantHostEventBroker.resetForTests();
 }
 
 function conversationScope(projectId: string, conversationId?: string) {
@@ -1913,14 +2495,14 @@ function isRestoredUiAction(value: unknown) {
     Boolean(target && typeof target === "object" && !Array.isArray(target)) &&
     Boolean(
       issuedAgainst &&
-        typeof issuedAgainst === "object" &&
-        !Array.isArray(issuedAgainst),
+      typeof issuedAgainst === "object" &&
+      !Array.isArray(issuedAgainst),
     ) &&
     Boolean(
       presentation &&
-        typeof presentation === "object" &&
-        !Array.isArray(presentation) &&
-        typeof (presentation as Record<string, unknown>).label === "string",
+      typeof presentation === "object" &&
+      !Array.isArray(presentation) &&
+      typeof (presentation as Record<string, unknown>).label === "string",
     )
   );
 }
@@ -2042,7 +2624,11 @@ function restoreProjectFileProposals(
 
 function safeRestoredProjectPath(value: unknown): value is string {
   if (typeof value !== "string" || !value || value.length > 2_000) return false;
-  if (value.includes("\0") || /^[\\/]/u.test(value) || /^[a-z]:/iu.test(value)) {
+  if (
+    value.includes("\0") ||
+    /^[\\/]/u.test(value) ||
+    /^[a-z]:/iu.test(value)
+  ) {
     return false;
   }
   return !value.split(/[\\/]/u).some((segment) => segment === "..");

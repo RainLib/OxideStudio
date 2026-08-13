@@ -20,6 +20,7 @@ describe("AI settings provider channels", () => {
       codexCliPath: "codex",
       codexCliModel: "gpt-cli",
       codexCliReasoningEffort: "high",
+      codexCliReasoningEffortByModel: { "gpt-cli": "high" },
       codexCliEnvironmentKeys: ["HTTPS_PROXY"],
     });
   });
@@ -90,6 +91,57 @@ describe("AI settings provider channels", () => {
         assistantMode: "chat",
         codexCliAssistantMode: "agent",
         codeBuddyCliAssistantMode: "plan",
+      }),
+    );
+  });
+
+  it("migrates legacy CLI effort and retains separate reasoning choices per model", () => {
+    const migrated = migratePersistedAiSettings(
+      {
+        codexCliModel: "gpt-legacy",
+        codexCliReasoningEffort: "high",
+        codeBuddyCliModel: "buddy-legacy",
+        codeBuddyCliReasoningEffort: "medium",
+      },
+      3,
+    );
+    expect(migrated).toEqual(
+      expect.objectContaining({
+        codexCliReasoningEffortByModel: { "gpt-legacy": "high" },
+        codeBuddyCliReasoningEffortByModel: { "buddy-legacy": "medium" },
+      }),
+    );
+
+    useAiSettingsStore.getState().updateSettings({ provider: "codex-cli" });
+    useAiSettingsStore.getState().updateSettings({
+      codexCliModel: "gpt-fast",
+      codexCliReasoningEffort: "low",
+    });
+    useAiSettingsStore.getState().updateSettings({
+      codexCliModel: "gpt-deep",
+      codexCliReasoningEffort: "high",
+    });
+    useAiSettingsStore.getState().updateSettings({
+      codexCliModel: "gpt-fast",
+    });
+
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({
+        model: "gpt-fast",
+        reasoningEffort: "low",
+      }),
+    );
+    expect(
+      useAiSettingsStore.getState().codexCliReasoningEffortByModel,
+    ).toEqual(expect.objectContaining({ "gpt-fast": "low", "gpt-deep": "high" }));
+
+    useAiSettingsStore.getState().updateSettings({
+      codexCliModel: "gpt-new",
+    });
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({
+        model: "gpt-new",
+        reasoningEffort: "default",
       }),
     );
   });

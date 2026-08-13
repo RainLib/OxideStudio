@@ -37,6 +37,7 @@ type CommandIndex = {
 };
 
 const commandIndexes = new WeakMap<ReadonlyArray<RedisCommandDocumentation>, CommandIndex>();
+const MAX_REDIS_KEY_COMPLETION_ITEMS = 512;
 
 function commandIndex(commands: readonly RedisCommandDocumentation[]): CommandIndex {
   const cached = commandIndexes.get(commands);
@@ -276,6 +277,10 @@ export function buildRedisCompletionItems(
   }
   const keyItems = (input.keys ?? [])
     .filter((key) => matchesPrefix(key, context.prefix))
+    // The source cache is already a stable lexical list. Limit here rather
+    // than after merging command arguments so an unusually large keyspace
+    // cannot make Monaco render a thousand rows for one key argument.
+    .slice(0, MAX_REDIS_KEY_COMPLETION_ITEMS)
     .map((key, itemIndex) => ({
       label: key,
       type: "key" as const,

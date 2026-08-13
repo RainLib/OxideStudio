@@ -43,6 +43,8 @@ export function DataCompareView() {
     sourceRows: number;
     targetRows: number;
     batchSize: number;
+    detailLimitPerStatus: number;
+    detailsTruncated: boolean;
   } | null>(null);
   const [isComparingFull, setIsComparingFull] = useState(false);
   const [fullComparisonError, setFullComparisonError] = useState<string | null>(null);
@@ -110,13 +112,18 @@ export function DataCompareView() {
   };
   const leftConnection = connections.find((connection) => connection.id === left.connectionId);
   const rightConnection = connections.find((connection) => connection.id === right.connectionId);
+  const selectedKeysMatchSuggested = keyColumns.length > 0
+    && keyColumns.length === left.suggestedKeyColumns.length
+    && keyColumns.length === right.suggestedKeyColumns.length
+    && keyColumns.every((key) => left.suggestedKeyColumns.includes(key))
+    && keyColumns.every((key) => right.suggestedKeyColumns.includes(key));
   const canCompareFull = Boolean(
     left.sourceKind === "table" &&
       right.sourceKind === "table" &&
       left.connectionId && right.connectionId &&
       left.objectName && right.objectName &&
       leftConnection?.driver && rightConnection?.driver &&
-      keyColumns.length > 0,
+      selectedKeysMatchSuggested,
   );
   const runFullComparison = async () => {
     if (!canCompareFull || !leftConnection || !rightConnection) return;
@@ -146,6 +153,8 @@ export function DataCompareView() {
         sourceRows: result.sourceRowCount,
         targetRows: result.targetRowCount,
         batchSize: result.batchSize,
+        detailLimitPerStatus: result.detailLimitPerStatus,
+        detailsTruncated: result.detailsTruncated,
       });
     } catch (error) {
       setFullComparisonError(error instanceof Error ? error.message : String(error));
@@ -183,7 +192,7 @@ export function DataCompareView() {
           title={
             canCompareFull
               ? "Compare all rows on the host, up to 100,000 rows per table"
-              : "Full compare requires two table tabs, their connections, and at least one shared key"
+              : "Full compare requires two table tabs, connections, and the complete shared primary key"
           }
           onClick={() => void runFullComparison()}
         >
@@ -250,6 +259,9 @@ export function DataCompareView() {
                   The sources have no columns with matching names.
                 </p>
               )}
+              <p className="px-3 pt-1 text-[8px] leading-4 wb-muted">
+                Full-table compare requires the complete shared primary key. Loaded-page compare can use any shared column.
+              </p>
             </div>
           </section>
 
@@ -294,6 +306,11 @@ export function DataCompareView() {
                   <div>{fullComparisonMeta.sourceRows.toLocaleString()} full left rows</div>
                   <div>{fullComparisonMeta.targetRows.toLocaleString()} full right rows</div>
                   <div>{fullComparisonMeta.batchSize.toLocaleString()} rows per host batch</div>
+                  {fullComparisonMeta.detailsTruncated && (
+                    <div className="mt-1 text-amber-200">
+                      Showing up to {fullComparisonMeta.detailLimitPerStatus.toLocaleString()} details per status; totals remain exact.
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
@@ -301,6 +318,9 @@ export function DataCompareView() {
                   <div>{right.rows.length.toLocaleString()} loaded right rows</div>
                 </>
               )}
+              <p className="px-3 pb-2 pt-1 text-[8px] leading-3.5 wb-muted">
+                Full-table compare uses the complete shared primary key. Loaded-page compare can use any shared column.
+              </p>
               {displayedComparison.leftOnlyColumns.length > 0 && (
                 <div className="mt-2 break-words">
                   Left-only columns: {displayedComparison.leftOnlyColumns.join(", ")}
@@ -618,14 +638,17 @@ function fullComparisonFromServer(
     typeMismatchColumns: [],
     counts: {
       equal: result.equalCount,
-      changed: result.modified.length,
-      leftOnly: result.added.length,
-      rightOnly: result.removed.length,
+      changed: result.modifiedCount,
+      leftOnly: result.addedCount,
+      rightOnly: result.removedCount,
       duplicate: 0,
     },
     comparedKeyCount: result.comparedKeyCount,
     warnings: [
       "Full table comparison ran in the host process. Equal rows are counted but not materialized in the result list.",
+      ...(result.detailsTruncated
+        ? [`Difference details are limited to ${result.detailLimitPerStatus.toLocaleString()} rows per status. Counts above remain exact.`]
+        : []),
     ],
   };
 }

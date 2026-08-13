@@ -163,4 +163,52 @@ describe("SchemaDiffView", () => {
     expect(openButton?.disabled).toBe(true);
     expect(openButton?.title).toContain("Resolve blocked changes");
   });
+
+  it("keeps descriptor-only schema object changes visible but out of executable migration SQL", async () => {
+    const descriptorPlan: SchemaDiffPlan = {
+      ...plan,
+      id: "diff-schema-object",
+      summary: { total: 1, safe: 0, review: 1, destructive: 0, blocked: 1 },
+      changes: [
+        {
+          id: "schema-object-1",
+          kind: "schemaObjectCreate",
+          risk: "review",
+          schemaName: "public",
+          relationName: "audit_events_id_seq",
+          objectType: "SEQUENCE",
+          summary: "Review creation of SEQUENCE audit_events_id_seq",
+          sql: [],
+          reversible: false,
+          manualReview: true,
+          phase: "manualReview",
+          order: 1,
+          dependsOn: [],
+          blockedReason:
+            "Schema object descriptors do not include source/DDL; review and apply this change manually.",
+        },
+      ],
+      migrationSql: "-- PLAN BLOCKED\n-- descriptor-only schema object",
+    };
+    useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
+    useTabStore.getState().openSchemaDiffTab(descriptorPlan, snapshot, snapshot);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<SchemaDiffView />);
+    });
+
+    expect(container.querySelector("[data-schema-object-review-summary]")?.textContent)
+      .toContain("Source DDL is not captured");
+    const change = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("audit_events_id_seq"),
+    );
+    await act(async () => change?.click());
+    expect(container.querySelector("[data-schema-object-review-detail]")?.textContent)
+      .toContain("not emitted in this migration preview");
+    const apply = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Apply safely"),
+    );
+    expect(apply?.disabled).toBe(true);
+  });
 });

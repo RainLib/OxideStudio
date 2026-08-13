@@ -37,3 +37,10 @@ export {
   type GridLayoutScope,
   type PersistedGridLayout,
 } from "./model/gridLayoutRepository";
+export {
+  isTableColumnEditable,
+  tableColumnEditability,
+  tableColumnReadOnlyReason,
+  type TableColumnEditability,
+  type TableColumnOwnership,
+} from "./model/tableColumnEditability";

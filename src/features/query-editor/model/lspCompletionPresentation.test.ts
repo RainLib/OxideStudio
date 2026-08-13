@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CompletionItemKind } from "@/services/lsp/types";
 import {
+  recordCompletionUsage,
+  resetCompletionUsageCacheForTests,
+} from "@/lib/completionUsage";
+import {
   applyResolvedLspCompletionItem,
   completionResolveRequestContext,
+  limitLspCompletionPresentationItems,
   lspCompletionItemsToMonacoSuggestions,
   markResolvableLspCompletionItems,
   sourceLspCompletionItem,
@@ -39,6 +44,41 @@ const monaco = {
 };
 
 describe("lspCompletionItemsToMonacoSuggestions", () => {
+  it("bounds a large catalog while preserving server order by default", () => {
+    const items = Array.from({ length: 600 }, (_, index) => ({
+      label: `table_${String(599 - index).padStart(3, "0")}`,
+      kind: CompletionItemKind.Module,
+      sortText: String(index).padStart(3, "0"),
+    }));
+
+    const limited = limitLspCompletionPresentationItems(items, {
+      rankByUsage: false,
+      usageScope: "postgres",
+    });
+
+    expect(limited).toHaveLength(512);
+    expect(limited[0]?.label).toBe("table_599");
+    expect(limited[limited.length - 1]?.label).toBe("table_088");
+  });
+
+  it("keeps frequently accepted items inside the bounded catalog", () => {
+    resetCompletionUsageCacheForTests();
+    recordCompletionUsage("postgres", "table_3", 2_000);
+    const items = Array.from({ length: 4 }, (_, index) => ({
+      label: `table_${index}`,
+      kind: CompletionItemKind.Module,
+      sortText: `0:${index}`,
+    }));
+
+    const limited = limitLspCompletionPresentationItems(items, {
+      maxItems: 2,
+      rankByUsage: true,
+      usageScope: "postgres",
+    });
+
+    expect(limited.map((item) => item.label)).toEqual(["table_3", "table_0"]);
+  });
+
   it("preserves label details, insert/replace boundaries, and whitespace mode", () => {
     const [suggestion] = lspCompletionItemsToMonacoSuggestions({
       monaco,

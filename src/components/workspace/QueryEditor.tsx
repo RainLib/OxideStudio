@@ -170,6 +170,7 @@ import {
   markResolvableLspCompletionItems,
   sourceLspCompletionItem,
   applyResolvedLspCompletionItem,
+  limitCompletionSuggestions,
   mergeCatalogNames,
   mergeCompletionFallbackSuggestions,
   parseElasticsearchConsoleServerVersion,
@@ -199,6 +200,7 @@ import {
 import { isCompletionRequestCurrent } from "@/features/query-editor/model/completionRequestGuard";
 
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
+const MAX_QUERY_EDITOR_COMPLETION_SUGGESTIONS = 640;
 
 function createInlineCompletionRequestId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -1873,9 +1875,13 @@ export function QueryEditor({
             // returns an unambiguous relation's columns or existing Explorer
             // objects, so an empty LSP response never turns into cross-schema
             // guessing.
-            if (suggestionsWithSmartJoins.length > 0) {
+            const boundedSuggestions = limitCompletionSuggestions(
+              suggestionsWithSmartJoins,
+              MAX_QUERY_EDITOR_COMPLETION_SUGGESTIONS,
+            );
+            if (boundedSuggestions.length > 0) {
               return result(
-                suggestionsWithSmartJoins,
+                boundedSuggestions,
                 "lsp",
                 undefined,
                 completionList.isIncomplete,

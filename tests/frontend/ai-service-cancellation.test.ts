@@ -82,4 +82,28 @@ describe("AI service cancellation", () => {
       }),
     });
   });
+
+  it("publishes only an opaque CLI environment revision after a private environment changes", async () => {
+    const listener = vi.fn();
+    const unsubscribe = aiService.subscribeCliEnvironmentRevision(listener);
+    mocks.invoke.mockResolvedValueOnce({
+      keys: ["HTTPS_PROXY"],
+      revision: "opaque-revision-1",
+    });
+
+    await expect(
+      aiService.setCliEnvironment("codex-cli", "default", {
+        HTTPS_PROXY: "http://secret.example.test",
+      }),
+    ).resolves.toEqual(["HTTPS_PROXY"]);
+
+    expect(listener).toHaveBeenCalledWith("codex-cli", "default");
+    expect(
+      aiService.getCliEnvironmentRevision("codex-cli", "default"),
+    ).toBe("opaque-revision-1");
+    expect(JSON.stringify(listener.mock.calls)).not.toContain(
+      "secret.example.test",
+    );
+    unsubscribe();
+  });
 });

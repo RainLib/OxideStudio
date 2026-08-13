@@ -100,14 +100,21 @@ pub async fn list_models(
             return Ok(cached.models.clone());
         }
     }
-    let (models, ttl) = match discover_models(&command, environment).await {
-        Ok(models) if !models.is_empty() => (models, Duration::from_secs(5 * 60)),
-        _ => (static_models(), Duration::from_secs(30)),
-    };
+    let models = discover_models(&command, environment)
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "Codex model catalog is unavailable: {}",
+                classify_error(&error.to_string())
+            )
+        })?;
+    if models.is_empty() {
+        return Err(anyhow!("Codex model catalog returned no models"));
+    }
     *MODEL_CACHE.lock().await = Some(CachedModels {
         key,
         loaded_at: now,
-        ttl,
+        ttl: Duration::from_secs(5 * 60),
         models: models.clone(),
     });
     Ok(models)
@@ -138,17 +145,7 @@ pub async fn test_connection(
             "Codex CLI returned no models; sign in with `codex login` and try again"
         ));
     }
-    let configured_model = config.model.trim();
-    let model = if configured_model.is_empty() || configured_model.eq_ignore_ascii_case("default") {
-        models
-            .iter()
-            .find(|model| model.is_default && model.id != "default")
-            .or_else(|| models.iter().find(|model| model.id != "default"))
-            .map(|model| model.id.clone())
-            .unwrap_or_else(|| "default".to_string())
-    } else {
-        configured_model.to_string()
-    };
+    let model = effective_connection_model(config.model.trim(), &models);
     Ok(CliConnectionTestResult {
         message: "Codex CLI is ready. Existing sign-in verified.".to_string(),
         model,
@@ -156,6 +153,21 @@ pub async fn test_connection(
         version: Some(cli_version),
         latency_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn effective_connection_model(configured_model: &str, models: &[CliModelInfo]) -> String {
+    if configured_model.is_empty() || configured_model.eq_ignore_ascii_case("default") {
+        // `default` is a UI sentinel rather than necessarily a valid concrete
+        // Codex model id. Connection diagnostics report a discovered concrete
+        // model without overloading `is_default` on catalog entries.
+        models
+            .iter()
+            .find(|model| model.id != "default")
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| "default".to_string())
+    } else {
+        configured_model.to_string()
+    }
 }
 
 async fn verify_authentication(
@@ -342,6 +354,8 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     let mut default_model_id = None;
+    let mut synthetic_default_efforts = Vec::new();
+    let mut saw_model = false;
     for model in models {
         let Some(id) = model
             .get("id")
@@ -352,9 +366,7 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
         else {
             continue;
         };
-        if !seen.insert(id.to_string()) {
-            continue;
-        }
+        saw_model = true;
         let label = model
             .get("displayName")
             .or_else(|| model.get("display_name"))
@@ -362,16 +374,17 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
             .map(str::trim)
             .filter(|label| !label.is_empty())
             .unwrap_or(id);
-        let is_default = model
+        let is_provider_default = model
             .get("isDefault")
             .or_else(|| model.get("is_default"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if is_default {
+        if is_provider_default && !id.eq_ignore_ascii_case("default") && default_model_id.is_none()
+        {
             default_model_id = Some(id.to_string());
         }
-        let mut info = CliModelInfo::new(id, label, is_default);
-        info.reasoning_efforts = model
+        let mut seen_efforts = HashSet::new();
+        let reasoning_efforts = model
             .get("supportedReasoningEfforts")
             .or_else(|| model.get("supported_reasoning_efforts"))
             .and_then(Value::as_array)
@@ -383,11 +396,27 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
                     .or_else(|| entry.get("reasoningEffort").and_then(Value::as_str))
                     .or_else(|| entry.get("effort").and_then(Value::as_str))
             })
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty() && seen_efforts.insert((*effort).to_string()))
             .map(str::to_string)
             .collect();
+        // `default` is OxideStudio's provider-default sentinel. Never expose a
+        // provider entry with the same id alongside the synthetic sentinel.
+        if id.eq_ignore_ascii_case("default") {
+            if synthetic_default_efforts.is_empty() {
+                synthetic_default_efforts = reasoning_efforts;
+            }
+            continue;
+        }
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let mut info = CliModelInfo::new(id, label, false);
+        info.is_provider_default = is_provider_default;
+        info.reasoning_efforts = reasoning_efforts;
         result.push(info);
     }
-    if result.is_empty() {
+    if !saw_model {
         return Err(anyhow!("Codex model discovery returned no models"));
     }
     let mut default = CliModelInfo::new("default", "Default", true);
@@ -396,21 +425,11 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
             default.reasoning_efforts = model.reasoning_efforts.clone();
         }
     }
+    if default.reasoning_efforts.is_empty() {
+        default.reasoning_efforts = synthetic_default_efforts;
+    }
     result.insert(0, default);
     Ok(result)
-}
-
-fn static_models() -> Vec<CliModelInfo> {
-    ["default", "gpt-5.5", "gpt-5.4-mini"]
-        .into_iter()
-        .map(|id| {
-            CliModelInfo::new(
-                id,
-                if id == "default" { "Default" } else { id },
-                id == "default",
-            )
-        })
-        .collect()
 }
 
 fn classify_error(value: &str) -> String {
@@ -448,7 +467,13 @@ mod tests {
                 "id": "gpt-test",
                 "displayName": "GPT Test",
                 "isDefault": true,
-                "supportedReasoningEfforts": ["low", {"reasoningEffort":"high"}]
+                "supportedReasoningEfforts": [
+                    " low ",
+                    "low",
+                    {"reasoningEffort":"high"},
+                    {"effort":" high "},
+                    " "
+                ]
             }),
             json!({"id":"gpt-test"}),
         ])
@@ -461,6 +486,47 @@ mod tests {
             ["default", "gpt-test"]
         );
         assert_eq!(models[0].reasoning_efforts, ["low", "high"]);
+        assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
+        assert!(models[0].is_default);
+        assert!(!models[1].is_default);
+        assert!(models[1].is_provider_default);
+    }
+
+    #[test]
+    fn replaces_provider_default_sentinel_with_one_synthetic_default() {
+        let models = parse_models(&[
+            json!({
+                "id": "default",
+                "isDefault": true,
+                "supportedReasoningEfforts": ["medium", " medium "]
+            }),
+            json!({ "id": "gpt-test", "isDefault": true }),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["default", "gpt-test"]
+        );
+        assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
+        assert!(models[0].is_default);
+        assert!(!models[1].is_default);
+        assert!(models[1].is_provider_default);
+    }
+
+    #[test]
+    fn resolves_default_connection_model_to_a_concrete_catalog_entry() {
+        let models = vec![
+            CliModelInfo::new("default", "Default", true),
+            CliModelInfo::new("gpt-test", "GPT Test", false),
+        ];
+
+        assert_eq!(effective_connection_model("default", &models), "gpt-test");
+        assert_eq!(effective_connection_model("", &models), "gpt-test");
+        assert_eq!(effective_connection_model("custom", &models), "custom");
     }
 
     #[test]

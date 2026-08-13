@@ -100,6 +100,19 @@ export type AgentTurnAccepted = {
 
 export type AgentCancelTurnRequest = AgentRequestMetadata;
 
+export type AgentTurnRuntimeStatus = {
+  active: boolean;
+};
+
+export type AgentTurnJournal = {
+  projectId: string;
+  threadId: string;
+  turnId: string;
+  events: AgentHostEvent[];
+  truncated: boolean;
+  updatedAt: number;
+};
+
 export type AgentAnswerClarificationRequest = AgentRequestMetadata & {
   clarificationId: string;
   answers: Record<string, string>;
@@ -455,6 +468,26 @@ export const agentHostService = {
     return await invokeRawCommand<AgentActionAccepted>("agent_cancel_turn", {
       request,
     });
+  },
+
+  getTurnRuntimeStatus: async (
+    request: AgentCancelTurnRequest,
+  ): Promise<AgentTurnRuntimeStatus> => {
+    return await invokeRawCommand<AgentTurnRuntimeStatus>(
+      "agent_turn_runtime_status",
+      { request },
+    );
+  },
+
+  loadTurnJournal: async (
+    projectId: string,
+    threadId: string,
+    turnId: string,
+  ): Promise<AgentTurnJournal | null> => {
+    return await invokeRawCommand<AgentTurnJournal | null>(
+      "agent_load_turn_journal",
+      { projectId, threadId, turnId },
+    );
   },
 
   answerClarification: async (

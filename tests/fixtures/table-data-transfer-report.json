@@ -1,0 +1,69 @@
+{
+  "current": {
+    "id": "table-transfer-report-append",
+    "projectId": "project-a",
+    "transferId": "transfer-append-001",
+    "source": {
+      "connectionId": "source-connection",
+      "driver": "postgres",
+      "schema": "public",
+      "table": "orders",
+      "database": "app"
+    },
+    "target": {
+      "connectionId": "target-connection",
+      "driver": "postgres",
+      "schema": "archive",
+      "table": "orders",
+      "database": "warehouse"
+    },
+    "mode": "append",
+    "planDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "maxRows": 100,
+    "rowsTransferred": 2,
+    "batches": 1,
+    "limitReached": false,
+    "targetRowsBefore": 41,
+    "status": "done",
+    "startedAt": 1700000000000,
+    "finishedAt": 1700000001000,
+    "error": null,
+    "verification": {
+      "status": "verified",
+      "expectedRows": 43,
+      "observedRows": 43,
+      "identityReseedColumns": [],
+      "identityReseedVerified": null,
+      "message": "Post-commit target row count matches the reviewed append baseline plus copied rows."
+    }
+  },
+  "legacy": {
+    "id": "table-transfer-report-legacy",
+    "projectId": "project-a",
+    "transferId": "transfer-legacy-001",
+    "source": {
+      "connectionId": "source-connection",
+      "driver": "postgres",
+      "schema": "public",
+      "table": "orders",
+      "database": null
+    },
+    "target": {
+      "connectionId": "target-connection",
+      "driver": "postgres",
+      "schema": "public",
+      "table": "orders_copy",
+      "database": null
+    },
+    "mode": "overwrite",
+    "planDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "maxRows": 100,
+    "rowsTransferred": 0,
+    "batches": 0,
+    "limitReached": false,
+    "status": "error",
+    "startedAt": 1700000000000,
+    "finishedAt": 1700000001000,
+    "error": "Transfer failed. Capture a fresh preview before retrying."
+  }
+}

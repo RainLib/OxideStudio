@@ -8,6 +8,7 @@ export {
 export { mergeCatalogNames } from "./model/catalogSelection";
 export {
   completionSuggestionsOrCached,
+  limitCompletionSuggestions,
   mergeCompletionFallbackSuggestions,
 } from "./model/completionFallback";
 export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";

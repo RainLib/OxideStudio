@@ -23,6 +23,7 @@ import { isProjectDdlSnapshot } from "@/features/schema-diff/model/projectDdlSna
 import { isSchemaDbmlSnapshot } from "@/features/schema-diff/model/schemaDbmlImport";
 import { isChartDbMetadataSnapshot } from "@/features/schema-diff/model/chartDbMetadataImport";
 import { isSchemaDiagramDraftSnapshot } from "@/features/schema-diff/model/schemaDiagramDraft";
+import { compareSnapshotToLive } from "@/services/schemaSnapshotStore";
 import { schemaService } from "@/services/tauri/schema.service";
 import type {
   SchemaChange,
@@ -68,6 +69,7 @@ export function SchemaDiffView() {
     tabs,
     activeTabId,
     createTab,
+    openSchemaDiffTab,
     selectSchemaDiffChange,
   } = useTabStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
@@ -85,6 +87,7 @@ export function SchemaDiffView() {
   const [allowDestructive, setAllowDestructive] = useState(false);
   const [allowNonTransactional, setAllowNonTransactional] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [isRecapturing, setIsRecapturing] = useState(false);
   const [execution, setExecution] = useState<SchemaMigrationJournalEntry | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [recentExecutions, setRecentExecutions] = useState<SchemaMigrationJournalEntry[]>([]);
@@ -134,6 +137,9 @@ export function SchemaDiffView() {
 
   const selectedChange = plan.changes.find(
     (change) => change.id === activeTab.selectedSchemaChangeId,
+  );
+  const descriptorOnlyObjectChanges = plan.changes.filter(
+    isDescriptorOnlySchemaObjectChange,
   );
   const requiresReview = plan.requiresReviewApproval ?? plan.changes.some(
     (change) => change.manualReview || change.risk === "review",
@@ -261,6 +267,31 @@ export function SchemaDiffView() {
     }
   };
 
+  const recaptureInterruptedMigration = async () => {
+    if (isApplying || isRecapturing) return;
+    setIsRecapturing(true);
+    setExecutionError(null);
+    try {
+      const connectionError = await setActiveConnection(plan.targetConnectionId);
+      if (connectionError) throw new Error(connectionError);
+      // Interrupted execution is never resumed. Read current target metadata
+      // and make a brand-new fingerprint-bound plan from the immutable source.
+      const refreshed = await compareSnapshotToLive(source, {
+        projectId: target.projectId,
+        connectionId: target.connectionId,
+        connectionName: target.connectionName,
+        driver: target.driver,
+        databaseName: target.databaseName,
+        schemaName: target.schemaName,
+      });
+      openSchemaDiffTab(refreshed.plan, source, refreshed.target);
+    } catch (error) {
+      setExecutionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsRecapturing(false);
+    }
+  };
+
   const revealChange = async (change: SchemaChange) => {
     selectSchemaDiffChange(activeTab.id, change.id);
     if (change.kind === "relationCreate") {
@@ -380,6 +411,22 @@ export function SchemaDiffView() {
                   ? "Apply reviewed plan"
                   : "Apply safely"}
           </button>
+          {currentJournal?.status === "interrupted" && (
+            <button
+              type="button"
+              className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
+              onClick={() => void recaptureInterruptedMigration()}
+              disabled={isApplying || isRecapturing}
+              title="Read the current target schema and create a new plan. This never resumes the interrupted migration."
+            >
+              {isRecapturing ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <GitCompareArrows size={12} />
+              )}
+              Recapture & recompare
+            </button>
+          )}
         </div>
       </header>
 
@@ -387,6 +434,18 @@ export function SchemaDiffView() {
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/20 bg-amber-400/[0.045] px-4 py-2 text-[9px] text-amber-100/90">
           <AlertTriangle size={12} className="shrink-0 text-amber-300" />
           {offlineSourceLabel} baselines can be compared and reviewed, but cannot be applied. Capture a live baseline before creating an executable migration.
+        </div>
+      )}
+
+      {descriptorOnlyObjectChanges.length > 0 && (
+        <div
+          className="flex shrink-0 items-start gap-2 border-b border-sky-400/20 bg-sky-400/[0.045] px-4 py-2 text-[9px] leading-4 text-sky-100/90"
+          data-schema-object-review-summary
+        >
+          <ShieldAlert size={12} className="mt-0.5 shrink-0 text-sky-300" />
+          <span>
+            {descriptorOnlyObjectChanges.length} schema object change{descriptorOnlyObjectChanges.length === 1 ? " is" : "s are"} review-only. Source DDL is not captured in schema descriptors, so these objects are excluded from generated migration SQL and must be reviewed and applied manually.
+          </span>
         </div>
       )}
 
@@ -687,6 +746,20 @@ export function SchemaDiffView() {
             </details>
           )}
 
+          {selectedChange && isDescriptorOnlySchemaObjectChange(selectedChange) && (
+            <section
+              className="shrink-0 border-b border-sky-400/20 bg-sky-400/[0.045] px-3 py-2 text-[9px] leading-4 text-sky-100/90"
+              data-schema-object-review-detail
+            >
+              <div className="flex items-center gap-1.5 font-medium text-sky-200">
+                <ShieldAlert size={11} /> Schema object review required
+              </div>
+              <p className="mt-1">
+                {selectedChange.objectType || "Schema object"} <span className="font-mono">{selectedChange.relationName}</span> has descriptor metadata only. No source definition or executable DDL is available, so it is not emitted in this migration preview or eligible for automatic apply.
+              </p>
+            </section>
+          )}
+
           {plan.warnings.length > 0 && (
             <div className="shrink-0 border-b border-amber-400/20 bg-amber-400/5 px-3 py-2 text-[9px] text-amber-200">
               <div className="flex items-center gap-1.5 font-medium">
@@ -737,6 +810,14 @@ export function SchemaDiffView() {
         </main>
       </div>
     </div>
+  );
+}
+
+function isDescriptorOnlySchemaObjectChange(change: SchemaChange) {
+  return (
+    change.kind === "schemaObjectCreate" ||
+    change.kind === "schemaObjectDrop" ||
+    change.kind === "schemaObjectModify"
   );
 }
 

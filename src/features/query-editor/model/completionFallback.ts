@@ -15,6 +15,21 @@ export async function completionSuggestionsOrCached<TLive, TCached>(
 
 type CompletionSuggestionLabel = string | { label: string };
 
+/**
+ * A single Monaco suggest widget should not have to render an unbounded union
+ * of LSP, metadata, join, and grammar proposals. Callers merge sources in
+ * priority order, so retaining the leading items preserves that policy.
+ */
+export function limitCompletionSuggestions<T>(
+  suggestions: readonly T[],
+  maxItems: number,
+): T[] {
+  const limit = Math.max(1, Math.trunc(maxItems));
+  return suggestions.length <= limit
+    ? [...suggestions]
+    : suggestions.slice(0, limit);
+}
+
 function completionSuggestionLabel(label: CompletionSuggestionLabel) {
   return typeof label === "string" ? label : label.label;
 }

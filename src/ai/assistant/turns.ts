@@ -284,20 +284,23 @@ export function upsertAssistantProcessItem(
 ) {
   const existingIndex = process.findIndex((candidate) => candidate.id === item.id);
   if (existingIndex < 0) {
+    const lastItem = process[process.length - 1];
+    if (!lastItem || compareProcessItems(lastItem, item) <= 0) {
+      return [...process, item];
+    }
     return [...process, item].sort(compareProcessItems);
   }
-  return process
-    .map((candidate, index) =>
-      index === existingIndex
-        ? {
-            ...candidate,
-            ...item,
-            sequence: candidate.sequence,
-            startedAt: candidate.startedAt,
-          }
-        : candidate,
-    )
-    .sort(compareProcessItems);
+  const nextProcess = [...process];
+  const existingItem = process[existingIndex]!;
+  nextProcess[existingIndex] = {
+    ...existingItem,
+    ...item,
+    // These fields define the stable process order. Updating an existing item
+    // should never force the whole process list through another sort.
+    sequence: existingItem.sequence,
+    startedAt: existingItem.startedAt,
+  };
+  return nextProcess;
 }
 
 function compareProcessItems(
