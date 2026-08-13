@@ -291,9 +291,21 @@ function AgentHostAssistantSidebar() {
       installedTools.has(tool.name),
     );
   }, [session.hostStatus?.installedTools, workspaceToolManifest]);
+  // Streaming answer deltas replace the active turn object on every frame, but
+  // drafts are deliberately excluded from model history. Key the expensive
+  // history conversion to the fields that can actually become a future prompt
+  // instead of every render-time turn array identity.
+  const conversationHistoryVersion = assistantConversationHistoryVersion(
+    session.turns,
+    session.activeTurn,
+  );
   const conversationHistory = useMemo(
     () => assistantConversationHistoryFromTurns(session.turns),
-    [session.turns],
+    [conversationHistoryVersion],
+  );
+  const turnMetricsVersion = assistantTurnMetricsVersion(
+    session.turns,
+    session.activeTurn,
   );
   const previousCompaction = useMemo(() => {
     if (session.contextMetrics?.compaction) {
@@ -312,7 +324,7 @@ function AgentHostAssistantSidebar() {
           (aggregate?.offloadedArtifacts ?? 0) + stats.offloadedArtifacts,
       };
     }, null);
-  }, [session.contextMetrics?.compaction, session.turns]);
+  }, [session.contextMetrics?.compaction, turnMetricsVersion]);
   const previousModelUsage = useMemo(() => {
     if (session.contextMetrics?.modelUsage) {
       return session.contextMetrics.modelUsage;
@@ -329,7 +341,7 @@ function AgentHostAssistantSidebar() {
         totalTokens: (aggregate?.totalTokens ?? 0) + usage.totalTokens,
       };
     }, null);
-  }, [session.contextMetrics?.modelUsage, session.turns]);
+  }, [session.contextMetrics?.modelUsage, turnMetricsVersion]);
   const previewContext = useMemo(
     () => createWorkspaceAiToolContext("assistant-agent-context-preview"),
     [
@@ -1898,6 +1910,49 @@ export function assistantConversationContentVersion(
   const versionFor = (turn: AssistantTurn | null | undefined) =>
     turn
       ? `${turn.id}:${turn.updatedAt}:${turn.status}:${turn.process.length}:${turn.draft.length}:${turn.final?.content.length || 0}`
+      : "none";
+  return `${turns.length}|${versionFor(activeTurn)}|${versionFor(tail)}`;
+}
+
+/**
+ * Conversation history intentionally contains only user requests, answered
+ * clarifications, and final answers. During a streamed draft none of these
+ * fields changes, so using this compact version avoids rebuilding history for
+ * every token while still reacting immediately to a completed answer or an
+ * answered clarification on the active turn.
+ */
+export function assistantConversationHistoryVersion(
+  turns: readonly AssistantTurn[],
+  activeTurn: AssistantTurn | null,
+) {
+  const tail = turns[turns.length - 1];
+  const versionFor = (turn: AssistantTurn | null | undefined) =>
+    turn
+      ? `${turn.id}:${turn.userMessage}:${turn.final?.content || ""}:${turn.clarifications
+          .filter((clarification) => Boolean(clarification.answer?.trim()))
+          .map(
+            (clarification) =>
+              `${clarification.clarificationId}:${clarification.answer!.trim()}`,
+          )
+          .join("\\u0001")}`
+      : "none";
+  return `${turns.length}|${versionFor(activeTurn)}|${versionFor(tail)}`;
+}
+
+/**
+ * Context metrics are emitted by the host when available. The local fallback
+ * only changes on the active turn or the turn appended to the conversation;
+ * keeping an O(1) dependency prevents the aggregate reducers from scanning a
+ * long conversation for every streamed answer.delta batch.
+ */
+export function assistantTurnMetricsVersion(
+  turns: readonly AssistantTurn[],
+  activeTurn: AssistantTurn | null,
+) {
+  const tail = turns[turns.length - 1];
+  const versionFor = (turn: AssistantTurn | null | undefined) =>
+    turn
+      ? `${turn.id}:${turn.contextCompaction?.count || 0}:${turn.contextCompaction?.lastInputTokens || 0}:${turn.contextCompaction?.lastRetainedTokens || 0}:${turn.contextCompaction?.offloadedArtifacts || 0}:${turn.modelUsage?.calls || 0}:${turn.modelUsage?.inputTokens || 0}:${turn.modelUsage?.outputTokens || 0}:${turn.modelUsage?.totalTokens || 0}`
       : "none";
   return `${turns.length}|${versionFor(activeTurn)}|${versionFor(tail)}`;
 }

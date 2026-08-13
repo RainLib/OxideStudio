@@ -84,6 +84,8 @@ import {
   AssistantSidebar,
   assistantConversationId,
   assistantConversationContentVersion,
+  assistantConversationHistoryVersion,
+  assistantTurnMetricsVersion,
   assistantToolManifestForProfile,
   cliSetupForProviderIdentity,
 } from "@/components/workspace/AssistantSidebar";
@@ -233,6 +235,41 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(before).not.toBe(after);
     expect(after).toContain("turn-12:101:running:0:14:0");
     expect(after).toContain("turn-79:79:completed:0:0:9");
+  });
+
+  it("does not rebuild future history or metric aggregates for draft-only deltas", () => {
+    const turns = Array.from({ length: 80 }, (_, index) => ({
+      id: `turn-${index}`,
+      updatedAt: index,
+      status: "completed" as const,
+      process: [],
+      draft: "",
+      final: { content: `answer ${index}`, attachments: [], createdAt: index },
+      clarifications: [],
+      contextCompaction: null,
+      modelUsage: null,
+    })) as any[];
+    const active = {
+      ...turns[12],
+      status: "running" as const,
+      draft: "streaming",
+      updatedAt: 100,
+      final: null,
+    };
+    const draftDelta = { ...active, draft: "streaming more", updatedAt: 101 };
+
+    expect(assistantConversationHistoryVersion(turns, active)).toBe(
+      assistantConversationHistoryVersion(turns, draftDelta),
+    );
+    expect(assistantTurnMetricsVersion(turns, active)).toBe(
+      assistantTurnMetricsVersion(turns, draftDelta),
+    );
+    expect(
+      assistantConversationHistoryVersion(turns, {
+        ...draftDelta,
+        final: { content: "complete", attachments: [], createdAt: 102 },
+      }),
+    ).not.toBe(assistantConversationHistoryVersion(turns, active));
   });
 
   it("filters tools by Chat, Plan, and Agent authority", () => {
