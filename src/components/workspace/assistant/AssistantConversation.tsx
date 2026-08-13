@@ -32,6 +32,7 @@ import type { AssistantTurn } from "@/ai/assistant/turns";
 import { AssistantTurnProcess } from "./AssistantTurnProcess";
 import { AssistantArtifactList } from "./AssistantArtifactList";
 import { AssistantCitationList } from "./AssistantCitationList";
+import { useI18n } from "@/i18n/I18nProvider";
 
 export interface AssistantConversationEntry {
   id: string;
@@ -225,6 +226,7 @@ function TurnConversation({
   onDecideApproval: NonNullable<AssistantConversationProps["onDecideApproval"]>;
   onResumeTurn: NonNullable<AssistantConversationProps["onResumeTurn"]>;
 }) {
+  const { t } = useI18n();
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
   const [visibleTurnLimit, setVisibleTurnLimit] = useState(
     DEFAULT_VISIBLE_TURNS,
@@ -353,6 +355,8 @@ function TurnConversation({
           onDecideApproval={decideApproval}
           onResumeTurn={resumeTurn}
           onCopyAnswer={copyAnswer}
+          technicalDetailsLabel={t("assistant.error.technicalDetails")}
+          tryAgainLabel={t("assistant.error.tryAgain")}
         />
       ))}
     </div>
@@ -390,6 +394,8 @@ interface AssistantTurnRowProps {
   onDecideApproval: NonNullable<AssistantConversationProps["onDecideApproval"]>;
   onResumeTurn: NonNullable<AssistantConversationProps["onResumeTurn"]>;
   onCopyAnswer: (turn: AssistantTurn) => Promise<void>;
+  technicalDetailsLabel: string;
+  tryAgainLabel: string;
 }
 
 const AssistantTurnRow = memo(function AssistantTurnRow({
@@ -405,6 +411,8 @@ const AssistantTurnRow = memo(function AssistantTurnRow({
   onDecideApproval,
   onResumeTurn,
   onCopyAnswer,
+  technicalDetailsLabel,
+  tryAgainLabel,
 }: AssistantTurnRowProps) {
   return (
     <article
@@ -540,7 +548,7 @@ const AssistantTurnRow = memo(function AssistantTurnRow({
                     size={10}
                     className="transition-transform duration-150 group-open:rotate-90"
                   />
-                  Technical details
+                  {technicalDetailsLabel}
                 </summary>
                 <pre className="mt-1 whitespace-pre-wrap break-words rounded-[3px] bg-black/15 px-2 py-1.5 font-mono leading-4">
                   {turn.errorDetail}
@@ -557,7 +565,7 @@ const AssistantTurnRow = memo(function AssistantTurnRow({
           onClick={() => onUsePrompt(turn.userMessage)}
         >
           <RotateCcw size={10} aria-hidden="true" />
-          Try again
+          {tryAgainLabel}
         </button>
       )}
     </article>

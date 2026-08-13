@@ -1,0 +1,64 @@
+{
+  "append": {
+    "mode": "append",
+    "mappedColumns": [
+      {
+        "source": "id",
+        "target": "id",
+        "dataType": "BIGINT",
+        "sourceDataType": "bigint",
+        "targetDataType": "BIGINT",
+        "compatibility": "exact",
+        "conversion": "none",
+        "reason": "The target accepts the source integer binding."
+      },
+      {
+        "source": "metadata",
+        "target": "metadata",
+        "dataType": "JSONB",
+        "sourceDataType": "jsonb",
+        "targetDataType": "JSONB",
+        "compatibility": "safe",
+        "conversion": "targetBinding",
+        "reason": "The target supports a JSON parameter binding."
+      }
+    ],
+    "skippedSourceColumns": [],
+    "previewRows": 25,
+    "maxRows": 5000,
+    "batchSize": 250,
+    "targetRowsBefore": 41,
+    "targetRowsToDelete": null,
+    "upsertKeyColumns": [],
+    "identityReseedColumns": ["id"],
+    "canExecute": true,
+    "confirmationToken": "TRANSFER 72DB4F91",
+    "warnings": ["Identity state will be verified after commit."]
+  },
+  "unsupported": {
+    "mode": "append",
+    "mappedColumns": [
+      {
+        "source": "geofence",
+        "target": "geofence",
+        "dataType": "UNMAPPED",
+        "sourceDataType": "vendor_geography",
+        "targetDataType": "UNMAPPED",
+        "compatibility": "unsupported",
+        "conversion": "none",
+        "reason": "No reviewed target binding is available."
+      }
+    ],
+    "skippedSourceColumns": ["geofence"],
+    "previewRows": 0,
+    "maxRows": 5000,
+    "batchSize": 250,
+    "targetRowsBefore": null,
+    "targetRowsToDelete": null,
+    "upsertKeyColumns": [],
+    "identityReseedColumns": [],
+    "canExecute": false,
+    "confirmationToken": "TRANSFER 1A2B3C4D",
+    "warnings": ["Unsupported mappings must be resolved before execution."]
+  }
+}

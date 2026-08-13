@@ -97,7 +97,7 @@ flowchart TD
 | Codex 式模型 UI | `AssistantModelControl.tsx:70-162,180-656`：单一 popover、quick 推力 slider、Advanced、可折叠模型列表、按模型 effort、无 Zap | `tests/frontend/assistant-agent-sidebar.test.tsx:1124-1297` | 本轮完成；功能与层级对齐，非像素级复刻 |
 | CLI catalog hook | `useAiCliCatalog.ts:9-195`：5 分钟 TTL、identity cache、single-flight、partial warning、force refresh、迟到结果隔离 | `tests/frontend/assistant-agent-sidebar.test.tsx:1298-1533` | 本轮完成 |
 | Default / effort 后端修正 | Codex synthetic default 与具体 model：`src-tauri/src/ai_cli/codex.rs:159-167,353-430`；CodeBuddy 去重/模型隔离 `src-tauri/src/ai_cli/codebuddy.rs:467-573,663-672`；selection effort `src-tauri/src/commands/ai.rs:269-298` | Rust 单测位于 `codex.rs:463-524`、`codebuddy.rs:736-791`、`commands/ai.rs:859-873` | 本轮完成；本轮未执行 Rust suite |
-| HTTP trust key | `AssistantSidebar.tsx:216,1603-1620` 按规范化 endpoint 分 conversation，排除 API key 和 model | `tests/frontend/assistant-agent-sidebar.test.tsx:97-120` | 本轮完成；32-bit 非加密 hash 的理论碰撞列为 P2 |
+| HTTP trust key | `AssistantSidebar.tsx:216,1603-1620` 按规范化 endpoint 分 conversation，排除 API key 和 model | `tests/frontend/assistant-agent-sidebar.test.tsx:97-120` | 本轮完成；使用固定长度的 128-bit identity digest，适配 Host 的 80 字符约束 |
 | Hydration event buffer | `useAssistantAgentSession.ts:337-342,449-465,1524-1539`；最多 2,000 events | `tests/frontend/assistant-turns.test.ts:13-37` | 本轮完成；只覆盖 listener 已挂载、snapshot 尚未完成的窗口 |
 | Persist cleanup flush | `useAssistantAgentSession.ts` 在 scope 切换、effect cleanup 与 Host 启动前保存 | 定向前端 suite 覆盖恢复主路径和启动检查点，但没有写频率性能断言 | 本轮完成；启动前经同一单写队列同步落盘，失败时拒绝启动 Host；写放大列为 P1 |
 | Host turn journal | `src-tauri/src/agent/store.rs`、`protocol.rs`、`host.rs`；Tauri command 与 `agent-host.service.ts` | Sidebar 恢复回归覆盖 journal 的 terminal answer 合并 | 本轮完成；AES-GCM 加密、160 个状态事件/turn、24 KiB/event；跳过 token delta，journal 故障不会阻塞存活 turn |
@@ -109,7 +109,7 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | P0-1 | 面板关闭或切换到同侧其他 tool 后，Assistant 组件仍会卸载，而 Host turn 继续运行 | 卸载：`src/pages/workspaceRuntime.tsx`；常驻代理、live scope 与 sequence replay：`src/hooks/useAssistantAgentSession.ts`；加密 journal：`src-tauri/src/agent/host.rs`、`store.rs` | DBX 卸载直接 cancel，也没有可靠 replay，因此不能照搬；ChartDB 无对应实现 | **本轮完成**。常驻 listener 在面板关闭后继续收集事件，重开后补齐且不再次 `startTurn`；启动前同步保存恢复检查点，写入失败时不会启动 Host。重启后会合并 Host journal 的有界状态事件；这只恢复 UI 投影，绝不自动重放 CLI 或 mutation |
 | P0-2 | Snapshot load 失败时，hydration 事件不能被静默丢弃 | `src/hooks/useAssistantAgentSession.ts` 的 restore catch/replay 分支 | DBX 没有加密 snapshot hydration；无可迁移补丁 | **本轮完成**。失败时合并常驻代理与本地 pending events，并按 sequence 去重后投影到现有 turn；buffer overflow 的用户可见诊断仍列 P1 |
-| P0-3 | HTTP provider 历史此前可能跨 endpoint 共用；会造成上下文跨目标泄漏 | `src/components/workspace/AssistantSidebar.tsx:1603-1620` | DBX config id 天然分 catalog，但不是 Oxide conversation trust key；ChartDB 直接读 endpoint/key，无会话边界 | **本轮完成**。endpoint 规范化后独立 conversation；API key 不进入 id。后续只需把 32-bit hash 升级为抗碰撞 canonical digest（P2） |
+| P0-3 | HTTP provider 历史此前可能跨 endpoint 共用；会造成上下文跨目标泄漏 | `src/components/workspace/AssistantSidebar.tsx:1603-1620` | DBX config id 天然分 catalog，但不是 Oxide conversation trust key；ChartDB 直接读 endpoint/key，无会话边界 | **本轮完成**。endpoint 规范化后独立 conversation；API key 不进入 id；固定长度 128-bit identity digest 保持在 Host 边界内。 |
 | P0-4 | Hydration 前事件可能被 snapshot 覆盖 | `src/hooks/useAssistantAgentSession.ts:337-342,449-465,1524-1539` | DBX 没有这一层 Host/snapshot race | **本轮完成**。已在 listener 先挂、snapshot 后合并；2,000 上限仍需 overflow 可见性（P1） |
 | P0-5 | 数据库/外部 mutation 审批若退化为弱确认，会破坏 input-bound lease | UI `AssistantTurnProcess.tsx:667-802`；Host `src-tauri/src/agent/host.rs:1253-1367,1906-1971,2727-2790,4695-4719` | DBX 的普通 AI 写入交互不具备 Oxide 的 database target/digest/lease 安全契约；ChartDB SQL 生成不负责安全执行 | **已完成，保持不迁移**。继续要求风险摘要、必要时确认短语、输入 digest 与单次 lease；不得用“是/继续”授予广泛权限 |
 
@@ -220,7 +220,7 @@ flowchart TD
 - [x] 将 session/event owner 提升到 workspace 常驻层，切换 side tool 不销毁订阅。
 - [x] Host 增加按 turn 有界、加密的状态事件 journal；重启恢复时与 snapshot/live buffer 按 sequence 合并。
 - [x] Snapshot failure 时保留/应用 buffered events；overflow 明确告警并 reconcile。
-- [ ] 覆盖“运行中关闭 Assistant → 切到 Commit → 再打开”的 delta/tool/final/status 无丢失测试。
+- [x] 覆盖“运行中关闭 Assistant → 切到 Commit → 再打开”的 delta/tool/final/status 无丢失测试：共享事件 broker 在面板卸载期间保留事件；重挂载后按 sequence 回放且不再次 `startTurn`。
 - [x] 覆盖“运行中换项目/provider”时保存、取消和新 scope 隔离，确保旧事件不能写入新 conversation。
 
 ### Phase 2：P1 provider/setup 与持久化状态机
@@ -237,7 +237,6 @@ flowchart TD
 - [x] Slash 支持 caret-aware range replacement 与中文 IME。
 - [ ] 真实 Tauri 验证 model/slash 面板在 280 px、200% zoom、reduced motion 下的几何和焦点。
 - [ ] 为 50/100 turns 与 100/500 models 建 DOM/React profiler 基线，再决定窗口化阈值。
-- [ ] HTTP trust key 改抗碰撞 digest。
 - [ ] Provider/setup/error 文案完成 i18n，原始错误放可展开 detail。
 - [ ] 将 provider setup、event controller、snapshot writer 从大 owner 中分离并建立独立测试。
 
@@ -252,7 +251,7 @@ flowchart TD
 
 ### 11.2 明确延后，不能据此宣称发布完成
 
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml`，尤其是 Codex/CodeBuddy catalog/default/effort 和 approval/Host regression：本机已完成编译，但 Windows 测试二进制启动时以 `STATUS_ENTRYPOINT_NOT_FOUND` 退出，未进入任何断言；需修复本机运行库后重跑。
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml`，尤其是 Codex/CodeBuddy catalog/default/effort、approval/Host regression 和 transfer fixture：本机已完成编译，但 Windows 测试二进制启动时以 `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)` 退出，未进入任何断言；需修复本机运行库后重跑。
 - [ ] 真实 Tauri 桌面分别验证系统 Codex CLI、托管 Codex CLI、CodeBuddy CLI 的 detect/install/auth/test/catalog。
 - [ ] 真实账号下验证 auth 浏览器返回、取消、过期、Sidebar 卸载后重接；不得使用或记录真实 credential。
 - [ ] 真实 CLI private MCP/bridge：只读工具、需确认写工具、拒绝、确认短语、lease 过期/重放、target 改变。

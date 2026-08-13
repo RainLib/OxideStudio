@@ -12913,15 +12913,16 @@ mod tests {
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
         AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
         RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
-        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
         TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
         TableDataTransferColumnMapping, TableDataTransferCompatibility,
         TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferReport, TableDataTransferRequest, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
-        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableRowUpdate, TableSort, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
-        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
+        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
+        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
+        TableExportWriterContext, TableExportWriterMessage, TableFilter, TableRowUpdate, TableSort,
+        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
+        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -15150,6 +15151,46 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         assert!(legacy.verification.is_none());
         let encoded = serde_json::to_value(&current)
             .expect("current transfer report fixture should serialize");
+        assert!(encoded.get("connectionString").is_none());
+        assert!(encoded.get("sql").is_none());
+        assert!(encoded.get("parameters").is_none());
+    }
+
+    #[test]
+    fn transfer_preview_fixture_preserves_confirmation_and_execution_boundaries() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/table-data-transfer-preview.json"
+        ))
+        .expect("transfer preview fixture JSON should remain valid");
+        let append: TableDataTransferPreview = serde_json::from_value(
+            fixture
+                .get("append")
+                .cloned()
+                .expect("fixture should contain the append preview"),
+        )
+        .expect("append transfer preview fixture should deserialize");
+        let unsupported: TableDataTransferPreview = serde_json::from_value(
+            fixture
+                .get("unsupported")
+                .cloned()
+                .expect("fixture should contain the unsupported preview"),
+        )
+        .expect("unsupported transfer preview fixture should deserialize");
+
+        assert_eq!(append.target_rows_before, Some(41));
+        assert_eq!(append.identity_reseed_columns, vec!["id"]);
+        assert!(append.can_execute);
+        assert!(append
+            .mapped_columns
+            .iter()
+            .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported));
+        assert!(!unsupported.can_execute);
+        assert!(unsupported
+            .mapped_columns
+            .iter()
+            .any(|column| column.compatibility == TableDataTransferCompatibility::Unsupported));
+        let encoded = serde_json::to_value(&append)
+            .expect("append transfer preview fixture should serialize");
         assert!(encoded.get("connectionString").is_none());
         assert!(encoded.get("sql").is_none());
         assert!(encoded.get("parameters").is_none());

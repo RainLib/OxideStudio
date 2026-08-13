@@ -661,18 +661,33 @@ describe("AssistantSidebar Agent Host path", () => {
 
     await emit({
       ...baseEvent(request.threadId, request.turnId, 1),
+      type: "tool.started",
+      callId: "hidden-schema-call",
+      toolName: "metadata.describeObject",
+      label: "Read hidden schema metadata",
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 2),
+      type: "tool.finished",
+      callId: "hidden-schema-call",
+      toolName: "metadata.describeObject",
+      label: "Read hidden schema metadata",
+      success: true,
+    });
+    await emit({
+      ...baseEvent(request.threadId, request.turnId, 3),
       type: "answer.delta",
       content: "Recovered background answer",
       reset: true,
     });
     await emit({
-      ...baseEvent(request.threadId, request.turnId, 2),
+      ...baseEvent(request.threadId, request.turnId, 4),
       type: "final.answer",
       content: "Recovered background answer",
       artifacts: [],
     });
     await emit({
-      ...baseEvent(request.threadId, request.turnId, 3),
+      ...baseEvent(request.threadId, request.turnId, 5),
       type: "turn.status",
       status: "completed",
     });
@@ -684,6 +699,12 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     expect(container.textContent).toContain("Recovered background answer");
+    const process = container.querySelector<HTMLElement>(
+      `[data-assistant-process-disclosure="${request.turnId}"]`,
+    );
+    expect(process?.dataset.processRunning).toBe("false");
+    await act(async () => process?.querySelector("button")?.click());
+    expect(process?.textContent).toContain("Read hidden schema metadata");
     expect(container.textContent).not.toContain("Resume");
     expect(mocks.startTurn).toHaveBeenCalledTimes(1);
   });

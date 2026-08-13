@@ -16,6 +16,7 @@ import type {
   TableDataTransferReport,
 } from "@/services/tauri/types";
 import transferReportFixture from "../fixtures/table-data-transfer-report.json";
+import transferPreviewFixture from "../fixtures/table-data-transfer-preview.json";
 
 const mocks = vi.hoisted(() => ({
   ensureConnectionReady: vi.fn(),
@@ -168,6 +169,31 @@ describe("TableDataTransferDialog", () => {
     expect(
       canExecuteTableDataTransfer(preview, "TRANSFER A13F9C", false),
     ).toBe(false);
+  });
+
+  it("keeps the reviewed preview contract bounded and refuses unsupported mappings", () => {
+    const previews = transferPreviewFixture as {
+      append: TableDataTransferPreview;
+      unsupported: TableDataTransferPreview;
+    };
+
+    expect(previews.append.targetRowsBefore).toBe(41);
+    expect(previews.append.identityReseedColumns).toEqual(["id"]);
+    expect(previews.append.confirmationToken).toMatch(/^TRANSFER [A-Z0-9]+$/u);
+    expect(previews.append.mappedColumns).toHaveLength(2);
+    expect(previews.append.mappedColumns.every((column) => column.compatibility !== "unsupported")).toBe(true);
+    expect(canExecuteTableDataTransfer(previews.append, previews.append.confirmationToken, false)).toBe(true);
+
+    expect(previews.unsupported.canExecute).toBe(false);
+    expect(previews.unsupported.mappedColumns[0]?.compatibility).toBe("unsupported");
+    expect(canExecuteTableDataTransfer(
+      previews.unsupported,
+      previews.unsupported.confirmationToken,
+      false,
+    )).toBe(false);
+    expect(JSON.stringify(previews)).not.toMatch(
+      /password|credential|connectionString|\bsql\b|parameters|rows?Values/i,
+    );
   });
 
   it("keeps the cross-layer transfer report fixture privacy-bounded and backward compatible", () => {
