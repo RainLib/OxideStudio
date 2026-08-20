@@ -37,6 +37,7 @@
 | 票据撤销 | 设备撤销已经阻止新的 ticket；数据库有 `revoked_access_nonces`，但 control plane/Gateway 尚未分发 nonce、用户或 Gateway 级撤销。 | 紧急撤销无法缩短已签发 ticket 的 60 秒上限。 | 实现按 nonce、设备、用户、gateway 的撤销分发；数据面要有低延迟 deny cache。 |
 | 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |
 | 审计 outbox 与 SIEM | `audit_events` 由数据库触发器保护为 append-only，并在同一事务写入 `audit_outbox`；可选 HTTPS webhook 仅接受私有 token 文件，失败以有界退避重试且不阻塞控制面。 | 尚无针对 outbox 表的独立 DB role、死信告警或 SIEM 端到端验收。 | 增加最小权限 DB role、投递指标/告警和生产 SIEM 连通性验证。 |
+| Kubernetes 生产基线 | 已提供非 root、只读根文件系统、seccomp、Secret CSI 只读挂载、禁止 service-account token、digest 占位与 NetworkPolicy 的 control plane/Gateway manifests。 | DNS、镜像 digest、CSI provider、L4 mTLS passthrough 和 CNI FQDN egress 仍须按集群实际配置。 | 在受控集群进行策略、mTLS、Vault、SIEM 和数据库联调后再推广。 |
 | 生产部署保护 | compose 明确为开发配置；没有生产 Helm/secret policy/NetworkPolicy | 运维人员可能把环境变量 secret 或 HTTP compose 用于生产 | 提供生产 deployment 模板、admission checks、secret provider allowlist、egress/ingress NetworkPolicy。 |
 
 设备撤销现已使用签名 Gateway 拉取 feed：Gateway 每五秒获取本组织已撤销的设备证书指纹，启动前必须取得成功快照，连续二十秒未成功刷新便拒绝数据面请求。剩余票据撤销工作是 nonce、用户、Gateway 级失效，以及大组织的增量 feed。

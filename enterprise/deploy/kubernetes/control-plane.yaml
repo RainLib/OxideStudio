@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oxide-control-plane-config
+  labels:
+    app.kubernetes.io/name: oxide-control-plane
+data:
+  OXIDE_CONTROL_PLANE_BIND: 0.0.0.0:8787
+  OXIDE_OIDC_ISSUER: https://id.example.invalid/realms/oxide
+  OXIDE_OIDC_AUDIENCE: oxide-control-plane
+  OXIDE_OIDC_JWKS_URL: https://id.example.invalid/realms/oxide/protocol/openid-connect/certs
+  OXIDE_ALLOWED_ORIGINS: https://admin.example.invalid
+  OXIDE_AUDIT_WEBHOOK_URL: https://siem.example.invalid/oxide/audit
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxide-control-plane
+  labels:
+    app.kubernetes.io/name: oxide-control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: oxide-control-plane }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oxide-control-plane }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control-plane
+          image: ghcr.io/rainlib/oxidestudio-enterprise-control-plane@sha256:REPLACE_WITH_SIGNED_DIGEST
+          ports: [{ name: http-api, containerPort: 8787 }]
+          envFrom: [{ configMapRef: { name: oxide-control-plane-config } }]
+          env:
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/oxide/database-url }
+            - { name: OXIDE_TICKET_SIGNING_KEY_BASE64_FILE, value: /var/run/secrets/oxide/ticket-signing-key }
+            - { name: OXIDE_AUDIT_WEBHOOK_TOKEN_FILE, value: /var/run/secrets/oxide/audit-webhook-token }
+          volumeMounts:
+            - { name: control-plane-secrets, mountPath: /var/run/secrets/oxide, readOnly: true }
+          readinessProbe: { httpGet: { path: /healthz, port: http-api }, initialDelaySeconds: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http-api }, initialDelaySeconds: 10 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: control-plane-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: oxide-control-plane }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxide-control-plane
+  labels: { app.kubernetes.io/name: oxide-control-plane }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: oxide-control-plane }
+  ports: [{ name: http-api, port: 8787, targetPort: http-api }]

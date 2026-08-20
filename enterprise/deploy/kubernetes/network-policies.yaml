@@ -1,0 +1,38 @@
+# Replace the example selectors and external HTTPS rule with the CNI-specific
+# identities/FQDN policy used by the production cluster before applying.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oxide-control-plane-default-deny
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: oxide-control-plane } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: oxide-enterprise }
+      ports: [{ protocol: TCP, port: 8787 }]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: oxide-enterprise-postgres }
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports: [{ protocol: TCP, port: 443 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oxide-gateway-default-deny
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: oxide-enterprise-gateway } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ protocol: TCP, port: 8790 }]
+  egress:
+    - to:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 5432 }

@@ -139,6 +139,12 @@ Gateway-local secret references are intentionally absent from those APIs.
 
 ## Security invariants
 
+For a Kubernetes production baseline, see
+[`deploy/kubernetes`](deploy/kubernetes/README.md). It is intentionally
+separate from the HTTP/local-development Compose topology and requires
+immutable image digests, CSI-mounted secrets, mTLS passthrough, and
+cluster-specific NetworkPolicy selectors.
+
 - Unknown or stale policy defaults to deny.
 - Cedar `forbid` overrides `permit`.
 - Gateway RPCs determine the action; callers cannot promote it in input.

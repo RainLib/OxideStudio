@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oxide-gateway-sources
+  labels:
+    app.kubernetes.io/name: oxide-enterprise-gateway
+data:
+  # This file is intentionally credential-free. Replace the UUID and the
+  # Vault/Kubernetes secret reference during deployment.
+  sources.json: |
+    [{"id":"00000000-0000-0000-0000-000000000000","driver":"postgres","secretRef":"vault:database/creds/oxide-readonly","connectionTemplate":"postgres://{username}:{password}@postgres.example.invalid/oxide","capabilities":["resource.discover","metadata.read","query.read"]}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxide-enterprise-gateway
+  labels:
+    app.kubernetes.io/name: oxide-enterprise-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: oxide-enterprise-gateway }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oxide-enterprise-gateway }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway
+          image: ghcr.io/rainlib/oxidestudio-enterprise-gateway@sha256:REPLACE_WITH_SIGNED_DIGEST
+          ports: [{ name: mtls-grpc, containerPort: 8790 }]
+          env:
+            - { name: OXIDE_GATEWAY_BIND, value: 0.0.0.0:8790 }
+            - { name: OXIDE_GATEWAY_ID, value: REPLACE_WITH_REGISTERED_GATEWAY_UUID }
+            - { name: OXIDE_GATEWAY_PUBLIC_ENDPOINT, value: https://gateway.example.invalid:8790 }
+            - { name: OXIDE_CONTROL_PLANE_URL, value: https://control-plane.example.invalid }
+            - { name: OXIDE_CONTROL_PLANE_VERIFYING_KEY_BASE64, value: REPLACE_WITH_CONTROL_PLANE_PUBLIC_KEY }
+            - { name: OXIDE_CONTROL_PLANE_CA_CERTIFICATE, value: /var/run/secrets/oxide/control-plane-ca.pem }
+            - { name: OXIDE_GATEWAY_SOURCES_FILE, value: /etc/oxide/sources.json }
+            - { name: OXIDE_GATEWAY_TLS_CERTIFICATE, value: /var/run/secrets/oxide/gateway.crt }
+            - { name: OXIDE_GATEWAY_TLS_PRIVATE_KEY, value: /var/run/secrets/oxide/gateway.key }
+            - { name: OXIDE_GATEWAY_CLIENT_CA_CERTIFICATE, value: /var/run/secrets/oxide/client-ca.crt }
+            - { name: OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE, value: /var/run/secrets/oxide/enrollment-token }
+            - { name: OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE, value: /var/run/secrets/oxide/enrollment-signing-key }
+            - { name: OXIDE_SECRET_PROVIDER, value: vault }
+            - { name: OXIDE_VAULT_ADDRESS, value: https://vault.example.invalid }
+            - { name: OXIDE_VAULT_TOKEN_FILE, value: /var/run/secrets/oxide/vault-token }
+          volumeMounts:
+            - { name: gateway-sources, mountPath: /etc/oxide, readOnly: true }
+            - { name: gateway-secrets, mountPath: /var/run/secrets/oxide, readOnly: true }
+          readinessProbe: { tcpSocket: { port: mtls-grpc }, initialDelaySeconds: 5 }
+          livenessProbe: { tcpSocket: { port: mtls-grpc }, initialDelaySeconds: 15 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: gateway-sources
+          configMap: { name: oxide-gateway-sources }
+        - name: gateway-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: oxide-enterprise-gateway }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxide-enterprise-gateway
+  labels: { app.kubernetes.io/name: oxide-enterprise-gateway }
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: { app.kubernetes.io/name: oxide-enterprise-gateway }
+  ports: [{ name: mtls-grpc, port: 8790, targetPort: mtls-grpc }]
