@@ -22,4 +22,4 @@ pub use ticket::*;
 // Keeping this tied to tickets/capability negotiation prevents a desktop from
 // treating an older SQL-only Gateway as a managed MongoDB or Elasticsearch
 // endpoint.
-pub const ENTERPRISE_CONTRACT_VERSION: u16 = 2;
+pub const ENTERPRISE_CONTRACT_VERSION: u16 = 3;

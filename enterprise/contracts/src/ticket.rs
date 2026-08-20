@@ -22,6 +22,10 @@ pub struct AccessSessionClaims {
     pub organization_id: Uuid,
     pub project_id: Uuid,
     pub data_source_id: Uuid,
+    /// Canonical database driver registered by the control plane. The Gateway
+    /// compares this signed identity to its local source before it resolves a
+    /// secret or executes a request.
+    pub driver: String,
     pub actions: BTreeSet<AccessAction>,
     pub resource_path: Vec<String>,
     /// Effective permit scopes for the ticket action. Discovery may expose
@@ -187,6 +191,7 @@ mod tests {
             organization_id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             data_source_id: Uuid::new_v4(),
+            driver: "postgres".into(),
             actions: BTreeSet::from([AccessAction::QueryRead]),
             resource_path: vec!["warehouse".into(), "public".into()],
             allowed_resource_paths: vec![vec!["warehouse".into(), "public".into()]],

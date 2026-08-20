@@ -242,7 +242,7 @@ async fn create_access_session(
         ));
     }
 
-    let (gateway_id, gateway_endpoint, policy_revision) = state
+    let (gateway_id, gateway_endpoint, policy_revision, driver) = state
         .store
         .gateway_for_source(
             input.organization_id,
@@ -270,6 +270,7 @@ async fn create_access_session(
         organization_id: input.organization_id,
         project_id: input.project_id,
         data_source_id: input.data_source_id,
+        driver,
         actions: BTreeSet::from([input.action]),
         resource_path: input.resource_path,
         allowed_resource_paths,
@@ -574,9 +575,15 @@ async fn register_data_source(
     let driver = input.driver.trim().to_ascii_lowercase();
     if !matches!(
         driver.as_str(),
-        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic" | "redis"
-    )
-        || input.capabilities.is_empty()
+        "postgres"
+            | "postgresql"
+            | "mysql"
+            | "mongodb"
+            | "mongo"
+            | "elasticsearch"
+            | "elastic"
+            | "redis"
+    ) || input.capabilities.is_empty()
         || !input
             .capabilities
             .iter()

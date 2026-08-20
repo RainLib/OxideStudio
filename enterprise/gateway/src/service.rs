@@ -224,6 +224,7 @@ impl DataPlane for DataPlaneService {
             &peer_certificate_fingerprint,
         )?;
         let source = self.require_source(authorization.data_source_id)?;
+        require_ticket_driver(&claims, source)?;
         Ok(Response::new(CapabilitiesResponse {
             contract_version: ENTERPRISE_CONTRACT_VERSION.into(),
             capabilities: source.capabilities.clone(),
@@ -249,6 +250,7 @@ impl DataPlane for DataPlaneService {
             &peer_certificate_fingerprint,
         )?;
         let source = self.require_source(authorization.data_source_id)?;
+        require_ticket_driver(&claims, source)?;
         require_metadata_scope_for_source(&request, &authorization.resource_path, &source.driver)?;
         let driver = self.driver(authorization.data_source_id).await?;
         let mut items = match request.kind.as_str() {
@@ -394,7 +396,8 @@ impl DataPlane for DataPlaneService {
             AccessAction::QueryRead,
             &peer_certificate_fingerprint,
         )?;
-        self.require_source(authorization.data_source_id)?;
+        let source = self.require_source(authorization.data_source_id)?;
+        require_ticket_driver(&claims, source)?;
         let driver = self.driver(authorization.data_source_id).await?;
         let dialect = driver
             .statement_scan_dialect()
@@ -463,6 +466,7 @@ impl DataPlane for DataPlaneService {
             &peer_certificate_fingerprint,
         )?;
         let source = self.require_source(authorization.data_source_id)?;
+        require_ticket_driver(&claims, source)?;
         let provider = canonical_native_provider(&request.provider)?;
         if canonical_native_provider(&source.driver)? != provider {
             return Err(Status::failed_precondition(
@@ -546,6 +550,35 @@ fn canonical_native_provider(value: &str) -> Result<&'static str, Status> {
         _ => Err(Status::failed_precondition(
             "managed data source does not support native read-only queries",
         )),
+    }
+}
+
+fn require_ticket_driver(
+    claims: &oxide_enterprise_contracts::AccessSessionClaims,
+    source: &DataSourceConfig,
+) -> Result<(), Status> {
+    if canonical_managed_driver(&claims.driver) != canonical_managed_driver(&source.driver) {
+        tracing::warn!(
+            data_source_id = %source.id,
+            ticket_driver = %claims.driver,
+            source_driver = %source.driver,
+            "managed Gateway source driver does not match the signed ticket"
+        );
+        return Err(Status::failed_precondition(
+            "managed data source driver configuration does not match the signed access ticket",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_managed_driver(value: &str) -> &str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" => "postgres",
+        "mysql" => "mysql",
+        "mongodb" | "mongo" => "mongodb",
+        "elasticsearch" | "elastic" => "elasticsearch",
+        "redis" => "redis",
+        _ => "unsupported",
     }
 }
 
@@ -1445,5 +1478,46 @@ mod tests {
             metadata_parent_path_for_source(&elastic, "elasticsearch").unwrap(),
             ["logs-2026"]
         );
+    }
+
+    #[test]
+    fn signed_ticket_driver_must_match_the_gateway_source_driver() {
+        let mut claims = oxide_enterprise_contracts::AccessSessionClaims {
+            version: ENTERPRISE_CONTRACT_VERSION,
+            issuer: "test".into(),
+            audience: Uuid::new_v4(),
+            principal_id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            device_certificate_fingerprint: "f".into(),
+            organization_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            data_source_id: Uuid::new_v4(),
+            driver: "postgres".into(),
+            actions: Default::default(),
+            resource_path: vec![],
+            allowed_resource_paths: vec![],
+            forbidden_resource_paths: vec![],
+            policy_revision: "p".into(),
+            nonce: Uuid::new_v4(),
+            issued_at: 0,
+            expires_at: 1,
+            max_rows: 1,
+            max_result_bytes: 4096,
+        };
+        let source = DataSourceConfig {
+            id: claims.data_source_id,
+            driver: "mysql".into(),
+            secret_ref: "vault:test".into(),
+            connection_template: None,
+            allow_insecure_transport: false,
+            capabilities: vec!["query.read".into()],
+        };
+        assert!(require_ticket_driver(&claims, &source).is_err());
+        claims.driver = "postgresql".into();
+        let postgres = DataSourceConfig {
+            driver: "postgres".into(),
+            ..source
+        };
+        assert!(require_ticket_driver(&claims, &postgres).is_ok());
     }
 }

@@ -1727,9 +1727,9 @@ impl ControlPlaneStore {
         organization_id: Uuid,
         project_id: Uuid,
         data_source_id: Uuid,
-    ) -> Result<(Uuid, String, String)> {
+    ) -> Result<(Uuid, String, String, String)> {
         let row = sqlx::query(
-            "SELECT d.gateway_id, d.policy_revision, g.direct_endpoint, g.last_seen_at
+            "SELECT d.gateway_id, d.policy_revision, d.driver, g.direct_endpoint, g.last_seen_at
              FROM data_sources d
              JOIN gateways g ON g.id = d.gateway_id
              WHERE d.id = $1 AND d.organization_id = $2 AND d.project_id = $3
@@ -1751,6 +1751,7 @@ impl ControlPlaneStore {
             row.try_get("gateway_id")?,
             row.try_get("direct_endpoint")?,
             row.try_get("policy_revision")?,
+            row.try_get("driver")?,
         ))
     }
 
