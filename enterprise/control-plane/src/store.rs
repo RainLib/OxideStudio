@@ -313,13 +313,20 @@ impl ControlPlaneStore {
         .execute(&mut *tx)
         .await?;
         let fingerprints = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT d.certificate_fingerprint
-             FROM managed_devices d
-             JOIN organization_memberships m
-               ON m.organization_id = d.organization_id AND m.user_id = d.user_id
-             WHERE d.organization_id = $1
-               AND (d.status = 'revoked' OR m.status <> 'active')
-             ORDER BY d.certificate_fingerprint",
+            "SELECT certificate_fingerprint
+             FROM (
+                SELECT d.certificate_fingerprint
+                FROM managed_devices d
+                JOIN organization_memberships m
+                  ON m.organization_id = d.organization_id AND m.user_id = d.user_id
+                WHERE d.organization_id = $1
+                  AND (d.status = 'revoked' OR m.status <> 'active')
+                UNION
+                SELECT r.certificate_fingerprint
+                FROM retired_device_certificates r
+                WHERE r.organization_id = $1
+             ) revoked_certificates
+             ORDER BY certificate_fingerprint",
         )
         .bind(organization_id)
         .fetch_all(&mut *tx)
@@ -504,6 +511,32 @@ impl ControlPlaneStore {
         if !member {
             anyhow::bail!("device owner is not an active organization member");
         }
+        let retired: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM retired_device_certificates
+               WHERE organization_id = $1 AND certificate_fingerprint = $2
+             )",
+        )
+        .bind(organization_id)
+        .bind(certificate_fingerprint)
+        .fetch_one(&mut *tx)
+        .await?;
+        if retired {
+            anyhow::bail!(
+                "a rotated or revoked device certificate cannot be enrolled again; issue a new certificate"
+            );
+        }
+        let previous_certificate_fingerprint = sqlx::query_scalar::<_, String>(
+            "SELECT certificate_fingerprint
+             FROM managed_devices
+             WHERE organization_id = $1 AND user_id = $2 AND device_id = $3
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(device_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO managed_devices
              (organization_id, user_id, device_id, certificate_fingerprint, display_name, enrolled_by)
@@ -522,6 +555,22 @@ impl ControlPlaneStore {
         .bind(actor_user_id)
         .execute(&mut *tx)
         .await?;
+        let rotated_certificate_fingerprint = rotated_device_certificate(
+            previous_certificate_fingerprint.as_deref(),
+            certificate_fingerprint,
+        );
+        if let Some(previous_certificate_fingerprint) = rotated_certificate_fingerprint {
+            sqlx::query(
+                "INSERT INTO retired_device_certificates
+                 (organization_id, certificate_fingerprint, reason)
+                 VALUES ($1, $2, 'certificate_rotated')
+                 ON CONFLICT (organization_id, certificate_fingerprint) DO NOTHING",
+            )
+            .bind(organization_id)
+            .bind(previous_certificate_fingerprint)
+            .execute(&mut *tx)
+            .await?;
+        }
         write_management_audit(
             &mut tx,
             organization_id,
@@ -529,8 +578,16 @@ impl ControlPlaneStore {
             None,
             None,
             &["managed-devices".into(), device_id.to_string()],
-            "managed-device.enroll",
-            serde_json::json!({ "principalId": user_id, "certificateFingerprint": certificate_fingerprint }),
+            if rotated_certificate_fingerprint.is_some() {
+                "managed-device.certificate-rotate"
+            } else {
+                "managed-device.enroll"
+            },
+            serde_json::json!({
+                "principalId": user_id,
+                "certificateFingerprint": certificate_fingerprint,
+                "replacedCertificateFingerprint": rotated_certificate_fingerprint,
+            }),
         )
         .await?;
         tx.commit().await?;
@@ -545,20 +602,31 @@ impl ControlPlaneStore {
         device_id: Uuid,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let result = sqlx::query(
+        let certificate_fingerprint = sqlx::query_scalar::<_, String>(
             "UPDATE managed_devices
              SET status = 'revoked', revoked_at = now()
              WHERE organization_id = $1 AND user_id = $2 AND device_id = $3
-               AND status = 'active'",
+               AND status = 'active'
+             RETURNING certificate_fingerprint",
         )
         .bind(organization_id)
         .bind(user_id)
         .bind(device_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(certificate_fingerprint) = certificate_fingerprint else {
+            anyhow::bail!("managed device is not active or does not belong to this organization");
+        };
+        sqlx::query(
+            "INSERT INTO retired_device_certificates
+             (organization_id, certificate_fingerprint, reason)
+             VALUES ($1, $2, 'device_revoked')
+             ON CONFLICT (organization_id, certificate_fingerprint) DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(&certificate_fingerprint)
         .execute(&mut *tx)
         .await?;
-        if result.rows_affected() != 1 {
-            anyhow::bail!("managed device is not active or does not belong to this organization");
-        }
         write_management_audit(
             &mut tx,
             organization_id,
@@ -567,7 +635,10 @@ impl ControlPlaneStore {
             None,
             &["managed-devices".into(), device_id.to_string()],
             "managed-device.revoke",
-            serde_json::json!({ "principalId": user_id }),
+            serde_json::json!({
+                "principalId": user_id,
+                "certificateFingerprint": certificate_fingerprint,
+            }),
         )
         .await?;
         tx.commit().await?;
@@ -1585,6 +1656,13 @@ fn gateway_heartbeat_is_fresh(
         && last_seen_at >= now - chrono::Duration::seconds(GATEWAY_TICKET_HEARTBEAT_MAX_AGE_SECONDS)
 }
 
+fn rotated_device_certificate<'a>(
+    previous_certificate_fingerprint: Option<&'a str>,
+    next_certificate_fingerprint: &str,
+) -> Option<&'a str> {
+    previous_certificate_fingerprint.filter(|previous| *previous != next_certificate_fingerprint)
+}
+
 #[cfg(test)]
 mod enrollment_tests {
     use super::*;
@@ -1688,6 +1766,16 @@ mod enrollment_tests {
             Some(now + chrono::Duration::seconds(1)),
             now,
         ));
+    }
+
+    #[test]
+    fn device_certificate_rotation_only_retires_a_replaced_fingerprint() {
+        assert_eq!(rotated_device_certificate(None, "new"), None);
+        assert_eq!(rotated_device_certificate(Some("same"), "same"), None);
+        assert_eq!(
+            rotated_device_certificate(Some("previous"), "replacement"),
+            Some("previous")
+        );
     }
 }
 
