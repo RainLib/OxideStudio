@@ -404,6 +404,14 @@ small {
   box-shadow: 0 0 0 1px rgb(233 98 41 / 25%);
 }
 
+.inline-form-hint {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+  color: #aeb6c2;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .gateway-registration-form {
   grid-template-columns: repeat(2, minmax(220px, 1fr)) auto;
 }

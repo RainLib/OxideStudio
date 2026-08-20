@@ -397,11 +397,7 @@ export function App() {
         capabilities: [
           "resourceDiscover",
           "metadataRead",
-          ...(sourceDriver === "postgres" ||
-          sourceDriver === "postgresql" ||
-          sourceDriver === "mysql"
-            ? ["queryRead"]
-            : []),
+          "queryRead",
         ],
       });
       setSourceName("");
@@ -711,8 +707,22 @@ export function App() {
                     >
                       <option value="postgres">PostgreSQL</option>
                       <option value="mysql">MySQL</option>
+                      <option value="mongodb">MongoDB</option>
+                      <option value="elasticsearch">Elasticsearch</option>
+                      <option value="redis">Redis</option>
                     </select>
                   </label>
+                  {(sourceDriver === "mongodb" ||
+                    sourceDriver === "elasticsearch" ||
+                    sourceDriver === "redis") && (
+                    <p className="inline-form-hint">
+                      {sourceDriver === "mongodb"
+                        ? "Read-only Gateway: one collection per query."
+                        : sourceDriver === "elasticsearch"
+                          ? "Read-only Gateway: one concrete index search per query."
+                          : "Read-only Gateway: one key and one allowlisted read command per query."}
+                    </p>
+                  )}
                   <button className="primary-button" disabled={loading}>
                     Register data source
                   </button>
