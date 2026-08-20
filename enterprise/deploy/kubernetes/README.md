@@ -28,6 +28,10 @@ committed to source control.
    deployment reference.
 2. Replace all `example.invalid` values and the NetworkPolicy selectors with
    the real control-plane, database, Vault, IdP, SIEM, and ingress identities.
+   The reference Gateway egress rule lists the standard managed-driver ports
+   (PostgreSQL, MySQL, Redis, Elasticsearch, MongoDB) so every supported
+   source can function; narrow it to each approved database CIDR/FQDN and port
+   before production rollout.
 3. Use an mTLS-capable L4 load balancer or TLS-passthrough ingress for the
    Gateway. TLS termination in front of the Gateway must preserve the original
    client certificate, otherwise ticket/device binding correctly fails closed.

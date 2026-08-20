@@ -251,6 +251,12 @@ async fn create_access_session(
         )
         .await
         .map_err(|error| {
+            if error
+                .to_string()
+                .contains("target binding renewal before issuing access tickets")
+            {
+                return ApiError::target_binding_required();
+            }
             tracing::warn!(error = %error, "managed access ticket was blocked by Gateway availability");
             ApiError::gateway_unavailable()
         })?;
@@ -1125,6 +1131,14 @@ impl ApiError {
         }
     }
 
+    fn target_binding_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "TARGET_BINDING_REQUIRED",
+            message: "managed data source must be renewed with a target binding before access can be issued".into(),
+        }
+    }
+
     fn desktop_upgrade_required() -> Self {
         Self {
             status: StatusCode::UPGRADE_REQUIRED,
@@ -1256,6 +1270,13 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, "GATEWAY_UNAVAILABLE");
         assert!(!error.message.contains("gateway.example"));
+    }
+
+    #[test]
+    fn target_binding_renewal_is_actionable_and_not_retryable() {
+        let error = ApiError::target_binding_required();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "TARGET_BINDING_REQUIRED");
     }
 
     #[test]

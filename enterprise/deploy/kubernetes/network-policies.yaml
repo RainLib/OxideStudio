@@ -31,8 +31,16 @@ spec:
   ingress:
     - ports: [{ protocol: TCP, port: 8790 }]
   egress:
+    # Replace this broad reference rule with selectors/CIDRs for the actual
+    # managed database targets. Keep only the ports required by registered
+    # sources; each connection is still ticket- and target-binding scoped.
     - to:
         - ipBlock: { cidr: 0.0.0.0/0 }
       ports:
         - { protocol: TCP, port: 443 }
         - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 3306 }
+        - { protocol: TCP, port: 6379 }
+        - { protocol: TCP, port: 6380 }
+        - { protocol: TCP, port: 9200 }
+        - { protocol: TCP, port: 27017 }
