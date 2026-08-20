@@ -15,6 +15,7 @@ import {
 import {
   adminApi,
   type AdminAuditEvent,
+  type GatewayCertificateRotation,
   type AdminOverview,
   type GatewayRegistration,
 } from "./api";
@@ -53,6 +54,10 @@ export function App() {
     useState("");
   const [gatewayEnrollment, setGatewayEnrollment] =
     useState<GatewayRegistration | null>(null);
+  const [gatewayRotation, setGatewayRotation] =
+    useState<GatewayCertificateRotation | null>(null);
+  const [gatewayRotationTarget, setGatewayRotationTarget] = useState<string | null>(null);
+  const [gatewayRotationFingerprint, setGatewayRotationFingerprint] = useState("");
   const [sourceProjectId, setSourceProjectId] = useState("");
   const [sourceGatewayId, setSourceGatewayId] = useState("");
   const [sourceName, setSourceName] = useState("");
@@ -323,6 +328,32 @@ export function App() {
       setGatewayEnrollmentPublicKey("");
       setGatewayOpen(false);
       setGatewayEnrollment(registration);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
+  const rotateGatewayCertificate = async (event: FormEvent) => {
+    event.preventDefault();
+    const gatewayId = gatewayRotationTarget;
+    if (!gatewayId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const rotation = await adminApi.rotateGatewayCertificate(
+        organizationId,
+        gatewayId,
+        gatewayRotationFingerprint,
+      );
+      setGatewayRotation(rotation);
+      setGatewayRotationTarget(null);
+      setGatewayRotationFingerprint("");
       await refresh();
     } catch (requestError) {
       setError(
@@ -1053,6 +1084,65 @@ export function App() {
                   </p>
                 </div>
               )}
+              {gatewayRotationTarget && (
+                <form className="inline-form gateway-rotation-form" onSubmit={rotateGatewayCertificate}>
+                  <label>
+                    Replacement TLS certificate SHA-256
+                    <input
+                      required
+                      minLength={64}
+                      maxLength={64}
+                      pattern="[A-Fa-f0-9]{64}"
+                      placeholder="64 hexadecimal characters"
+                      value={gatewayRotationFingerprint}
+                      onChange={(event) => setGatewayRotationFingerprint(event.target.value)}
+                    />
+                  </label>
+                  <button className="primary-button" disabled={loading}>
+                    Create rotation token
+                  </button>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    disabled={loading}
+                    onClick={() => {
+                      setGatewayRotationTarget(null);
+                      setGatewayRotationFingerprint("");
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
+              {gatewayRotation && (
+                <div className="enrollment-instructions" role="status">
+                  <div>
+                    <strong>Save this one-time certificate rotation token now.</strong>
+                    <p>
+                      Deploy the replacement TLS certificate, keep the existing
+                      Gateway signing-key file, and restart before {" "}
+                      {new Date(gatewayRotation.enrollment.expiresAt).toLocaleString()}.
+                    </p>
+                  </div>
+                  <label>
+                    Certificate rotation token
+                    <textarea
+                      readOnly
+                      value={gatewayRotation.enrollment.token}
+                      aria-label="One-time Gateway certificate rotation token"
+                    />
+                  </label>
+                  <code className="enrollment-config">
+                    OXIDE_GATEWAY_ID={gatewayRotation.id}{"\n"}
+                    OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE=/run/secrets/oxide-gateway-certificate-rotation{"\n"}
+                    OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE=/run/secrets/oxide-gateway-enrollment-key
+                  </code>
+                  <p className="enrollment-note">
+                    The control plane never receives the private key. Remove the
+                    token file after the new Gateway instance is active.
+                  </p>
+                </div>
+              )}
               <div className="gateway-list">
                 {overview?.gateways.map((gateway) => (
                   <div className="gateway-line" key={gateway.id}>
@@ -1064,6 +1154,18 @@ export function App() {
                     <span className={`status ${gateway.status}`}>
                       {gateway.status}
                     </span>
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      disabled={loading || gateway.status !== "active"}
+                      onClick={() => {
+                        setGatewayRotationTarget(gateway.id);
+                        setGatewayRotation(null);
+                        setGatewayRotationFingerprint("");
+                      }}
+                    >
+                      Rotate cert
+                    </button>
                     <button
                       type="button"
                       className="quiet-button danger-button"

@@ -97,6 +97,10 @@ pub fn router(state: AppState) -> Router {
             post(revoke_gateway),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/gateways/{gateway_id}/rotate-certificate",
+            post(rotate_gateway_certificate),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/managed-devices",
             post(register_managed_device),
         )
@@ -361,6 +365,12 @@ struct RegisterGatewayRequest {
     direct_endpoint: String,
     certificate_fingerprint: String,
     enrollment_public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RotateGatewayCertificateRequest {
+    certificate_fingerprint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -687,6 +697,37 @@ async fn revoke_gateway(
     Ok(Json(serde_json::json!({
         "gatewayId": gateway_id,
         "status": "revoked",
+    })))
+}
+
+async fn rotate_gateway_certificate(
+    State(state): State<AppState>,
+    Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<RotateGatewayCertificateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let certificate_fingerprint =
+        normalize_certificate_fingerprint(&input.certificate_fingerprint)?;
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let rotation = state
+        .store
+        .rotate_gateway_certificate(
+            organization_id,
+            user.id,
+            gateway_id,
+            &certificate_fingerprint,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "id": gateway_id,
+        "status": "rotationPending",
+        "enrollment": {
+            "token": rotation.enrollment_token,
+            "expiresAt": rotation.enrollment_expires_at,
+            "certificateFingerprint": certificate_fingerprint,
+        },
     })))
 }
 

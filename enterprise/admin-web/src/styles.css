@@ -320,7 +320,7 @@ small {
 
 .gateway-line {
   display: grid;
-  grid-template-columns: 24px 1fr 100px auto;
+  grid-template-columns: 24px minmax(0, 1fr) 100px auto auto;
   align-items: center;
   min-height: 48px;
   border-bottom: 1px solid #2a2e34;

@@ -36,6 +36,12 @@ pub struct GatewayRegistration {
 }
 
 #[derive(Debug)]
+pub struct GatewayCertificateRotation {
+    pub enrollment_token: String,
+    pub enrollment_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug)]
 pub struct GatewayRevocationSnapshot {
     pub revoked_device_certificate_fingerprints: Vec<String>,
     pub revoked_access_nonces: Vec<Uuid>,
@@ -192,7 +198,9 @@ impl ControlPlaneStore {
         let mut tx = self.pool.begin().await?;
         let gateway = sqlx::query(
             "SELECT organization_id, direct_endpoint, certificate_fingerprint, enrollment_public_key,
-                    enrollment_token_hash, enrollment_expires_at, status
+                    enrollment_token_hash, enrollment_expires_at, status,
+                    pending_certificate_fingerprint, certificate_rotation_token_hash,
+                    certificate_rotation_expires_at
              FROM gateways
              WHERE id = $1
              FOR UPDATE",
@@ -209,6 +217,12 @@ impl ControlPlaneStore {
         let expires_at: Option<chrono::DateTime<chrono::Utc>> =
             gateway.try_get("enrollment_expires_at")?;
         let status: String = gateway.try_get("status")?;
+        let pending_certificate_fingerprint: Option<String> =
+            gateway.try_get("pending_certificate_fingerprint")?;
+        let rotation_token_hash: Option<String> =
+            gateway.try_get("certificate_rotation_token_hash")?;
+        let rotation_expires_at: Option<chrono::DateTime<chrono::Utc>> =
+            gateway.try_get("certificate_rotation_expires_at")?;
         let enrollment_token = enrollment_token.unwrap_or_default();
         let identity_proof_valid = verify_enrollment_signature(
             enrollment_public_key.as_deref(),
@@ -220,12 +234,49 @@ impl ControlPlaneStore {
         );
         if !matches!(status.as_str(), "pending" | "active")
             || stored_endpoint != direct_endpoint
-            || stored_fingerprint.as_deref() != Some(certificate_fingerprint)
             || !identity_proof_valid
         {
             anyhow::bail!("Gateway enrollment proof was rejected");
         }
         if status == "active" {
+            let rotation_is_pending = pending_certificate_fingerprint.is_some()
+                || rotation_token_hash.is_some()
+                || rotation_expires_at.is_some();
+            if rotation_is_pending {
+                let rotation_is_valid = pending_certificate_fingerprint.as_deref()
+                    == Some(certificate_fingerprint)
+                    && rotation_expires_at.is_some_and(|value| value > chrono::Utc::now())
+                    && rotation_token_hash.as_deref().is_some_and(|expected| {
+                        constant_time_equals(
+                            expected.as_bytes(),
+                            digest_enrollment_token(enrollment_token).as_bytes(),
+                        )
+                    });
+                if !rotation_is_valid {
+                    anyhow::bail!("Gateway certificate rotation proof was rejected");
+                }
+                sqlx::query(
+                    "UPDATE gateways
+                     SET certificate_fingerprint = $2, last_seen_at = now(), activated_at = now(),
+                         pending_certificate_fingerprint = NULL,
+                         certificate_rotation_token_hash = NULL,
+                         certificate_rotation_expires_at = NULL
+                     WHERE id = $1 AND status = 'active'",
+                )
+                .bind(gateway_id)
+                .bind(certificate_fingerprint)
+                .execute(&mut *tx)
+                .await?;
+                write_gateway_certificate_rotation_audit(&mut tx, organization_id, gateway_id)
+                    .await?;
+                tx.commit().await?;
+                return Ok(organization_id);
+            }
+            if !enrollment_token.is_empty()
+                || stored_fingerprint.as_deref() != Some(certificate_fingerprint)
+            {
+                anyhow::bail!("Gateway active identity proof was rejected");
+            }
             sqlx::query("UPDATE gateways SET last_seen_at = now() WHERE id = $1")
                 .bind(gateway_id)
                 .execute(&mut *tx)
@@ -259,6 +310,72 @@ impl ControlPlaneStore {
         write_gateway_enrollment_audit(&mut tx, organization_id, gateway_id).await?;
         tx.commit().await?;
         Ok(organization_id)
+    }
+
+    pub async fn rotate_gateway_certificate(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        gateway_id: Uuid,
+        certificate_fingerprint: &str,
+    ) -> Result<GatewayCertificateRotation> {
+        let enrollment_token = generate_enrollment_token();
+        let enrollment_token_hash = digest_enrollment_token(&enrollment_token);
+        let mut tx = self.pool.begin().await?;
+        let current_fingerprint = sqlx::query_scalar::<_, String>(
+            "SELECT certificate_fingerprint
+             FROM gateways
+             WHERE id = $1 AND organization_id = $2 AND status = 'active'
+             FOR UPDATE",
+        )
+        .bind(gateway_id)
+        .bind(organization_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Gateway is not active in this organization")?;
+        if current_fingerprint == certificate_fingerprint {
+            anyhow::bail!(
+                "Gateway certificate rotation requires a different certificate fingerprint"
+            );
+        }
+        let rotation_expires_at = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "UPDATE gateways
+             SET pending_certificate_fingerprint = $3,
+                 certificate_rotation_token_hash = $4,
+                 certificate_rotation_expires_at = now() + interval '15 minutes'
+             WHERE id = $1 AND organization_id = $2
+             RETURNING certificate_rotation_expires_at",
+        )
+        .bind(gateway_id)
+        .bind(organization_id)
+        .bind(certificate_fingerprint)
+        .bind(&enrollment_token_hash)
+        .fetch_one(&mut *tx)
+        .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &[
+                "gateways".into(),
+                gateway_id.to_string(),
+                "certificate-rotation".into(),
+            ],
+            "gateway.certificate-rotation.request",
+            serde_json::json!({
+                "previousCertificateFingerprint": current_fingerprint,
+                "pendingCertificateFingerprint": certificate_fingerprint,
+                "expiresAt": rotation_expires_at,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(GatewayCertificateRotation {
+            enrollment_token,
+            enrollment_expires_at: rotation_expires_at,
+        })
     }
 
     pub async fn gateway_revocation_snapshot(
@@ -1924,6 +2041,26 @@ async fn write_gateway_enrollment_audit(
     .bind(serde_json::json!(["gateways", gateway_id.to_string()]))
     .bind(Uuid::new_v4())
     .bind(serde_json::json!({ "status": "active", "proof": "certificate-and-one-time-token" }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn write_gateway_certificate_rotation_audit(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    gateway_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO audit_events
+         (id, organization_id, resource_path, action, decision, reason_code, request_id, source, metadata)
+         VALUES ($1, $2, $3, 'gateway.certificate-rotation.activate', 'allow', 'GATEWAY_ROTATION_PROOF_ACCEPTED', $4, 'gateway', $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(organization_id)
+    .bind(serde_json::json!(["gateways", gateway_id.to_string()]))
+    .bind(Uuid::new_v4())
+    .bind(serde_json::json!({ "status": "active", "proof": "current-signing-key-and-one-time-token" }))
     .execute(&mut **tx)
     .await?;
     Ok(())

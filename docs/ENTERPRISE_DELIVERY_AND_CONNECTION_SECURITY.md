@@ -34,7 +34,7 @@
 | 设备身份绑定与证书轮换 | 管理员登记 organization/user/device UUID 与 mTLS 叶证书 SHA-256 指纹；控制面只为 active 记录签发 ticket，ticket 带指纹，Gateway 每个 RPC 都从 TLS peer certificate 计算并比较。为同一设备登记新证书时，旧指纹会在同一事务写入永久 retired-certificate 记录，并随签名 Gateway 快照分发；被 rotate 或 revoke 的指纹不能再次登记。 | 被窃取的短期 ticket 不能在另一张客户证书上重放；轮换旧证书最多在 5 秒快照传播窗口内仍可能被 Gateway 识别，之后即使 ticket 未到期也会被拒绝。 | 增加自动证书签发/轮换 enrollment、撤销传播指标和 control-plane 到 Gateway 的低延迟 deny cache。 |
 | 设备撤销传播 | Gateway 使用登记的 Ed25519 身份每 5 秒拉取本组织已撤销的设备证书指纹；启动前必须成功获取快照，连续 20 秒未刷新则 fail closed。 | 控制面或网络不可用超过上限时，managed 数据面会保护性拒绝而非接受过期撤销状态。 | 增加 nonce、用户和 Gateway 级撤销，并为大组织改为增量 feed。 |
 | 成员、所有权与 Gateway 紧急停用 | 管理端可 suspend/reactivate 成员（保留最后一个 active owner）或 revoke pending/active Gateway。当前 owner 可以把所有权转给另一位 active 成员；该操作在组织级事务锁内把原 owner 降为 administrator、提升新 owner，并写入审计。成员停用立即阻止 ticket 签发，且其所有设备证书进入 Gateway 撤销快照；Gateway revoke 会阻止后续 source 路由和快照刷新，20 秒后数据面 fail closed。 | 已在执行中的 RPC 不会强制中断；低延迟边界由 5 秒刷新和 20 秒最大快照年龄决定。 | 增加 Gateway 证书轮换、管理通知和可审计的 ownership recovery runbook。 |
-| Gateway 注册、心跳与激活证明 | 控制面登记证书 SHA-256 指纹和 Gateway 专用 Ed25519 公钥，签发 15 分钟的一次性 token（仅在创建响应中返回其明文）；Gateway 在开始监听前必须通过 HTTPS 回连，提交端点、指纹、token 的 Ed25519 签名。控制面只保存 token 摘要，成功后立刻销毁摘要并写入 Gateway 系统审计事件；后续 signed revocation-feed 拉取会刷新 `last_seen_at`。签发新桌面 ticket 前，控制面要求 Gateway 的签名心跳不早于 30 秒；缺失、过期或未来时间一律拒绝。 | token 只可用一次，失联 Gateway 不能继续取得新票据；已有 ticket 仍受其 60 秒 TTL 和 Gateway 20 秒 fail-closed feed 上限约束。 | 加入证书轮换 enrollment、主动健康指标和多副本可用性策略。 |
+| Gateway 注册、心跳、激活与证书轮换 | 控制面登记证书 SHA-256 指纹和 Gateway 专用 Ed25519 公钥，签发 15 分钟的一次性 token（仅在创建响应中返回其明文）；Gateway 在开始监听前必须通过 HTTPS 回连，提交端点、指纹、token 的 Ed25519 签名。对 active Gateway，管理员可创建另一枚 15 分钟的轮换 token；控制面保留旧证书身份，直到携带新证书、同一 Gateway 签名私钥和该 token 的实例完成接管，随后原子替换指纹、销毁挑战并写入审计。后续 signed revocation-feed 拉取会刷新 `last_seen_at`。签发新桌面 ticket 前，控制面要求 Gateway 的签名心跳不早于 30 秒；缺失、过期或未来时间一律拒绝。 | token 只可用一次，单独持有新证书或 token 都不能接管；失联 Gateway 不能继续取得新票据；已有 ticket 仍受其 60 秒 TTL 和 Gateway 20 秒 fail-closed feed 上限约束。 | 增加主动健康指标、多副本可用性策略和真实集群 certificate rollout 验收。 |
 | 票据撤销 | 管理员可撤销精确 ticket nonce；Gateway 快照分发已撤销 nonce、设备证书指纹及被 suspend 成员的设备。 | 撤销传播窗口由 5 秒刷新决定；已开始的 RPC 不会被强制中断。 | 为大组织增加游标/增量 feed、用户/Gateway 级显式失效与撤销指标。 |
 | 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |
 | 精确 ticket 撤销 | 成功签发 ticket 会将 nonce/expiry 写入审计元数据；管理员只能撤销本组织已有且未过期的 nonce。Gateway 快照同时分发 nonce 和设备指纹，在每个 RPC 校验两者。 | 快照仍为全量小集合，撤销传播窗口由 5 秒刷新决定。 | 为大组织增加游标/增量 feed 和撤销指标。 |
@@ -66,9 +66,10 @@ Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动
 5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
 6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
 7. Gateway 到 PostgreSQL/MySQL 的数据库 URL 默认必须验证服务端 TLS 身份。仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
+8. Gateway TLS 轮换时，管理员只通过控制面取得一次性 token；将 token 写入私有 `OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE`，并以新 TLS 证书、原有 `OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE` 重启 Gateway。新实例成功接管后立即删除 token 文件；不得通过控制面、日志或共享配置传输私钥。
 
 ## 验收与延后验证
 
 当前可本地验证：contracts/Gateway 单元测试、control plane API 输入拒绝、release manifest/签名检查、desktop managed driver 不暴露写入能力。
 
-必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询以及未来 MongoDB/Elasticsearch Gateway adapter。真实数据库验证不会在控制逻辑完成前提前执行。
+必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换/rollback 与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询以及未来 MongoDB/Elasticsearch Gateway adapter。真实数据库验证不会在控制逻辑完成前提前执行。

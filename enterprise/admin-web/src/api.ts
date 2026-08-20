@@ -64,6 +64,16 @@ export interface GatewayRegistration {
   };
 }
 
+export interface GatewayCertificateRotation {
+  id: string;
+  status: "rotationPending";
+  enrollment: {
+    token: string;
+    expiresAt: string;
+    certificateFingerprint: string;
+  };
+}
+
 const baseUrl = (
   import.meta.env.VITE_OXIDE_CONTROL_PLANE_URL || ""
 ).replace(/\/$/, "");
@@ -138,6 +148,18 @@ export const adminApi = {
           certificateFingerprint,
           enrollmentPublicKey,
         }),
+      },
+    ),
+  rotateGatewayCertificate: (
+    organizationId: string,
+    gatewayId: string,
+    certificateFingerprint: string,
+  ) =>
+    request<GatewayCertificateRotation>(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/rotate-certificate`,
+      {
+        method: "POST",
+        body: JSON.stringify({ certificateFingerprint }),
       },
     ),
   registerDataSource: (
