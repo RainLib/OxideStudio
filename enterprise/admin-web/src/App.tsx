@@ -170,6 +170,22 @@ export function App() {
     }
   };
 
+  const revokeManagedDevice = async (userId: string, deviceId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.revokeManagedDevice(organizationId, { userId, deviceId });
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
   const registerGateway = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true);
@@ -640,6 +656,64 @@ export function App() {
                   </button>
                 </form>
               )}
+              {deviceOpen && (
+                <form
+                  className="inline-form device-enrollment-form"
+                  onSubmit={registerManagedDevice}
+                >
+                  <label>
+                    Member
+                    <select
+                      required
+                      value={deviceUserId}
+                      onChange={(event) => setDeviceUserId(event.target.value)}
+                    >
+                      <option value="">Select member</option>
+                      {overview?.members
+                        .filter((member) => member.status === "active")
+                        .map((member) => (
+                          <option key={member.id} value={member.id}>
+                            {member.displayName}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    Device UUID
+                    <input
+                      required
+                      value={deviceId}
+                      placeholder="Desktop enrollment ID"
+                      onChange={(event) => setDeviceId(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Client certificate SHA-256
+                    <input
+                      required
+                      minLength={64}
+                      maxLength={64}
+                      pattern="[A-Fa-f0-9]{64}"
+                      value={deviceFingerprint}
+                      onChange={(event) =>
+                        setDeviceFingerprint(event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    Device name
+                    <input
+                      maxLength={128}
+                      value={deviceName}
+                      placeholder="Optional"
+                      onChange={(event) => setDeviceName(event.target.value)}
+                    />
+                  </label>
+                  <button className="primary-button" disabled={loading}>
+                    Enroll device
+                  </button>
+                </form>
+              )}
               <div className="table">
                 <div className="table-row member-row table-head">
                   <span>Member</span>
@@ -658,6 +732,55 @@ export function App() {
                     </span>
                   </div>
                 ))}
+              </div>
+              <div className="device-heading">
+                <strong>Managed devices</strong>
+                <span>
+                  Revoke stops new tickets immediately; an already issued
+                  ticket remains bounded by its 60-second lifetime.
+                </span>
+              </div>
+              <div className="table device-table">
+                <div className="table-row device-row table-head">
+                  <span>Device</span>
+                  <span>Owner</span>
+                  <span>Certificate</span>
+                  <span>Status</span>
+                  <span aria-label="Actions" />
+                </div>
+                {overview?.managedDevices.map((device) => (
+                  <div
+                    className="table-row device-row"
+                    key={`${device.userId}-${device.deviceId}`}
+                  >
+                    <span>
+                      <strong>{device.displayName || "Managed device"}</strong>
+                      <small>{device.deviceId}</small>
+                    </span>
+                    <span>{device.userDisplayName}</span>
+                    <code title={device.certificateFingerprint}>
+                      {device.certificateFingerprint.slice(0, 16)}…
+                    </code>
+                    <span className={`status ${device.status}`}>
+                      {device.status}
+                    </span>
+                    <button
+                      type="button"
+                      className="quiet-button danger-button"
+                      disabled={loading || device.status !== "active"}
+                      onClick={() =>
+                        void revokeManagedDevice(device.userId, device.deviceId)
+                      }
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))}
+                {overview?.managedDevices.length === 0 && (
+                  <div className="empty">
+                    No managed devices have been enrolled.
+                  </div>
+                )}
               </div>
             </section>
 
@@ -730,32 +853,6 @@ export function App() {
                   <button className="primary-button" disabled={loading}>
                     Register Gateway
                   </button>
-                </form>
-              )}
-              {deviceOpen && (
-                <form className="inline-form device-enrollment-form" onSubmit={registerManagedDevice}>
-                  <label>
-                    Member
-                    <select required value={deviceUserId} onChange={(event) => setDeviceUserId(event.target.value)}>
-                      <option value="">Select member</option>
-                      {overview?.members.filter((member) => member.status === "active").map((member) => (
-                        <option key={member.id} value={member.id}>{member.displayName}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Device UUID
-                    <input required value={deviceId} placeholder="Desktop enrollment ID" onChange={(event) => setDeviceId(event.target.value)} />
-                  </label>
-                  <label>
-                    Client certificate SHA-256
-                    <input required minLength={64} maxLength={64} pattern="[A-Fa-f0-9]{64}" value={deviceFingerprint} onChange={(event) => setDeviceFingerprint(event.target.value)} />
-                  </label>
-                  <label>
-                    Device name
-                    <input maxLength={128} value={deviceName} placeholder="Optional" onChange={(event) => setDeviceName(event.target.value)} />
-                  </label>
-                  <button className="primary-button" disabled={loading}>Enroll device</button>
                 </form>
               )}
               {gatewayEnrollment && (

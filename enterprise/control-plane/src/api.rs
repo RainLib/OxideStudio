@@ -93,6 +93,10 @@ pub fn router(state: AppState) -> Router {
             post(register_managed_device),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/managed-devices/revoke",
+            post(revoke_managed_device),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/data-sources",
             post(register_data_source),
         )
@@ -344,6 +348,13 @@ struct RegisterManagedDeviceRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevokeManagedDeviceRequest {
+    user_id: Uuid,
+    device_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProjectAssignmentRequest {
     project_id: Uuid,
     principal_kind: String,
@@ -523,6 +534,25 @@ async fn register_managed_device(
     Ok(Json(serde_json::json!({
         "deviceId": input.device_id,
         "status": "active",
+    })))
+}
+
+async fn revoke_managed_device(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RevokeManagedDeviceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .revoke_managed_device(organization_id, user.id, input.user_id, input.device_id)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "deviceId": input.device_id,
+        "status": "revoked",
     })))
 }
 

@@ -260,8 +260,52 @@ small {
 }
 
 .status.suspended,
+.status.revoked,
 .status.offline {
   color: #e07171;
+}
+
+.device-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 20px 0 8px;
+}
+
+.device-heading strong {
+  color: #e5e8ec;
+  font-size: 12px;
+}
+
+.device-heading span {
+  color: #858c98;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.device-row {
+  grid-template-columns: minmax(190px, 1fr) minmax(120px, 0.7fr) minmax(142px, 0.75fr) 80px 76px;
+}
+
+.device-row > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.danger-button {
+  border-color: #6c3d3d;
+  color: #e98a8a;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #342021;
+}
+
+.quiet-button:disabled,
+.primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .gateway-list {

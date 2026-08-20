@@ -25,6 +25,16 @@ export interface AdminOverview {
     status: string;
     lastSeenAt?: string;
   }>;
+  managedDevices: Array<{
+    userId: string;
+    userDisplayName: string;
+    deviceId: string;
+    certificateFingerprint: string;
+    displayName?: string;
+    status: "active" | "revoked";
+    enrolledAt: string;
+    revokedAt?: string;
+  }>;
 }
 
 export interface AdminAuditEvent {
@@ -157,6 +167,14 @@ export const adminApi = {
   ) =>
     request(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/managed-devices`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  revokeManagedDevice: (
+    organizationId: string,
+    input: { userId: string; deviceId: string },
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/managed-devices/revoke`,
       { method: "POST", body: JSON.stringify(input) },
     ),
   assignProject: (

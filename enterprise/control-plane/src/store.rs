@@ -444,6 +444,43 @@ impl ControlPlaneStore {
         Ok(())
     }
 
+    pub async fn revoke_managed_device(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        user_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE managed_devices
+             SET status = 'revoked', revoked_at = now()
+             WHERE organization_id = $1 AND user_id = $2 AND device_id = $3
+               AND status = 'active'",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("managed device is not active or does not belong to this organization");
+        }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["managed-devices".into(), device_id.to_string()],
+            "managed-device.revoke",
+            serde_json::json!({ "principalId": user_id }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn accept_verified_invitations(
         &self,
         user_id: Uuid,
@@ -650,6 +687,17 @@ impl ControlPlaneStore {
         .bind(organization_id)
         .fetch_all(&self.pool)
         .await?;
+        let device_rows = sqlx::query(
+            "SELECT d.user_id, d.device_id, d.certificate_fingerprint, d.display_name,
+                    d.status, d.enrolled_at, d.revoked_at, u.display_name AS user_display_name
+             FROM managed_devices d
+             JOIN users u ON u.id = d.user_id
+             WHERE d.organization_id = $1
+             ORDER BY d.status, d.enrolled_at DESC, d.device_id",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(serde_json::json!({
             "organization": {
                 "id": organization.try_get::<Uuid, _>("id")?,
@@ -681,6 +729,18 @@ impl ControlPlaneStore {
                     "displayName": row.get::<String, _>("display_name"),
                     "status": row.get::<String, _>("status"),
                     "lastSeenAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_seen_at").ok(),
+                })
+            }).collect::<Vec<_>>(),
+            "managedDevices": device_rows.into_iter().map(|row| {
+                serde_json::json!({
+                    "userId": row.get::<Uuid, _>("user_id"),
+                    "userDisplayName": row.get::<String, _>("user_display_name"),
+                    "deviceId": row.get::<Uuid, _>("device_id"),
+                    "certificateFingerprint": row.get::<String, _>("certificate_fingerprint"),
+                    "displayName": row.try_get::<Option<String>, _>("display_name").ok().flatten(),
+                    "status": row.get::<String, _>("status"),
+                    "enrolledAt": row.get::<chrono::DateTime<chrono::Utc>, _>("enrolled_at"),
+                    "revokedAt": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("revoked_at").ok().flatten(),
                 })
             }).collect::<Vec<_>>(),
         }))
