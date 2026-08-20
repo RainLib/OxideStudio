@@ -15,17 +15,17 @@
 
 ## 已落地的阶段一能力收敛
 
-当前 Gateway RPC 实现资源发现、元数据读取、只读 SQL 查询，以及 MongoDB/Elasticsearch 的受限原生只读查询。为防止控制面管理界面、grant 或 descriptor 比数据面承诺得更多，当前版本统一实施以下限制：
+当前 Gateway RPC 实现资源发现、元数据读取、只读 SQL 查询，以及 MongoDB/Elasticsearch/Redis 的受限原生只读查询。为防止控制面管理界面、grant 或 descriptor 比数据面承诺得更多，当前版本统一实施以下限制：
 
 1. `AccessAction::is_stage_one_managed_action` 只允许 `resource.discover`、`metadata.read`、`query.read`。
 2. 控制面拒绝为 `data.write`、`schema.ddl`、`data.export`、`ai.use` 或 `mcp.use` 注册 managed source、创建 grant 或签发 access ticket。
 3. project descriptor 只会下发当前 Gateway 实际可执⾏的三种能力，即使旧数据库中遗留了更宽的 grant。
-4. Gateway source 配置拒绝重复 source ID、非 PostgreSQL/MySQL/MongoDB/Elasticsearch driver、空/控制字符 secret reference、缺少动态凭据占位符的 connection template，以及任何非只读能力。
+4. Gateway source 配置拒绝重复 source ID、非 PostgreSQL/MySQL/MongoDB/Elasticsearch/Redis driver、空/控制字符 secret reference、缺少动态凭据占位符的 connection template，以及任何非只读能力。
 5. Gateway 的 source 配置和 TLS 私钥必须是普通文件；敏感文件大小受限。在 Unix 上它们还必须禁止 group/other 读取。
 
-MongoDB 仅允许单集合 `find`、`aggregate` 和 `countDocuments`；聚合中禁止 `$out`、`$merge`、`$lookup`、`$unionWith`、服务端 JavaScript 与 change stream。Elasticsearch 仅允许单个具体 index 的 `GET`/`POST /<index>/_search`；禁止 wildcard/multi-index、脚本和 runtime mappings。两者都使用独立 RPC 及精确 collection/index ticket scope，绝不经过 SQL parser。
+MongoDB 仅允许单集合 `find`、`aggregate` 和 `countDocuments`；聚合中禁止 `$out`、`$merge`、`$lookup`、`$unionWith`、服务端 JavaScript 与 change stream。Elasticsearch 仅允许单个具体 index 的 `GET`/`POST /<index>/_search`；禁止 wildcard/multi-index、脚本和 runtime mappings。Redis 仅允许单条、单 key 的 allowlist 读取命令，拒绝写入、脚本、清库、`KEYS` 和 `SCAN`。三者均使用独立 RPC 与精确 resource ticket scope，绝不经过 SQL parser。
 
-该原生 RPC 将 enterprise contract 升级为 v2；MongoDB/Elasticsearch 的 managed desktop 与 Gateway 必须成对升级，旧 SQL-only Gateway 会在能力协商阶段被拒绝，而不会静默降级执行。
+该原生 RPC 及签名 driver identity 将 enterprise contract 升级为 v3；managed desktop、control plane 与 Gateway 必须成对升级。Gateway 会将 ticket 中已签名的数据源 driver 与本地 source 配置标准化比较，不匹配立即拒绝，旧 SQL-only Gateway 也会在能力协商阶段被拒绝，而不会静默降级执行。
 
 这条能力收敛是安全边界，不是永久功能限制。实现 managed write/DDL/export 前，必须先新增专用 Gateway RPC、单次审批/回执、事务边界、审计和故障恢复模型；不能只开放一个 `AccessAction`。
 
@@ -59,7 +59,7 @@ Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动
 | 身份生命周期 | 增加 SCIM/JIT、group sync、停用传播及审计；目前 principal kind 已预留 user/group，但没有企业目录同步。 |
 | 数据面 HA | 控制面 policy revision heartbeat、Gateway health、负载均衡和故障域策略。 |
 | 数据治理 | 行/列级 policy、字段掩码、分类标签、查询指纹与 SIEM 事件。 |
-| managed engine 覆盖 | MongoDB/Elasticsearch 已有独立受限原生 adapter 与 collection/index scope；Redis 仍需单独定义命令 allowlist、key-pattern scope 和响应上限。不可复用 SQL parser 假装支持。 |
+| managed engine 覆盖 | MongoDB/Elasticsearch/Redis 已有独立受限原生 adapter 与 collection/index/key scope；Redis key-pattern grant 与受管 SCAN 分页仍需专用授权/游标契约。不可复用 SQL parser 假装支持。 |
 | 分发运营 | 企业私有 channel、设备/版本合规报告、强制最低版本、回滚策略和更新签名 key rotation drill。 |
 
 ## 生产运行约束
@@ -70,11 +70,11 @@ Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动
 4. 管理员注册 Gateway 时必须提供实际 TLS 叶证书的 SHA-256 DER 指纹及专用 Ed25519 公钥。返回的一次性 enrollment token 和匹配的 Ed25519 私钥只能写入 Gateway 的私有挂载文件；Gateway 回连签名证明成功后才会变为 active。激活后可移除 token 文件，但必须保留 Ed25519 私钥以完成重启身份证明。管理员没有手工激活入口。
 5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
 6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
-7. Gateway 到 PostgreSQL/MySQL/MongoDB/Elasticsearch 的数据库 URL 默认必须验证服务端 TLS 身份。MongoDB source 必须显式写入 `tls=true`（或 `ssl=true`），Elasticsearch source 必须使用 `https://`；仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
+7. Gateway 到 PostgreSQL/MySQL/MongoDB/Elasticsearch/Redis 的数据库 URL 默认必须验证服务端 TLS 身份。MongoDB source 必须显式写入 `tls=true`（或 `ssl=true`），Elasticsearch source 必须使用 `https://`，Redis source 必须使用 `rediss://`；仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
 8. Gateway TLS 轮换时，管理员只通过控制面取得一次性 token；将 token 写入私有 `OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE`，并以新 TLS 证书、原有 `OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE` 重启 Gateway。新实例成功接管后立即删除 token 文件；不得通过控制面、日志或共享配置传输私钥。
 
 ## 验收与延后验证
 
 当前可本地验证：contracts/Gateway 单元测试、control plane API 输入拒绝、release manifest/签名检查、desktop managed driver 不暴露写入能力。
 
-必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换/rollback 与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询，以及 MongoDB/Elasticsearch 受限原生查询与 TLS 端点。真实数据库验证不会在控制逻辑完成前提前执行。
+必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换/rollback 与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询，以及 MongoDB/Elasticsearch/Redis 受限原生查询与 TLS 端点。真实数据库验证不会在控制逻辑完成前提前执行。

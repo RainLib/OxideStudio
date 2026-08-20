@@ -68,7 +68,7 @@ after the workbench is interactive. Managed projects are grouped by
 organization in the project selector. They use distinct secret-free
 descriptors and are never persisted through the local `SavedConnection` API.
 
-Opening a managed PostgreSQL/MySQL/MongoDB/Elasticsearch source installs a `ManagedGatewayDriver`
+Opening a managed PostgreSQL/MySQL/MongoDB/Elasticsearch/Redis source installs a `ManagedGatewayDriver`
 into the existing Rust `ConnectionManager`. Explorer metadata and read-only
 queries therefore reuse the normal workbench commands, while every driver
 operation obtains a fresh, scoped access ticket and opens an mTLS Gateway
@@ -114,13 +114,14 @@ The shared contract enumerates:
 - `mcp.use`
 
 The current slice implements object/action policies, bounded read-only
-PostgreSQL/MySQL execution, and provider-specific bounded MongoDB/Elasticsearch
+PostgreSQL/MySQL execution, and provider-specific bounded MongoDB/Elasticsearch/Redis
 execution. Discovery tickets contain effective permit scopes and explicit
 exclusions, so a table-level `forbid` is applied to Explorer results and every
 SQL relation, including JOINs. MongoDB requests are constrained to one
 collection and a safe `find`/`aggregate`/`countDocuments` subset; Elasticsearch
-requests are constrained to one concrete index `_search` endpoint. Redis,
-mutation, DDL, export, approval leases and external managed MCP remain
+requests are constrained to one concrete index `_search` endpoint. Redis requests
+are constrained to one selected database, one key and an allowlisted read command.
+Mutation, DDL, export, approval leases and external managed MCP remain
 separately gated capabilities: clients must not infer them from driver names.
 
 Every request is checked at ticket issuance and again at the Gateway. SQL that
@@ -145,7 +146,7 @@ anonymous/local use, OIDC/PKCE sign-in, multi-organization membership,
 invitations, project assignment, secret-free descriptors, device-encrypted
 cache, administrator provisioning, object/action grants, mTLS Gateway
 metadata, PostgreSQL/MySQL read-only SQL queries, and bounded MongoDB/
-Elasticsearch native read-only queries.
+Elasticsearch/Redis native read-only queries.
 
 The following plan items deliberately remain fail-closed until their own
 backend implementations exist:
@@ -154,7 +155,7 @@ backend implementations exist:
 - cloud-provider `SecretProvider` implementations (Vault dynamic
   credentials/KV and mounted Kubernetes Secrets are implemented);
 - Gateway policy polling/heartbeat and high availability;
-- Redis native Gateway operations;
+- Redis key-pattern grants and managed SCAN pagination;
 - mutation, transaction, DDL, export and single-use approval leases;
 - managed `oxide-agent` device login, MCP and CLI;
 - Arrow IPC output (the protocol value is reserved; stage one returns bounded
