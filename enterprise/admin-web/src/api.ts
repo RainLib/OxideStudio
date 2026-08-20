@@ -27,6 +27,20 @@ export interface AdminOverview {
   }>;
 }
 
+export interface AdminAuditEvent {
+  occurredAt: string;
+  userId?: string;
+  projectId?: string;
+  dataSourceId?: string;
+  resourcePath?: unknown;
+  action: string;
+  decision: string;
+  reasonCode: string;
+  requestId: string;
+  source: string;
+  metadata: Record<string, unknown>;
+}
+
 const baseUrl = (
   import.meta.env.VITE_OXIDE_CONTROL_PLANE_URL || ""
 ).replace(/\/$/, "");
@@ -63,6 +77,10 @@ export const adminApi = {
   overview: (organizationId: string) =>
     request<AdminOverview>(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/overview`,
+    ),
+  auditEvents: (organizationId: string) =>
+    request<{ events: AdminAuditEvent[] }>(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/audit-events`,
     ),
   invite: (organizationId: string, email: string, role: string) =>
     request(
