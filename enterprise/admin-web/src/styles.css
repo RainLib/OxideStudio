@@ -234,7 +234,7 @@ h2 {
 }
 
 .member-row {
-  grid-template-columns: minmax(280px, 1fr) 160px 120px;
+  grid-template-columns: minmax(240px, 1fr) 160px 100px 76px;
 }
 
 .member-row span:first-child {

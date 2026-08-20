@@ -93,12 +93,20 @@ pub fn router(state: AppState) -> Router {
             post(register_gateway),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/gateways/{gateway_id}/revoke",
+            post(revoke_gateway),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/managed-devices",
             post(register_managed_device),
         )
         .route(
             "/v1/admin/organizations/{organization_id}/managed-devices/revoke",
             post(revoke_managed_device),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/members/{member_id}/suspend",
+            post(suspend_member),
         )
         .route(
             "/v1/admin/organizations/{organization_id}/data-sources",
@@ -565,6 +573,42 @@ async fn revoke_managed_device(
         .await?;
     Ok(Json(serde_json::json!({
         "deviceId": input.device_id,
+        "status": "revoked",
+    })))
+}
+
+async fn suspend_member(
+    State(state): State<AppState>,
+    Path((organization_id, member_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .suspend_member(organization_id, user.id, member_id)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "memberId": member_id,
+        "status": "suspended",
+    })))
+}
+
+async fn revoke_gateway(
+    State(state): State<AppState>,
+    Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .revoke_gateway(organization_id, user.id, gateway_id)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "gatewayId": gateway_id,
         "status": "revoked",
     })))
 }

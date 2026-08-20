@@ -292,10 +292,13 @@ impl ControlPlaneStore {
             .execute(&mut *tx)
             .await?;
         let fingerprints = sqlx::query_scalar::<_, String>(
-            "SELECT certificate_fingerprint
-             FROM managed_devices
-             WHERE organization_id = $1 AND status = 'revoked'
-             ORDER BY revoked_at DESC, certificate_fingerprint",
+            "SELECT DISTINCT d.certificate_fingerprint
+             FROM managed_devices d
+             JOIN organization_memberships m
+               ON m.organization_id = d.organization_id AND m.user_id = d.user_id
+             WHERE d.organization_id = $1
+               AND (d.status = 'revoked' OR m.status <> 'active')
+             ORDER BY d.certificate_fingerprint",
         )
         .bind(organization_id)
         .fetch_all(&mut *tx)
@@ -322,6 +325,7 @@ impl ControlPlaneStore {
                FROM managed_projects p
                JOIN gateways g ON g.organization_id = p.organization_id
                WHERE p.id = $1 AND p.organization_id = $2 AND g.id = $3
+                 AND g.status = 'active'
              )",
         )
         .bind(project_id)
@@ -532,6 +536,99 @@ impl ControlPlaneStore {
             &["managed-devices".into(), device_id.to_string()],
             "managed-device.revoke",
             serde_json::json!({ "principalId": user_id }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn suspend_member(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        member_id: Uuid,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        let role = sqlx::query_scalar::<_, String>(
+            "SELECT organization_role
+             FROM organization_memberships
+             WHERE organization_id = $1 AND user_id = $2 AND status = 'active'
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(member_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("organization member is not active")?;
+        if role == "owner" {
+            let active_owner_count: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                 FROM organization_memberships
+                 WHERE organization_id = $1 AND organization_role = 'owner' AND status = 'active'",
+            )
+            .bind(organization_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if active_owner_count <= 1 {
+                anyhow::bail!("the last active organization owner cannot be suspended");
+            }
+        }
+        sqlx::query(
+            "UPDATE organization_memberships
+             SET status = 'suspended'
+             WHERE organization_id = $1 AND user_id = $2 AND status = 'active'",
+        )
+        .bind(organization_id)
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["members".into(), member_id.to_string()],
+            "member.suspend",
+            serde_json::json!({ "principalId": member_id }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_gateway(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        gateway_id: Uuid,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE gateways
+             SET status = 'revoked'
+             WHERE id = $1 AND organization_id = $2 AND status IN ('pending', 'active')",
+        )
+        .bind(gateway_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("Gateway is not active or pending in this organization");
+        }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["gateways".into(), gateway_id.to_string()],
+            "gateway.revoke",
+            serde_json::json!({}),
         )
         .await?;
         tx.commit().await?;

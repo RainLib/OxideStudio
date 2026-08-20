@@ -177,6 +177,16 @@ export const adminApi = {
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/managed-devices/revoke`,
       { method: "POST", body: JSON.stringify(input) },
     ),
+  suspendMember: (organizationId: string, memberId: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}/suspend`,
+      { method: "POST" },
+    ),
+  revokeGateway: (organizationId: string, gatewayId: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/revoke`,
+      { method: "POST" },
+    ),
   assignProject: (
     organizationId: string,
     projectId: string,

@@ -186,6 +186,38 @@ export function App() {
     }
   };
 
+  const suspendMember = async (memberId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.suspendMember(organizationId, memberId);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
+  const revokeGateway = async (gatewayId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.revokeGateway(organizationId, gatewayId);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
   const registerGateway = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true);
@@ -719,6 +751,7 @@ export function App() {
                   <span>Member</span>
                   <span>Role</span>
                   <span>Status</span>
+                  <span aria-label="Actions" />
                 </div>
                 {overview?.members.map((member) => (
                   <div className="table-row member-row" key={member.id}>
@@ -730,6 +763,23 @@ export function App() {
                     <span className={`status ${member.status}`}>
                       {member.status}
                     </span>
+                    <button
+                      type="button"
+                      className="quiet-button danger-button"
+                      disabled={
+                        loading ||
+                        member.status !== "active" ||
+                        member.role === "owner"
+                      }
+                      title={
+                        member.role === "owner"
+                          ? "Transfer ownership before suspending an owner."
+                          : undefined
+                      }
+                      onClick={() => void suspendMember(member.id)}
+                    >
+                      Suspend
+                    </button>
                   </div>
                 ))}
               </div>
@@ -902,6 +952,17 @@ export function App() {
                     <span className={`status ${gateway.status}`}>
                       {gateway.status}
                     </span>
+                    <button
+                      type="button"
+                      className="quiet-button danger-button"
+                      disabled={
+                        loading ||
+                        !["pending", "active"].includes(gateway.status)
+                      }
+                      onClick={() => void revokeGateway(gateway.id)}
+                    >
+                      Revoke
+                    </button>
                   </div>
                 ))}
               </div>
