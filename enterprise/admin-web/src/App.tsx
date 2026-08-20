@@ -20,11 +20,6 @@ const accessActions = [
   ["resourceDiscover", "Discover"],
   ["metadataRead", "Metadata"],
   ["queryRead", "Read query"],
-  ["dataWrite", "Write data"],
-  ["schemaDdl", "Schema DDL"],
-  ["dataExport", "Export"],
-  ["aiUse", "AI"],
-  ["mcpUse", "MCP"],
 ] as const;
 
 export function App() {
