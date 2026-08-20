@@ -84,6 +84,13 @@ the production path for Kubernetes Secret, Vault Agent, or equivalent mounted
 secret delivery. The inline variables remain available only for the local
 reference topology.
 
+Every `audit_events` insert is append-only and atomically enqueued in
+`audit_outbox` by the database. To deliver that durable stream to a SIEM, set a
+credential-free HTTPS `OXIDE_AUDIT_WEBHOOK_URL` and put its bearer credential
+only in `OXIDE_AUDIT_WEBHOOK_TOKEN_FILE`. The control plane retries failed
+deliveries with bounded exponential backoff; a disabled or unavailable sink
+never blocks access-policy decisions, and the undelivered events remain queued.
+
 Vault is implemented as the first production provider. It reads its token from
 a private mounted file rather than an environment variable:
 

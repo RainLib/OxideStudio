@@ -1,4 +1,5 @@
 mod api;
+mod audit_outbox;
 mod auth;
 mod config;
 mod store;
@@ -42,6 +43,12 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    if let Some(audit_webhook) = config.audit_webhook.clone() {
+        audit_outbox::spawn(pool.clone(), audit_webhook);
+        tracing::info!("audit outbox delivery is enabled");
+    } else {
+        tracing::warn!("audit outbox delivery is disabled; events remain durably queued for a configured SIEM sink");
+    }
     let verifier = OidcVerifier::load(
         config.oidc_issuer,
         config.oidc_audience,
