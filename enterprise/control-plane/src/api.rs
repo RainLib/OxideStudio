@@ -130,6 +130,10 @@ pub fn router(state: AppState) -> Router {
             post(register_data_source),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/data-sources/{data_source_id}/target-binding",
+            post(renew_data_source_target_binding),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/project-assignments",
             post(assign_project),
         )
@@ -441,6 +445,12 @@ struct RegisterDataSourceRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RenewDataSourceTargetBindingRequest {
+    target_binding: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisterManagedDeviceRequest {
     user_id: Uuid,
     device_id: Uuid,
@@ -634,6 +644,25 @@ fn normalize_target_binding(value: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(value)
+}
+
+async fn renew_data_source_target_binding(
+    State(state): State<AppState>,
+    Path((organization_id, data_source_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(input): Json<RenewDataSourceTargetBindingRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let target_binding = normalize_target_binding(&input.target_binding)?;
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let policy_revision = state
+        .store
+        .renew_data_source_target_binding(organization_id, user.id, data_source_id, &target_binding)
+        .await?;
+    Ok(Json(
+        serde_json::json!({ "id": data_source_id, "targetBinding": target_binding, "policyRevision": policy_revision }),
+    ))
 }
 
 async fn register_managed_device(

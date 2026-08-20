@@ -528,6 +528,43 @@ impl ControlPlaneStore {
         Ok(data_source_id)
     }
 
+    pub async fn renew_data_source_target_binding(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        data_source_id: Uuid,
+        target_binding: &str,
+    ) -> Result<String> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT project_id FROM data_sources WHERE id = $1 AND organization_id = $2 FOR UPDATE",
+        )
+        .bind(data_source_id)
+        .bind(organization_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("managed data source is not available")?;
+        let project_id: Uuid = row.try_get("project_id")?;
+        let revision = Uuid::new_v4().to_string();
+        sqlx::query("UPDATE data_sources SET target_binding = $1, policy_revision = $2, updated_at = now() WHERE id = $3")
+            .bind(target_binding).bind(&revision).bind(data_source_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE managed_projects SET policy_revision = $1, updated_at = now() WHERE id = $2 AND organization_id = $3")
+            .bind(&revision).bind(project_id).bind(organization_id).execute(&mut *tx).await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            Some(project_id),
+            Some(data_source_id),
+            &["data-sources".into(), data_source_id.to_string()],
+            "data-source.target-binding.renew",
+            serde_json::json!({ "targetBinding": target_binding, "policyRevision": revision }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(revision)
+    }
+
     pub async fn sync_identity(&self, identity: &AuthenticatedIdentity) -> Result<User> {
         if let Some(row) = sqlx::query(
             "SELECT u.id, u.display_name
