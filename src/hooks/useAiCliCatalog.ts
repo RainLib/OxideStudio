@@ -14,6 +14,8 @@ import {
 } from "react";
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
+const CATALOG_FAILURE_RETRY_MS = 30 * 1000;
+const CATALOG_CACHE_SCHEMA_VERSION = 1;
 
 export type AiCliCatalogStatus =
   "idle" | "loading" | "ready" | "empty" | "error";
@@ -40,137 +42,230 @@ export interface AiCliCatalogController extends AiCliCatalogSnapshot {
   refresh: () => void;
 }
 
-interface CachedCatalog extends AiCliCatalogSnapshot {
-  signature: string;
-}
-
 const EMPTY_CATALOG: AiCliCatalogSnapshot = {
   status: "idle",
   models: [],
   commands: [],
 };
 
-const catalogCache = new Map<string, CachedCatalog>();
-const catalogRequests = new Map<string, Promise<CachedCatalog>>();
+type CatalogResourceStatus = "ready" | "empty" | "error";
+
+interface CachedCatalogResource<T> {
+  values: T[];
+  status: CatalogResourceStatus;
+  /** Time of the most recent request, including a failed refresh. */
+  checkedAt: number;
+  /** Time of the most recent successful response. */
+  loadedAt?: number;
+  warning?: string;
+  stale?: boolean;
+}
+
+// Keep capability data for the renderer lifetime so remounting the Assistant or
+// opening another consumer reuses it. Cross-restart reuse is delegated to the
+// Rust metadata store, whose identity is keyed and opaque; localStorage must not
+// expose executable paths, profiles, or private-environment identity.
+const modelCache = new Map<string, CachedCatalogResource<AiCliModelInfo>>();
+const modelRequests = new Map<
+  string,
+  Promise<CachedCatalogResource<AiCliModelInfo>>
+>();
+const commandCache = new Map<
+  string,
+  CachedCatalogResource<AiCliCommandInfo>
+>();
+const commandRequests = new Map<
+  string,
+  Promise<CachedCatalogResource<AiCliCommandInfo>>
+>();
 
 interface CachedEfforts {
   efforts: string[];
   status: AiCliCatalogStatus;
   warning?: string;
+  checkedAt?: number;
   loadedAt?: number;
+  stale?: boolean;
 }
 
 const effortCache = new Map<string, CachedEfforts>();
 const effortRequests = new Map<string, Promise<CachedEfforts>>();
 
-function catalogSignature(config: AiCliProviderConfig) {
+function catalogSignature(
+  config: AiCliProviderConfig,
+  runtimeVersion = "",
+  environmentRevision = aiService.getCliEnvironmentRevision(
+    config.kind,
+    config.profileId,
+  ),
+) {
   return JSON.stringify({
+    schemaVersion: CATALOG_CACHE_SCHEMA_VERSION,
     kind: config.kind,
-    profileId: config.profileId,
+    profileId: config.profileId.trim(),
     executablePath: config.executablePath?.trim() || "",
-    environmentKeys: [...(config.environmentKeys ?? [])].sort(),
-    environmentRevision: aiService.getCliEnvironmentRevision(
-      config.kind,
-      config.profileId,
-    ),
+    environmentKeys: [...(config.environmentKeys ?? [])]
+      .map((key) => key.trim())
+      .filter(Boolean)
+      .sort(),
+    environmentRevision,
+    runtimeVersion: runtimeVersion.trim(),
   });
 }
 
-function isFresh(
-  catalog: { loadedAt?: number; stale?: boolean } | undefined,
-) {
-  return Boolean(
-    catalog?.loadedAt &&
-      !catalog.stale &&
-      Date.now() - catalog.loadedAt < CATALOG_TTL_MS,
-  );
+function isEffortFresh(cached: CachedEfforts | undefined) {
+  const checkedAt = cached?.checkedAt ?? cached?.loadedAt;
+  if (!cached || !checkedAt) return false;
+  const ttl = cached.stale ? CATALOG_FAILURE_RETRY_MS : CATALOG_TTL_MS;
+  return Date.now() - checkedAt < ttl;
 }
 
-function effortSignature(config: AiCliProviderConfig) {
-  return `${catalogSignature(config)}\n${config.model.trim() || "default"}`;
+function isCatalogResourceFresh<T>(
+  resource: CachedCatalogResource<T> | undefined,
+) {
+  if (!resource) return false;
+  const ttl = resource.stale
+    ? CATALOG_FAILURE_RETRY_MS
+    : CATALOG_TTL_MS;
+  return Date.now() - resource.checkedAt < ttl;
+}
+
+function effortSignature(catalogKey: string, config: AiCliProviderConfig) {
+  return `${catalogKey}\n${config.model.trim() || "default"}`;
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function loadCatalog(
-  config: AiCliProviderConfig,
+async function loadCatalogResource<T>(
+  signature: string,
   force: boolean,
-): Promise<CachedCatalog> {
-  const signature = catalogSignature(config);
-  const cached = catalogCache.get(signature);
-  if (!force && cached?.status === "ready" && isFresh(cached)) return cached;
-  if (!force && cached?.status === "empty" && isFresh(cached)) return cached;
+  cache: Map<string, CachedCatalogResource<T>>,
+  requests: Map<string, Promise<CachedCatalogResource<T>>>,
+  load: () => Promise<T[]>,
+  normalize: (values: readonly T[]) => T[],
+) {
+  const cached = cache.get(signature);
+  if (!force && isCatalogResourceFresh(cached)) return cached!;
 
-  const pending = catalogRequests.get(signature);
-  if (pending) return pending;
+  const pending = requests.get(signature);
+  if (pending) {
+    if (!force) return pending;
+    // A manual refresh requested during initial discovery must not be consumed
+    // by that non-forced request. Let it settle, then issue one real refresh.
+    await pending;
+    const replacement = requests.get(signature);
+    if (replacement && replacement !== pending) return replacement;
+  }
 
-  const previousModels = cached?.models ?? [];
-  const previousCommands = cached?.commands ?? [];
-  const loading: CachedCatalog = {
-    signature,
-    status: "loading",
-    models: previousModels,
-    commands: previousCommands,
-    loadedAt: cached?.loadedAt,
-  };
-  catalogCache.set(signature, loading);
-
-  const request = Promise.allSettled([
-    aiService.listCliModels(config),
-    aiService.listCliCommands(config),
-  ])
-    .then(([modelResult, commandResult]) => {
-      const models =
-        modelResult.status === "fulfilled"
-          ? uniqueBy(modelResult.value, (model) => model.id.trim())
-          : previousModels;
-      const commands =
-        commandResult.status === "fulfilled"
-          ? uniqueBy(commandResult.value, (command) => command.name.trim())
-          : previousCommands;
-      const warnings = [
-        modelResult.status === "rejected"
-          ? `Model catalog: ${errorMessage(modelResult.reason)}`
-          : null,
-        commandResult.status === "rejected"
-          ? `Command catalog: ${errorMessage(commandResult.reason)}`
-          : null,
-      ].filter((value): value is string => Boolean(value));
-
-      const modelsUnavailable =
-        modelResult.status === "rejected" && models.length === 0;
-      const stale = modelResult.status === "rejected" || commandResult.status === "rejected";
-      const next: CachedCatalog = {
-        signature,
-        status: modelsUnavailable
-          ? "error"
-          : models.length === 0
-            ? "empty"
-            : "ready",
-        models,
-        commands,
-        warning: warnings.length ? warnings.join(" ") : undefined,
-        // A failed probe must not turn a last-known-good catalog into a fresh
-        // result. It remains usable but is retried on the next mount or when
-        // the user chooses Retry.
-        loadedAt: stale ? cached?.loadedAt : Date.now(),
-        stale,
+  let request: Promise<CachedCatalogResource<T>>;
+  request = load()
+    .then((values) => {
+      const normalized = normalize(values);
+      const now = Date.now();
+      const next: CachedCatalogResource<T> = {
+        values: normalized,
+        status: normalized.length ? "ready" : "empty",
+        checkedAt: now,
+        loadedAt: now,
       };
-      catalogCache.set(signature, next);
+      cache.set(signature, next);
+      return next;
+    })
+    .catch((error: unknown) => {
+      const previous = cache.get(signature) ?? cached;
+      const values = previous?.values ?? [];
+      const next: CachedCatalogResource<T> = {
+        values,
+        status: values.length ? "ready" : "error",
+        checkedAt: Date.now(),
+        loadedAt: previous?.loadedAt,
+        warning: errorMessage(error),
+        stale: true,
+      };
+      cache.set(signature, next);
       return next;
     })
     .finally(() => {
-      catalogRequests.delete(signature);
+      if (requests.get(signature) === request) requests.delete(signature);
     });
 
-  catalogRequests.set(signature, request);
+  requests.set(signature, request);
   return request;
+}
+
+function catalogSnapshot(signature: string): AiCliCatalogSnapshot {
+  const modelResource = modelCache.get(signature);
+  const commandResource = commandCache.get(signature);
+  const warnings = [
+    modelResource?.warning
+      ? `Model catalog: ${modelResource.warning}`
+      : null,
+    commandResource?.warning
+      ? `Command catalog: ${commandResource.warning}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  const loadedTimes = [
+    modelResource?.loadedAt,
+    commandResource?.loadedAt,
+  ].filter((value): value is number => typeof value === "number");
+
+  return {
+    status: !modelResource
+      ? "loading"
+      : modelResource.status === "error"
+        ? "error"
+        : modelResource.values.length
+          ? "ready"
+          : "empty",
+    models: modelResource?.values ?? [],
+    commands: commandResource?.values ?? [],
+    warning: warnings.length ? warnings.join(" ") : undefined,
+    loadedAt: loadedTimes.length ? Math.max(...loadedTimes) : undefined,
+    stale: Boolean(modelResource?.stale || commandResource?.stale),
+  };
+}
+
+async function loadCatalog(
+  config: AiCliProviderConfig,
+  signature: string,
+  runtimeVersion: string | undefined,
+  force: boolean,
+): Promise<AiCliCatalogSnapshot> {
+  await Promise.all([
+    loadCatalogResource(
+      signature,
+      force,
+      modelCache,
+      modelRequests,
+      () =>
+        aiService.listCliModels(config, {
+          runtimeVersion,
+          forceRefresh: force,
+        }),
+      (values) => uniqueBy(values, (model) => model.id.trim()),
+    ),
+    loadCatalogResource(
+      signature,
+      force,
+      commandCache,
+      commandRequests,
+      () =>
+        aiService.listCliCommands(config, {
+          runtimeVersion,
+          forceRefresh: force,
+        }),
+      (values) => uniqueBy(values, (command) => command.name.trim()),
+    ),
+  ]);
+  return catalogSnapshot(signature);
 }
 
 async function loadEfforts(
   config: AiCliProviderConfig,
+  signature: string,
+  runtimeVersion: string | undefined,
   force: boolean,
 ): Promise<CachedEfforts> {
   // Codex exposes effort support on the model catalog itself. CodeBuddy's ACP
@@ -178,15 +273,23 @@ async function loadEfforts(
   if (config.kind !== "codebuddy-cli") {
     return { efforts: [], status: "idle" };
   }
-  const signature = effortSignature(config);
   const cached = effortCache.get(signature);
-  if (!force && cached && isFresh(cached)) return cached;
+  if (!force && isEffortFresh(cached)) return cached!;
 
   const pending = effortRequests.get(signature);
-  if (pending) return pending;
+  if (pending) {
+    if (!force) return pending;
+    await pending;
+    const replacement = effortRequests.get(signature);
+    if (replacement && replacement !== pending) return replacement;
+  }
 
-  const request = aiService
-    .listCliEfforts(config)
+  let request: Promise<CachedEfforts>;
+  request = aiService
+    .listCliEfforts(config, {
+      runtimeVersion,
+      forceRefresh: force,
+    })
     .then((values) => {
       const efforts = [
         ...new Set(values.map((value) => value.trim()).filter(Boolean)),
@@ -194,23 +297,30 @@ async function loadEfforts(
       const next: CachedEfforts = {
         efforts,
         status: efforts.length ? "ready" : "empty",
+        checkedAt: Date.now(),
         loadedAt: Date.now(),
       };
       effortCache.set(signature, next);
       return next;
     })
     .catch((error: unknown) => {
+      const previous = effortCache.get(signature) ?? cached;
+      const efforts = previous?.efforts ?? [];
       const next: CachedEfforts = {
-        efforts: [],
-        status: "error",
+        efforts,
+        status: efforts.length ? "ready" : "error",
         warning: `Reasoning capability: ${errorMessage(error)}`,
-        loadedAt: Date.now(),
+        checkedAt: Date.now(),
+        loadedAt: previous?.loadedAt,
+        stale: true,
       };
       effortCache.set(signature, next);
       return next;
     })
     .finally(() => {
-      effortRequests.delete(signature);
+      if (effortRequests.get(signature) === request) {
+        effortRequests.delete(signature);
+      }
     });
   effortRequests.set(signature, request);
   return request;
@@ -229,20 +339,27 @@ function uniqueBy<T>(values: readonly T[], keyOf: (value: T) => string) {
 export function useAiCliCatalog(
   config: AiCliProviderConfig | null,
   enabled: boolean,
+  runtimeVersion?: string,
 ): AiCliCatalogController {
   const environmentRevision = useCliEnvironmentRevision(config);
   const signature = useMemo(
-    () => (config ? catalogSignature(config) : null),
+    () =>
+      config
+        ? catalogSignature(config, runtimeVersion, environmentRevision)
+        : null,
     [
       config?.kind,
       config?.profileId,
       config?.executablePath,
       config?.environmentKeys,
       environmentRevision,
+      runtimeVersion,
     ],
   );
   const configRef = useRef(config);
   configRef.current = config;
+  const signatureRef = useRef(signature);
+  signatureRef.current = signature;
   const [snapshot, setSnapshot] = useState<AiCliCatalogSnapshot>(EMPTY_CATALOG);
   const [effortSnapshot, setEffortSnapshot] = useState<CachedEfforts>({
     efforts: [],
@@ -252,6 +369,8 @@ export function useAiCliCatalog(
     signature: string;
     revision: number;
   } | null>(null);
+  const handledCatalogRefreshRef = useRef<string | null>(null);
+  const handledEffortRefreshRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!enabled || !config || !signature) {
@@ -260,14 +379,18 @@ export function useAiCliCatalog(
     }
 
     let disposed = false;
-    const cached = catalogCache.get(signature);
-    setSnapshot(
-      cached ? { ...cached } : { status: "loading", models: [], commands: [] },
+    setSnapshot(catalogSnapshot(signature));
+    const refreshToken =
+      refreshRequest?.signature === signature
+        ? `${signature}\n${refreshRequest.revision}`
+        : null;
+    const force = Boolean(
+      refreshToken && handledCatalogRefreshRef.current !== refreshToken,
     );
-    const force = refreshRequest?.signature === signature;
-    void loadCatalog(config, force).then((next) => {
-      if (disposed || next.signature !== signature) return;
-      setSnapshot({ ...next });
+    if (refreshToken) handledCatalogRefreshRef.current = refreshToken;
+    void loadCatalog(config, signature, runtimeVersion, force).then((next) => {
+      if (disposed || signatureRef.current !== signature) return;
+      setSnapshot(next);
     });
     return () => {
       disposed = true;
@@ -281,16 +404,34 @@ export function useAiCliCatalog(
     }
 
     let disposed = false;
-    const currentEffortSignature = effortSignature(config);
+    const currentEffortSignature = effortSignature(signature, config);
     const cached = effortCache.get(currentEffortSignature);
     setEffortSnapshot(
       cached
         ? { ...cached }
         : { efforts: [], status: "loading" },
     );
-    const force = refreshRequest?.signature === signature;
-    void loadEfforts(config, force).then((next) => {
-      if (disposed || effortSignature(config) !== currentEffortSignature) return;
+    const refreshToken =
+      refreshRequest?.signature === signature
+        ? `${signature}\n${refreshRequest.revision}`
+        : null;
+    const force = Boolean(
+      refreshToken && handledEffortRefreshRef.current !== refreshToken,
+    );
+    if (refreshToken) handledEffortRefreshRef.current = refreshToken;
+    void loadEfforts(
+      config,
+      currentEffortSignature,
+      runtimeVersion,
+      force,
+    ).then((next) => {
+      if (
+        disposed ||
+        !signatureRef.current ||
+        effortSignature(signatureRef.current, config) !== currentEffortSignature
+      ) {
+        return;
+      }
       setEffortSnapshot({ ...next });
     });
     return () => {
@@ -300,8 +441,8 @@ export function useAiCliCatalog(
 
   const refresh = useCallback(() => {
     const current = configRef.current;
-    if (!current) return;
-    const currentSignature = catalogSignature(current);
+    const currentSignature = signatureRef.current;
+    if (!current || !currentSignature) return;
     setRefreshRequest((request) => ({
       signature: currentSignature,
       revision:
@@ -340,8 +481,10 @@ export function useCliEnvironmentRevision(config: AiCliProviderConfig | null) {
 }
 
 export function resetAiCliCatalogForTests() {
-  catalogCache.clear();
-  catalogRequests.clear();
+  modelCache.clear();
+  modelRequests.clear();
+  commandCache.clear();
+  commandRequests.clear();
   effortCache.clear();
   effortRequests.clear();
 }

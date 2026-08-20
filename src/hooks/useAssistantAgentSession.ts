@@ -92,6 +92,7 @@ export type AssistantAgentSession = {
   activeTurn: AssistantTurn | null;
   /** A persisted snapshot and its journal are still being reconciled. */
   isHydrating: boolean;
+  hydrationError: string | null;
   availability: AgentHostAvailability;
   hostStatus: AgentHostStatus | null;
   hostError: string | null;
@@ -131,6 +132,7 @@ export type AssistantAgentSession = {
     expectedRoot?: string | null,
   ) => Promise<void>;
   clear: () => void;
+  retryHydration: () => void;
   refreshStatus: () => Promise<void>;
 };
 
@@ -142,6 +144,8 @@ export function useAssistantAgentSession(
 ): AssistantAgentSession {
   const [turns, setTurns] = useState<AssistantTurn[]>([]);
   const [isHydrating, setIsHydrating] = useState(true);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
+  const [hydrationRevision, setHydrationRevision] = useState(0);
   const [availability, setAvailability] =
     useState<AgentHostAvailability>("checking");
   const [hostStatus, setHostStatus] = useState<AgentHostStatus | null>(null);
@@ -158,6 +162,7 @@ export function useAssistantAgentSession(
   );
   const resumeRequestsRef = useRef(new Map<string, AgentStartTurnRequest>());
   const hydratedScopeRef = useRef<string | null>(null);
+  const failedHydrationScopeRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const persistMaxWaitTimerRef = useRef<number | null>(null);
   const persistDirtySinceRef = useRef<number | null>(null);
@@ -275,6 +280,9 @@ export function useAssistantAgentSession(
       previousConversationId,
     );
     const nextScope = conversationScope(projectId, conversationId);
+    if (failedHydrationScopeRef.current !== nextScope) {
+      failedHydrationScopeRef.current = null;
+    }
     if (previousScope !== nextScope) {
       const previousSnapshot = latestPersistSnapshotRef.current;
       if (previousSnapshot?.scope === previousScope) {
@@ -305,6 +313,7 @@ export function useAssistantAgentSession(
     projectIdRef.current = projectId;
     conversationIdRef.current = conversationId;
     setIsHydrating(true);
+    setHydrationError(null);
     const retainedState = liveConversationStates.get(nextScope);
     threadIdRef.current =
       retainedState?.threadId ??
@@ -523,8 +532,10 @@ export function useAssistantAgentSession(
           mergedTurns,
           bufferedEvents,
         );
+        failedHydrationScopeRef.current = null;
         setTurns(turnsRef.current);
         hydratedScopeRef.current = nextScope;
+        setHydrationError(null);
         setIsHydrating(false);
         retainLiveConversationState(
           nextScope,
@@ -550,8 +561,12 @@ export function useAssistantAgentSession(
           turnsRef.current,
           recoveredEvents,
         );
+        failedHydrationScopeRef.current = nextScope;
         setTurns(turnsRef.current);
         hydratedScopeRef.current = nextScope;
+        setHydrationError(
+          "The saved Assistant conversation could not be restored. Retry before sending a new message, or start a new chat to keep the saved history untouched.",
+        );
         setIsHydrating(false);
         retainLiveConversationState(
           nextScope,
@@ -582,6 +597,7 @@ export function useAssistantAgentSession(
   }, [
     conversationId,
     handleCommandError,
+    hydrationRevision,
     mutateTurns,
     projectId,
     refreshStatus,
@@ -589,7 +605,12 @@ export function useAssistantAgentSession(
 
   useEffect(() => {
     const scope = conversationScope(projectId, conversationId);
-    if (hydratedScopeRef.current !== scope) return;
+    if (
+      hydratedScopeRef.current !== scope ||
+      failedHydrationScopeRef.current === scope
+    ) {
+      return;
+    }
     latestPersistSnapshotRef.current = conversationSnapshotRequest(
       projectId,
       conversationId,
@@ -606,7 +627,8 @@ export function useAssistantAgentSession(
       const snapshot = latestPersistSnapshotRef.current;
       if (
         snapshot?.scope !== scope ||
-        hydratedScopeRef.current !== scope
+        hydratedScopeRef.current !== scope ||
+        failedHydrationScopeRef.current === scope
       ) {
         return;
       }
@@ -1368,16 +1390,24 @@ export function useAssistantAgentSession(
       resumeRequestsRef.current,
     );
     latestPersistSnapshotRef.current = clearedSnapshot;
+    failedHydrationScopeRef.current = null;
     liveConversationStates.delete(scope);
     setTurns([]);
     persistQueueRef.current.enqueue(clearedSnapshot.request);
     setHostError(null);
+    setHydrationError(null);
+  }, []);
+
+  const retryHydration = useCallback(() => {
+    if (turnsRef.current.some(assistantTurnIsActive)) return;
+    setHydrationRevision((current) => current + 1);
   }, []);
 
   return {
     turns,
     activeTurn,
     isHydrating,
+    hydrationError,
     availability,
     hostStatus,
     hostError,
@@ -1393,6 +1423,7 @@ export function useAssistantAgentSession(
     keepFileChangeHunk,
     undoFileChangeHunk,
     clear,
+    retryHydration,
     refreshStatus,
   };
 }

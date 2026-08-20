@@ -6,11 +6,13 @@ ifeq ($(OS),Windows_NT)
 SHELL := cmd.exe
 .SHELLFLAGS := /C
 DEV_ENV := set OXIDE_SKIP_SQL_LSP_PREPARE=1&&
+FAST_DEV_ENV := set OXIDE_SKIP_SQL_LSP_PREPARE=1&& set OXIDE_SKIP_OXIDE_AGENT_PREPARE=1&&
 LSP_BUILD_COMMAND := node scripts/prepare-sql-lsp.mjs
 REMOVE_DIST := if exist dist rmdir /S /Q dist
 else
 SHELL := /bin/bash
 DEV_ENV := OXIDE_SKIP_SQL_LSP_PREPARE=1
+FAST_DEV_ENV := OXIDE_SKIP_SQL_LSP_PREPARE=1 OXIDE_SKIP_OXIDE_AGENT_PREPARE=1
 LSP_BUILD_COMMAND := node scripts/prepare-sql-lsp.mjs
 REMOVE_DIST := rm -rf dist
 endif
@@ -44,8 +46,8 @@ submodules: ## Initialize and update git submodules.
 dev: lsp-build ## Start the Tauri desktop app in development mode.
 	$(DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
 
-run: ## Start Tauri immediately using the prepared SQL LSP binary.
-	$(DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
+run: ## Start Tauri immediately using prepared SQL LSP and agent binaries.
+	$(FAST_DEV_ENV) $(NPM) run tauri -- dev $(TAURI_DEV_ARGS)
 
 dev-no-watch: lsp-build ## Start Tauri dev without the Rust file watcher.
 	$(DEV_ENV) $(NPM) run tauri -- dev --no-watch

@@ -29,6 +29,7 @@ import {
   type AssistantModelCatalogStatus,
   type AssistantModelStatus,
 } from "./AssistantModelControl";
+import { AssistantProviderCommandList } from "./AssistantProviderCommandList";
 import type {
   AiCliCommandInfo,
   AiCliModelInfo,
@@ -82,10 +83,13 @@ interface AssistantPromptBoxProps {
   modelCatalogStatus?: AssistantModelCatalogStatus;
   modelCatalogWarning?: string;
   reasoningEffort?: string;
+  serviceTier?: "default" | "priority";
+  accessMode?: "restricted" | "full";
   commandOptions?: readonly AiCliCommandInfo[];
   onModelChange: (model: string) => void;
   onReasoningEffortChange?: (effort: string) => void;
-  onOpenAiSettings: () => void;
+  onServiceTierChange?: (tier: "default" | "priority") => void;
+  onAccessModeChange?: (mode: "restricted" | "full") => void;
   onRetryModel: () => void;
   submissionBlockReason: string | null;
   modeOptions?: readonly AssistantModeOption[];
@@ -133,10 +137,13 @@ export function AssistantPromptBox({
   modelCatalogStatus,
   modelCatalogWarning,
   reasoningEffort,
+  serviceTier,
+  accessMode,
   commandOptions,
   onModelChange,
   onReasoningEffortChange,
-  onOpenAiSettings,
+  onServiceTierChange,
+  onAccessModeChange,
   onRetryModel,
   submissionBlockReason,
   modeOptions = ASSISTANT_MODE_OPTIONS,
@@ -732,6 +739,9 @@ export function AssistantPromptBox({
                   catalogStatus={modelCatalogStatus}
                   catalogWarning={modelCatalogWarning}
                   reasoningEffort={reasoningEffort}
+                  serviceTier={serviceTier}
+                  accessMode={accessMode}
+                  fullAccessAvailable={mode === "agent"}
                   onOpenChange={(open) => {
                     setModelPanelOpen(open);
                     if (open) {
@@ -742,10 +752,8 @@ export function AssistantPromptBox({
                   }}
                   onModelChange={onModelChange}
                   onReasoningEffortChange={onReasoningEffortChange}
-                  onOpenSettings={() => {
-                    setModelPanelOpen(false);
-                    onOpenAiSettings();
-                  }}
+                  onServiceTierChange={onServiceTierChange}
+                  onAccessModeChange={onAccessModeChange}
                   onRetry={onRetryModel}
                 />
 
@@ -815,38 +823,12 @@ export function AssistantPromptBox({
             role="listbox"
             aria-label="Provider commands"
           >
-            <div className="flex items-center justify-between gap-3 px-2 pb-1.5 pt-0.5 text-[9px] text-[hsl(var(--wb-text-muted))]">
-              <span className="font-medium text-[hsl(var(--wb-text))]">
-                Provider commands
-              </span>
-              <span>↑↓ navigate · Enter insert</span>
-            </div>
-            {commandSuggestions.map((command, index) => (
-              <button
-                key={command.name}
-                id={`assistant-provider-command-${index}`}
-                type="button"
-                role="option"
-                aria-selected={index === activeCommandIndex}
-                className={cn(
-                  "flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]",
-                  index === activeCommandIndex
-                    ? "bg-[hsl(var(--wb-active))]"
-                    : "hover:bg-[hsl(var(--wb-hover))]",
-                )}
-                onMouseDown={(event) => event.preventDefault()}
-                onMouseEnter={() => setActiveCommandIndex(index)}
-                onClick={() => acceptCommand(command)}
-              >
-                <span className="shrink-0 font-mono text-[10px] text-[hsl(var(--wb-accent))]">
-                  /{command.name}
-                </span>
-                <span className="min-w-0 flex-1 text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
-                  {command.description}
-                  {command.argumentHint ? ` · ${command.argumentHint}` : ""}
-                </span>
-              </button>
-            ))}
+            <AssistantProviderCommandList
+              commands={commandSuggestions}
+              activeIndex={activeCommandIndex}
+              onActiveIndexChange={setActiveCommandIndex}
+              onAccept={acceptCommand}
+            />
           </PopoverContent>
         )}
       </Popover>

@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type {
   AiCliProviderConfig,
+  AiCliAccessMode,
   AiCliReasoningEffort,
+  AiCliServiceTier,
   AiHttpProviderConfig,
   AiProviderConfig,
   AiProviderKind,
@@ -37,6 +39,8 @@ export interface AiSettingsState {
   codexCliModel: string;
   codexCliReasoningEffort: AiCliReasoningEffort;
   codexCliReasoningEffortByModel: AiCliReasoningPreferences;
+  codexCliServiceTier: AiCliServiceTier;
+  codexCliAccessMode: AiCliAccessMode;
   codexCliEnvironmentKeys: string[];
   codexCliEnvironmentDraft: Record<string, string>;
 
@@ -86,6 +90,12 @@ function cliProviderConfig(
   kind: "codex-cli" | "codebuddy-cli",
 ): AiCliProviderConfig {
   const codex = kind === "codex-cli";
+  const reasoningEffort = cliReasoningEffortForModel(state, kind);
+  const fullAccessActive =
+    codex &&
+    state.codexCliAccessMode === "full" &&
+    state.codexCliAssistantMode === "agent" &&
+    reasoningEffort.trim().toLowerCase() === "ultra";
   return {
     kind,
     profileId: codex
@@ -96,7 +106,9 @@ function cliProviderConfig(
     model:
       (codex ? state.codexCliModel : state.codeBuddyCliModel).trim() ||
       "default",
-    reasoningEffort: cliReasoningEffortForModel(state, kind),
+    reasoningEffort,
+    serviceTier: codex ? state.codexCliServiceTier : undefined,
+    accessMode: codex ? (fullAccessActive ? "full" : "restricted") : undefined,
     timeoutMs: state.timeoutMs,
     environmentKeys: codex
       ? state.codexCliEnvironmentKeys
@@ -139,11 +151,11 @@ function cliReasoningEffortForModel(
   // Version 4 seeds the previously selected model with the legacy value.
   // Once any per-model preference exists, an unseen model must use the
   // provider default instead of inheriting an incompatible prior override.
-  return (
+  const selected =
     preferences[model]?.trim() ||
     (Object.keys(preferences).length === 0 ? legacy : "default") ||
-    "default"
-  );
+    "default";
+  return selected.toLowerCase() === "enabled" ? "default" : selected;
 }
 
 function withCliReasoningPreferences(
@@ -237,6 +249,8 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       codexCliModel: "default",
       codexCliReasoningEffort: "default",
       codexCliReasoningEffortByModel: {},
+      codexCliServiceTier: "default",
+      codexCliAccessMode: "restricted",
       codexCliEnvironmentKeys: [],
       codexCliEnvironmentDraft: {},
       codeBuddyCliProfileId: DEFAULT_CODEBUDDY_CLI_PROFILE_ID,
@@ -315,6 +329,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         codexCliModel: state.codexCliModel,
         codexCliReasoningEffort: state.codexCliReasoningEffort,
         codexCliReasoningEffortByModel: state.codexCliReasoningEffortByModel,
+        codexCliServiceTier: state.codexCliServiceTier,
         codexCliEnvironmentKeys: state.codexCliEnvironmentKeys,
         codeBuddyCliProfileId: state.codeBuddyCliProfileId,
         codeBuddyCliPath: state.codeBuddyCliPath,
@@ -330,6 +345,8 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;
+        // Full access is an explicit runtime grant, never a persisted preference.
+        state.updateSettings({ codexCliAccessMode: "restricted" });
         const legacySecret = state.apiKey.trim();
         if (legacySecret) {
           void aiService

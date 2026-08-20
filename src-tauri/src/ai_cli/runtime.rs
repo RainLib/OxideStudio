@@ -2,10 +2,11 @@ use crate::ai_cli::CliProviderKind;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use serde_json::{json, Value};
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsStr,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -130,14 +131,14 @@ pub fn resolve_named_command(name: &str) -> Result<CliCommandSpec> {
     command_for_generic_path(path)
 }
 
-fn command_for_path(provider: CliProviderKind, path: PathBuf) -> Result<CliCommandSpec> {
+fn command_for_path(_provider: CliProviderKind, path: PathBuf) -> Result<CliCommandSpec> {
     #[cfg(windows)]
     {
-        if provider == CliProviderKind::CodexCli {
+        if _provider == CliProviderKind::CodexCli {
             if let Some(spec) = windows_codex_node_entrypoint(&path) {
                 return Ok(spec);
             }
-        } else if provider == CliProviderKind::CodebuddyCli {
+        } else if _provider == CliProviderKind::CodebuddyCli {
             if let Some(spec) = windows_codebuddy_node_entrypoint(&path) {
                 return Ok(spec);
             }
@@ -592,6 +593,8 @@ pub async fn run_codex_app_server<F>(
     prompt: &[u8],
     model: Option<&str>,
     effort: Option<&str>,
+    service_tier: Option<&str>,
+    full_access: bool,
     collaboration_mode: &str,
     timeout: Duration,
     mut cancellation: watch::Receiver<bool>,
@@ -687,16 +690,12 @@ where
                 match value.get("id").and_then(Value::as_u64) {
                     Some(1) => {
                         write_json_line(&mut stdin, &json!({ "method": "initialized" })).await?;
-                        let mut params = json!({
-                            "cwd": cwd,
-                            "approvalPolicy": "never",
-                            "sandbox": "read-only",
-                            "ephemeral": true,
-                            "experimentalRawEvents": false
-                        });
-                        if let Some(model) = model {
-                            params["model"] = Value::String(model.to_string());
-                        }
+                        let params = codex_thread_start_params(
+                            cwd,
+                            model,
+                            service_tier,
+                            full_access,
+                        );
                         write_json_line(
                             &mut stdin,
                             &json!({ "id": 2, "method": "thread/start", "params": params }),
@@ -709,26 +708,15 @@ where
                             .ok_or_else(|| anyhow!("Codex thread/start omitted its thread id"))?
                             .to_string();
                         thread_id = Some(id.clone());
-                        let mut params = json!({
-                            "threadId": id,
-                            "input": [{ "type": "text", "text": prompt }],
-                            "approvalPolicy": "never",
-                            "sandboxPolicy": { "type": "readOnly", "networkAccess": false }
-                        });
-                        if let Some(model) = model {
-                            params["model"] = Value::String(model.to_string());
-                            let mut settings = json!({ "model": model });
-                            if let Some(effort) = effort {
-                                settings["reasoning_effort"] = Value::String(effort.to_string());
-                            }
-                            params["collaborationMode"] = json!({
-                                "mode": collaboration_mode,
-                                "settings": settings
-                            });
-                        }
-                        if let Some(effort) = effort {
-                            params["effort"] = Value::String(effort.to_string());
-                        }
+                        let params = codex_turn_start_params(
+                            &id,
+                            prompt,
+                            model,
+                            effort,
+                            service_tier,
+                            collaboration_mode,
+                            full_access,
+                        );
                         write_json_line(
                             &mut stdin,
                             &json!({ "id": 3, "method": "turn/start", "params": params }),
@@ -775,6 +763,68 @@ where
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
         parsed_events,
     })
+}
+
+fn codex_thread_start_params(
+    cwd: &Path,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+    full_access: bool,
+) -> Value {
+    let mut params = json!({
+        "cwd": cwd,
+        "approvalPolicy": "never",
+        "sandbox": if full_access { "danger-full-access" } else { "read-only" },
+        "ephemeral": true,
+        "experimentalRawEvents": false
+    });
+    if let Some(model) = model {
+        params["model"] = Value::String(model.to_string());
+    }
+    if let Some(service_tier) = service_tier {
+        params["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    params
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codex_turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    service_tier: Option<&str>,
+    collaboration_mode: &str,
+    full_access: bool,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{ "type": "text", "text": prompt }],
+        "approvalPolicy": "never",
+        "sandboxPolicy": if full_access {
+            json!({ "type": "dangerFullAccess" })
+        } else {
+            json!({ "type": "readOnly", "networkAccess": false })
+        }
+    });
+    if let Some(model) = model {
+        params["model"] = Value::String(model.to_string());
+        let mut settings = json!({ "model": model });
+        if let Some(effort) = effort {
+            settings["reasoning_effort"] = Value::String(effort.to_string());
+        }
+        params["collaborationMode"] = json!({
+            "mode": collaboration_mode,
+            "settings": settings
+        });
+    }
+    if let Some(effort) = effort {
+        params["effort"] = Value::String(effort.to_string());
+    }
+    if let Some(service_tier) = service_tier {
+        params["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    params
 }
 
 async fn write_json_line(stdin: &mut tokio::process::ChildStdin, value: &Value) -> Result<()> {
@@ -832,6 +882,52 @@ mod tests {
             codex_initialize_request().pointer("/params/capabilities/experimentalApi"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn codex_access_mode_params_match_app_server_protocol() {
+        let restricted_thread =
+            codex_thread_start_params(Path::new("project"), Some("gpt-test"), None, false);
+        assert_eq!(restricted_thread["sandbox"], json!("read-only"));
+
+        let restricted_turn = codex_turn_start_params(
+            "thread-1",
+            "inspect",
+            Some("gpt-test"),
+            Some("high"),
+            None,
+            "default",
+            false,
+        );
+        assert_eq!(
+            restricted_turn["sandboxPolicy"],
+            json!({ "type": "readOnly", "networkAccess": false })
+        );
+
+        let full_thread = codex_thread_start_params(
+            Path::new("project"),
+            Some("gpt-test"),
+            Some("priority"),
+            true,
+        );
+        assert_eq!(full_thread["sandbox"], json!("danger-full-access"));
+        assert_eq!(full_thread["serviceTier"], json!("priority"));
+
+        let full_turn = codex_turn_start_params(
+            "thread-1",
+            "edit",
+            Some("gpt-test"),
+            Some("ultra"),
+            Some("priority"),
+            "default",
+            true,
+        );
+        assert_eq!(
+            full_turn["sandboxPolicy"],
+            json!({ "type": "dangerFullAccess" })
+        );
+        assert_eq!(full_turn["effort"], json!("ultra"));
+        assert_eq!(full_turn["serviceTier"], json!("priority"));
     }
 
     #[cfg(windows)]
@@ -988,8 +1084,10 @@ mod tests {
             fixture.directory.path(),
             b"inspect the active SQL",
             Some("gpt-test"),
-            Some("high"),
-            "plan",
+            Some("ultra"),
+            Some("priority"),
+            true,
+            "default",
             Duration::from_secs(5),
             receiver,
             move |value| captured.lock().unwrap().push(value),

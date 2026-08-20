@@ -1,31 +1,29 @@
-import { Sparkles, SquarePen, X } from "lucide-react";
+import { SquarePen, X } from "lucide-react";
 import { useI18n } from "@/i18n";
+import type { ReactNode } from "react";
 
 interface AssistantHeaderProps {
   isRunning: boolean;
+  providerControl: ReactNode;
+  historyControl?: ReactNode;
   onNewChat: () => void;
   onHide: () => void;
 }
 
 export function AssistantHeader({
   isRunning,
+  providerControl,
+  historyControl,
   onNewChat,
   onHide,
 }: AssistantHeaderProps) {
   const { t } = useI18n();
   return (
     <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)] px-2">
-      <div className="flex min-w-0 items-center gap-1.5">
-        <Sparkles
-          size={14}
-          className="shrink-0 text-[hsl(var(--wb-accent))]"
-        />
-        <span className="truncate text-[11px] font-semibold text-[hsl(var(--wb-text))]">
-          {t("assistant.title")}
-        </span>
-      </div>
+      <div className="flex min-w-0 flex-1 items-center">{providerControl}</div>
 
-      <div className="wb-tool-header-actions flex items-center gap-0.5">
+      <div className="wb-tool-header-actions flex shrink-0 items-center gap-0.5">
+        {historyControl}
         <button
           type="button"
           className="wb-icon-button h-6 w-6"

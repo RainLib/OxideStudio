@@ -8,18 +8,19 @@ use crate::{
             AgentArtifactReadRequest, AgentArtifactReadResult, AgentArtifactSearchMatch,
             AgentArtifactSearchRequest, AgentArtifactSearchResult, AgentCancelTurnRequest,
             AgentContextCompactionMetrics, AgentContextMetrics, AgentConversationSnapshot,
-            AgentConversationSnapshotSaveRequest, AgentHostStatus, AgentModelUsageMetrics,
-            AgentProfile, AgentProjectStateCleared, AgentProviderConfig, AgentProviderKind,
-            AgentToolManifestEntry, AgentTurnAccepted, AgentTurnJournal, AgentTurnRequest,
-            ApprovalDecision, ArtifactReadRequest, ArtifactSearchRequest, BoundedObservation,
-            CheckpointRequest, GraphCheckpointDeleteThreadRequest, GraphCheckpointGetRequest,
-            GraphCheckpointListRequest, GraphCheckpointPutRequest, GraphCheckpointPutWritesRequest,
-            GraphTypedBlob, ModelCompleteRequest, ModelStreamRequest, RequestMetadata,
-            ToolInvokeRequest, ToolPreflightRequest, AGENT_HOST_EVENT_CHANNEL,
-            AGENT_HOST_MAX_FRAME_BYTES, AGENT_HOST_PROTOCOL_VERSION, HOST_CANCEL_TURN_METHOD,
-            HOST_INITIALIZE_METHOD, HOST_MODEL_CHUNK_METHOD, HOST_RESUME_TURN_METHOD,
-            HOST_START_TURN_METHOD, SIDECAR_ARTIFACT_READ_METHOD, SIDECAR_ARTIFACT_SEARCH_METHOD,
-            SIDECAR_CHECKPOINT_LOAD_METHOD, SIDECAR_CHECKPOINT_SAVE_METHOD, SIDECAR_EVENT_METHOD,
+            AgentConversationSnapshotSaveRequest, AgentConversationSummary, AgentHostStatus,
+            AgentModelUsageMetrics, AgentProfile, AgentProjectStateCleared, AgentProviderConfig,
+            AgentProviderKind, AgentToolManifestEntry, AgentTurnAccepted, AgentTurnJournal,
+            AgentTurnRequest, ApprovalDecision, ArtifactReadRequest, ArtifactSearchRequest,
+            BoundedObservation, CheckpointRequest, GraphCheckpointDeleteThreadRequest,
+            GraphCheckpointGetRequest, GraphCheckpointListRequest, GraphCheckpointPutRequest,
+            GraphCheckpointPutWritesRequest, GraphTypedBlob, ModelCompleteRequest,
+            ModelStreamRequest, RequestMetadata, ToolInvokeRequest, ToolPreflightRequest,
+            AGENT_HOST_EVENT_CHANNEL, AGENT_HOST_MAX_FRAME_BYTES, AGENT_HOST_PROTOCOL_VERSION,
+            HOST_CANCEL_TURN_METHOD, HOST_INITIALIZE_METHOD, HOST_MODEL_CHUNK_METHOD,
+            HOST_RESUME_TURN_METHOD, HOST_START_TURN_METHOD, SIDECAR_ARTIFACT_READ_METHOD,
+            SIDECAR_ARTIFACT_SEARCH_METHOD, SIDECAR_CHECKPOINT_LOAD_METHOD,
+            SIDECAR_CHECKPOINT_SAVE_METHOD, SIDECAR_EVENT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_DELETE_THREAD_METHOD, SIDECAR_GRAPH_CHECKPOINT_GET_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_LIST_METHOD, SIDECAR_GRAPH_CHECKPOINT_PUT_METHOD,
             SIDECAR_GRAPH_CHECKPOINT_PUT_WRITES_METHOD, SIDECAR_MODEL_COMPLETE_METHOD,
@@ -651,6 +652,16 @@ impl AgentHostManager {
     ) -> Result<Option<AgentConversationSnapshot>> {
         self.inner
             .load_conversation_snapshot(project_id, conversation_id)
+            .await
+    }
+
+    pub async fn list_conversation_snapshots(
+        &self,
+        project_id: &str,
+        conversation_scope: &str,
+    ) -> Result<Vec<AgentConversationSummary>> {
+        self.inner
+            .list_conversation_snapshots(project_id, conversation_scope)
             .await
     }
 
@@ -1644,6 +1655,51 @@ impl AgentHostInner {
             ));
         }
         Ok(Some(snapshot))
+    }
+
+    async fn list_conversation_snapshots(
+        &self,
+        project_id: &str,
+        conversation_scope: &str,
+    ) -> Result<Vec<AgentConversationSummary>> {
+        validate_project_id(project_id)?;
+        validate_conversation_id(Some(conversation_scope))?;
+        let store_prefix = conversation_snapshot_store_key(Some(conversation_scope));
+        let values = self
+            .store
+            .list_threads_with_prefix(project_id, &store_prefix, 50)
+            .await?;
+        let mut summaries = values
+            .into_iter()
+            .filter_map(|value| {
+                let snapshot = serde_json::from_value::<AgentConversationSnapshot>(value).ok()?;
+                let conversation_id = snapshot.conversation_id.clone()?;
+                if snapshot.project_id != project_id
+                    || !conversation_belongs_to_scope(&conversation_id, conversation_scope)
+                {
+                    return None;
+                }
+                let turns = snapshot.turns.as_array()?;
+                if turns.is_empty() {
+                    return None;
+                }
+                let title = turns
+                    .iter()
+                    .find_map(|turn| turn.get("userMessage").and_then(Value::as_str))
+                    .map(conversation_summary_title)
+                    .unwrap_or_default();
+                Some(AgentConversationSummary {
+                    project_id: snapshot.project_id,
+                    conversation_id,
+                    thread_id: snapshot.thread_id,
+                    title,
+                    turn_count: turns.len(),
+                    updated_at: snapshot.updated_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        Ok(summaries)
     }
 
     async fn load_context_metrics_unlocked(&self, project_id: &str) -> Result<AgentContextMetrics> {
@@ -6571,6 +6627,24 @@ fn conversation_snapshot_store_key(conversation_id: Option<&str>) -> String {
     }
 }
 
+fn conversation_belongs_to_scope(conversation_id: &str, conversation_scope: &str) -> bool {
+    conversation_id == conversation_scope
+        || conversation_id
+            .strip_prefix(conversation_scope)
+            .is_some_and(|suffix| suffix.starts_with(":chat:"))
+}
+
+fn conversation_summary_title(message: &str) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = normalized.chars();
+    let title = characters.by_ref().take(79).collect::<String>();
+    if characters.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    }
+}
+
 fn valid_clarification_question(value: &Value) -> bool {
     let Some(question) = value.as_object() else {
         return false;
@@ -6997,6 +7071,20 @@ mod tests {
         );
         assert!(validate_conversation_id(Some("provider:codex-cli")).is_ok());
         assert!(validate_conversation_id(Some("../../other-session")).is_err());
+        assert!(conversation_belongs_to_scope(
+            "provider:codex-cli:chat:abc",
+            "provider:codex-cli"
+        ));
+        assert!(!conversation_belongs_to_scope(
+            "provider:codex-cli-other:chat:abc",
+            "provider:codex-cli"
+        ));
+        assert_eq!(
+            conversation_summary_title(
+                "  Explain   why this query is slow and suggest a safe index  "
+            ),
+            "Explain why this query is slow and suggest a safe index"
+        );
     }
 
     fn tool_manifest(name: &str) -> AgentToolManifestEntry {

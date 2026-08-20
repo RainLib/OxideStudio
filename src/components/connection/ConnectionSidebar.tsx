@@ -233,14 +233,6 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
               void connect(conn);
             }}
           >
-            {/* Status Indicator */}
-            <div
-              className={cn(
-                "h-2 w-2 rounded-full shrink-0",
-                activeConnectionId === conn.id ? "bg-emerald-500" : "bg-transparent"
-              )}
-            />
-
             {/* Icon Box */}
             <div
               className={cn(
@@ -257,6 +249,14 @@ export function ConnectionSidebar({ width = 300 }: ConnectionSidebarProps) {
             >
               {renderConnectionIcon(conn)}
             </div>
+
+            {/* Keep connection state beside its driver identity. */}
+            <div
+              className={cn(
+                "h-2 w-2 rounded-full shrink-0",
+                activeConnectionId === conn.id ? "bg-emerald-500" : "bg-transparent"
+              )}
+            />
 
             <div className="flex-1 overflow-hidden min-w-0 flex flex-col justify-center gap-2">
               <div

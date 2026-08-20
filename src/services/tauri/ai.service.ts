@@ -15,6 +15,14 @@ export interface AiHttpProviderConfig {
 
 /** Provider-advertised value; Codex and CodeBuddy may add levels independently. */
 export type AiCliReasoningEffort = string;
+export type AiCliServiceTier = "default" | "priority";
+export type AiCliAccessMode = "restricted" | "full";
+
+export interface AiCliModelServiceTier {
+  id: string;
+  name: string;
+  description: string;
+}
 
 export interface AiCliProviderConfig {
   kind: "codex-cli" | "codebuddy-cli";
@@ -22,6 +30,8 @@ export interface AiCliProviderConfig {
   executablePath?: string;
   model: string;
   reasoningEffort?: AiCliReasoningEffort;
+  serviceTier?: AiCliServiceTier;
+  accessMode?: AiCliAccessMode;
   timeoutMs?: number;
   /** Names only. Values are resolved by Rust from the private credential store. */
   environmentKeys?: string[];
@@ -122,12 +132,20 @@ export interface AiCliModelInfo {
   /** Concrete provider default, kept separate from the `default` sentinel. */
   isProviderDefault?: boolean;
   reasoningEfforts?: string[];
+  serviceTiers?: AiCliModelServiceTier[];
 }
 
 export interface AiCliCommandInfo {
   name: string;
   description: string;
   argumentHint?: string;
+}
+
+export interface AiCliCapabilityRequestOptions {
+  /** Detected CLI version; participates in the persistent cache identity. */
+  runtimeVersion?: string;
+  /** Bypass renderer, persistent, and provider-process capability caches. */
+  forceRefresh?: boolean;
 }
 
 export interface AiCliInstallResult {
@@ -283,23 +301,34 @@ export async function detectCliProvider(
 
 export async function listCliModels(
   config: AiCliProviderConfig,
+  options: AiCliCapabilityRequestOptions = {},
 ): Promise<AiCliModelInfo[]> {
   return invokeWithInterceptors<AiCliModelInfo[]>("ai_cli_list_models", {
     config,
+    runtimeVersion: options.runtimeVersion,
+    forceRefresh: options.forceRefresh,
   });
 }
 
 export async function listCliEfforts(
   config: AiCliProviderConfig,
+  options: AiCliCapabilityRequestOptions = {},
 ): Promise<string[]> {
-  return invokeWithInterceptors<string[]>("ai_cli_list_efforts", { config });
+  return invokeWithInterceptors<string[]>("ai_cli_list_efforts", {
+    config,
+    runtimeVersion: options.runtimeVersion,
+    forceRefresh: options.forceRefresh,
+  });
 }
 
 export async function listCliCommands(
   config: AiCliProviderConfig,
+  options: AiCliCapabilityRequestOptions = {},
 ): Promise<AiCliCommandInfo[]> {
   return invokeWithInterceptors<AiCliCommandInfo[]>("ai_cli_list_commands", {
     config,
+    runtimeVersion: options.runtimeVersion,
+    forceRefresh: options.forceRefresh,
   });
 }
 

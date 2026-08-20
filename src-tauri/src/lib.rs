@@ -162,6 +162,7 @@ pub fn run() {
             commands::agent::agent_get_context_metrics,
             commands::agent::agent_save_conversation_snapshot,
             commands::agent::agent_load_conversation_snapshot,
+            commands::agent::agent_list_conversation_snapshots,
             commands::agent::agent_import_text_attachment,
             commands::agent::agent_read_artifact,
             commands::agent::agent_search_artifact,

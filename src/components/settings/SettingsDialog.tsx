@@ -3361,9 +3361,13 @@ function AiSettings({
     setCliStatus({ status: "loading", message: "Loading models..." });
     try {
       await persistCliEnvironment();
-      const models = await aiService.listCliModels(cliConfig);
+      const models = await aiService.listCliModels(cliConfig, {
+        forceRefresh: true,
+      });
       setCliModels(models);
-      const efforts = await aiService.listCliEfforts(cliConfig).catch(() => []);
+      const efforts = await aiService
+        .listCliEfforts(cliConfig, { forceRefresh: true })
+        .catch(() => []);
       setCliEfforts(efforts);
       setCliStatus({
         status: "success",

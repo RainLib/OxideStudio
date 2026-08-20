@@ -1,7 +1,11 @@
+// @vitest-environment happy-dom
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import type { LspClient } from "@/services/lsp";
 import {
   registerLspHoverProvider,
+  useLspHoverProviderCoordinator,
   type LspHoverProviderRuntime,
 } from "./useLspHoverProviderCoordinator";
 
@@ -15,12 +19,14 @@ function deferred<T>() {
 
 function fixture() {
   let provider: any;
-  const dispose = vi.fn();
+  const dispose = vi.fn(function (this: { _isDisposed: boolean }) {
+    this._isDisposed = true;
+  });
   const monaco = {
     languages: {
       registerHoverProvider: vi.fn((_language: string, nextProvider: any) => {
         provider = nextProvider;
-        return { dispose };
+        return { _isDisposed: false, dispose };
       }),
     },
     Range: class Range {
@@ -89,6 +95,28 @@ describe("LSP hover provider coordinator", () => {
     expect(monaco.languages.registerHoverProvider).toHaveBeenCalledTimes(1);
     coordinator.dispose();
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds Monaco disposal before returning the React effect cleanup", async () => {
+    const state = fixture();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    function Harness() {
+      useLspHoverProviderCoordinator({
+        ...state.runtime(),
+        editorLanguageId: "pgsql",
+        isActivePane: true,
+        lspClient: state.lspClient,
+        monaco: state.monaco,
+      });
+      return null;
+    }
+
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => root.unmount());
+
+    expect(state.dispose).toHaveBeenCalledTimes(1);
   });
 
   it("drops a hover response after its connection owner changes", async () => {

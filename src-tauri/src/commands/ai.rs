@@ -12,17 +12,24 @@ use crate::{
             has_provider_secret, load_provider_secret, normalize_provider_secret,
             save_provider_secret,
         },
+        store::MetaStore,
     },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    future::Future,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tauri::{AppHandle, State};
 use tokio::sync::{watch, Mutex};
 
 const MAX_EARLY_CANCELLATIONS: usize = 256;
+const CLI_CAPABILITY_CACHE_SCHEMA_VERSION: &str = "1";
+const CLI_CAPABILITY_CACHE_NAMESPACE: &str = "cli-capability-catalog-v1";
+const CLI_CAPABILITY_CACHE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Provider CLIs produce rich but provider-specific diagnostics. Preserve the
 /// raw diagnostic as the response message while exposing a small, stable code
@@ -224,6 +231,149 @@ async fn cli_environment(
         .map_err(|error| error.to_string())
 }
 
+fn cli_capability_cache_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn cli_capability_cache_key(
+    meta_store: &MetaStore,
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    resource_kind: &str,
+    runtime_version: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut configured_environment_keys = config
+        .environment_keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    configured_environment_keys.sort_unstable();
+    configured_environment_keys.dedup();
+
+    let profile_id = config.profile_id.trim();
+    let executable_path = config
+        .executable_path
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let runtime_version = runtime_version.map(str::trim).unwrap_or_default();
+    let selected_model = if resource_kind == "efforts" {
+        config.model.trim()
+    } else {
+        ""
+    };
+    let mut components = vec![
+        ("schemaVersion", CLI_CAPABILITY_CACHE_SCHEMA_VERSION),
+        ("resourceKind", resource_kind),
+        ("provider", config.kind.as_str()),
+        ("profileId", profile_id),
+        ("executablePath", executable_path),
+        ("runtimeVersion", runtime_version),
+        ("selectedModel", selected_model),
+    ];
+    for key in configured_environment_keys {
+        components.push(("configuredEnvironmentKey", key));
+    }
+    // BTreeMap iteration is deterministic. Values are authenticated directly
+    // into the HMAC and never serialized, persisted or logged.
+    for (key, value) in environment {
+        components.push(("environmentName", key.as_str()));
+        components.push(("environmentValue", value.as_str()));
+    }
+    meta_store.opaque_cache_key(CLI_CAPABILITY_CACHE_NAMESPACE, components)
+}
+
+async fn load_cached_cli_capability<T, F, Fut>(
+    meta_store: &MetaStore,
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    resource_kind: &'static str,
+    runtime_version: Option<&str>,
+    force_refresh: bool,
+    now_ms: i64,
+    discover: F,
+) -> anyhow::Result<Vec<T>>
+where
+    T: DeserializeOwned + Serialize,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<Vec<T>>>,
+{
+    let cache_key = match cli_capability_cache_key(
+        meta_store,
+        config,
+        environment,
+        resource_kind,
+        runtime_version,
+    ) {
+        Ok(cache_key) => Some(cache_key),
+        Err(error) => {
+            tracing::warn!(
+                resource_kind,
+                error = %error,
+                "CLI capability cache key derivation failed; using live discovery"
+            );
+            None
+        }
+    };
+
+    if !force_refresh {
+        if let Some(cache_key) = cache_key.as_deref() {
+            match meta_store
+                .get_cli_capability_cache(cache_key, resource_kind, now_ms)
+                .await
+            {
+                Ok(Some(payload)) => match serde_json::from_value(payload) {
+                    Ok(values) => return Ok(values),
+                    Err(error) => tracing::warn!(
+                        resource_kind,
+                        error = %error,
+                        "Ignoring incompatible CLI capability cache payload"
+                    ),
+                },
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    resource_kind,
+                    error = %error,
+                    "CLI capability cache read failed; using live discovery"
+                ),
+            }
+        }
+    }
+
+    let values = discover().await?;
+    if let Some(cache_key) = cache_key.as_deref() {
+        match serde_json::to_value(&values) {
+            Ok(payload) => {
+                if let Err(error) = meta_store
+                    .save_cli_capability_cache(
+                        cache_key,
+                        resource_kind,
+                        &payload,
+                        now_ms.saturating_add(CLI_CAPABILITY_CACHE_TTL_MS),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        resource_kind,
+                        error = %error,
+                        "CLI capability cache write failed"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                resource_kind,
+                error = %error,
+                "CLI capability result could not be cached"
+            ),
+        }
+    }
+    Ok(values)
+}
+
 #[tauri::command]
 pub async fn ai_cli_set_environment(
     app: AppHandle,
@@ -283,16 +433,36 @@ pub async fn ai_cli_detect(
 #[tauri::command]
 pub async fn ai_cli_list_models(
     app: AppHandle,
+    meta_store: State<'_, MetaStore>,
     config: CliProviderConfig,
+    runtime_version: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<Response<Vec<CliModelInfo>>, String> {
     let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
         Ok(environment) => environment,
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
-    let result = match config.kind {
-        CliProviderKind::CodexCli => codex::list_models(&config, &environment).await,
-        CliProviderKind::CodebuddyCli => codebuddy::list_models(&config, &environment).await,
-    };
+    let force_refresh = force_refresh.unwrap_or(false);
+    let result = load_cached_cli_capability(
+        &meta_store,
+        &config,
+        &environment,
+        "models",
+        runtime_version.as_deref(),
+        force_refresh,
+        cli_capability_cache_now_ms(),
+        || async {
+            match config.kind {
+                CliProviderKind::CodexCli => {
+                    codex::list_models_with_refresh(&config, &environment, force_refresh).await
+                }
+                CliProviderKind::CodebuddyCli => {
+                    codebuddy::list_models_with_refresh(&config, &environment, force_refresh).await
+                }
+            }
+        },
+    )
+    .await;
     match result {
         Ok(models) => Ok(Response::ok(models)),
         Err(error) => {
@@ -308,18 +478,38 @@ pub async fn ai_cli_list_models(
 #[tauri::command]
 pub async fn ai_cli_list_efforts(
     app: AppHandle,
+    meta_store: State<'_, MetaStore>,
     config: CliProviderConfig,
+    runtime_version: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<Response<Vec<String>>, String> {
     let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
         Ok(environment) => environment,
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
-    let result = match config.kind {
-        CliProviderKind::CodexCli => codex::list_models(&config, &environment)
-            .await
-            .map(|models| model_efforts_for_selection(&models, &config.model)),
-        CliProviderKind::CodebuddyCli => codebuddy::list_efforts(&config, &environment).await,
-    };
+    let force_refresh = force_refresh.unwrap_or(false);
+    let result = load_cached_cli_capability(
+        &meta_store,
+        &config,
+        &environment,
+        "efforts",
+        runtime_version.as_deref(),
+        force_refresh,
+        cli_capability_cache_now_ms(),
+        || async {
+            match config.kind {
+                CliProviderKind::CodexCli => {
+                    codex::list_models_with_refresh(&config, &environment, force_refresh)
+                        .await
+                        .map(|models| model_efforts_for_selection(&models, &config.model))
+                }
+                CliProviderKind::CodebuddyCli => {
+                    codebuddy::list_efforts_with_refresh(&config, &environment, force_refresh).await
+                }
+            }
+        },
+    )
+    .await;
     match result {
         Ok(efforts) => Ok(Response::ok(efforts)),
         Err(error) => {
@@ -344,16 +534,35 @@ fn model_efforts_for_selection(models: &[CliModelInfo], requested_model: &str) -
 #[tauri::command]
 pub async fn ai_cli_list_commands(
     app: AppHandle,
+    meta_store: State<'_, MetaStore>,
     config: CliProviderConfig,
+    runtime_version: Option<String>,
+    force_refresh: Option<bool>,
 ) -> Result<Response<Vec<CliCommandInfo>>, String> {
     let environment = match cli_environment(&app, config.kind, &config.profile_id).await {
         Ok(environment) => environment,
         Err(error) => return Ok(Response::err("AI_CLI_ENVIRONMENT_ERROR", &error)),
     };
-    let result = match config.kind {
-        CliProviderKind::CodexCli => Ok(codex::common_commands()),
-        CliProviderKind::CodebuddyCli => codebuddy::list_commands(&config, &environment).await,
-    };
+    let force_refresh = force_refresh.unwrap_or(false);
+    let result = load_cached_cli_capability(
+        &meta_store,
+        &config,
+        &environment,
+        "commands",
+        runtime_version.as_deref(),
+        force_refresh,
+        cli_capability_cache_now_ms(),
+        || async {
+            match config.kind {
+                CliProviderKind::CodexCli => Ok(codex::common_commands()),
+                CliProviderKind::CodebuddyCli => {
+                    codebuddy::list_commands_with_refresh(&config, &environment, force_refresh)
+                        .await
+                }
+            }
+        },
+    )
+    .await;
     match result {
         Ok(commands) => Ok(Response::ok(commands)),
         Err(error) => {
@@ -891,6 +1100,339 @@ fn provider_error_message(status: u16, value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn cache_test_config() -> CliProviderConfig {
+        CliProviderConfig {
+            kind: CliProviderKind::CodexCli,
+            profile_id: "work-profile".to_string(),
+            executable_path: Some("/private/tools/codex".to_string()),
+            model: "default".to_string(),
+            reasoning_effort: None,
+            service_tier: None,
+            access_mode: None,
+            timeout_ms: Some(30_000),
+            environment_keys: vec!["Z_TOKEN".to_string(), "HTTPS_PROXY".to_string()],
+        }
+    }
+
+    async fn cache_test_store() -> MetaStore {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn capability_cache_key_tracks_identity_version_environment_and_effort_model() {
+        let store = cache_test_store().await;
+        let config = cache_test_config();
+        let environment = BTreeMap::from([
+            (
+                "HTTPS_PROXY".to_string(),
+                "https://secret.example.test".to_string(),
+            ),
+            ("Z_TOKEN".to_string(), "top-secret-token".to_string()),
+        ]);
+        let base =
+            cli_capability_cache_key(&store, &config, &environment, "models", Some("codex 1.2.3"))
+                .unwrap();
+        let mut reordered = config.clone();
+        reordered.environment_keys = vec![
+            " HTTPS_PROXY ".to_string(),
+            "Z_TOKEN".to_string(),
+            "HTTPS_PROXY".to_string(),
+        ];
+        assert_eq!(
+            base,
+            cli_capability_cache_key(
+                &store,
+                &reordered,
+                &environment,
+                "models",
+                Some(" codex 1.2.3 "),
+            )
+            .unwrap()
+        );
+
+        let variants = [
+            cli_capability_cache_key(&store, &config, &environment, "models", Some("codex 1.2.4"))
+                .unwrap(),
+            cli_capability_cache_key(
+                &store,
+                &CliProviderConfig {
+                    executable_path: Some("/different/codex".to_string()),
+                    ..config.clone()
+                },
+                &environment,
+                "models",
+                Some("codex 1.2.3"),
+            )
+            .unwrap(),
+            cli_capability_cache_key(
+                &store,
+                &CliProviderConfig {
+                    profile_id: "another-profile".to_string(),
+                    ..config.clone()
+                },
+                &environment,
+                "models",
+                Some("codex 1.2.3"),
+            )
+            .unwrap(),
+            cli_capability_cache_key(
+                &store,
+                &CliProviderConfig {
+                    kind: CliProviderKind::CodebuddyCli,
+                    ..config.clone()
+                },
+                &environment,
+                "models",
+                Some("codex 1.2.3"),
+            )
+            .unwrap(),
+            cli_capability_cache_key(
+                &store,
+                &config,
+                &BTreeMap::from([
+                    (
+                        "HTTPS_PROXY".to_string(),
+                        "https://changed.example.test".to_string(),
+                    ),
+                    ("Z_TOKEN".to_string(), "top-secret-token".to_string()),
+                ]),
+                "models",
+                Some("codex 1.2.3"),
+            )
+            .unwrap(),
+            cli_capability_cache_key(
+                &store,
+                &config,
+                &environment,
+                "commands",
+                Some("codex 1.2.3"),
+            )
+            .unwrap(),
+        ];
+        assert!(variants.iter().all(|variant| variant != &base));
+
+        let effort_default = cli_capability_cache_key(
+            &store,
+            &config,
+            &environment,
+            "efforts",
+            Some("codex 1.2.3"),
+        )
+        .unwrap();
+        let effort_selected = cli_capability_cache_key(
+            &store,
+            &CliProviderConfig {
+                model: "gpt-selected".to_string(),
+                ..config.clone()
+            },
+            &environment,
+            "efforts",
+            Some("codex 1.2.3"),
+        )
+        .unwrap();
+        assert_ne!(effort_default, effort_selected);
+        assert!(!base.contains("work-profile"));
+        assert!(!base.contains("private"));
+        assert!(!base.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn persistent_capability_cache_honors_ttl_force_and_last_known_good() {
+        let store = cache_test_store().await;
+        let config = cache_test_config();
+        let environment = BTreeMap::from([(
+            "HTTPS_PROXY".to_string(),
+            "https://secret.example.test".to_string(),
+        )]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let now = cli_capability_cache_now_ms();
+
+        let first_calls = calls.clone();
+        let first = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            false,
+            now,
+            move || async move {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["first".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, ["first"]);
+
+        let cached_calls = calls.clone();
+        let cached = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            false,
+            now + 1,
+            move || async move {
+                cached_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["should-not-run".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached, ["first"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let force_calls = calls.clone();
+        let forced = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            true,
+            now + 2,
+            move || async move {
+                force_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["refreshed".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(forced, ["refreshed"]);
+
+        let failed_calls = calls.clone();
+        let failed: anyhow::Result<Vec<String>> = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            true,
+            now + 3,
+            move || async move {
+                failed_calls.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("refresh failed"))
+            },
+        )
+        .await;
+        assert!(failed.is_err());
+
+        let retained_calls = calls.clone();
+        let retained = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            false,
+            now + 4,
+            move || async move {
+                retained_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["should-not-run".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(retained, ["refreshed"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let expired_calls = calls.clone();
+        let expired = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "models",
+            Some("codex 1.2.3"),
+            false,
+            now + CLI_CAPABILITY_CACHE_TTL_MS + 5,
+            move || async move {
+                expired_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["after-ttl".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(expired, ["after-ttl"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn incompatible_persistent_cache_fails_open_and_is_replaced() {
+        let store = cache_test_store().await;
+        let config = cache_test_config();
+        let environment = BTreeMap::new();
+        let now = cli_capability_cache_now_ms();
+        let cache_key = cli_capability_cache_key(
+            &store,
+            &config,
+            &environment,
+            "commands",
+            Some("codex 1.2.3"),
+        )
+        .unwrap();
+        store
+            .save_cli_capability_cache(
+                &cache_key,
+                "commands",
+                &json!({ "oldSchema": true }),
+                now + CLI_CAPABILITY_CACHE_TTL_MS,
+            )
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let live_calls = calls.clone();
+        let live: Vec<String> = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "commands",
+            Some("codex 1.2.3"),
+            false,
+            now,
+            move || async move {
+                live_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["status".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(live, ["status"]);
+
+        let cached_calls = calls.clone();
+        let cached: Vec<String> = load_cached_cli_capability(
+            &store,
+            &config,
+            &environment,
+            "commands",
+            Some("codex 1.2.3"),
+            false,
+            now + 1,
+            move || async move {
+                cached_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["should-not-run".to_string()])
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached, ["status"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn chat_completion_url_appends_path_once() {

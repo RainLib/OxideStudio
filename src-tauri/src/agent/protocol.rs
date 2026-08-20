@@ -121,6 +121,10 @@ pub struct AgentProviderConfig {
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub access_mode: Option<String>,
+    #[serde(default)]
     pub environment_keys: Vec<String>,
 }
 
@@ -135,6 +139,8 @@ impl std::fmt::Debug for AgentProviderConfig {
             .field("profile_id", &self.profile_id)
             .field("executable_path", &self.executable_path)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("service_tier", &self.service_tier)
+            .field("access_mode", &self.access_mode)
             .field("environment_keys", &self.environment_keys)
             .field("timeout_ms", &self.timeout_ms)
             .field("capabilities", &self.capabilities)
@@ -253,6 +259,26 @@ impl AgentTurnRequest {
             }
             _ => {}
         }
+        if self.provider.access_mode.as_deref().is_some_and(|mode| {
+            !matches!(mode, "restricted" | "full")
+        }) {
+            return Err("provider accessMode must be restricted or full".to_string());
+        }
+        if self.provider.kind != AgentProviderKind::CodexCli
+            && self.provider.access_mode.as_deref() == Some("full")
+        {
+            return Err("Full access is only supported by Codex CLI".to_string());
+        }
+        if self.provider.access_mode.as_deref() == Some("full")
+            && (self.profile != AgentProfile::Agent
+                || self
+                    .provider
+                    .reasoning_effort
+                    .as_deref()
+                    .is_none_or(|effort| !effort.eq_ignore_ascii_case("ultra")))
+        {
+            return Err("Full access requires Agent mode with Ultra reasoning".to_string());
+        }
         for tool in &self.tools {
             if tool.name.trim().is_empty() || tool.name.chars().count() > 200 {
                 return Err("tool names must contain 1 to 200 characters".to_string());
@@ -289,6 +315,8 @@ impl AgentTurnRequest {
                 "profileId": self.provider.profile_id,
                 "executablePath": self.provider.executable_path,
                 "reasoningEffort": self.provider.reasoning_effort,
+                "serviceTier": self.provider.service_tier,
+                "accessMode": self.provider.access_mode,
                 "environmentKeys": self.provider.environment_keys,
             },
             "workspace": self.workspace,
@@ -324,6 +352,8 @@ impl AgentTurnRequest {
                 "profileId": self.provider.profile_id,
                 "executablePath": self.provider.executable_path,
                 "reasoningEffort": self.provider.reasoning_effort,
+                "serviceTier": self.provider.service_tier,
+                "accessMode": self.provider.access_mode,
                 "environmentKeys": self.provider.environment_keys,
             },
             "workspace": self.workspace,
@@ -431,6 +461,17 @@ pub struct AgentConversationSnapshot {
     pub turns: Value,
     #[serde(default)]
     pub resume_requests: Value,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConversationSummary {
+    pub project_id: String,
+    pub conversation_id: String,
+    pub thread_id: String,
+    pub title: String,
+    pub turn_count: usize,
     pub updated_at: i64,
 }
 
@@ -935,6 +976,80 @@ mod tests {
     }
 
     #[test]
+    fn full_access_requires_codex_agent_mode_and_ultra_reasoning() {
+        let mut request = codex_full_access_request();
+        assert!(request.validate().is_ok());
+
+        request.profile = AgentProfile::Plan;
+        assert_eq!(
+            request.validate().unwrap_err(),
+            "Full access requires Agent mode with Ultra reasoning"
+        );
+
+        request.profile = AgentProfile::Agent;
+        request.provider.reasoning_effort = Some("high".to_string());
+        assert_eq!(
+            request.validate().unwrap_err(),
+            "Full access requires Agent mode with Ultra reasoning"
+        );
+
+        request.provider.reasoning_effort = Some("ultra".to_string());
+        request.provider.kind = AgentProviderKind::CodebuddyCli;
+        assert_eq!(
+            request.validate().unwrap_err(),
+            "Full access is only supported by Codex CLI"
+        );
+    }
+
+    fn codex_full_access_request() -> AgentTurnRequest {
+        AgentTurnRequest {
+            metadata: RequestMetadata {
+                request_id: "request".to_string(),
+                thread_id: "thread".to_string(),
+                turn_id: "turn".to_string(),
+                context_version: "ctx".to_string(),
+                deadline: 1,
+            },
+            project_id: "project".to_string(),
+            profile: AgentProfile::Agent,
+            messages: Vec::new(),
+            prompt: "edit the project".to_string(),
+            provider: AgentProviderConfig {
+                kind: AgentProviderKind::CodexCli,
+                base_url: String::new(),
+                api_key: None,
+                model: "gpt-test".to_string(),
+                timeout_ms: None,
+                capabilities: ProviderCapabilities {
+                    streaming: true,
+                    tool_calling: true,
+                    structured_output: true,
+                    max_input_tokens: None,
+                    max_output_tokens: None,
+                },
+                profile_id: Some("codex-cli-default".to_string()),
+                executable_path: None,
+                reasoning_effort: Some("ultra".to_string()),
+                service_tier: None,
+                access_mode: Some("full".to_string()),
+                environment_keys: Vec::new(),
+            },
+            workspace: WorkspaceContext {
+                project_id: "project".to_string(),
+                connection_id: None,
+                database: None,
+                namespace: None,
+                active_tab_id: None,
+                config_revision: None,
+                fingerprint: "fingerprint".to_string(),
+                summary: HashMap::new(),
+            },
+            tools: Vec::new(),
+            resume_checkpoint: None,
+        }
+    }
+
+    #[test]
     fn sidecar_params_do_not_include_provider_secrets() {
         let request = AgentTurnRequest {
             metadata: RequestMetadata {
@@ -964,6 +1079,8 @@ mod tests {
                 profile_id: None,
                 executable_path: None,
                 reasoning_effort: None,
+                service_tier: None,
+                access_mode: None,
                 environment_keys: Vec::new(),
             },
             workspace: WorkspaceContext {

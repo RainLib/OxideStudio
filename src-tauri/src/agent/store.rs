@@ -167,6 +167,85 @@ impl AgentStore {
         self.get(RecordKey::thread(project_id, thread_id)).await
     }
 
+    pub async fn list_threads_with_prefix(
+        &self,
+        project_id: &str,
+        thread_id_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        validate_scope_value("project id", project_id)?;
+        validate_scope_value("thread id prefix", thread_id_prefix)?;
+        let limit = limit.clamp(1, 100);
+        let backend = self.backend().await?;
+        let records = match backend.as_ref() {
+            Backend::Session(session) => {
+                let now = now_millis();
+                let mut records = session.records.write().await;
+                records.retain(|_, record| record.expires_at > now);
+                records
+                    .iter()
+                    .filter(|(key, _)| {
+                        key.kind == RecordKind::Thread
+                            && key.project_id == project_id
+                            && key.record_id.starts_with(thread_id_prefix)
+                    })
+                    .map(|(key, record)| (key.clone(), record.clone()))
+                    .collect::<Vec<_>>()
+            }
+            Backend::Persistent(persistent) => {
+                let rows = sqlx::query(
+                    r#"SELECT thread_id, ciphertext, nonce, expires_at
+                       FROM agent_threads
+                       WHERE project_id = ?
+                         AND substr(thread_id, 1, length(?)) = ?
+                         AND expires_at > ?
+                       ORDER BY updated_at DESC
+                       LIMIT ?"#,
+                )
+                .bind(project_id)
+                .bind(thread_id_prefix)
+                .bind(thread_id_prefix)
+                .bind(now_millis())
+                .bind(limit as i64)
+                .fetch_all(&persistent.pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let thread_id: String = row.get("thread_id");
+                        let nonce: Vec<u8> = row.get("nonce");
+                        let nonce: [u8; 12] = nonce.try_into().map_err(|_| {
+                            anyhow!("stored agent thread nonce has an invalid length")
+                        })?;
+                        Ok((
+                            RecordKey::thread(project_id, &thread_id),
+                            EncryptedRecord {
+                                ciphertext: row.get("ciphertext"),
+                                nonce,
+                                expires_at: row.get("expires_at"),
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
+
+        let mut values = records
+            .into_iter()
+            .map(|(key, record)| {
+                let mut plaintext = decrypt(backend.key(), &key, &record)?;
+                let decoded = serde_json::from_slice(&plaintext)
+                    .context("decrypted agent thread is not valid JSON");
+                plaintext.zeroize();
+                decoded
+            })
+            .collect::<Result<Vec<Value>>>()?;
+        values.sort_by_key(|value| {
+            std::cmp::Reverse(value.get("updatedAt").and_then(Value::as_i64).unwrap_or(0))
+        });
+        values.truncate(limit);
+        Ok(values)
+    }
+
     pub async fn save_turn_journal(
         &self,
         project_id: &str,
@@ -1546,6 +1625,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_store_lists_only_matching_thread_prefixes() {
+        let store = AgentStore::session_for_test(PathBuf::from("unused"), [7u8; 32]);
+        store
+            .save_thread(
+                "project",
+                "conversation:provider-a:chat:new",
+                &serde_json::json!({"updatedAt": 200, "id": "new"}),
+            )
+            .await
+            .unwrap();
+        store
+            .save_thread(
+                "project",
+                "conversation:provider-a:chat:old",
+                &serde_json::json!({"updatedAt": 100, "id": "old"}),
+            )
+            .await
+            .unwrap();
+        store
+            .save_thread(
+                "project",
+                "conversation:provider-b:chat:other",
+                &serde_json::json!({"updatedAt": 300, "id": "other"}),
+            )
+            .await
+            .unwrap();
+
+        let values = store
+            .list_threads_with_prefix("project", "conversation:provider-a", 20)
+            .await
+            .unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["id"], "new");
+        assert_eq!(values[1]["id"], "old");
+    }
+
+    #[tokio::test]
     async fn persistent_store_never_writes_json_plaintext() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("agent.db");
@@ -1563,6 +1679,39 @@ mod tests {
         assert!(!bytes
             .windows(marker.len())
             .any(|window| window == marker.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn persistent_store_lists_matching_thread_prefixes() {
+        let directory = tempdir().unwrap();
+        let store = AgentStore::persistent_for_test(directory.path().join("agent.db"), [9u8; 32])
+            .await
+            .unwrap();
+        store
+            .save_thread(
+                "project",
+                "conversation:provider-a:chat:one",
+                &serde_json::json!({"updatedAt": 100, "id": "one"}),
+            )
+            .await
+            .unwrap();
+        store
+            .save_thread(
+                "project",
+                "conversation:provider-b:chat:two",
+                &serde_json::json!({"updatedAt": 200, "id": "two"}),
+            )
+            .await
+            .unwrap();
+
+        let values = store
+            .list_threads_with_prefix("project", "conversation:provider-a", 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            values,
+            vec![serde_json::json!({"updatedAt": 100, "id": "one"})]
+        );
     }
 
     #[tokio::test]

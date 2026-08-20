@@ -13,6 +13,7 @@ export {
 } from "./ui/DataGridContextMenu";
 export {
   DataGridHoverTooltip,
+  gridHoverTooltipPosition,
   gridCellTooltipText,
   type DataGridHoverTooltipState,
 } from "./ui/DataGridHoverTooltip";

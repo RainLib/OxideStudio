@@ -17,6 +17,10 @@ import {
 } from "@/ai/assistant/contextPreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AssistantHeader } from "./assistant/AssistantHeader";
+import {
+  AssistantConversationHistory,
+  upsertAssistantConversationHistorySummary,
+} from "./assistant/AssistantConversationHistory";
 import { AssistantConversation } from "./assistant/AssistantConversation";
 import { AssistantPromptBox } from "./assistant/AssistantPromptBox";
 import type { AssistantModelStatus } from "./assistant/AssistantModelControl";
@@ -85,8 +89,13 @@ import {
 } from "@/lib/agentFileReview";
 
 const CLI_PROBE_TTL_MS = 5 * 60 * 1_000;
+const ACTIVE_CONVERSATION_STORAGE_KEY = "oxide-assistant-active-conversations-v1";
 
 type PendingTextAttachment = AgentTextAttachment & { id: string };
+type AssistantConversationSelection = {
+  scopeKey: string;
+  conversationId: string;
+};
 
 export function assistantToolManifestForProfile(
   profile: AgentProfile,
@@ -126,6 +135,12 @@ function AgentHostAssistantSidebar() {
   );
   const codexCliReasoningEffortByModel = useAiSettingsStore(
     (state) => state.codexCliReasoningEffortByModel,
+  );
+  const codexCliServiceTier = useAiSettingsStore(
+    (state) => state.codexCliServiceTier,
+  );
+  const codexCliAccessMode = useAiSettingsStore(
+    (state) => state.codexCliAccessMode,
   );
   const codeBuddyCliPath = useAiSettingsStore(
     (state) => state.codeBuddyCliPath,
@@ -230,13 +245,56 @@ function AgentHostAssistantSidebar() {
         ? codeBuddyAssistantMode
         : oxideAssistantMode;
   const providerConfigured = Boolean(modelConfig);
-  const conversationId = assistantConversationId(modelConfig);
+  const conversationScope = assistantConversationId(modelConfig);
+  const conversationScopeKey = assistantConversationScopeKey(
+    activeProjectId,
+    conversationScope,
+  );
+  const [conversationSelection, setConversationSelection] =
+    useState<AssistantConversationSelection>(() => ({
+      scopeKey: conversationScopeKey,
+      conversationId: resolveStoredAssistantConversationId(
+        activeProjectId,
+        conversationScope,
+      ),
+    }));
+  const conversationId = conversationScope
+    ? conversationSelection.scopeKey === conversationScopeKey &&
+      assistantConversationBelongsToScope(
+        conversationSelection.conversationId,
+        conversationScope,
+      )
+      ? conversationSelection.conversationId
+      : resolveStoredAssistantConversationId(
+          activeProjectId,
+          conversationScope,
+        )
+    : undefined;
   const session = useAssistantAgentSession(
     activeProjectId,
     providerConfigured,
     modelConfig?.kind,
     conversationId,
   );
+  useEffect(() => {
+    if (!conversationScope || !conversationId) return;
+    if (
+      conversationSelection.scopeKey === conversationScopeKey &&
+      conversationSelection.conversationId === conversationId
+    ) {
+      return;
+    }
+    setConversationSelection({
+      scopeKey: conversationScopeKey,
+      conversationId,
+    });
+  }, [
+    conversationId,
+    conversationScope,
+    conversationScopeKey,
+    conversationSelection.conversationId,
+    conversationSelection.scopeKey,
+  ]);
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -388,6 +446,7 @@ function AgentHostAssistantSidebar() {
       ? modelConfig
       : null,
     cliSetupForCurrentIdentity?.phase === "ready",
+    cliSetupForCurrentIdentity?.version,
   );
   const modelPrompt = useMemo(
     () => promptWithTextAttachments(message, attachments),
@@ -427,6 +486,32 @@ function AgentHostAssistantSidebar() {
     session.turns,
     session.activeTurn,
   );
+  useEffect(() => {
+    if (!conversationScope || !conversationId || session.turns.length === 0) {
+      return;
+    }
+    const firstTurn = session.turns[0];
+    const latestTurn = session.turns[session.turns.length - 1];
+    if (!firstTurn || !latestTurn) return;
+    upsertAssistantConversationHistorySummary(
+      activeProjectId,
+      conversationScope,
+      {
+        projectId: activeProjectId,
+        conversationId,
+        threadId: firstTurn.threadId || latestTurn.threadId || "",
+        title: firstTurn.userMessage.replace(/\s+/gu, " ").trim().slice(0, 80),
+        turnCount: session.turns.length,
+        updatedAt: latestTurn.updatedAt,
+      },
+    );
+  }, [
+    activeProjectId,
+    conversationId,
+    conversationScope,
+    session.turns,
+    turnsContentVersion,
+  ]);
   // Provider health follows the newest turn only. Reusing an older failed turn
   // after a later successful request would incorrectly send a ready CLI back to
   // its authentication screen whenever the Assistant panel remounts.
@@ -475,6 +560,22 @@ function AgentHostAssistantSidebar() {
             codeBuddyCliReasoningEffort,
           )
         : undefined;
+  useEffect(() => {
+    if (
+      codexCliAccessMode === "full" &&
+      (aiProvider !== "codex-cli" ||
+        assistantMode !== "agent" ||
+        displayedReasoningEffort?.trim().toLowerCase() !== "ultra")
+    ) {
+      updateAiSettings({ codexCliAccessMode: "restricted" });
+    }
+  }, [
+    aiProvider,
+    assistantMode,
+    codexCliAccessMode,
+    displayedReasoningEffort,
+    updateAiSettings,
+  ]);
   const cliModelOptions = useMemo(() => {
     if (aiProvider !== "codebuddy-cli") return cliCatalog.models;
     const selectedModel = displayedModel.trim() || "default";
@@ -501,6 +602,8 @@ function AgentHostAssistantSidebar() {
     cliSetup: cliSetupForCurrentIdentity,
     t,
   });
+  const assistantSubmissionBlockReason =
+    session.hydrationError || submissionBlockReason;
   const showProviderWelcome =
     !session.isHydrating && !aiEnabled && session.turns.length === 0;
   const cliSetupRequired = Boolean(
@@ -517,6 +620,45 @@ function AgentHostAssistantSidebar() {
         detail: { section: "ai" },
       }),
     );
+  };
+
+  const resetConversationComposer = () => {
+    autoFollowConversationRef.current = true;
+    setMessage("");
+    setAttachments([]);
+    setAttachmentError(null);
+  };
+
+  const activateConversation = (nextConversationId: string) => {
+    if (
+      !conversationScope ||
+      !assistantConversationBelongsToScope(
+        nextConversationId,
+        conversationScope,
+      )
+    ) {
+      return;
+    }
+    persistAssistantConversationSelection(
+      activeProjectId,
+      conversationScope,
+      nextConversationId,
+    );
+    setConversationSelection({
+      scopeKey: conversationScopeKey,
+      conversationId: nextConversationId,
+    });
+    resetConversationComposer();
+  };
+
+  const startNewConversation = () => {
+    if (session.isBusy) return;
+    if (!conversationScope) {
+      resetConversationComposer();
+      session.clear();
+      return;
+    }
+    activateConversation(createAssistantConversationId(conversationScope));
   };
 
   const selectAssistantProvider = (provider: AiProviderKind) => {
@@ -1045,7 +1187,7 @@ function AgentHostAssistantSidebar() {
 
   const handleSubmit = async () => {
     const prompt = message.trim();
-    if (!prompt || session.isBusy || submissionBlockReason) return;
+    if (!prompt || session.isBusy || assistantSubmissionBlockReason) return;
     const mode = resolveAssistantMode(assistantMode, prompt);
     const submittedAttachments = attachments;
     const submittedPrompt = promptWithTextAttachments(
@@ -1294,30 +1436,35 @@ function AgentHostAssistantSidebar() {
     <div className="wb-assistant-shell flex h-full flex-col wb-panel">
       <AssistantHeader
         isRunning={session.isBusy}
-        onHide={() => setToolWindowVisible("assistant", false)}
-        onNewChat={() => {
-          autoFollowConversationRef.current = true;
-          setMessage("");
-          session.clear();
-          setAttachments([]);
-          setAttachmentError(null);
-        }}
-      />
-
-      <AssistantProviderControl
-        provider={aiProvider}
-        enabled={aiEnabled}
-        destination={
-          modelConfig?.kind === "openai-compatible"
-            ? contextProviderLabel
-            : null
+        providerControl={
+          <AssistantProviderControl
+            provider={aiProvider}
+            enabled={aiEnabled}
+            destination={
+              modelConfig?.kind === "openai-compatible"
+                ? contextProviderLabel
+                : null
+            }
+            modelStatus={modelStatus}
+            cliSetup={cliSetupForCurrentIdentity}
+            isBusy={session.isBusy}
+            inHeader
+            onSelect={selectAssistantProvider}
+          />
         }
-        modelStatus={modelStatus}
-        cliSetup={cliSetupForCurrentIdentity}
-        isBusy={session.isBusy}
-        onSelect={selectAssistantProvider}
-        onRetry={retryAssistantProvider}
-        onOpenSettings={openAiSettings}
+        historyControl={
+          conversationScope && conversationId ? (
+            <AssistantConversationHistory
+              projectId={activeProjectId}
+              conversationScope={conversationScope}
+              activeConversationId={conversationId}
+              disabled={session.isBusy}
+              onSelect={activateConversation}
+            />
+          ) : null
+        }
+        onHide={() => setToolWindowVisible("assistant", false)}
+        onNewChat={startNewConversation}
       />
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[hsl(var(--wb-editor))]">
@@ -1373,18 +1520,22 @@ function AgentHostAssistantSidebar() {
             />
           ) : (
             <>
-              {session.hostError && session.turns.length === 0 && (
+              {(session.hydrationError || session.hostError) &&
+                session.turns.length === 0 && (
                 <div className="mx-3 mt-3 border-y border-amber-500/25 bg-amber-500/5 px-2 py-2 text-[10px] leading-4 text-amber-300">
-                  {session.hostError}
+                  {session.hydrationError || session.hostError}
                   <button
                     type="button"
                     className="ml-2 underline underline-offset-2 hover:text-[hsl(var(--wb-text))]"
-                    onClick={() => void session.refreshStatus()}
+                    onClick={() => {
+                      if (session.hydrationError) session.retryHydration();
+                      else void session.refreshStatus();
+                    }}
                   >
                     Retry
                   </button>
                 </div>
-              )}
+                )}
 
               <AssistantConversation
                 turns={session.turns}
@@ -1546,6 +1697,12 @@ function AgentHostAssistantSidebar() {
                 : undefined
             }
             reasoningEffort={displayedReasoningEffort}
+            serviceTier={
+              aiProvider === "codex-cli" ? codexCliServiceTier : undefined
+            }
+            accessMode={
+              aiProvider === "codex-cli" ? codexCliAccessMode : undefined
+            }
             commandOptions={
               aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
                 ? cliCatalog.commands
@@ -1569,7 +1726,16 @@ function AgentHostAssistantSidebar() {
                     : {},
               )
             }
-            onOpenAiSettings={openAiSettings}
+            onServiceTierChange={(serviceTier) =>
+              updateAiSettings(
+                aiProvider === "codex-cli" ? { codexCliServiceTier: serviceTier } : {},
+              )
+            }
+            onAccessModeChange={(accessMode) =>
+              updateAiSettings(
+                aiProvider === "codex-cli" ? { codexCliAccessMode: accessMode } : {},
+              )
+            }
             onRetryModel={() => {
               if (authIssueId) setDismissedAuthIssueId(authIssueId);
               const catalogNeedsRefresh =
@@ -1586,7 +1752,7 @@ function AgentHostAssistantSidebar() {
               }
               retryAssistantProvider();
             }}
-            submissionBlockReason={submissionBlockReason}
+            submissionBlockReason={assistantSubmissionBlockReason}
             modeOptions={assistantProviderDefinition(aiProvider).modeOptions}
             attachments={attachments}
             attachmentError={attachmentError}
@@ -1873,8 +2039,10 @@ function selectedCliReasoningEffort(
   legacyEffort: string,
 ) {
   const selected = preferences[model.trim() || "default"]?.trim();
-  if (selected) return selected;
-  return Object.keys(preferences).length === 0 ? legacyEffort : "default";
+  const effort =
+    selected ||
+    (Object.keys(preferences).length === 0 ? legacyEffort : "default");
+  return effort.trim().toLowerCase() === "enabled" ? "default" : effort;
 }
 
 export function cliSetupForProviderIdentity(
@@ -1981,6 +2149,109 @@ export function assistantConversationId(provider: AiProviderConfig | null) {
     baseUrl: canonicalHttpDestination(provider.baseUrl),
   });
   return `provider:http:${nonSecretDestinationDigest(identity)}`;
+}
+
+export function assistantConversationScopeKey(
+  projectId: string,
+  conversationScope?: string,
+) {
+  return JSON.stringify([projectId, conversationScope || "default"]);
+}
+
+export function assistantConversationBelongsToScope(
+  conversationId: string,
+  conversationScope: string,
+) {
+  return (
+    conversationId === conversationScope ||
+    conversationId.startsWith(`${conversationScope}:chat:`)
+  );
+}
+
+export function createAssistantConversationId(
+  conversationScope: string,
+  now = Date.now(),
+  randomToken = assistantConversationRandomToken(),
+) {
+  const normalizedToken = randomToken
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/gu, "")
+    .slice(0, 8)
+    .padEnd(8, "0");
+  const conversationId = `${conversationScope}:chat:${now.toString(36)}-${normalizedToken}`;
+  if (conversationId.length > 80) {
+    throw new Error("Assistant conversation identity exceeds the host limit.");
+  }
+  return conversationId;
+}
+
+function resolveStoredAssistantConversationId(
+  projectId: string,
+  conversationScope?: string,
+) {
+  if (!conversationScope) return "";
+  if (typeof window === "undefined") return conversationScope;
+  try {
+    const value = window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+    const selections = value
+      ? (JSON.parse(value) as Record<string, unknown>)
+      : {};
+    const candidate = selections[
+      assistantConversationScopeKey(projectId, conversationScope)
+    ];
+    return typeof candidate === "string" &&
+      assistantConversationBelongsToScope(candidate, conversationScope)
+      ? candidate
+      : conversationScope;
+  } catch {
+    return conversationScope;
+  }
+}
+
+function persistAssistantConversationSelection(
+  projectId: string,
+  conversationScope: string,
+  conversationId: string,
+) {
+  if (
+    typeof window === "undefined" ||
+    !assistantConversationBelongsToScope(conversationId, conversationScope)
+  ) {
+    return;
+  }
+  try {
+    const value = window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : {};
+    const selections =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    const scopeKey = assistantConversationScopeKey(projectId, conversationScope);
+    delete selections[scopeKey];
+    selections[scopeKey] = conversationId;
+    const boundedSelections = Object.fromEntries(
+      Object.entries(selections).slice(-100),
+    );
+    window.localStorage.setItem(
+      ACTIVE_CONVERSATION_STORAGE_KEY,
+      JSON.stringify(boundedSelections),
+    );
+  } catch {
+    // Persistence is a convenience. A denied/quota-limited localStorage must
+    // never prevent starting or opening a conversation in this session.
+  }
+}
+
+function assistantConversationRandomToken() {
+  try {
+    const bytes = new Uint8Array(4);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
+  } catch {
+    return Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+  }
 }
 
 function canonicalHttpDestination(baseUrl: string) {

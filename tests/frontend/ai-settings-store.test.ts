@@ -21,6 +21,8 @@ describe("AI settings provider channels", () => {
       codexCliModel: "gpt-cli",
       codexCliReasoningEffort: "high",
       codexCliReasoningEffortByModel: { "gpt-cli": "high" },
+      codexCliServiceTier: "default",
+      codexCliAccessMode: "restricted",
       codexCliEnvironmentKeys: ["HTTPS_PROXY"],
     });
   });
@@ -57,6 +59,8 @@ describe("AI settings provider channels", () => {
       executablePath: "codex",
       model: "gpt-cli",
       reasoningEffort: "high",
+      serviceTier: "default",
+      accessMode: "restricted",
       timeoutMs: useAiSettingsStore.getState().timeoutMs,
       environmentKeys: ["HTTPS_PROXY"],
     });
@@ -66,6 +70,38 @@ describe("AI settings provider channels", () => {
       model: "inline-model",
       timeoutMs: useAiSettingsStore.getState().inlineTimeoutMs,
     });
+  });
+
+  it("only emits Full access for Codex Agent turns using Ultra", () => {
+    useAiSettingsStore.getState().updateSettings({
+      provider: "codex-cli",
+      codexCliAssistantMode: "agent",
+      codexCliReasoningEffort: "ultra",
+      codexCliAccessMode: "full",
+    });
+
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({
+        kind: "codex-cli",
+        reasoningEffort: "ultra",
+        accessMode: "full",
+      }),
+    );
+
+    useAiSettingsStore.getState().updateSettings({
+      codexCliAssistantMode: "plan",
+    });
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({ accessMode: "restricted" }),
+    );
+
+    useAiSettingsStore.getState().updateSettings({
+      codexCliAssistantMode: "agent",
+      codexCliReasoningEffort: "high",
+    });
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({ accessMode: "restricted" }),
+    );
   });
 
   it("migrates and preserves an independent mode for each Assistant provider", () => {

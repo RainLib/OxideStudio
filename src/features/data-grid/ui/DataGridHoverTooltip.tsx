@@ -1,4 +1,4 @@
-import type { GridCell } from "@glideapps/glide-data-grid";
+import type { GridCell, GridMouseEventArgs } from "@glideapps/glide-data-grid";
 import { createPortal } from "react-dom";
 
 export interface DataGridHoverTooltipState {
@@ -36,6 +36,25 @@ export function gridCellTooltipText(cell: GridCell): string {
 
 interface DataGridHoverTooltipProps {
   tooltip: DataGridHoverTooltipState | null;
+}
+
+type HoverableGridMouseEvent = Extract<
+  GridMouseEventArgs,
+  { kind: "cell" | "header" }
+>;
+
+/**
+ * Glide's cell bounds are already in viewport coordinates. Its localEvent
+ * coordinates are relative to that cell, so adding them gives the pointer's
+ * viewport position for the portaled, fixed-position tooltip.
+ */
+export function gridHoverTooltipPosition(
+  event: HoverableGridMouseEvent,
+) {
+  return {
+    x: event.bounds.x + event.localEventX,
+    y: event.bounds.y + event.localEventY,
+  };
 }
 
 /** Displays source column metadata and the complete cell value on hover. */

@@ -256,6 +256,18 @@ pub async fn agent_load_conversation_snapshot(
 }
 
 #[tauri::command]
+pub async fn agent_list_conversation_snapshots(
+    manager: State<'_, AgentHostManager>,
+    project_id: String,
+    conversation_scope: String,
+) -> Result<Vec<crate::agent::protocol::AgentConversationSummary>, CommandError> {
+    manager
+        .list_conversation_snapshots(&project_id, &conversation_scope)
+        .await
+        .map_err(|error| agent_error("AGENT_CONVERSATION_LIST_FAILED", error))
+}
+
+#[tauri::command]
 pub async fn agent_read_artifact(
     manager: State<'_, AgentHostManager>,
     request: AgentArtifactReadRequest,

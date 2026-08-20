@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GridCellKind } from "@glideapps/glide-data-grid";
 import {
   DataGridHoverTooltip,
+  gridHoverTooltipPosition,
   gridCellTooltipText,
 } from "@/features/data-grid";
 
@@ -40,6 +41,18 @@ describe("data grid hover tooltip", () => {
         data: "a long value that is clipped in the canvas",
       }),
     ).toContain("clipped in the canvas");
+  });
+
+  it("anchors a portaled tooltip using Glide's viewport cell bounds", () => {
+    const position = gridHoverTooltipPosition({
+      kind: "cell",
+      location: [3, 7],
+      bounds: { x: 486, y: 198, width: 160, height: 28 },
+      localEventX: 24,
+      localEventY: 9,
+    } as never);
+
+    expect(position).toEqual({ x: 510, y: 207 });
   });
 
   it("replaces tooltip content when the hovered cell changes", async () => {

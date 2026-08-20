@@ -41,23 +41,37 @@ pub struct CliProviderConfig {
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
+    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub access_mode: Option<String>,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub environment_keys: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CliModelInfo {
     pub id: String,
     pub label: String,
     /// Keeps a concrete provider default distinct from the OxideStudio
     /// `default` sentinel stored in `is_default`.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_provider_default: bool,
     pub is_default: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<CliModelServiceTier>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliModelServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 
 impl CliModelInfo {
@@ -68,6 +82,7 @@ impl CliModelInfo {
             is_provider_default: false,
             is_default,
             reasoning_efforts: Vec::new(),
+            service_tiers: Vec::new(),
         }
     }
 }
@@ -76,7 +91,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CliCommandInfo {
     pub name: String,

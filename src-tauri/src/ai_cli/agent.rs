@@ -9,7 +9,7 @@ use crate::{
         },
         CliProviderKind,
     },
-    core::cli_provider_secret::load_cli_environment,
+    core::{cli_provider_secret::load_cli_environment, store::MetaStore},
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -71,7 +71,8 @@ pub struct PreparedCliRun {
     pub stdin: Vec<u8>,
     pub timeout: Duration,
     protocol: CliRunProtocol,
-    working_directory: TempDir,
+    working_directory: PathBuf,
+    _isolated_working_directory: TempDir,
     _bridge: PrivateBridgeSession,
 }
 
@@ -80,13 +81,15 @@ enum CliRunProtocol {
     CodexAppServer {
         model: Option<String>,
         effort: Option<String>,
+        service_tier: Option<String>,
+        full_access: bool,
         collaboration_mode: &'static str,
     },
 }
 
 impl PreparedCliRun {
     pub fn working_directory(&self) -> &Path {
-        self.working_directory.path()
+        &self.working_directory
     }
 
     pub async fn run(
@@ -113,6 +116,8 @@ impl PreparedCliRun {
             CliRunProtocol::CodexAppServer {
                 model,
                 effort,
+                service_tier,
+                full_access,
                 collaboration_mode,
             } => {
                 crate::ai_cli::runtime::run_codex_app_server(
@@ -123,6 +128,8 @@ impl PreparedCliRun {
                     &self.stdin,
                     model.as_deref(),
                     effort.as_deref(),
+                    service_tier.as_deref(),
+                    *full_access,
                     collaboration_mode,
                     self.timeout,
                     cancellation,
@@ -496,9 +503,30 @@ pub async fn prepare_cli_run(
     );
     environment.insert(BRIDGE_TOKEN_ENV.to_string(), bridge.token().to_string());
 
-    let working_directory = isolated_working_directory()?;
+    let isolated_working_directory = isolated_working_directory()?;
     let oxide_agent = resolve_oxide_agent_binary(app)?;
-    let prompt = build_prompt(request);
+    let full_access = provider_kind == CliProviderKind::CodexCli
+        && request.profile == AgentProfile::Agent
+        && provider.access_mode.as_deref() == Some("full")
+        && provider
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|effort| effort.eq_ignore_ascii_case("ultra"));
+    let working_directory = if full_access {
+        let store = app
+            .try_state::<MetaStore>()
+            .ok_or_else(|| anyhow!("project metadata store is unavailable"))?;
+        crate::commands::project_files::agent_project_directory(
+            &store,
+            &request.project_id,
+            None,
+        )
+        .await?
+        .1
+    } else {
+        isolated_working_directory.path().to_path_buf()
+    };
+    let prompt = build_prompt(request, full_access);
     let timeout = Duration::from_millis(
         provider
             .timeout_ms
@@ -506,15 +534,19 @@ pub async fn prepare_cli_run(
             .clamp(MIN_CLI_TIMEOUT_MS, MAX_CLI_TIMEOUT_MS),
     );
     let args = match provider_kind {
-        CliProviderKind::CodexCli => codex_args(provider, &oxide_agent, request),
+        CliProviderKind::CodexCli => {
+            codex_args(provider, &oxide_agent, request, full_access)
+        }
         CliProviderKind::CodebuddyCli => {
-            codebuddy_args(provider, &oxide_agent, request, working_directory.path())?
+            codebuddy_args(provider, &oxide_agent, request, &working_directory)?
         }
     };
     let protocol = match provider_kind {
         CliProviderKind::CodexCli => CliRunProtocol::CodexAppServer {
             model: non_default(provider.model.as_str()),
             effort: provider.reasoning_effort.as_deref().and_then(non_default),
+            service_tier: provider.service_tier.as_deref().and_then(non_default),
+            full_access,
             collaboration_mode: if request.profile == AgentProfile::Plan {
                 "plan"
             } else {
@@ -532,6 +564,7 @@ pub async fn prepare_cli_run(
         timeout,
         protocol,
         working_directory,
+        _isolated_working_directory: isolated_working_directory,
         _bridge: bridge,
     })
 }
@@ -582,7 +615,7 @@ fn provider_kind(kind: AgentProviderKind) -> Result<CliProviderKind> {
     }
 }
 
-fn build_prompt(request: &AgentTurnRequest) -> String {
+fn build_prompt(request: &AgentTurnRequest, full_access: bool) -> String {
     let current_request = request.prompt.trim();
     // Native slash commands must be the first token in the provider input.
     // Runtime tool manifests, sandboxing and Desktop approval leases still
@@ -595,13 +628,18 @@ fn build_prompt(request: &AgentTurnRequest) -> String {
         AgentProfile::Plan => "Plan (strictly read-only)",
         AgentProfile::Agent => "Agent (database changes require Desktop approval)",
     };
+    let access_boundary = if full_access {
+        "The user explicitly enabled Full access. Native shell, filesystem, project editing, and network tools may run without further approval. "
+    } else {
+        "Use only the tools provided by the `oxide` MCP server for workspace and database access. Do not use shell, filesystem, web, or project editing tools. "
+    };
     let mut prompt = format!(
         "You are the OxideStudio database assistant running in {profile} mode.\n\
-Use only the tools provided by the `oxide` MCP server for workspace and database access. \
-Do not use shell, filesystem, web, or project editing tools. Never ask the user to approve inside the CLI: \
-OxideStudio Desktop owns every approval. A database mutation is permitted only when \
-`query.executeApproved` is present and Desktop returns a successful receipt. If a mutation result is unknown, \
-tell the user to verify it manually and do not retry it. Do not reveal hidden reasoning; provide concise conclusions.\n\n"
+{access_boundary}\
+Never ask the user to approve inside the CLI: OxideStudio Desktop owns database approvals. \
+A database mutation is permitted only when `query.executeApproved` is present and Desktop returns a successful receipt. \
+If a mutation result is unknown, tell the user to verify it manually and do not retry it. \
+Do not reveal hidden reasoning; provide concise conclusions.\n\n"
     );
     if !request.messages.is_empty() {
         prompt.push_str("Conversation context:\n");
@@ -619,15 +657,22 @@ fn codex_args(
     _provider: &AgentProviderConfig,
     oxide_agent: &Path,
     request: &AgentTurnRequest,
+    full_access: bool,
 ) -> Vec<String> {
-    let args = vec![
+    let mut args = vec![
         "app-server".to_string(),
         "-c".to_string(),
         "mcp_servers={}".to_string(),
-        "-c".to_string(),
-        "features.shell_tool=false".to_string(),
-        "-c".to_string(),
-        "web_search=\"disabled\"".to_string(),
+    ];
+    if !full_access {
+        args.extend([
+            "-c".to_string(),
+            "features.shell_tool=false".to_string(),
+            "-c".to_string(),
+            "web_search=\"disabled\"".to_string(),
+        ]);
+    }
+    args.extend([
         "-c".to_string(),
         format!(
             "mcp_servers.oxide.command={}",
@@ -661,7 +706,7 @@ fn codex_args(
             )
             .unwrap_or_else(|_| "[]".to_string())
         ),
-    ];
+    ]);
     args
 }
 
@@ -735,7 +780,11 @@ fn codebuddy_args(
         .reasoning_effort
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
+        .filter(|value| {
+            !value.is_empty()
+                && !value.eq_ignore_ascii_case("default")
+                && !value.eq_ignore_ascii_case("enabled")
+        })
     {
         args.extend(["--effort".to_string(), effort.to_string()]);
     }

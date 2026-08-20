@@ -167,11 +167,20 @@ export type AgentContextMetrics = {
 };
 
 export type AgentConversationSnapshot = {
-    projectId: string;
-    conversationId?: string | null;
+  projectId: string;
+  conversationId?: string | null;
   threadId: string;
   turns: unknown;
   resumeRequests: unknown;
+  updatedAt: number;
+};
+
+export type AgentConversationSummary = {
+  projectId: string;
+  conversationId: string;
+  threadId: string;
+  title: string;
+  turnCount: number;
   updatedAt: number;
 };
 
@@ -395,12 +404,22 @@ export const agentHostService = {
   },
 
   loadConversationSnapshot: async (
-      projectId: string,
-      conversationId?: string,
+    projectId: string,
+    conversationId?: string,
   ): Promise<AgentConversationSnapshot | null> => {
     return await invokeRawCommand<AgentConversationSnapshot | null>(
       "agent_load_conversation_snapshot",
-        { projectId, conversationId },
+      { projectId, conversationId },
+    );
+  },
+
+  listConversationSnapshots: async (
+    projectId: string,
+    conversationScope: string,
+  ): Promise<AgentConversationSummary[]> => {
+    return await invokeRawCommand<AgentConversationSummary[]>(
+      "agent_list_conversation_snapshots",
+      { projectId, conversationScope },
     );
   },
 

@@ -3158,6 +3158,18 @@ export function QueryEditor({
         "editorIndentGuide.activeBackground1": "#414754",
         "editorRuler.foreground": "#2b2e34",
         "editorGutter.background": "#1c1d20",
+        "editorWidget.background": "#272a30",
+        "editorWidget.border": "#3a414d",
+        "editorSuggestWidget.background": "#272a30",
+        "editorSuggestWidget.border": "#3a414d",
+        "editorSuggestWidget.foreground": "#e1e5eb",
+        "editorSuggestWidget.selectedBackground": "#354967",
+        "editorSuggestWidget.selectedForeground": "#f2f5f9",
+        "editorSuggestWidget.highlightForeground": "#8db8ff",
+        "editorSuggestWidget.focusHighlightForeground": "#c5dcff",
+        "editorSuggestWidgetStatus.foreground": "#aeb7c4",
+        "editorHoverWidget.background": "#272a30",
+        "editorHoverWidget.border": "#3a414d",
       },
     });
   }, []);

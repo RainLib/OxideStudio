@@ -1,4 +1,12 @@
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -8,16 +16,14 @@ import { cn } from "@/lib/utils";
 import type { AiCliModelInfo } from "@/services/tauri/ai.service";
 import {
   AlertTriangle,
-  Bot,
   Check,
   ChevronDown,
-  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   CircleAlert,
   LoaderCircle,
-  RotateCcw,
   Search,
-  Settings2,
-  SlidersHorizontal,
+  Zap,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useState, type RefObject } from "react";
 
@@ -52,10 +58,14 @@ interface AssistantModelControlProps {
   catalogStatus?: AssistantModelCatalogStatus;
   catalogWarning?: string;
   reasoningEffort?: string;
+  serviceTier?: "default" | "priority";
+  accessMode?: "restricted" | "full";
+  fullAccessAvailable?: boolean;
   onOpenChange: (open: boolean) => void;
   onReasoningEffortChange?: (effort: string) => void;
+  onServiceTierChange?: (tier: "default" | "priority") => void;
+  onAccessModeChange?: (mode: "restricted" | "full") => void;
   onModelChange: (model: string) => void;
-  onOpenSettings: () => void;
   onRetry: () => void;
 }
 
@@ -71,10 +81,14 @@ export function AssistantModelControl({
   catalogStatus,
   catalogWarning,
   reasoningEffort,
+  serviceTier,
+  accessMode,
+  fullAccessAvailable = false,
   onOpenChange,
   onReasoningEffortChange,
+  onServiceTierChange,
+  onAccessModeChange,
   onModelChange,
-  onOpenSettings,
   onRetry,
 }: AssistantModelControlProps) {
   const { t } = useI18n();
@@ -91,9 +105,29 @@ export function AssistantModelControl({
     t("assistant.model.default"),
   );
   const triggerLabel = status.kind === "missing" ? t("assistant.model.configure") : modelLabel;
+  const [ultraAccessOpen, setUltraAccessOpen] = useState(false);
+  const changeReasoningEffort = (effort: string) => {
+    if (!onReasoningEffortChange) return;
+    if (
+      effort.trim().toLowerCase() === "ultra" &&
+      accessMode === "restricted" &&
+      onAccessModeChange
+    ) {
+      setUltraAccessOpen(true);
+      return;
+    }
+    onReasoningEffortChange(effort);
+    if (
+      effort.trim().toLowerCase() !== "ultra" &&
+      accessMode === "full"
+    ) {
+      onAccessModeChange?.("restricted");
+    }
+  };
 
   return (
-    <Popover open={open} onOpenChange={onOpenChange}>
+    <>
+      <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           ref={triggerRef}
@@ -155,7 +189,7 @@ export function AssistantModelControl({
         onCloseAutoFocus={(event) => {
           event.preventDefault();
         }}
-        className="w-[min(316px,calc(100vw-20px))] overflow-hidden rounded-[12px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_16px_rgba(0,0,0,0.38)] data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-1 data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100 motion-reduce:duration-0"
+        className="w-[min(236px,calc(100vw-20px))] overflow-visible rounded-[12px] border-0 bg-transparent p-0 text-[hsl(var(--wb-text))] shadow-none data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-1 data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100 motion-reduce:duration-0"
       >
         <AssistantModelPanel
           model={model}
@@ -165,13 +199,63 @@ export function AssistantModelControl({
           catalogStatus={catalogStatus}
           catalogWarning={catalogWarning}
           reasoningEffort={reasoningEffort}
-          onReasoningEffortChange={onReasoningEffortChange}
+          serviceTier={serviceTier}
+          onReasoningEffortChange={
+            onReasoningEffortChange ? changeReasoningEffort : undefined
+          }
+          onServiceTierChange={onServiceTierChange}
           onModelChange={onModelChange}
-          onOpenSettings={onOpenSettings}
           onRetry={onRetry}
         />
-      </PopoverContent>
-    </Popover>
+        </PopoverContent>
+      </Popover>
+
+      <Dialog open={ultraAccessOpen} onOpenChange={setUltraAccessOpen}>
+        <DialogContent
+          data-assistant-ultra-access-dialog="true"
+          className="w-[500px] max-w-[calc(100vw-24px)] gap-0 overflow-hidden rounded-[12px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_6px_8px_rgba(0,0,0,0.42)] [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]"
+        >
+          <DialogHeader className="space-y-2 px-5 pb-4 pt-5 pr-12 text-left">
+            <DialogTitle className="text-[15px] font-semibold leading-5 tracking-normal">
+              {t("assistant.model.ultraAccessTitle")}
+            </DialogTitle>
+            <DialogDescription className="text-[11px] leading-5 text-[hsl(var(--wb-text-muted))]">
+              {t("assistant.model.ultraAccessDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-row gap-2 px-5 pb-5 sm:space-x-0">
+            <button
+              type="button"
+              className="flex h-9 flex-1 items-center justify-center gap-2 rounded-full bg-[hsl(var(--destructive)/0.14)] px-4 text-[11px] font-medium text-[hsl(var(--destructive))] outline-none transition-colors hover:bg-[hsl(var(--destructive)/0.2)] focus-visible:ring-1 focus-visible:ring-[hsl(var(--destructive))] disabled:pointer-events-none disabled:opacity-40"
+              onClick={() => {
+                onAccessModeChange?.("full");
+                onReasoningEffortChange?.("ultra");
+                setUltraAccessOpen(false);
+              }}
+              disabled={!fullAccessAvailable}
+              title={
+                fullAccessAvailable
+                  ? undefined
+                  : t("assistant.model.fullAccessAgentOnly")
+              }
+            >
+              <AlertTriangle size={13} aria-hidden="true" />
+              {t("assistant.model.useFullAccess")}
+            </button>
+            <button
+              type="button"
+              className="h-9 flex-1 rounded-full bg-[hsl(var(--wb-text))] px-4 text-[11px] font-medium text-[hsl(var(--wb-editor))] outline-none transition-opacity hover:opacity-90 focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+              onClick={() => {
+                onReasoningEffortChange?.("ultra");
+                setUltraAccessOpen(false);
+              }}
+            >
+              {t("assistant.model.continueRestricted")}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -183,9 +267,10 @@ interface AssistantModelPanelProps {
   catalogStatus?: AssistantModelCatalogStatus;
   catalogWarning?: string;
   reasoningEffort?: string;
+  serviceTier?: "default" | "priority";
   onReasoningEffortChange?: (effort: string) => void;
+  onServiceTierChange?: (tier: "default" | "priority") => void;
   onModelChange: (model: string) => void;
-  onOpenSettings: () => void;
   onRetry: () => void;
 }
 
@@ -197,16 +282,19 @@ function AssistantModelPanel({
   catalogStatus,
   catalogWarning,
   reasoningEffort,
+  serviceTier = "default",
   onReasoningEffortChange,
+  onServiceTierChange,
   onModelChange,
-  onOpenSettings,
   onRetry,
 }: AssistantModelPanelProps) {
   const { t } = useI18n();
   const modelInputId = useId();
   const effortGroupName = useId();
   const [view, setView] = useState<"quick" | "advanced">("quick");
-  const [modelListOpen, setModelListOpen] = useState(false);
+  const [activeMenu, setActiveMenu] = useState<
+    "model" | "effort" | "speed" | null
+  >(null);
   const [modelSearch, setModelSearch] = useState("");
   const [customModel, setCustomModel] = useState(model);
   const normalizedModel = model.trim();
@@ -242,13 +330,32 @@ function AssistantModelPanel({
     () => normalizeEffortOptions(selectedModel?.reasoningEfforts),
     [selectedModel?.reasoningEfforts],
   );
+  const effectiveModelLabel = displayEffectiveModelLabel(
+    options,
+    selectedModel,
+    normalizedModel,
+    t("assistant.model.default"),
+  );
+  const effortLabel = formatEffort(
+    normalizedEffort,
+    t("assistant.model.default"),
+  );
+  const supportsPriority = Boolean(
+    selectedModel?.serviceTiers?.some((tier) => tier.id === "priority"),
+  );
+  const priorityCapabilityKnown =
+    Boolean(selectedModel) ||
+    catalogStatus === "ready" ||
+    catalogStatus === "empty";
   const canRetry =
     status.kind === "unavailable" ||
     status.kind === "authentication-error" ||
     catalogStatus === "error" ||
     Boolean(catalogWarning);
   const canReset =
-    normalizedModel !== "default" || normalizedEffort !== "default";
+    normalizedModel !== "default" ||
+    normalizedEffort !== "default" ||
+    serviceTier !== "default";
   const catalogPrimaryMessage =
     catalogStatus === "loading"
       ? t("assistant.model.catalogLoading")
@@ -262,8 +369,22 @@ function AssistantModelPanel({
 
   useEffect(() => setCustomModel(model), [model]);
   useEffect(() => {
-    if (!modelListOpen || view !== "advanced") setModelSearch("");
-  }, [modelListOpen, view]);
+    if (activeMenu !== "model" || view !== "advanced") setModelSearch("");
+  }, [activeMenu, view]);
+  useEffect(() => {
+    if (
+      priorityCapabilityKnown &&
+      !supportsPriority &&
+      serviceTier === "priority"
+    ) {
+      onServiceTierChange?.("default");
+    }
+  }, [
+    onServiceTierChange,
+    priorityCapabilityKnown,
+    serviceTier,
+    supportsPriority,
+  ]);
 
   const selectModel = (option: AiCliModelInfo) => {
     if (disabled || option.id === normalizedModel) return;
@@ -275,6 +396,10 @@ function AssistantModelPanel({
     ) {
       onReasoningEffortChange?.("default");
     }
+    if (!option.serviceTiers?.some((tier) => tier.id === "priority")) {
+      onServiceTierChange?.("default");
+    }
+    setActiveMenu(null);
   };
 
   const resetDefaults = () => {
@@ -285,12 +410,27 @@ function AssistantModelPanel({
     if (normalizedEffort !== "default") {
       onReasoningEffortChange?.("default");
     }
+    if (serviceTier !== "default") {
+      onServiceTierChange?.("default");
+    }
+  };
+
+  const toggleFast = () => {
+    if (!disabled && supportsPriority) {
+      onServiceTierChange?.(
+        serviceTier === "priority" ? "default" : "priority",
+      );
+    }
   };
 
   return (
-    <section aria-label={t("assistant.model.controls")} className="relative">
+    <section
+      aria-label={t("assistant.model.controls")}
+      data-assistant-model-panel="true"
+      className="relative rounded-[12px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] shadow-[0_8px_18px_rgba(0,0,0,0.36)]"
+    >
       {status.kind !== "configured" && (
-        <div className="mx-3 mt-3 flex min-h-7 items-center gap-1.5 rounded-[6px] bg-[hsl(var(--wb-hover))] px-2">
+        <div className="mx-2 mt-2 flex min-h-7 items-center gap-1.5 rounded-[6px] bg-[hsl(var(--wb-hover))] px-2">
           <ModelStatusIcon status={status.kind} />
           <span className="min-w-0 flex-1 truncate text-[9px] text-[hsl(var(--wb-text-muted))]">
             {status.label}
@@ -314,7 +454,7 @@ function AssistantModelPanel({
           <div
             role={catalogStatus === "error" ? "alert" : "status"}
             data-assistant-model-catalog-status={catalogStatus}
-            className="mx-3 mt-3 flex min-h-7 items-center gap-1.5 rounded-[6px] bg-[hsl(var(--wb-hover))] px-2"
+            className="mx-2 mt-2 flex min-h-7 items-center gap-1.5 rounded-[6px] bg-[hsl(var(--wb-hover))] px-2"
           >
             {catalogStatus === "loading" ? (
               <LoaderCircle
@@ -349,46 +489,48 @@ function AssistantModelPanel({
           </div>
         )}
 
-      <div className="grid overflow-hidden [grid-template-areas:'surface']">
+      <div className="grid [grid-template-areas:'surface']">
         <div
           data-assistant-model-view="quick"
           aria-hidden={view !== "quick"}
           inert={view !== "quick"}
           className={cn(
-            "[grid-area:surface] transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
+            "[grid-area:surface] p-2 transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
             view === "quick"
               ? "translate-x-0 opacity-100"
               : "pointer-events-none -translate-x-8 opacity-0",
           )}
         >
-          <div className="px-4 pb-3 pt-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-[9px] text-[hsl(var(--wb-text-muted))]">
-                  {t("assistant.model.label")}
-                </div>
-                <div
-                  data-assistant-current-model="true"
-                  className="mt-0.5 truncate text-[13px] font-medium"
-                >
-                  {displayEffectiveModelLabel(
-                    options,
-                    selectedModel,
-                    normalizedModel,
-                    t("assistant.model.default"),
-                  )}
-                </div>
-              </div>
-              <span
-                className={cn(
-                  "shrink-0 rounded-full bg-[hsl(var(--wb-hover))] px-2 py-1 text-[10px] font-medium",
-                  effortToneClass(normalizedEffort),
-                )}
+          <div className="px-1 py-0.5">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                data-assistant-quick-advanced-toggle="true"
+                className="flex h-7 min-w-0 flex-1 items-center gap-1 px-1 text-left text-[11px] text-[hsl(var(--wb-text-muted))] outline-none transition-colors hover:text-[hsl(var(--wb-text))] focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+                onClick={() => setView("advanced")}
               >
-                {formatEffort(normalizedEffort, t("assistant.model.default"))}
-              </span>
+                <span>{t("assistant.model.advanced")}</span>
+                <ChevronRight size={12} aria-hidden="true" />
+              </button>
+              {supportsPriority && onServiceTierChange && (
+                <button
+                  type="button"
+                  data-assistant-fast-toggle="true"
+                  className={cn(
+                    "flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-[hsl(var(--wb-text-muted))] outline-none transition-[background-color,color,transform] duration-150 hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] active:scale-95 disabled:pointer-events-none disabled:opacity-40 motion-reduce:transition-none motion-reduce:active:scale-100",
+                    serviceTier === "priority" &&
+                      "bg-[hsl(var(--wb-accent)/0.16)] text-[hsl(var(--wb-accent))]",
+                  )}
+                  onClick={toggleFast}
+                  disabled={disabled}
+                  aria-label={t("assistant.model.fastToggle")}
+                  aria-pressed={serviceTier === "priority"}
+                  title={t("assistant.model.fastDescription")}
+                >
+                  <Zap size={13} aria-hidden="true" />
+                </button>
+              )}
             </div>
-
             {effortOptions.length > 0 && onReasoningEffortChange && (
               <ReasoningTrack
                 name={effortGroupName}
@@ -396,28 +538,11 @@ function AssistantModelPanel({
                 selected={normalizedEffort}
                 disabled={disabled}
                 onSelect={onReasoningEffortChange}
+                accelerated={serviceTier === "priority"}
+                motionEnabled={view === "quick"}
+                compact
               />
             )}
-          </div>
-
-          <div className="flex items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">
-            <button
-              type="button"
-              className="wb-text-button h-7 px-2 text-[10px]"
-              onClick={() => setView("advanced")}
-            >
-              <SlidersHorizontal size={11} />
-              {t("assistant.model.advanced")}
-            </button>
-            <button
-              type="button"
-              className="wb-text-button h-7 px-2 text-[9px]"
-              onClick={resetDefaults}
-              disabled={!canReset}
-            >
-              <RotateCcw size={10} />
-              {t("assistant.model.reset")}
-            </button>
           </div>
         </div>
 
@@ -425,254 +550,393 @@ function AssistantModelPanel({
           data-assistant-model-view="advanced"
           aria-hidden={view !== "advanced"}
           inert={view !== "advanced"}
+          onPointerLeave={() => setActiveMenu(null)}
+          onBlurCapture={(event) => {
+            if (
+              !(event.relatedTarget instanceof Node) ||
+              !event.currentTarget.contains(event.relatedTarget)
+            ) {
+              setActiveMenu(null);
+            }
+          }}
           className={cn(
-            "[grid-area:surface] transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
+            "[grid-area:surface] p-2 transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
             view === "advanced"
               ? "translate-x-0 opacity-100"
               : "pointer-events-none translate-x-8 opacity-0",
           )}
         >
-          <div className="flex min-h-10 items-center gap-1 border-b border-[hsl(var(--wb-border-subtle))] px-2">
+          <div>
+            <AdvancedRow
+              label={t("assistant.model.label")}
+              value={effectiveModelLabel}
+              active={activeMenu === "model"}
+              menu="model"
+              ariaLabel={t("assistant.model.toggleList")}
+              onOpen={() => setActiveMenu("model")}
+            />
+            {effortOptions.length > 0 && onReasoningEffortChange && (
+              <AdvancedRow
+                label={t("assistant.model.reasoning")}
+                value={effortLabel}
+                active={activeMenu === "effort"}
+                menu="effort"
+                ariaLabel={t("assistant.model.reasoningEffort")}
+                onOpen={() => setActiveMenu("effort")}
+              />
+            )}
+            {supportsPriority && onServiceTierChange && (
+              <AdvancedRow
+                label={t("assistant.model.speed")}
+                value={
+                  serviceTier === "priority"
+                    ? t("assistant.model.fast")
+                    : t("assistant.model.standard")
+                }
+                active={activeMenu === "speed"}
+                menu="speed"
+                ariaLabel={t("assistant.model.speed")}
+                onOpen={() => setActiveMenu("speed")}
+              />
+            )}
             <button
               type="button"
-              className="wb-icon-button h-7 w-7"
-              onClick={() => setView("quick")}
+              className="flex h-8 w-full items-center gap-1 rounded-[7px] px-2 text-left text-[10px] text-[hsl(var(--wb-text-muted))] outline-none hover:bg-[hsl(var(--wb-hover))] focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+              onClick={() => {
+                setActiveMenu(null);
+                setView("quick");
+              }}
+              onFocus={() => setActiveMenu(null)}
+              data-assistant-advanced-toggle="true"
               aria-label={t("assistant.model.backToReasoning")}
             >
-              <ChevronLeft size={13} />
-            </button>
-            <span className="text-[11px] font-medium">
               {t("assistant.model.advanced")}
-            </span>
+              <ChevronUp size={11} aria-hidden="true" />
+            </button>
           </div>
 
-          <div className="p-2.5">
-            {options.length > 0 ? (
-              <div className="rounded-[8px] border border-[hsl(var(--wb-border-subtle))]">
-                <button
-                  type="button"
-                  className="flex h-10 w-full items-center gap-2 rounded-[8px] px-2.5 text-left outline-none transition-colors hover:bg-[hsl(var(--wb-hover))] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
-                  onClick={() => setModelListOpen((current) => !current)}
-                  aria-label={t("assistant.model.toggleList")}
-                  aria-expanded={modelListOpen}
-                >
-                  <Bot
-                    size={12}
-                    className="shrink-0 text-[hsl(var(--wb-text-muted))]"
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[9px] text-[hsl(var(--wb-text-muted))]">
-                      {t("assistant.model.label")}
-                    </span>
-                    <span className="block truncate text-[10px]">
-                      {displayEffectiveModelLabel(
-                        options,
-                        selectedModel,
-                        normalizedModel,
-                        t("assistant.model.default"),
-                      )}
-                    </span>
-                  </span>
-                  <ChevronDown
-                    size={11}
-                    className={cn(
-                      "transition-transform duration-150 motion-reduce:transition-none",
-                      modelListOpen && "rotate-180",
-                    )}
-                  />
-                </button>
-                <div
-                  className={cn(
-                    "grid transition-[grid-template-rows] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
-                    modelListOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    {modelListOpen && (
-                      <div
-                        className="border-t border-[hsl(var(--wb-border-subtle))] p-1"
-                      >
-                        {options.length > MODEL_SEARCH_THRESHOLD && (
-                          <label className="mb-1 flex h-8 items-center gap-1.5 rounded-[5px] bg-[hsl(var(--wb-panel))] px-2 text-[hsl(var(--wb-text-muted))] focus-within:ring-1 focus-within:ring-inset focus-within:ring-[hsl(var(--wb-accent))]">
-                            <Search size={11} className="shrink-0" aria-hidden="true" />
-                            <span className="sr-only">
-                              {t("assistant.model.search")}
-                            </span>
-                            <input
-                              value={modelSearch}
-                              onChange={(event) => setModelSearch(event.target.value)}
-                              placeholder={t("assistant.model.search")}
-                              autoComplete="off"
-                              spellCheck={false}
-                              className="min-w-0 flex-1 bg-transparent text-[10px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
-                            />
-                          </label>
-                        )}
-                        <div
-                          className="custom-scrollbar max-h-[176px] overflow-y-auto"
-                          role="radiogroup"
-                          aria-label="Assistant model"
-                        >
-                          {visibleModelOptions.map((option) => {
-                            const checked = option.id === normalizedModel;
-                            return (
-                              <label
-                                key={option.id}
-                                className={cn(
-                                  "flex h-8 cursor-pointer items-center gap-2 rounded-[5px] px-2 text-[10px] outline-none transition-colors focus-within:ring-1 focus-within:ring-inset focus-within:ring-[hsl(var(--wb-accent))]",
-                                  checked
-                                    ? "bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-text))]"
-                                    : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]",
-                                )}
-                              >
-                                <input
-                                  type="radio"
-                                  className="sr-only"
-                                  name="assistant-model"
-                                  value={option.id}
-                                  checked={checked}
-                                  onChange={() => selectModel(option)}
-                                  disabled={disabled}
-                                  aria-label={
-                                    option.id === "default"
-                                      ? t("assistant.model.default")
-                                      : option.label
-                                  }
-                                />
-                                <span className="min-w-0 flex-1 truncate">
-                                  {option.id === "default"
-                                    ? t("assistant.model.default")
-                                    : option.label}
-                                </span>
-                                {checked && (
-                                  <Check
-                                    size={11}
-                                    className="shrink-0 text-[hsl(var(--wb-accent))]"
-                                  />
-                                )}
-                              </label>
-                            );
-                          })}
-                          {matchingOptions.length === 0 && (
-                            <p
-                              className="px-2 py-4 text-center text-[9px] text-[hsl(var(--wb-text-muted))]"
-                              role="status"
-                            >
-                              {t("assistant.model.noSearchResult")}
-                            </p>
-                          )}
-                          {matchingOptions.length > visibleModelOptions.length && (
-                            <p
-                              className="px-2 py-2 text-center text-[9px] text-[hsl(var(--wb-text-muted))]"
-                              role="status"
-                            >
-                              {t("assistant.model.showing", {
-                                visible: visibleModelOptions.length,
-                                total: matchingOptions.length,
-                              })}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : catalogStatus ? (
-              <div className="flex min-h-16 items-center justify-center rounded-[8px] border border-[hsl(var(--wb-border-subtle))] px-3 text-center text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
-                {catalogStatus === "loading"
-                  ? t("assistant.model.modelsLoading")
-                  : catalogWarning || t("assistant.model.noCatalog")}
-              </div>
-            ) : (
-              <form
-                className="flex items-end gap-1.5"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const nextModel = customModel.trim();
-                  if (nextModel && nextModel !== normalizedModel && !disabled) {
-                    onModelChange(nextModel);
-                  }
-                }}
-              >
-                <label className="min-w-0 flex-1" htmlFor={modelInputId}>
-                  <span className="sr-only">
-                    {t("assistant.model.identifier")}
-                  </span>
-                  <input
-                    id={modelInputId}
-                    value={customModel}
-                    onChange={(event) => setCustomModel(event.target.value)}
-                    disabled={disabled}
-                    placeholder={t("assistant.model.identifier")}
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="wb-field h-8 w-full font-mono text-[10px]"
-                  />
-                </label>
-                <button
-                  type="submit"
-                  className="wb-primary-button h-8 px-2 text-[9px]"
-                  disabled={
-                    !customModel.trim() ||
-                    customModel.trim() === normalizedModel ||
-                    disabled
-                  }
-                >
-                  {t("common.apply")}
-                </button>
-              </form>
-            )}
-
-            {effortOptions.length > 0 && onReasoningEffortChange && (
-              <div className="mt-2 rounded-[8px] border border-[hsl(var(--wb-border-subtle))] px-2.5 pb-2.5 pt-2">
-                <div className="flex items-center justify-between gap-2 pb-1.5">
-                  <span className="text-[10px] font-medium">
-                    {t("assistant.model.reasoning")}
-                  </span>
-                  <span
-                    className={cn(
-                      "text-[9px]",
-                      effortToneClass(normalizedEffort),
-                    )}
-                  >
-                    {formatEffort(normalizedEffort, t("assistant.model.default"))}
-                  </span>
-                </div>
-                <ReasoningTrack
-                  name={`${effortGroupName}-advanced`}
-                  options={effortOptions}
+          {activeMenu && (
+            <div
+              data-assistant-submenu={activeMenu}
+              className="absolute bottom-2 right-full z-10 w-[242px] pr-[6px]"
+            >
+              <div className="w-[236px] rounded-[11px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 shadow-[0_6px_8px_rgba(0,0,0,0.4)] animate-in fade-in-0 slide-in-from-right-1 duration-150 motion-reduce:animate-none">
+              {activeMenu === "model" && (
+                <ModelMenu
+                  options={options}
+                  visibleOptions={visibleModelOptions}
+                  matchingCount={matchingOptions.length}
+                  selectedModel={normalizedModel}
+                  search={modelSearch}
+                  customModel={customModel}
+                  customModelInputId={modelInputId}
+                  catalogStatus={catalogStatus}
+                  catalogWarning={catalogWarning}
+                  disabled={disabled}
+                  onSearchChange={setModelSearch}
+                  onCustomModelChange={setCustomModel}
+                  onSelect={selectModel}
+                  onApplyCustom={() => {
+                    const nextModel = customModel.trim();
+                    if (nextModel && nextModel !== normalizedModel && !disabled) {
+                      onModelChange(nextModel);
+                      setActiveMenu(null);
+                    }
+                  }}
+                />
+              )}
+              {activeMenu === "effort" && onReasoningEffortChange && (
+                <OptionMenu
+                  ariaLabel={t("assistant.model.reasoningEffort")}
+                  options={["default", ...effortOptions].map((value) => ({
+                    id: value,
+                    label: formatEffort(value, t("assistant.model.default")),
+                  }))}
                   selected={normalizedEffort}
                   disabled={disabled}
-                  onSelect={onReasoningEffortChange}
-                  compact
+                  onSelect={(value) => {
+                    onReasoningEffortChange(value);
+                    setActiveMenu(null);
+                  }}
                 />
+              )}
+              {activeMenu === "speed" && supportsPriority && onServiceTierChange && (
+                <OptionMenu
+                  ariaLabel={t("assistant.model.speed")}
+                  options={[
+                    {
+                      id: "default",
+                      label: t("assistant.model.standard"),
+                      description: t("assistant.model.standardDescription"),
+                    },
+                    {
+                      id: "priority",
+                      label: t("assistant.model.fast"),
+                      description: t("assistant.model.fastDescription"),
+                    },
+                  ]}
+                  selected={serviceTier}
+                  disabled={disabled}
+                  onSelect={(value) => {
+                    onServiceTierChange(value as "default" | "priority");
+                    setActiveMenu(null);
+                  }}
+                />
+              )}
+              <div className="mt-1 flex items-center border-t border-[hsl(var(--wb-border-subtle))] pt-1">
+                <button
+                  type="button"
+                  className="wb-text-button h-7 px-2 text-[9px]"
+                  onClick={resetDefaults}
+                  disabled={!canReset}
+                >
+                  {t("assistant.model.reset")}
+                </button>
+                </div>
               </div>
-            )}
-          </div>
-
-          <div className="flex items-center border-t border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">
-            <button
-              type="button"
-              className="wb-text-button h-7 px-2 text-[9px]"
-              onClick={resetDefaults}
-              disabled={!canReset}
-            >
-              <RotateCcw size={10} />
-              {t("assistant.model.reset")}
-            </button>
-            <button
-              type="button"
-              className="wb-text-button ml-auto h-7 px-2 text-[9px]"
-              onClick={onOpenSettings}
-            >
-              <Settings2 size={10} />
-              {t("common.settings")}
-            </button>
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </section>
+  );
+}
+
+function AdvancedRow({
+  label,
+  value,
+  active,
+  menu,
+  ariaLabel,
+  onOpen,
+}: {
+  label: string;
+  value: string;
+  active: boolean;
+  menu: "model" | "effort" | "speed";
+  ariaLabel?: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-assistant-menu-trigger={menu}
+      className={cn(
+        "flex h-8 w-full items-center rounded-[7px] px-2 text-[10px] outline-none transition-colors hover:bg-[hsl(var(--wb-hover))] focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]",
+        active && "bg-[hsl(var(--wb-active))]",
+      )}
+      onClick={onOpen}
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "touch") onOpen();
+      }}
+      onFocus={onOpen}
+      aria-label={ariaLabel}
+      aria-expanded={active}
+    >
+      <span className="shrink-0 font-medium">{label}</span>
+      <span className="ml-auto max-w-[126px] truncate text-[hsl(var(--wb-text-muted))]">
+        {value}
+      </span>
+      <ChevronRight size={12} className="ml-1 shrink-0" aria-hidden="true" />
+    </button>
+  );
+}
+
+function OptionMenu({
+  ariaLabel,
+  options,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  ariaLabel: string;
+  options: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    disabled?: boolean;
+  }>;
+  selected: string;
+  disabled: boolean;
+  onSelect: (value: string) => void;
+}) {
+  return (
+    <div role="radiogroup" aria-label={ariaLabel}>
+      {options.map((option) => {
+        const checked = option.id === selected;
+        return (
+          <label
+            key={option.id}
+            className={cn(
+              "flex min-h-10 cursor-pointer items-center gap-2 rounded-[7px] px-2 py-1.5 text-[10px] outline-none transition-colors hover:bg-[hsl(var(--wb-hover))] focus-within:ring-1 focus-within:ring-[hsl(var(--wb-accent))]",
+              checked && "bg-[hsl(var(--wb-active))]",
+              (disabled || option.disabled) && "cursor-default opacity-45",
+            )}
+          >
+            <input
+              type="radio"
+              className="sr-only"
+              name={ariaLabel}
+              value={option.id}
+              checked={checked}
+              disabled={disabled || option.disabled}
+              onChange={() => onSelect(option.id)}
+              aria-label={option.label}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block">{option.label}</span>
+              {option.description && (
+                <span className="block text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                  {option.description}
+                </span>
+              )}
+            </span>
+            {checked && (
+              <Check size={12} className="shrink-0 text-[hsl(var(--wb-text-muted))]" />
+            )}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModelMenu({
+  options,
+  visibleOptions,
+  matchingCount,
+  selectedModel,
+  search,
+  customModel,
+  customModelInputId,
+  catalogStatus,
+  catalogWarning,
+  disabled,
+  onSearchChange,
+  onCustomModelChange,
+  onSelect,
+  onApplyCustom,
+}: {
+  options: readonly AiCliModelInfo[];
+  visibleOptions: readonly AiCliModelInfo[];
+  matchingCount: number;
+  selectedModel: string;
+  search: string;
+  customModel: string;
+  customModelInputId: string;
+  catalogStatus?: AssistantModelCatalogStatus;
+  catalogWarning?: string;
+  disabled: boolean;
+  onSearchChange: (value: string) => void;
+  onCustomModelChange: (value: string) => void;
+  onSelect: (option: AiCliModelInfo) => void;
+  onApplyCustom: () => void;
+}) {
+  const { t } = useI18n();
+  if (!options.length && catalogStatus) {
+    return (
+      <div className="px-3 py-5 text-center text-[9px] leading-4 text-[hsl(var(--wb-text-muted))]">
+        {catalogStatus === "loading"
+          ? t("assistant.model.modelsLoading")
+          : catalogWarning || t("assistant.model.noCatalog")}
+      </div>
+    );
+  }
+  if (!options.length) {
+    return (
+      <form
+        className="flex items-center gap-1 p-1"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onApplyCustom();
+        }}
+      >
+        <label className="min-w-0 flex-1" htmlFor={customModelInputId}>
+          <span className="sr-only">{t("assistant.model.identifier")}</span>
+          <input
+            id={customModelInputId}
+            value={customModel}
+            onChange={(event) => onCustomModelChange(event.target.value)}
+            disabled={disabled}
+            placeholder={t("assistant.model.identifier")}
+            className="wb-field h-8 w-full font-mono text-[10px]"
+          />
+        </label>
+        <button type="submit" className="wb-primary-button h-8 px-2 text-[9px]">
+          {t("common.apply")}
+        </button>
+      </form>
+    );
+  }
+  return (
+    <>
+      {options.length > MODEL_SEARCH_THRESHOLD && (
+        <label className="mb-1 flex h-8 items-center gap-1.5 rounded-[6px] bg-[hsl(var(--wb-panel))] px-2 text-[hsl(var(--wb-text-muted))] focus-within:ring-1 focus-within:ring-[hsl(var(--wb-accent))]">
+          <Search size={11} aria-hidden="true" />
+          <span className="sr-only">{t("assistant.model.search")}</span>
+          <input
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder={t("assistant.model.search")}
+            autoComplete="off"
+            spellCheck={false}
+            className="min-w-0 flex-1 bg-transparent text-[10px] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
+          />
+        </label>
+      )}
+      <div
+        className="custom-scrollbar max-h-[208px] overflow-y-auto"
+        role="radiogroup"
+        aria-label="Assistant model"
+      >
+        {visibleOptions.map((option) => {
+          const checked = option.id === selectedModel;
+          return (
+            <label
+              key={option.id}
+              className={cn(
+                "flex h-8 cursor-pointer items-center gap-2 rounded-[6px] px-2 text-[10px] hover:bg-[hsl(var(--wb-hover))] focus-within:ring-1 focus-within:ring-[hsl(var(--wb-accent))]",
+                checked && "bg-[hsl(var(--wb-active))]",
+              )}
+            >
+              <input
+                type="radio"
+                className="sr-only"
+                name="assistant-model"
+                value={option.id}
+                checked={checked}
+                onChange={() => onSelect(option)}
+                disabled={disabled}
+                aria-label={
+                  option.id === "default"
+                    ? t("assistant.model.default")
+                    : option.label
+                }
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {option.id === "default"
+                  ? t("assistant.model.default")
+                  : option.label}
+              </span>
+              {checked && <Check size={11} className="shrink-0" />}
+            </label>
+          );
+        })}
+        {matchingCount === 0 && (
+          <p className="px-2 py-4 text-center text-[9px] text-[hsl(var(--wb-text-muted))]">
+            {t("assistant.model.noSearchResult")}
+          </p>
+        )}
+        {matchingCount > visibleOptions.length && (
+          <p className="px-2 py-2 text-center text-[9px] text-[hsl(var(--wb-text-muted))]">
+            {t("assistant.model.showing", {
+              visible: visibleOptions.length,
+              total: matchingCount,
+            })}
+          </p>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -682,6 +946,8 @@ function ReasoningTrack({
   selected,
   disabled,
   onSelect,
+  accelerated = false,
+  motionEnabled = true,
   compact = false,
 }: {
   name: string;
@@ -689,6 +955,8 @@ function ReasoningTrack({
   selected: string;
   disabled: boolean;
   onSelect: (value: string) => void;
+  accelerated?: boolean;
+  motionEnabled?: boolean;
   compact?: boolean;
 }) {
   const { t } = useI18n();
@@ -696,10 +964,20 @@ function ReasoningTrack({
   const selectedIndex = Math.max(0, values.indexOf(selected));
   const fill =
     values.length > 1 ? (selectedIndex / (values.length - 1)) * 100 : 0;
-  const activeRank = effortRank(values[selectedIndex] ?? "default");
+  const selectedRank = effortRank(values[selectedIndex] ?? "default");
+  const highestKnownRank = Math.max(
+    0,
+    ...options.map(effortRank).filter((rank) => rank < 50),
+  );
+  const maximumSelected =
+    selectedIndex > 0 &&
+    selectedRank < 50 &&
+    selectedRank === highestKnownRank;
+  const animated =
+    motionEnabled && (accelerated || maximumSelected);
 
   return (
-    <div className={cn(!compact && "mt-4")}>
+    <div className={cn(compact ? "mt-1" : "mt-4")}>
       {!compact && (
         <div className="mb-2 flex items-center justify-between text-[9px] text-[hsl(var(--wb-text-muted))]">
           <span>{t("assistant.model.reasoningEffort")}</span>
@@ -707,33 +985,61 @@ function ReasoningTrack({
         </div>
       )}
       <div className="relative h-10 px-1">
-        <div className="pointer-events-none absolute left-2 right-2 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-full bg-[hsl(var(--wb-hover))]">
+        <div
+          data-assistant-speed-tier={accelerated ? "priority" : "default"}
+          data-assistant-reasoning-animation={
+            animated ? (accelerated ? "fast" : "maximum") : "none"
+          }
+          className="pointer-events-none absolute left-1 right-1 top-1/2 h-6 -translate-y-1/2 overflow-hidden rounded-full bg-[hsl(var(--wb-hover))]"
+        >
           <div
             className={cn(
-              "relative h-full rounded-full transition-[width,background-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
-              activeRank >= 4 && activeRank < 50
-                ? "bg-[hsl(var(--wb-brand))]"
-                : "bg-[hsl(var(--wb-accent))]",
+              "relative h-full overflow-hidden rounded-full bg-[hsl(var(--wb-accent))] transition-[width,background-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
+              animated && "wb-assistant-energy-track",
             )}
-            style={{ width: `${Math.max(fill, 3)}%` }}
-          />
+            style={{ width: `${Math.max(fill, 8)}%` }}
+          >
+            {animated && (
+              <div
+                data-assistant-fast-particles="true"
+                data-assistant-animation-speed={
+                  accelerated ? "1.5x" : "standard"
+                }
+                className="absolute inset-0 motion-reduce:hidden"
+                aria-hidden="true"
+              >
+                {[0, 1, 2, 3, 4, 5, 6].map((index) => (
+                  <span
+                    key={index}
+                    className="wb-assistant-fast-particle"
+                    style={{
+                      top: `${22 + ((index * 31) % 58)}%`,
+                      animationDelay: `${index * -115}ms`,
+                      animationDuration: accelerated ? "800ms" : "1200ms",
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        {!maximumSelected && (
           <div
-            className="absolute inset-y-0 left-0 opacity-70 motion-reduce:hidden"
-            style={{ width: `${fill}%` }}
+            className="pointer-events-none absolute inset-x-4 top-1/2 flex -translate-y-1/2 justify-between"
             aria-hidden="true"
           >
-            {[18, 39, 61, 82].map((left, index) => (
+            {values.map((value, index) => (
               <span
-                key={left}
-                className="absolute top-1/2 h-0.5 w-0.5 -translate-y-1/2 rounded-full bg-white/80 animate-pulse motion-reduce:animate-none"
-                style={{
-                  left: `${left}%`,
-                  animationDelay: `${index * 120}ms`,
-                }}
+                key={`${value}-${index}`}
+                data-assistant-reasoning-stop="true"
+                className={cn(
+                  "h-1 w-1 rounded-full",
+                  index <= selectedIndex ? "bg-white/75" : "bg-white/30",
+                )}
               />
             ))}
           </div>
-        </div>
+        )}
         <input
           type="range"
           data-assistant-reasoning-track="true"
@@ -751,15 +1057,15 @@ function ReasoningTrack({
             values[selectedIndex] ?? "default",
             t("assistant.model.default"),
           )}
-          className="absolute inset-x-1 top-1/2 z-10 h-8 w-[calc(100%-0.5rem)] -translate-y-1/2 cursor-pointer opacity-0 disabled:cursor-default"
+          className="absolute inset-x-1 top-1/2 z-20 h-8 w-[calc(100%-0.5rem)] -translate-y-1/2 cursor-pointer opacity-0 disabled:cursor-default"
         />
         <span
           className={cn(
-            "pointer-events-none absolute top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/70 bg-[hsl(var(--wb-text))] shadow-[0_1px_4px_rgba(0,0,0,0.45)] transition-[left,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
+            "pointer-events-none absolute top-1/2 z-10 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/70 bg-[hsl(var(--wb-text))] shadow-[0_1px_4px_rgba(0,0,0,0.45)] transition-[left,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
             !disabled && "hover:scale-105",
           )}
           style={{
-            left: `calc(0.5rem + ${fill}% - ${fill / 100}rem)`,
+            left: `calc(0.25rem + ${fill}% - ${fill / 200}rem)`,
           }}
           aria-hidden="true"
         />
@@ -780,6 +1086,8 @@ function normalizeModelOptions(modelOptions?: readonly AiCliModelInfo[]) {
       isDefault: true,
       reasoningEfforts: modelOptions.find((option) => option.isProviderDefault)
         ?.reasoningEfforts,
+      serviceTiers: modelOptions.find((option) => option.isProviderDefault)
+        ?.serviceTiers,
     },
     ...modelOptions,
   ];
@@ -813,7 +1121,16 @@ function displayEffectiveModelLabel(
 
 function normalizeEffortOptions(values?: readonly string[]) {
   if (!values?.length) return [];
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      values
+        .map((value) => value.trim())
+        .filter(
+          (value) =>
+            Boolean(value) && value.toLowerCase() !== "enabled",
+        ),
+    ),
+  ];
 }
 
 function effortRank(value: string) {
@@ -822,7 +1139,6 @@ function effortRank(value: string) {
     minimal: 0,
     low: 1,
     medium: 2,
-    enabled: 2,
     high: 3,
     xhigh: 4,
     max: 5,
@@ -871,10 +1187,5 @@ function ModelStatusIcon({ status }: { status: AssistantModelStatusKind }) {
   ) {
     return <AlertTriangle size={11} className="shrink-0 text-amber-400" />;
   }
-  return (
-    <SlidersHorizontal
-      size={11}
-      className="shrink-0 text-[hsl(var(--wb-text-muted))]"
-    />
-  );
+  return null;
 }

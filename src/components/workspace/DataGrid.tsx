@@ -79,6 +79,7 @@ import {
   compactResultColumnType,
   DataGridContextMenu,
   DataGridHoverTooltip,
+  gridHoverTooltipPosition,
   gridCellTooltipText,
   isTableColumnEditable,
   resolveHeaderColumnType,
@@ -1362,12 +1363,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           event.kind === "cell"
             ? gridCellTooltipText(getCellContent([col, row]))
             : "";
-        const rect = gridContainerRef.current?.getBoundingClientRect();
-
         setHoverTooltip({
           key: `${event.kind}:${col}:${row}:${content}`,
-          x: (rect?.left ?? 0) + event.localEventX,
-          y: (rect?.top ?? 0) + event.localEventY,
+          ...gridHoverTooltipPosition(event),
           columnName: column?.name ?? String(visualColumn.id),
           columnType: column
             ? "data_type" in column

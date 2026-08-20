@@ -4524,6 +4524,7 @@ dependencies = [
  "dotenvy",
  "flate2",
  "futures",
+ "hmac 0.12.1",
  "keyring",
  "libc",
  "minisign-verify",

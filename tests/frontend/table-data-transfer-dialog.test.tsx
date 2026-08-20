@@ -160,6 +160,51 @@ describe("TableDataTransferDialog", () => {
     ).toBe(true);
   });
 
+  it("uses Settings-style workflow navigation for setup and review", async () => {
+    mocks.getDatabaseCapabilities.mockResolvedValue({
+      driver: "postgres",
+      supportsDatabaseCatalogs: false,
+      supportsTableDataTransfer: true,
+    });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <TableDataTransferDialog
+          open
+          source={{
+            connectionId: "source",
+            driver: "postgres",
+            schema: "public",
+            table: "users",
+          }}
+          connections={[
+            { id: "source", name: "Source", driver: "postgres", url: "postgres://source" },
+            { id: "target", name: "Target", driver: "postgres", url: "postgres://target" },
+          ]}
+          onClose={vi.fn()}
+          onTransferred={vi.fn()}
+        />,
+      );
+    });
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.className).toContain("w-[min(960px,calc(100vw-32px))]");
+    const workflow = document.body.querySelector<HTMLElement>(
+      '[aria-label="Transfer workflow"]',
+    );
+    const setup = Array.from(workflow?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.includes("Transfer setup"),
+    );
+    const review = Array.from(workflow?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.includes("Review & confirm"),
+    );
+
+    expect(setup?.getAttribute("aria-current")).toBe("step");
+    await act(async () => review?.click());
+    expect(review?.getAttribute("aria-current")).toBe("step");
+  });
+
   it("never enables execution for a preview with unsupported mappings", () => {
     const preview = {
       confirmationToken: "TRANSFER A13F9C",

@@ -94,14 +94,24 @@ pub async fn list_models(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliModelInfo>> {
+    list_models_with_refresh(config, environment, false).await
+}
+
+pub async fn list_models_with_refresh(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    force_refresh: bool,
+) -> Result<Vec<CliModelInfo>> {
     let command =
         resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
-    cached_models(&command, environment).await.map_err(|error| {
-        anyhow!(
-            "Codex model catalog is unavailable: {}",
-            classify_error(&error.to_string())
-        )
-    })
+    cached_models(&command, environment, force_refresh)
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "Codex model catalog is unavailable: {}",
+                classify_error(&error.to_string())
+            )
+        })
 }
 
 /// Reuse the verified model list for both connection validation and the
@@ -111,23 +121,40 @@ pub async fn list_models(
 async fn cached_models(
     command: &CliCommandSpec,
     environment: &BTreeMap<String, String>,
+    force_refresh: bool,
 ) -> Result<Vec<CliModelInfo>> {
     let key = model_cache_key(&command, environment);
-    get_or_discover_models_by_key(key, || async {
+    get_or_discover_models_by_key(key, force_refresh, || async {
         discover_models(command, environment).await
     })
     .await
 }
 
-async fn get_or_discover_models_by_key<F, Fut>(key: u64, discover: F) -> Result<Vec<CliModelInfo>>
+async fn get_or_discover_models_by_key<F, Fut>(
+    key: u64,
+    force_refresh: bool,
+    discover: F,
+) -> Result<Vec<CliModelInfo>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<CliModelInfo>>>,
 {
+    let force_baseline = if force_refresh {
+        MODEL_CACHE
+            .lock()
+            .await
+            .as_ref()
+            .filter(|cached| cached.key == key)
+            .map(|cached| cached.loaded_at)
+    } else {
+        None
+    };
     let now = Instant::now();
-    if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
-        if cached.key == key && now.saturating_duration_since(cached.loaded_at) < cached.ttl {
-            return Ok(cached.models.clone());
+    if !force_refresh {
+        if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
+            if cached.key == key && now.saturating_duration_since(cached.loaded_at) < cached.ttl {
+                return Ok(cached.models.clone());
+            }
         }
     }
     let discovery_lock = {
@@ -138,12 +165,18 @@ where
             .clone()
     };
     let _discovery_guard = discovery_lock.lock().await;
-    // A concurrent setup probe can finish while this caller waits. Check a
-    // second time so the composer does not launch another app-server process.
+    // A concurrent setup probe or forced refresh can finish while this caller
+    // waits. A forced caller may reuse only a value produced after it started.
     let now = Instant::now();
     if let Some(cached) = MODEL_CACHE.lock().await.as_ref() {
         if cached.key == key && now.saturating_duration_since(cached.loaded_at) < cached.ttl {
-            return Ok(cached.models.clone());
+            let refreshed_while_waiting = force_refresh
+                && force_baseline
+                    .map(|baseline| cached.loaded_at != baseline)
+                    .unwrap_or(true);
+            if !force_refresh || refreshed_while_waiting {
+                return Ok(cached.models.clone());
+            }
         }
     }
     let models = discover().await?;
@@ -176,7 +209,7 @@ pub async fn test_connection(
         resolve_command(CliProviderKind::CodexCli, config.executable_path.as_deref()).await?;
     let cli_version = version(&command, environment).await?;
     verify_authentication(&command, environment).await?;
-    let models = cached_models(&command, environment)
+    let models = cached_models(&command, environment, false)
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
     if models.is_empty() {
@@ -439,6 +472,58 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
             .filter(|effort| !effort.is_empty() && seen_efforts.insert((*effort).to_string()))
             .map(str::to_string)
             .collect();
+        let mut service_tiers = model
+            .get("serviceTiers")
+            .or_else(|| model.get("service_tiers"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = entry.get("id")?.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                Some(super::CliModelServiceTier {
+                    id: id.to_string(),
+                    name: entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(id)
+                        .to_string(),
+                    description: entry
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if service_tiers.is_empty()
+            && model
+                .get("additionalSpeedTiers")
+                .or_else(|| model.get("additional_speed_tiers"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    entry.as_str().or_else(|| {
+                        entry
+                            .get("id")
+                            .or_else(|| entry.get("value"))
+                            .and_then(Value::as_str)
+                    })
+                })
+                .any(|tier| tier.trim().eq_ignore_ascii_case("fast"))
+        {
+            service_tiers.push(super::CliModelServiceTier {
+                id: "priority".to_string(),
+                name: "Fast".to_string(),
+                description: "1.5x speed, increased usage".to_string(),
+            });
+        }
         // `default` is OxideStudio's provider-default sentinel. Never expose a
         // provider entry with the same id alongside the synthetic sentinel.
         if id.eq_ignore_ascii_case("default") {
@@ -453,6 +538,7 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
         let mut info = CliModelInfo::new(id, label, false);
         info.is_provider_default = is_provider_default;
         info.reasoning_efforts = reasoning_efforts;
+        info.service_tiers = service_tiers;
         result.push(info);
     }
     if !saw_model {
@@ -462,6 +548,7 @@ fn parse_models(models: &[Value]) -> Result<Vec<CliModelInfo>> {
     if let Some(default_id) = default_model_id {
         if let Some(model) = result.iter().find(|model| model.id == default_id) {
             default.reasoning_efforts = model.reasoning_efforts.clone();
+            default.service_tiers = model.service_tiers.clone();
         }
     }
     if default.reasoning_efforts.is_empty() {
@@ -513,7 +600,12 @@ mod tests {
                     {"reasoningEffort":"high"},
                     {"effort":" high "},
                     " "
-                ]
+                ],
+                "serviceTiers": [{
+                    "id": "priority",
+                    "name": "Fast",
+                    "description": "1.5x speed, increased usage"
+                }]
             }),
             json!({"id":"gpt-test"}),
         ])
@@ -526,10 +618,40 @@ mod tests {
             ["default", "gpt-test"]
         );
         assert_eq!(models[0].reasoning_efforts, ["low", "high"]);
+        assert_eq!(models[0].service_tiers[0].id, "priority");
         assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
         assert!(models[0].is_default);
         assert!(!models[1].is_default);
         assert!(models[1].is_provider_default);
+    }
+
+    #[test]
+    fn normalizes_legacy_fast_tier_without_duplicating_current_service_tiers() {
+        let legacy = parse_models(&[json!({
+            "id": "legacy-model",
+            "isDefault": true,
+            "additionalSpeedTiers": ["fast"]
+        })])
+        .unwrap();
+        assert_eq!(legacy[0].service_tiers.len(), 1);
+        assert_eq!(legacy[0].service_tiers[0].id, "priority");
+
+        let current = parse_models(&[json!({
+            "id": "current-model",
+            "isDefault": true,
+            "additionalSpeedTiers": ["fast"],
+            "serviceTiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "Provider description"
+            }]
+        })])
+        .unwrap();
+        assert_eq!(current[0].service_tiers.len(), 1);
+        assert_eq!(
+            current[0].service_tiers[0].description,
+            "Provider description"
+        );
     }
 
     #[test]
@@ -581,12 +703,12 @@ mod tests {
         let discoveries = Arc::new(AtomicUsize::new(0));
         let first_count = discoveries.clone();
         let second_count = discoveries.clone();
-        let first = get_or_discover_models_by_key(key, move || async move {
+        let first = get_or_discover_models_by_key(key, false, move || async move {
             first_count.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
             Ok(vec![CliModelInfo::new("default", "Default", true)])
         });
-        let second = get_or_discover_models_by_key(key, move || async move {
+        let second = get_or_discover_models_by_key(key, false, move || async move {
             second_count.fetch_add(1, Ordering::SeqCst);
             Ok(vec![CliModelInfo::new("incorrect", "Incorrect", false)])
         });
@@ -595,6 +717,25 @@ mod tests {
         assert_eq!(discoveries.load(Ordering::SeqCst), 1);
         assert_eq!(first.unwrap()[0].id, "default");
         assert_eq!(second.unwrap()[0].id, "default");
+
+        let forced = get_or_discover_models_by_key(key, true, || async {
+            Ok(vec![CliModelInfo::new("refreshed", "Refreshed", false)])
+        })
+        .await
+        .unwrap();
+        assert_eq!(forced[0].id, "refreshed");
+
+        let failed = get_or_discover_models_by_key(key, true, || async {
+            Err(anyhow!("forced refresh failed"))
+        })
+        .await;
+        assert!(failed.is_err());
+        let retained = get_or_discover_models_by_key(key, false, || async {
+            Ok(vec![CliModelInfo::new("incorrect", "Incorrect", false)])
+        })
+        .await
+        .unwrap();
+        assert_eq!(retained[0].id, "refreshed");
         *MODEL_CACHE.lock().await = None;
         MODEL_DISCOVERY_LOCKS.lock().await.remove(&key);
     }

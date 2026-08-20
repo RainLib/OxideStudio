@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
   getContextMetrics: vi.fn(),
   loadConversationSnapshot: vi.fn(),
+  listConversationSnapshots: vi.fn(),
   saveConversationSnapshot: vi.fn(),
   importTextAttachment: vi.fn(),
   startTurn: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("@/services/tauri/agent-host.service", () => ({
     getStatus: mocks.getStatus,
     getContextMetrics: mocks.getContextMetrics,
     loadConversationSnapshot: mocks.loadConversationSnapshot,
+    listConversationSnapshots: mocks.listConversationSnapshots,
     saveConversationSnapshot: mocks.saveConversationSnapshot,
     importTextAttachment: mocks.importTextAttachment,
     startTurn: mocks.startTurn,
@@ -82,6 +84,9 @@ vi.mock("@/services/tauri/ai.service", async (importOriginal) => {
 
 import {
   AssistantSidebar,
+  assistantConversationBelongsToScope,
+  assistantConversationScopeKey,
+  createAssistantConversationId,
   assistantConversationId,
   assistantConversationContentVersion,
   assistantConversationHistoryVersion,
@@ -91,6 +96,7 @@ import {
 } from "@/components/workspace/AssistantSidebar";
 import { resetAiCliCatalogForTests } from "@/hooks/useAiCliCatalog";
 import { resetAssistantAgentRuntimeForTests } from "@/hooks/useAssistantAgentSession";
+import { resetAssistantConversationHistoryForTests } from "@/components/workspace/assistant/AssistantConversationHistory";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -188,6 +194,27 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(primary).toMatch(/^provider:cli:[0-9a-f]{32}$/u);
     expect(primary).not.toContain("primary");
     expect(primary).not.toContain("C:/tools");
+  });
+
+  it("creates bounded child conversation identities inside the provider scope", () => {
+    const scope = "provider:http:0123456789abcdef0123456789abcdef";
+    const conversationId = createAssistantConversationId(
+      scope,
+      1_700_000_000_000,
+      "A1B2-C3D4-extra",
+    );
+
+    expect(conversationId).toBe(`${scope}:chat:loyw3v28-a1b2-c3d`);
+    expect(conversationId.length).toBeLessThanOrEqual(80);
+    expect(assistantConversationBelongsToScope(conversationId, scope)).toBe(
+      true,
+    );
+    expect(
+      assistantConversationBelongsToScope(
+        "provider:http:other:chat:one",
+        scope,
+      ),
+    ).toBe(false);
   });
 
   it("does not reuse a ready CLI setup after its identity changes", () => {
@@ -316,10 +343,13 @@ describe("AssistantSidebar Agent Host path", () => {
     vi.stubEnv("VITE_ASSISTANT_LEGACY_RUNTIME", "0");
     vi.clearAllMocks();
     resetAiCliCatalogForTests();
+    resetAssistantConversationHistoryForTests();
+    window.localStorage.removeItem("oxide-assistant-active-conversations-v1");
     await resetAssistantAgentRuntimeForTests();
     useAssistantCliSetupStore.getState().reset();
     mocks.listener = null;
     mocks.loadConversationSnapshot.mockResolvedValue(null);
+    mocks.listConversationSnapshots.mockResolvedValue([]);
     mocks.saveConversationSnapshot.mockResolvedValue({
       projectId: "default",
       threadId: "thread",
@@ -744,7 +774,7 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("encrypted snapshot unavailable");
   });
 
-  it("persists an empty checkpoint when starting a new chat", async () => {
+  it("preserves the previous snapshot when starting a new chat", async () => {
     await act(async () => {
       root = createRoot(container);
       root.render(<AssistantSidebar />);
@@ -764,10 +794,21 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(mocks.saveConversationSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "project-1",
-        turns: [],
+        turns: [expect.objectContaining({ userMessage: "Finish this first" })],
         resumeRequests: [],
       }),
     );
+    const nextConversationId = mocks.loadConversationSnapshot.mock.calls.at(
+      -1,
+    )?.[1];
+    expect(nextConversationId).toMatch(/:chat:[a-z0-9]+-[a-z0-9_-]{8}$/u);
+    const persistedSelection = window.localStorage.getItem(
+      "oxide-assistant-active-conversations-v1",
+    );
+    expect(persistedSelection).toContain(nextConversationId);
+    expect(persistedSelection).not.toContain("Finish this first");
+    expect(persistedSelection).not.toContain("secret");
+    expect(persistedSelection).not.toContain("llm.example.test");
     expect(container.querySelectorAll("[data-assistant-turn-id]")).toHaveLength(
       0,
     );
@@ -1052,6 +1093,203 @@ describe("AssistantSidebar Agent Host path", () => {
 
     expect(container.textContent).toContain("What changed in the project?");
     expect(container.textContent).toContain("Two SQL files changed.");
+  });
+
+  it("lists, caches, and opens provider-scoped conversation history", async () => {
+    const scope = assistantConversationId(
+      useAiSettingsStore.getState().assistantProviderConfig(),
+    );
+    expect(scope).toBeTruthy();
+    const historicalConversationId = createAssistantConversationId(
+      scope!,
+      1_700_000_000_000,
+      "abcd1234",
+    );
+    mocks.listConversationSnapshots.mockResolvedValueOnce([
+      {
+        projectId: "project-1",
+        conversationId: historicalConversationId,
+        threadId: "thread:historical",
+        title: "Review the slow report query",
+        turnCount: 1,
+        updatedAt: 1_700_000_000_000,
+      },
+    ]);
+    mocks.loadConversationSnapshot.mockImplementation(
+      async (_projectId, requestedConversationId) =>
+        requestedConversationId === historicalConversationId
+          ? {
+              projectId: "project-1",
+              conversationId: historicalConversationId,
+              threadId: "thread:historical",
+              turns: [
+                {
+                  id: "turn:historical",
+                  requestId: "request:historical",
+                  threadId: "thread:historical",
+                  projectId: "project-1",
+                  requestedMode: "agent",
+                  mode: "agent",
+                  userMessage: "Review the slow report query",
+                  status: "completed",
+                  process: [],
+                  clarifications: [],
+                  approvals: [],
+                  draft: "",
+                  final: {
+                    content: "The missing composite index is the main cause.",
+                    attachments: [],
+                    artifactRefs: [],
+                    createdAt: 2,
+                  },
+                  error: null,
+                  errorDetail: null,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              ],
+              resumeRequests: [],
+              updatedAt: 2,
+            }
+          : null,
+    );
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    const historyTrigger = findButtonByAria(
+      container,
+      "Open assistant chat history",
+    );
+    await act(async () => {
+      historyTrigger.click();
+      await flushAsyncWork();
+    });
+    expect(mocks.listConversationSnapshots).toHaveBeenCalledWith(
+      "project-1",
+      scope,
+    );
+    expect(document.body.textContent).toContain("Review the slow report query");
+
+    await act(async () => {
+      historyTrigger.click();
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      historyTrigger.click();
+      await flushAsyncWork();
+    });
+    expect(mocks.listConversationSnapshots).toHaveBeenCalledTimes(1);
+
+    const historyItem = document.querySelector<HTMLButtonElement>(
+      `[data-assistant-history-item="${historicalConversationId}"]`,
+    );
+    expect(historyItem).not.toBeNull();
+    await act(async () => {
+      historyItem?.click();
+      await flushAsyncWork();
+    });
+
+    expect(mocks.loadConversationSnapshot).toHaveBeenCalledWith(
+      "project-1",
+      historicalConversationId,
+    );
+    expect(container.textContent).toContain(
+      "The missing composite index is the main cause.",
+    );
+  });
+
+  it("blocks writes to a historical conversation until a failed restore is retried", async () => {
+    const scope = assistantConversationId(
+      useAiSettingsStore.getState().assistantProviderConfig(),
+    )!;
+    const historicalConversationId = createAssistantConversationId(
+      scope,
+      1_700_000_000_000,
+      "safe1234",
+    );
+    window.localStorage.setItem(
+      "oxide-assistant-active-conversations-v1",
+      JSON.stringify({
+        [assistantConversationScopeKey("project-1", scope)]:
+          historicalConversationId,
+      }),
+    );
+    mocks.loadConversationSnapshot
+      .mockRejectedValueOnce(new Error("encrypted snapshot unavailable"))
+      .mockResolvedValueOnce({
+        projectId: "project-1",
+        conversationId: historicalConversationId,
+        threadId: "thread:restored-after-retry",
+        turns: [
+          {
+            id: "turn:restored-after-retry",
+            requestId: "request:restored-after-retry",
+            threadId: "thread:restored-after-retry",
+            projectId: "project-1",
+            requestedMode: "agent",
+            mode: "agent",
+            userMessage: "Keep this historical request",
+            status: "completed",
+            process: [],
+            clarifications: [],
+            approvals: [],
+            draft: "",
+            final: {
+              content: "Historical answer restored safely.",
+              attachments: [],
+              artifactRefs: [],
+              createdAt: 2,
+            },
+            error: null,
+            errorDetail: null,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        ],
+        resumeRequests: [],
+        updatedAt: 2,
+      });
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    expect(container.textContent).toContain(
+      "saved Assistant conversation could not be restored",
+    );
+    await submitPrompt(container, "Do not overwrite history", "Run agent");
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    await emit({
+      ...baseEvent("thread:unrelated", "turn:unrelated", 9),
+      type: "turn.status",
+      status: "completed",
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+      await flushAsyncWork();
+    });
+    expect(
+      mocks.saveConversationSnapshot.mock.calls.some(
+        ([request]) =>
+          request.conversationId === historicalConversationId &&
+          Array.isArray(request.turns) &&
+          request.turns.length === 0,
+      ),
+    ).toBe(false);
+    vi.useRealTimers();
+
+    await clickButton(container, "Retry");
+
+    expect(mocks.loadConversationSnapshot).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Historical answer restored safely.");
   });
 
   it("shows a stable restoring surface instead of the empty Assistant state while a snapshot is pending", async () => {
@@ -1561,22 +1799,78 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
 
+    const assistantHeader = container.querySelector("header");
+    expect(
+      assistantHeader?.querySelector("[data-assistant-provider]"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(":scope > [data-assistant-provider]"),
+    ).toBeNull();
+
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    expect(document.body.textContent).toContain("Run Assistant with");
-    expect(document.body.textContent).toContain(
+    const providerMenu = document.body.querySelector<HTMLElement>(
+      '[data-assistant-provider-menu="true"]',
+    );
+    expect(providerMenu).not.toBeNull();
+    expect(providerMenu?.className).toContain("w-[220px]");
+    expect(
+      providerMenu?.querySelectorAll("[data-assistant-provider-option]"),
+    ).toHaveLength(3);
+    for (const providerOption of providerMenu?.querySelectorAll<HTMLElement>(
+      "[data-assistant-provider-option]",
+    ) ?? []) {
+      expect(providerOption.className).toContain("h-9");
+      expect(providerOption.childElementCount).toBe(2);
+    }
+    expect(providerMenu?.textContent).toContain("Oxide Assistant");
+    expect(providerMenu?.textContent).toContain("OpenAI Codex");
+    expect(providerMenu?.textContent).toContain("CodeBuddy Code");
+    expect(providerMenu?.textContent).not.toContain("Run Assistant with");
+    expect(providerMenu?.textContent).not.toContain(
       "SQL inline completion keeps its separate HTTP provider",
     );
+    expect(providerMenu?.textContent).not.toContain(
+      "A native Codex agent session",
+    );
+    expect(providerMenu?.textContent).not.toContain("API");
+    expect(providerMenu?.textContent).not.toContain("CLI");
+    expect(providerMenu?.textContent).not.toContain("Ready");
+    expect(providerMenu?.textContent).not.toContain("Provider settings");
+    expect(
+      providerMenu?.querySelector(
+        '[data-assistant-provider-brand="openai-compatible"] img[src="/oxide-logo.png"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      providerMenu?.querySelector(
+        '[data-assistant-provider-brand="codex-cli"] svg',
+      ),
+    ).not.toBeNull();
+    expect(
+      providerMenu?.querySelector(
+        '[data-assistant-provider-brand="codebuddy-cli"] img[src="/provider-icons/codebuddy.svg"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-assistant-provider] [data-assistant-provider-brand="openai-compatible"] img[src="/oxide-logo.png"]',
+      ),
+    ).not.toBeNull();
 
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(providerMenu!, "Use OpenAI Codex");
     expect(useAiSettingsStore.getState()).toEqual(
       expect.objectContaining({
         enabled: true,
         provider: "codex-cli",
       }),
     );
+    const codexProviderTrigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label^="Assistant provider: OpenAI Codex"]',
+    );
+    expect(codexProviderTrigger?.textContent).toContain("OpenAI Codex");
     expect(
-      container.querySelector(
-        'button[aria-label^="Assistant provider: Codex CLI"]',
+      codexProviderTrigger?.querySelector(
+        '[data-assistant-provider-brand="codex-cli"] svg',
       ),
     ).not.toBeNull();
     expect(mocks.loadConversationSnapshot).toHaveBeenCalledWith(
@@ -1605,7 +1899,7 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -1651,7 +1945,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -1732,7 +2026,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -1786,7 +2080,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -1839,6 +2133,13 @@ describe("AssistantSidebar Agent Host path", () => {
         label: "Default",
         isDefault: true,
         reasoningEfforts: ["low", "medium", "high", "xhigh"],
+        serviceTiers: [
+          {
+            id: "priority",
+            name: "Fast",
+            description: "1.5x speed, increased usage",
+          },
+        ],
       },
       {
         id: "gpt-5.6-sol",
@@ -1846,6 +2147,13 @@ describe("AssistantSidebar Agent Host path", () => {
         isDefault: false,
         isProviderDefault: true,
         reasoningEfforts: ["low", "medium", "high", "xhigh"],
+        serviceTiers: [
+          {
+            id: "priority",
+            name: "Fast",
+            description: "1.5x speed, increased usage",
+          },
+        ],
       },
       {
         id: "gpt-5.6-terra",
@@ -1873,7 +2181,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -1882,7 +2190,7 @@ describe("AssistantSidebar Agent Host path", () => {
     const providerTrigger = container.querySelector<HTMLButtonElement>(
       "button[data-assistant-provider]",
     );
-    expect(providerTrigger?.textContent).toContain("Codex CLI · Ready");
+    expect(providerTrigger?.textContent).toContain("OpenAI Codex · Ready");
     expect(providerTrigger?.textContent).not.toContain("Codex CLI · Codex CLI");
 
     const detectionCalls = mocks.detectCliProvider.mock.calls.length;
@@ -1906,6 +2214,7 @@ describe("AssistantSidebar Agent Host path", () => {
       document.body.querySelectorAll("[data-assistant-model-popover]"),
     ).toHaveLength(1);
     expect(modelTrigger.querySelector(".lucide-zap")).toBeNull();
+    expect(modelTrigger.querySelector(".lucide-sliders-horizontal")).toBeNull();
 
     const quickView = modelPopover!.querySelector<HTMLElement>(
       '[data-assistant-model-view="quick"]',
@@ -1913,8 +2222,15 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(quickView).not.toBeNull();
     expect(quickView?.className).toMatch(/transition|animate/);
     expect(
-      quickView?.querySelector("[data-assistant-current-model]")?.textContent,
-    ).toContain("GPT-5.6 Sol");
+      modelPopover!.querySelectorAll('[data-assistant-model-panel="true"]'),
+    ).toHaveLength(1);
+    expect(modelPopover!.className).toContain("bg-transparent");
+    const quickAdvancedToggle = quickView?.querySelector<HTMLButtonElement>(
+      '[data-assistant-quick-advanced-toggle="true"]',
+    );
+    expect(quickAdvancedToggle).not.toBeNull();
+    expect(quickAdvancedToggle?.className).not.toContain("hover:bg-");
+    expect(quickAdvancedToggle?.className).not.toContain("rounded-");
     const reasoningTrack = quickView?.querySelector<HTMLInputElement>(
       'input[type="range"][data-assistant-reasoning-track]',
     );
@@ -1924,7 +2240,40 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(reasoningTrack?.getAttribute("aria-label")).toBe("Reasoning effort");
     expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("Default");
     expect(quickView?.textContent).not.toContain("GPT-5.6 Terra");
-    expect(quickView?.querySelector(".lucide-zap")).toBeNull();
+    const fastToggle = quickView?.querySelector<HTMLButtonElement>(
+      '[data-assistant-fast-toggle="true"]',
+    );
+    expect(fastToggle).not.toBeNull();
+    expect(fastToggle?.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      fastToggle!.click();
+      await flushAsyncWork();
+    });
+    expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("priority");
+    expect(fastToggle?.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      quickView?.querySelector('[data-assistant-speed-tier="priority"]'),
+    ).not.toBeNull();
+    expect(
+      quickView?.querySelector('[data-assistant-fast-particles="true"]'),
+    ).not.toBeNull();
+    expect(
+      quickView
+        ?.querySelector('[data-assistant-fast-particles="true"]')
+        ?.getAttribute("data-assistant-animation-speed"),
+    ).toBe("1.5x");
+    expect(
+      quickView?.querySelector<HTMLElement>(".wb-assistant-fast-particle")
+        ?.style.animationDuration,
+    ).toBe("800ms");
+    await act(async () => {
+      fastToggle!.click();
+      await flushAsyncWork();
+    });
+    expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("default");
+    expect(
+      quickView?.querySelector('[data-assistant-fast-particles="true"]'),
+    ).toBeNull();
 
     await setRangeValue(reasoningTrack!, "3");
     expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("high");
@@ -1933,8 +2282,19 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(document.body.querySelector("[data-assistant-model-popover]")).toBe(
       modelPopover,
     );
-    expect(modelPopover!.querySelector(".lucide-zap")).toBeNull();
+    expect(modelPopover!.querySelector("[data-assistant-fast-toggle]")).not.toBeNull();
     expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
+
+    await setRangeValue(reasoningTrack!, "4");
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("xhigh");
+    expect(
+      quickView
+        ?.querySelector('[data-assistant-reasoning-animation="maximum"]')
+        ?.querySelector('[data-assistant-animation-speed="standard"]'),
+    ).not.toBeNull();
+    expect(
+      quickView?.querySelector('[data-assistant-reasoning-stop="true"]'),
+    ).toBeNull();
 
     await clickButton(modelPopover!, "Advanced");
 
@@ -1957,10 +2317,18 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(modelListToggle).not.toBeNull();
     expect(modelListToggle?.getAttribute("aria-expanded")).toBe("false");
     await act(async () => {
-      modelListToggle!.click();
+      modelListToggle!.dispatchEvent(
+        new PointerEvent("pointerover", {
+          bubbles: true,
+          pointerType: "mouse",
+        }),
+      );
       await flushAsyncWork();
     });
     expect(modelListToggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      advancedView!.querySelector('[data-assistant-submenu="model"]'),
+    ).not.toBeNull();
 
     const modelSearch = advancedView!.querySelector<HTMLInputElement>(
       'input[placeholder="Search models"]',
@@ -1988,14 +2356,18 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     expect(useAiSettingsStore.getState().codexCliModel).toBe("gpt-5.6-terra");
+    await clickButtonByAria(advancedView!, "Reasoning effort");
     const terraReasoning = advancedView!.querySelector<HTMLInputElement>(
-      'input[type="range"][data-assistant-reasoning-track]',
+      'input[type="radio"][aria-label="Default"]',
     );
     expect(terraReasoning).not.toBeNull();
-    expect(terraReasoning?.max).toBe("3");
-    expect(terraReasoning?.getAttribute("aria-valuetext")).toBe("Default");
+    expect(terraReasoning?.checked).toBe(true);
+    expect(
+      advancedView!.querySelector('button[data-assistant-menu-trigger="speed"]'),
+    ).toBeNull();
+    expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("default");
     expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
-    expect(modelPopover!.querySelector(".lucide-zap")).toBeNull();
+    expect(modelPopover!.querySelector("[data-assistant-fast-toggle]")).toBeNull();
     expect(mocks.detectCliProvider).toHaveBeenCalledTimes(detectionCalls);
 
     await act(async () => {
@@ -2028,6 +2400,88 @@ describe("AssistantSidebar Agent Host path", () => {
         ?.querySelector('[data-assistant-model-view="advanced"]')
         ?.getAttribute("aria-hidden"),
     ).toBe("true");
+  });
+
+  it("confirms Ultra access and automatically revokes Full access outside Agent mode", async () => {
+    useAiSettingsStore.setState({
+      provider: "codex-cli",
+      enabled: true,
+      codexCliAssistantMode: "agent",
+      codexCliReasoningEffort: "default",
+      codexCliReasoningEffortByModel: { default: "default" },
+      codexCliAccessMode: "restricted",
+    });
+    mocks.listCliModels.mockResolvedValue([
+      {
+        id: "default",
+        label: "Default",
+        isDefault: true,
+        reasoningEfforts: ["low", "ultra"],
+      },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    const modelTrigger = findButtonByAria(container, "Assistant model: Default");
+    await act(async () => {
+      modelTrigger.click();
+      await flushAsyncWork();
+    });
+    let reasoningTrack = document.body.querySelector<HTMLInputElement>(
+      '[data-assistant-reasoning-track="true"]',
+    );
+    expect(reasoningTrack?.max).toBe("2");
+
+    await setRangeValue(reasoningTrack!, "2");
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe(
+      "default",
+    );
+    expect(
+      document.body.querySelector('[data-assistant-ultra-access-dialog="true"]'),
+    ).not.toBeNull();
+    await clickButton(document.body, "Continue");
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("ultra");
+    expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("restricted");
+
+    await act(async () => {
+      useAiSettingsStore.getState().updateSettings({
+        codexCliReasoningEffort: "default",
+      });
+      await flushAsyncWork();
+      if (modelTrigger.getAttribute("aria-expanded") !== "true") {
+        modelTrigger.click();
+        await flushAsyncWork();
+      }
+    });
+    reasoningTrack = document.body.querySelector<HTMLInputElement>(
+      '[data-assistant-reasoning-track="true"]',
+    );
+    await setRangeValue(reasoningTrack!, "2");
+    await clickButton(document.body, "Use Full access");
+
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("ultra");
+    expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("full");
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({
+        reasoningEffort: "ultra",
+        accessMode: "full",
+      }),
+    );
+
+    await act(async () => {
+      useAiSettingsStore.getState().updateSettings({
+        codexCliAssistantMode: "plan",
+      });
+      await flushAsyncWork();
+    });
+    expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("restricted");
+    expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
+      expect.objectContaining({ accessMode: "restricted" }),
+    );
   });
 
   it("deduplicates same-identity CLI catalog loads and does not reload them for model or effort changes", async () => {
@@ -2255,8 +2709,8 @@ describe("AssistantSidebar Agent Host path", () => {
     });
     expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
 
-    await clickButtonByAria(container, "Assistant provider: Codex CLI");
-    await clickButtonByAria(document.body, "Use CodeBuddy CLI");
+    await clickButtonByAria(container, "Assistant provider: OpenAI Codex");
+    await clickButtonByAria(document.body, "Use CodeBuddy Code");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -2286,7 +2740,12 @@ describe("AssistantSidebar Agent Host path", () => {
   });
 
   it("loads CodeBuddy reasoning capability for the selected model without reloading its model catalog", async () => {
-    useAiSettingsStore.setState({ provider: "codebuddy-cli", enabled: true });
+    useAiSettingsStore.setState({
+      provider: "codebuddy-cli",
+      enabled: true,
+      codeBuddyCliReasoningEffort: "enabled",
+      codeBuddyCliReasoningEffortByModel: { default: "enabled" },
+    });
     mocks.detectCliProvider.mockImplementation(async (config) => ({
       provider: config.kind,
       available: true,
@@ -2306,7 +2765,9 @@ describe("AssistantSidebar Agent Host path", () => {
       { id: "buddy-terra", label: "Buddy Terra", isDefault: false },
     ]);
     mocks.listCliEfforts.mockImplementation(async (config) =>
-      config.model === "buddy-terra" ? ["minimal", "high"] : ["low", "medium"],
+      config.model === "buddy-terra"
+        ? ["enabled", "minimal", "max"]
+        : ["enabled", "low", "medium"],
     );
 
     await act(async () => {
@@ -2317,9 +2778,13 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
     expect(mocks.listCliEfforts).toHaveBeenLastCalledWith(
       expect.objectContaining({ kind: "codebuddy-cli", model: "default" }),
+      { runtimeVersion: "1.0.0", forceRefresh: false },
     );
 
     await clickButtonByAria(container, "Assistant model: Default");
+    expect(
+      findButtonByAria(container, "Assistant model: Default").textContent,
+    ).not.toContain("Enabled");
     const modelPopover = document.body.querySelector<HTMLElement>(
       "[data-assistant-model-popover]",
     )!;
@@ -2338,11 +2803,36 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
     expect(mocks.listCliEfforts).toHaveBeenLastCalledWith(
       expect.objectContaining({ kind: "codebuddy-cli", model: "buddy-terra" }),
+      { runtimeVersion: "1.0.0", forceRefresh: false },
     );
     const reasoningTrack = modelPopover.querySelector<HTMLInputElement>(
       'input[data-assistant-reasoning-track]',
     );
     expect(reasoningTrack?.max).toBe("2");
+    expect(modelPopover.textContent).not.toContain("Enabled");
+    await act(async () => {
+      modelPopover
+        .querySelector<HTMLButtonElement>("[data-assistant-advanced-toggle]")
+        ?.click();
+      await flushAsyncWork();
+    });
+    await setRangeValue(reasoningTrack!, "2");
+    expect(useAiSettingsStore.getState().codeBuddyCliReasoningEffort).toBe(
+      "max",
+    );
+    expect(
+      modelPopover.querySelector(
+        '[data-assistant-reasoning-animation="maximum"] [data-assistant-animation-speed="standard"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      modelPopover.querySelector<HTMLElement>(".wb-assistant-fast-particle")
+        ?.style.animationDuration,
+    ).toBe("1200ms");
+    expect(
+      modelPopover.querySelector('[data-assistant-reasoning-stop="true"]'),
+    ).toBeNull();
+    expect(modelPopover.querySelector("[data-assistant-fast-toggle]")).toBeNull();
   });
 
   it("keeps the conversation surface mounted while a ready CLI is revalidated", async () => {
@@ -2362,7 +2852,7 @@ describe("AssistantSidebar Agent Host path", () => {
     });
 
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
 
     expect(container.textContent).not.toContain("Set up Codex CLI");
     expect(container.querySelector("textarea")).not.toBeNull();
@@ -2461,7 +2951,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -2510,7 +3000,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -2553,7 +3043,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -2595,7 +3085,7 @@ describe("AssistantSidebar Agent Host path", () => {
       await flushAsyncWork();
     });
     await clickButtonByAria(container, "Assistant provider: Oxide Assistant");
-    await clickButtonByAria(document.body, "Use Codex CLI");
+    await clickButtonByAria(document.body, "Use OpenAI Codex");
     await act(async () => {
       await flushAsyncWork();
     });
@@ -2622,18 +3112,12 @@ describe("AssistantSidebar Agent Host path", () => {
     expect(container.textContent).toContain("Downloading Codex CLI");
   });
 
-  it("manages the model from the composer and opens the AI settings section", async () => {
-    const settingsEvents: unknown[] = [];
-    const handleSettings = (event: Event) => {
-      settingsEvents.push((event as CustomEvent).detail);
-    };
-    window.addEventListener("oxide:open-settings", handleSettings);
-    try {
-      await act(async () => {
-        root = createRoot(container);
-        root.render(<AssistantSidebar />);
-        await flushAsyncWork();
-      });
+  it("manages the model from the composer without an extra settings action", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
 
       await clickButtonByAria(container, "Assistant model: agent-model");
       const modelPanel = document.body.querySelector<HTMLElement>(
@@ -2641,6 +3125,7 @@ describe("AssistantSidebar Agent Host path", () => {
       );
       expect(modelPanel).not.toBeNull();
       await clickButton(modelPanel!, "Advanced");
+      await clickButtonByAria(modelPanel!, "Toggle model list");
       const modelInput = modelPanel!.querySelector<HTMLInputElement>(
         'input[placeholder="Model identifier"]',
       );
@@ -2658,11 +3143,10 @@ describe("AssistantSidebar Agent Host path", () => {
           "Assistant model: agent-model-v2",
         ).getAttribute("aria-expanded"),
       ).toBe("true");
-      await clickButton(modelPanel!, "Settings");
-      expect(settingsEvents).toEqual([{ section: "ai" }]);
-    } finally {
-      window.removeEventListener("oxide:open-settings", handleSettings);
-    }
+    await clickButtonByAria(modelPanel!, "Toggle model list");
+    expect(
+      modelPanel!.querySelector('button[aria-label="Settings"]'),
+    ).toBeNull();
   });
 
   it("blocks tool modes when the model cannot call tools but keeps Chat usable", async () => {

@@ -4738,7 +4738,14 @@ export function SchemaSidebar() {
                               : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`
                           }
                         />
-                        <span className="truncate font-medium">
+                        <ConnectionRuntimeBadge
+                          runtime={connectionRuntime}
+                          isConnected={connectedConnectionIds.includes(
+                            connection.id,
+                          )}
+                          isConnecting={isConnecting}
+                        />
+                        <span className="min-w-0 truncate font-medium">
                           {connection.name}
                         </span>
                         {databaseExplorerSettings.showConnectionNotes &&
@@ -4759,13 +4766,6 @@ export function SchemaSidebar() {
                             Managed
                           </span>
                         )}
-                        <ConnectionRuntimeBadge
-                          runtime={connectionRuntime}
-                          isConnected={connectedConnectionIds.includes(
-                            connection.id,
-                          )}
-                          isConnecting={isConnecting}
-                        />
                         <MetadataNodeBadge
                           state={connectionMetadata.nodeState}
                         />

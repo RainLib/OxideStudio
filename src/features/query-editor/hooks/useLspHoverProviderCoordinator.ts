@@ -172,12 +172,15 @@ export function useLspHoverProviderCoordinator(
 
   useEffect(() => {
     if (!options.isActivePane || !options.monaco) return;
-    return registerLspHoverProvider({
+    const provider = registerLspHoverProvider({
       editorLanguageId: options.editorLanguageId,
       getRuntime: () => runtimeRef.current,
       lspClient: options.lspClient,
       monaco: options.monaco,
-    }).dispose;
+    });
+    // Monaco's IDisposable#dispose reads instance state. React calls effect
+    // cleanups as standalone functions, so do not return the method unbound.
+    return () => provider.dispose();
   }, [
     options.editorLanguageId,
     options.isActivePane,

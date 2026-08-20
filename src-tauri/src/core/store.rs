@@ -4,8 +4,10 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
 };
 use anyhow::{anyhow, Context, Result};
+use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::path::Path;
 use tauri::{AppHandle, Manager};
@@ -13,6 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 const CONNECTION_CREDENTIAL_KEY_BYTES: usize = 32;
 const CONNECTION_CREDENTIAL_KEY_FILE: &str = "connection-credentials-v1.secret";
+const CLI_CAPABILITY_CACHE_KEY_HEX_LENGTH: usize = 64;
+const CLI_CAPABILITY_CACHE_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const CLI_CAPABILITY_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
@@ -224,9 +229,30 @@ fn config_contains_plaintext_credentials(config: &serde_json::Value) -> bool {
         })
 }
 
+fn update_cache_mac_component(mac: &mut Hmac<Sha256>, name: &str, value: &str) {
+    for bytes in [name.as_bytes(), value.as_bytes()] {
+        mac.update(&(bytes.len() as u64).to_be_bytes());
+        mac.update(bytes);
+    }
+}
+
+fn validate_cli_capability_cache_identity(cache_key: &str, resource_kind: &str) -> Result<()> {
+    if cache_key.len() != CLI_CAPABILITY_CACHE_KEY_HEX_LENGTH
+        || !cache_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("CLI capability cache key is invalid");
+    }
+    if !matches!(resource_kind, "models" | "commands" | "efforts") {
+        anyhow::bail!("CLI capability cache resource kind is invalid");
+    }
+    Ok(())
+}
+
 impl MetaStore {
     #[cfg(test)]
-    fn for_test(pool: Pool<Sqlite>) -> Self {
+    pub(crate) fn for_test(pool: Pool<Sqlite>) -> Self {
         Self {
             pool,
             credential_key: Zeroizing::new([7_u8; CONNECTION_CREDENTIAL_KEY_BYTES]),
@@ -264,7 +290,7 @@ impl MetaStore {
         Ok(store)
     }
 
-    async fn init(&self) -> Result<()> {
+    pub(crate) async fn init(&self) -> Result<()> {
         // Create connections table
         sqlx::query(
             r#"
@@ -405,6 +431,28 @@ impl MetaStore {
         .execute(&self.pool)
         .await?;
 
+        // Provider capability catalogs are safe to persist, but their lookup
+        // identity may contain executable paths, profile names and private
+        // environment values. Only an opaque keyed digest is stored here.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS cli_capability_cache (
+                cache_key TEXT PRIMARY KEY NOT NULL,
+                resource_kind TEXT NOT NULL CHECK(resource_kind IN ('models', 'commands', 'efforts')),
+                payload TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_cli_capability_cache_expiry ON cli_capability_cache(expires_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Create resources table (Hierarchical Metadata)
         // using an adjacency list model
         sqlx::query(
@@ -450,6 +498,107 @@ impl MetaStore {
             .execute(&self.pool)
             .await?;
 
+        Ok(())
+    }
+
+    /// Derive a stable local-only cache key without exposing the key material
+    /// or any identity component to SQLite. Each named component is
+    /// length-delimited before authentication so concatenation is unambiguous.
+    pub fn opaque_cache_key<'a, I>(&self, namespace: &str, components: I) -> Result<String>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        if namespace.is_empty() || namespace.len() > 128 {
+            anyhow::bail!("cache key namespace is invalid");
+        }
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.credential_key.as_ref())
+            .map_err(|_| anyhow!("local cache key material is invalid"))?;
+        update_cache_mac_component(&mut mac, "namespace", namespace);
+        for (name, value) in components {
+            if name.is_empty() || name.len() > 128 {
+                anyhow::bail!("cache key component name is invalid");
+            }
+            update_cache_mac_component(&mut mac, name, value);
+        }
+        let digest = mac.finalize().into_bytes();
+        let mut encoded = String::with_capacity(CLI_CAPABILITY_CACHE_KEY_HEX_LENGTH);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Ok(encoded)
+    }
+
+    /// Return only a fresh, correctly typed entry. Callers deliberately treat
+    /// any storage or JSON error as a cache miss and perform live discovery.
+    pub async fn get_cli_capability_cache(
+        &self,
+        cache_key: &str,
+        resource_kind: &str,
+        now_ms: i64,
+    ) -> Result<Option<serde_json::Value>> {
+        validate_cli_capability_cache_identity(cache_key, resource_kind)?;
+        let payload = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT payload
+            FROM cli_capability_cache
+            WHERE cache_key = ? AND resource_kind = ? AND expires_at > ?
+            "#,
+        )
+        .bind(cache_key)
+        .bind(resource_kind)
+        .bind(now_ms)
+        .fetch_optional(&self.pool)
+        .await?;
+        payload
+            .map(|payload| serde_json::from_str(&payload).context("invalid CLI capability cache"))
+            .transpose()
+    }
+
+    /// Atomically replace an entry after successful live discovery. Failed
+    /// refreshes never call this method, leaving the last-known-good row intact.
+    pub async fn save_cli_capability_cache(
+        &self,
+        cache_key: &str,
+        resource_kind: &str,
+        payload: &serde_json::Value,
+        expires_at: i64,
+    ) -> Result<()> {
+        validate_cli_capability_cache_identity(cache_key, resource_kind)?;
+        let now = current_timestamp_millis();
+        if expires_at <= now {
+            anyhow::bail!("CLI capability cache expiry must be in the future");
+        }
+        let payload = serde_json::to_string(payload)?;
+        if payload.len() > CLI_CAPABILITY_CACHE_MAX_PAYLOAD_BYTES {
+            anyhow::bail!("CLI capability cache payload exceeds its limit");
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO cli_capability_cache
+                (cache_key, resource_kind, payload, updated_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                resource_kind = excluded.resource_kind,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at,
+                expires_at = excluded.expires_at
+            "#,
+        )
+        .bind(cache_key)
+        .bind(resource_kind)
+        .bind(payload)
+        .bind(now)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM cli_capability_cache WHERE expires_at < ?")
+            .bind(now.saturating_sub(CLI_CAPABILITY_CACHE_RETENTION_MS))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1721,6 +1870,126 @@ fn assistant_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AssistantTask
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cli_capability_cache_is_idempotent_private_and_ttl_bound() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        // Startup may retry setup; the table and index migration must remain
+        // safe when executed more than once.
+        store.init().await.unwrap();
+
+        let secret = "https://user:top-secret@proxy.example.test";
+        let fields = [
+            ("provider", "codex-cli"),
+            ("profile", "work-profile"),
+            ("path", "/private/tools/codex"),
+            ("environmentName", "HTTPS_PROXY"),
+            ("environmentValue", secret),
+        ];
+        let cache_key = store
+            .opaque_cache_key("cli-capability-catalog-v1", fields)
+            .unwrap();
+        let same_key = store
+            .opaque_cache_key("cli-capability-catalog-v1", fields)
+            .unwrap();
+        let changed_key = store
+            .opaque_cache_key(
+                "cli-capability-catalog-v1",
+                [
+                    ("provider", "codex-cli"),
+                    ("profile", "work-profile"),
+                    ("path", "/private/tools/codex"),
+                    ("environmentName", "HTTPS_PROXY"),
+                    ("environmentValue", "https://different.example.test"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(cache_key, same_key);
+        assert_ne!(cache_key, changed_key);
+        assert_eq!(cache_key.len(), CLI_CAPABILITY_CACHE_KEY_HEX_LENGTH);
+        assert!(!cache_key.contains("codex"));
+
+        let now = current_timestamp_millis();
+        let expires_at = now + 60_000;
+        let payload = serde_json::json!([{
+            "id": "gpt-test",
+            "label": "GPT Test",
+            "isDefault": false
+        }]);
+        store
+            .save_cli_capability_cache(&cache_key, "models", &payload, expires_at)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_cli_capability_cache(&cache_key, "models", now)
+                .await
+                .unwrap(),
+            Some(payload)
+        );
+        assert!(store
+            .get_cli_capability_cache(&cache_key, "models", expires_at)
+            .await
+            .unwrap()
+            .is_none());
+
+        let raw: String = sqlx::query_scalar(
+            "SELECT cache_key || payload FROM cli_capability_cache WHERE cache_key = ?",
+        )
+        .bind(&cache_key)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        for private_value in [secret, "work-profile", "/private/tools/codex"] {
+            assert!(!raw.contains(private_value));
+        }
+        assert!(store
+            .get_cli_capability_cache("not-a-digest", "models", now)
+            .await
+            .is_err());
+        assert!(store
+            .save_cli_capability_cache(&cache_key, "unknown", &serde_json::json!([]), expires_at)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn cli_capability_cache_surfaces_corrupt_json_as_a_cache_error() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        let cache_key = store
+            .opaque_cache_key("cli-capability-catalog-v1", [("provider", "codebuddy-cli")])
+            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO cli_capability_cache
+                (cache_key, resource_kind, payload, updated_at, expires_at)
+            VALUES (?, 'commands', '{broken-json', ?, ?)
+            "#,
+        )
+        .bind(&cache_key)
+        .bind(current_timestamp_millis())
+        .bind(current_timestamp_millis() + 60_000)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert!(store
+            .get_cli_capability_cache(&cache_key, "commands", current_timestamp_millis())
+            .await
+            .is_err());
+    }
 
     #[tokio::test]
     async fn connection_credentials_are_encrypted_outside_metadata_json() {

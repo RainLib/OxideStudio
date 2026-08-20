@@ -112,14 +112,24 @@ pub async fn list_models(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliModelInfo>> {
+    list_models_with_refresh(config, environment, false).await
+}
+
+pub async fn list_models_with_refresh(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    force_refresh: bool,
+) -> Result<Vec<CliModelInfo>> {
     let command = resolve_command(
         CliProviderKind::CodebuddyCli,
         config.executable_path.as_deref(),
     )
     .await?;
-    Ok(get_or_discover_capabilities(&command, environment)
-        .await?
-        .models)
+    Ok(
+        get_or_discover_capabilities(&command, environment, force_refresh)
+            .await?
+            .models,
+    )
 }
 
 fn provider_identity_key(command: &CliCommandSpec, environment: &BTreeMap<String, String>) -> u64 {
@@ -134,6 +144,14 @@ pub async fn list_efforts(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
+    list_efforts_with_refresh(config, environment, false).await
+}
+
+pub async fn list_efforts_with_refresh(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    force_refresh: bool,
+) -> Result<Vec<String>> {
     let command = resolve_command(
         CliProviderKind::CodebuddyCli,
         config.executable_path.as_deref(),
@@ -141,7 +159,7 @@ pub async fn list_efforts(
     .await?;
     let model = normalize_model_id(config.model.trim());
     let key = effort_cache_key(&command, environment, &model);
-    get_or_discover_efforts_by_key(key, || async {
+    get_or_discover_efforts_by_key(key, force_refresh, || async {
         Ok(discover_catalog_via_acp(&command, environment, &model)
             .await?
             .efforts)
@@ -162,15 +180,30 @@ fn effort_cache_key(
     hasher.finish()
 }
 
-async fn get_or_discover_efforts_by_key<F, Fut>(key: u64, discover: F) -> Result<Vec<String>>
+async fn get_or_discover_efforts_by_key<F, Fut>(
+    key: u64,
+    force_refresh: bool,
+    discover: F,
+) -> Result<Vec<String>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<String>>>,
 {
+    let force_baseline = if force_refresh {
+        EFFORT_CACHE
+            .lock()
+            .await
+            .get(&key)
+            .map(|cached| cached.loaded_at)
+    } else {
+        None
+    };
     let now = Instant::now();
-    if let Some(cached) = EFFORT_CACHE.lock().await.get(&key) {
-        if now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL {
-            return Ok(cached.efforts.clone());
+    if !force_refresh {
+        if let Some(cached) = EFFORT_CACHE.lock().await.get(&key) {
+            if now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL {
+                return Ok(cached.efforts.clone());
+            }
         }
     }
 
@@ -184,11 +217,18 @@ where
     let _discovery_guard = discovery_lock.lock().await;
 
     // A concurrent request for the same executable, environment and model may
-    // have finished while this task waited for the model-scoped lock.
+    // have finished while this task waited for the model-scoped lock. Forced
+    // callers only reuse a value produced after their request started.
     let now = Instant::now();
     if let Some(cached) = EFFORT_CACHE.lock().await.get(&key) {
         if now.saturating_duration_since(cached.loaded_at) < EFFORT_CACHE_TTL {
-            return Ok(cached.efforts.clone());
+            let refreshed_while_waiting = force_refresh
+                && force_baseline
+                    .map(|baseline| cached.loaded_at != baseline)
+                    .unwrap_or(true);
+            if !force_refresh || refreshed_while_waiting {
+                return Ok(cached.efforts.clone());
+            }
         }
     }
 
@@ -209,12 +249,20 @@ pub async fn list_commands(
     config: &CliProviderConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliCommandInfo>> {
+    list_commands_with_refresh(config, environment, false).await
+}
+
+pub async fn list_commands_with_refresh(
+    config: &CliProviderConfig,
+    environment: &BTreeMap<String, String>,
+    force_refresh: bool,
+) -> Result<Vec<CliCommandInfo>> {
     let command = resolve_command(
         CliProviderKind::CodebuddyCli,
         config.executable_path.as_deref(),
     )
     .await?;
-    get_or_discover_capabilities(&command, environment)
+    get_or_discover_capabilities(&command, environment, force_refresh)
         .await?
         .commands
         .ok_or_else(|| anyhow!("CodeBuddy ACP session did not publish its command catalog"))
@@ -277,7 +325,7 @@ pub async fn test_connection(
     // Account state, model catalog and session creation are all verified over
     // ACP. Stream-json's apiKeySource is only a service origin and must never
     // be interpreted as proof that a user is signed in.
-    let capabilities = get_or_discover_capabilities(&command, environment)
+    let capabilities = get_or_discover_capabilities(&command, environment, false)
         .await
         .map_err(|error| anyhow!(classify_error(&error.to_string())))?;
     let configured = config.model.trim();
@@ -348,9 +396,10 @@ fn fresh_cached_capabilities(
 async fn get_or_discover_capabilities(
     command: &CliCommandSpec,
     environment: &BTreeMap<String, String>,
+    force_refresh: bool,
 ) -> Result<CachedCapabilities> {
     let key = provider_identity_key(command, environment);
-    get_or_discover_capabilities_by_key(key, || async {
+    get_or_discover_capabilities_by_key(key, force_refresh, || async {
         let catalog = discover_catalog_via_acp(command, environment, "").await?;
         if catalog.models.is_empty() {
             return Err(anyhow!("CodeBuddy ACP session returned no usable models"));
@@ -367,16 +416,28 @@ async fn get_or_discover_capabilities(
 
 async fn get_or_discover_capabilities_by_key<F, Fut>(
     key: u64,
+    force_refresh: bool,
     discover: F,
 ) -> Result<CachedCapabilities>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<CachedCapabilities>>,
 {
-    if let Some(cached) =
-        fresh_cached_capabilities(&*CAPABILITY_CACHE.lock().await, key, Instant::now())
-    {
-        return Ok(cached);
+    let force_baseline = if force_refresh {
+        CAPABILITY_CACHE
+            .lock()
+            .await
+            .get(&key)
+            .map(|cached| cached.loaded_at)
+    } else {
+        None
+    };
+    if !force_refresh {
+        if let Some(cached) =
+            fresh_cached_capabilities(&*CAPABILITY_CACHE.lock().await, key, Instant::now())
+        {
+            return Ok(cached);
+        }
     }
 
     let discovery_lock = {
@@ -389,11 +450,18 @@ where
     let _discovery_guard = discovery_lock.lock().await;
 
     // A concurrent caller may have completed discovery while this caller was
-    // waiting for the identity-scoped lock.
+    // waiting for the identity-scoped lock. Forced callers only reuse a value
+    // produced after their request started.
     if let Some(cached) =
         fresh_cached_capabilities(&*CAPABILITY_CACHE.lock().await, key, Instant::now())
     {
-        return Ok(cached);
+        let refreshed_while_waiting = force_refresh
+            && force_baseline
+                .map(|baseline| cached.loaded_at != baseline)
+                .unwrap_or(true);
+        if !force_refresh || refreshed_while_waiting {
+            return Ok(cached);
+        }
     }
 
     let now = Instant::now();
@@ -720,7 +788,11 @@ fn parse_effort_options(value: &Value) -> Vec<String> {
                 .or_else(|| option.as_str())
         })
         .map(str::trim)
-        .filter(|value| !value.is_empty() && seen.insert(value.to_string()))
+        .filter(|value| {
+            !value.is_empty()
+                && !value.eq_ignore_ascii_case("enabled")
+                && seen.insert(value.to_string())
+        })
         .map(str::to_string)
         .collect()
 }
@@ -801,7 +873,7 @@ mod tests {
         assert!(models
             .iter()
             .all(|model| model.reasoning_efforts.is_empty()));
-        assert_eq!(efforts, ["minimal", "max", "enabled"]);
+        assert_eq!(efforts, ["minimal", "max"]);
     }
 
     #[test]
@@ -875,7 +947,7 @@ mod tests {
         let discover_one = discoveries.clone();
         let discover_two = discoveries.clone();
 
-        let first = get_or_discover_capabilities_by_key(key, move || async move {
+        let first = get_or_discover_capabilities_by_key(key, false, move || async move {
             discover_one.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
             Ok(CachedCapabilities {
@@ -885,7 +957,7 @@ mod tests {
                 current_model: Some("hy3".to_string()),
             })
         });
-        let second = get_or_discover_capabilities_by_key(key, move || async move {
+        let second = get_or_discover_capabilities_by_key(key, false, move || async move {
             discover_two.fetch_add(1, Ordering::SeqCst);
             Ok(CachedCapabilities {
                 loaded_at: Instant::now(),
@@ -903,6 +975,30 @@ mod tests {
         assert_eq!(second.current_model, Some("hy3".to_string()));
         assert_eq!(second.commands.unwrap()[0].name, "review");
 
+        let refreshed = get_or_discover_capabilities_by_key(key, true, || async {
+            Ok(CachedCapabilities {
+                loaded_at: Instant::now(),
+                models: vec![CliModelInfo::new("refreshed", "Refreshed", false)],
+                commands: Some(vec![CliCommandInfo::new("status", "Fresh status")]),
+                current_model: Some("refreshed".to_string()),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(refreshed.models[0].id, "refreshed");
+
+        let failed = get_or_discover_capabilities_by_key(key, true, || async {
+            Err(anyhow!("forced refresh failed"))
+        })
+        .await;
+        assert!(failed.is_err());
+        let retained = get_or_discover_capabilities_by_key(key, false, || async {
+            unreachable!("a failed forced refresh must retain the previous capability cache")
+        })
+        .await
+        .unwrap();
+        assert_eq!(retained.models[0].id, "refreshed");
+
         CAPABILITY_CACHE.lock().await.remove(&key);
         CAPABILITY_DISCOVERY_LOCKS.lock().await.remove(&key);
     }
@@ -915,12 +1011,12 @@ mod tests {
         let discover_one = discoveries.clone();
         let discover_two = discoveries.clone();
 
-        let first = get_or_discover_efforts_by_key(key, move || async move {
+        let first = get_or_discover_efforts_by_key(key, false, move || async move {
             discover_one.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
             Ok(vec!["low".to_string(), "high".to_string()])
         });
-        let second = get_or_discover_efforts_by_key(key, move || async move {
+        let second = get_or_discover_efforts_by_key(key, false, move || async move {
             discover_two.fetch_add(1, Ordering::SeqCst);
             Ok(vec!["incorrect-second-result".to_string()])
         });
@@ -930,6 +1026,23 @@ mod tests {
         let expected = vec!["low".to_string(), "high".to_string()];
         assert_eq!(first.unwrap(), expected);
         assert_eq!(second.unwrap(), expected);
+
+        let refreshed =
+            get_or_discover_efforts_by_key(key, true, || async { Ok(vec!["max".to_string()]) })
+                .await
+                .unwrap();
+        assert_eq!(refreshed, ["max"]);
+        assert!(get_or_discover_efforts_by_key(key, true, || async {
+            Err(anyhow!("forced effort refresh failed"))
+        })
+        .await
+        .is_err());
+        let retained = get_or_discover_efforts_by_key(key, false, || async {
+            unreachable!("a failed forced refresh must retain the previous effort cache")
+        })
+        .await
+        .unwrap();
+        assert_eq!(retained, ["max"]);
 
         EFFORT_CACHE.lock().await.remove(&key);
         EFFORT_DISCOVERY_LOCKS.lock().await.remove(&key);
@@ -943,6 +1056,6 @@ mod tests {
                 "options": [{"value":"enabled"},{"value":"medium"},{"value":"xhigh"}]
             }]
         }));
-        assert_eq!(efforts, ["enabled", "medium", "xhigh"]);
+        assert_eq!(efforts, ["medium", "xhigh"]);
     }
 }

@@ -9,7 +9,6 @@ import { localizedCliSetupStatus } from "./assistantProviderCopy";
 import type { AiProviderKind } from "@/services/tauri/ai.service";
 import {
   ASSISTANT_PROVIDER_DEFINITIONS,
-  assistantProviderDefinition,
   type AssistantProviderDefinition,
 } from "@/ai/assistant/providerDefinitions";
 import type { AssistantCliSetupState } from "./AssistantProviderSetup";
@@ -18,12 +17,12 @@ import {
   Check,
   ChevronDown,
   Code2,
-  RefreshCw,
   Settings2,
   ShieldCheck,
   TerminalSquare,
   type LucideIcon,
 } from "lucide-react";
+import { BsOpenai } from "react-icons/bs";
 import { useState } from "react";
 import type { AssistantModelStatus } from "./AssistantModelControl";
 
@@ -40,9 +39,8 @@ interface AssistantProviderControlProps {
   modelStatus: AssistantModelStatus;
   cliSetup: AssistantCliSetupState | null;
   isBusy: boolean;
+  inHeader?: boolean;
   onSelect: (provider: AiProviderKind) => void;
-  onRetry: () => void;
-  onOpenSettings: () => void;
 }
 
 export function AssistantProviderControl({
@@ -52,16 +50,14 @@ export function AssistantProviderControl({
   modelStatus,
   cliSetup,
   isBusy,
+  inHeader = false,
   onSelect,
-  onRetry,
-  onOpenSettings,
 }: AssistantProviderControlProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  const option = providerOption(provider);
   const status = providerStatus(enabled, modelStatus, cliSetup, t);
   const visibleDestination =
-    cliSetup && cliSetup.phase !== "ready"
+    inHeader || (cliSetup && cliSetup.phase !== "ready")
       ? status.label
       : destination || status.label;
 
@@ -70,21 +66,33 @@ export function AssistantProviderControl({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="group flex h-8 w-full shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-left transition-colors hover:bg-[hsl(var(--wb-hover)/0.58)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))] motion-reduce:transition-none"
+          className={cn(
+            "group flex h-8 w-full shrink-0 items-center gap-2 text-left transition-colors hover:bg-[hsl(var(--wb-hover)/0.58)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))] motion-reduce:transition-none",
+            inHeader
+              ? "rounded-[4px] px-1.5"
+              : "border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3",
+          )}
           data-assistant-provider
           title={`${status.label}. ${status.detail}`}
-          aria-label={`Assistant provider: ${enabled ? option.label : t("assistant.provider.chooseStatus")}`}
+          aria-label={`Assistant provider: ${enabled ? providerSelectorName(provider) : t("assistant.provider.chooseStatus")}`}
         >
           <span
             className={cn("h-1.5 w-1.5 shrink-0 rounded-full", status.dotClass)}
             aria-hidden="true"
           />
+          <ProviderBrandIcon provider={provider} />
           <span className="min-w-0 flex-1 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
             <span className="font-medium text-[hsl(var(--wb-text))]">
-              {enabled ? option.label : t("assistant.provider.choose")}
+              {enabled
+                ? providerSelectorName(provider)
+                : t("assistant.provider.choose")}
             </span>
             <span aria-hidden="true"> · </span>
-            <span>{enabled ? visibleDestination : t("assistant.provider.notConnected")}</span>
+            <span>
+              {enabled
+                ? visibleDestination
+                : t("assistant.provider.notConnected")}
+            </span>
           </span>
           {isBusy && (
             <span className="text-[9px] text-[hsl(var(--wb-text-muted))]">
@@ -100,21 +108,15 @@ export function AssistantProviderControl({
       </PopoverTrigger>
 
       <PopoverContent
+        data-assistant-provider-menu="true"
         align="start"
         side="bottom"
         sideOffset={5}
-        className="w-[328px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.34)]"
+        role="dialog"
+        aria-label={t("assistant.provider.choose")}
+        className="w-[220px] rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.34)]"
       >
-        <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2.5">
-          <div className="text-[11px] font-semibold">
-            {t("assistant.provider.runWith")}
-          </div>
-          <p className="mt-0.5 max-w-[42ch] leading-4 text-[hsl(var(--wb-text-muted))]">
-            {t("assistant.provider.switchDescription")}
-          </p>
-        </div>
-
-        <div className="py-1">
+        <div className="space-y-0.5">
           {ASSISTANT_PROVIDER_DEFINITIONS.map((candidate) => (
             <ProviderOptionRow
               key={candidate.kind}
@@ -127,47 +129,6 @@ export function AssistantProviderControl({
               }}
             />
           ))}
-        </div>
-
-        <div className="border-t border-[hsl(var(--wb-border-subtle))] px-3 py-2">
-          <div className="flex items-start gap-2">
-            <span
-              className={cn("mt-1 h-1.5 w-1.5 shrink-0 rounded-full", status.dotClass)}
-              aria-hidden="true"
-            />
-            <div className="min-w-0 flex-1">
-              <div className="font-medium">{status.label}</div>
-              <p className="mt-0.5 line-clamp-2 leading-4 text-[hsl(var(--wb-text-muted))]">
-                {status.detail}
-              </p>
-            </div>
-          </div>
-          <div className="mt-2 flex items-center justify-end gap-1">
-            {enabled && status.canRetry && (
-              <button
-                type="button"
-                className="wb-text-button h-7 px-2 text-[10px]"
-                onClick={() => {
-                  onRetry();
-                  setOpen(false);
-                }}
-              >
-                <RefreshCw size={11} aria-hidden="true" />
-                {t("assistant.provider.retry")}
-              </button>
-            )}
-            <button
-              type="button"
-              className="wb-text-button h-7 px-2 text-[10px]"
-              onClick={() => {
-                onOpenSettings();
-                setOpen(false);
-              }}
-            >
-              <Settings2 size={11} aria-hidden="true" />
-                {t("assistant.provider.settings")}
-            </button>
-          </div>
         </div>
       </PopoverContent>
     </Popover>
@@ -250,6 +211,28 @@ function ProviderOptionRow({
 }) {
   const { t } = useI18n();
   const Icon = PROVIDER_ICONS[option.kind];
+  if (!roomy) {
+    const displayName = providerSelectorName(option.kind);
+    return (
+      <button
+        type="button"
+        data-assistant-provider-option={option.kind}
+        className={cn(
+          "flex h-9 w-full items-center gap-2 rounded-[6px] px-2 text-left outline-none transition-colors hover:bg-[hsl(var(--wb-hover))] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))] disabled:cursor-not-allowed disabled:opacity-45 motion-reduce:transition-none",
+          selected && "bg-[hsl(var(--wb-active))]",
+        )}
+        disabled={disabled}
+        aria-label={t("assistant.provider.use", { provider: displayName })}
+        aria-pressed={selected}
+        onClick={onSelect}
+      >
+        <ProviderBrandIcon provider={option.kind} />
+        <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-[hsl(var(--wb-text))]">
+          {displayName}
+        </span>
+      </button>
+    );
+  }
   return (
     <button
       type="button"
@@ -306,6 +289,38 @@ function ProviderOptionRow({
   );
 }
 
+function ProviderBrandIcon({ provider }: { provider: AiProviderKind }) {
+  return (
+    <span
+      data-assistant-provider-brand={provider}
+      className="flex h-5 w-5 shrink-0 items-center justify-center"
+      aria-hidden="true"
+    >
+      {provider === "openai-compatible" ? (
+        <img
+          src="/oxide-logo.png"
+          alt=""
+          className="h-[18px] w-[18px] object-contain"
+        />
+      ) : provider === "codex-cli" ? (
+        <BsOpenai className="h-[17px] w-[17px] text-[hsl(var(--wb-text))]" />
+      ) : (
+        <img
+          src="/provider-icons/codebuddy.svg"
+          alt=""
+          className="h-[18px] w-[18px] object-contain"
+        />
+      )}
+    </span>
+  );
+}
+
+function providerSelectorName(provider: AiProviderKind) {
+  if (provider === "openai-compatible") return "Oxide Assistant";
+  if (provider === "codex-cli") return "OpenAI Codex";
+  return "CodeBuddy Code";
+}
+
 function localizedProviderDescription(
   provider: AiProviderKind,
   t: ReturnType<typeof useI18n>["t"],
@@ -317,10 +332,6 @@ function localizedProviderDescription(
         ? "assistant.provider.codexDescription"
         : "assistant.provider.codebuddyDescription",
   );
-}
-
-function providerOption(provider: AiProviderKind): AssistantProviderDefinition {
-  return assistantProviderDefinition(provider);
 }
 
 function providerStatus(

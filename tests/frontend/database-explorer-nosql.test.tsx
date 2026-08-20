@@ -182,6 +182,18 @@ describe("Database Explorer NoSQL navigation", () => {
       expect(databaseButton("db 3")).toBeUndefined();
     });
 
+    const connectionRow = container.querySelector<HTMLElement>(
+      "#database-connection-redis-1 [role='button']",
+    );
+    const driverIcon = connectionRow?.querySelector<HTMLElement>(
+      '[data-database-brand="redis"]',
+    );
+    const connectionStatus = connectionRow?.querySelector<HTMLElement>(
+      '[aria-label="Connected"]',
+    );
+    expect(driverIcon?.nextElementSibling).toBe(connectionStatus);
+    expect(connectionStatus?.nextElementSibling?.textContent).toContain("Redis");
+
     const visibilityButton = container.querySelector<HTMLButtonElement>(
       '[title="Select visible databases"]',
     );

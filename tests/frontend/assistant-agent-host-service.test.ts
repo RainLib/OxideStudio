@@ -465,6 +465,33 @@ describe("Agent Host Tauri service", () => {
     );
   });
 
+  it("lists encrypted conversation summaries inside one provider scope", async () => {
+    mocks.invokeRawCommand.mockResolvedValueOnce([
+      {
+        projectId: "project-1",
+        conversationId: "provider:cli:one:chat:latest",
+        threadId: "thread-1",
+        title: "Explain this query plan",
+        turnCount: 3,
+        updatedAt: 200,
+      },
+    ]);
+
+    const summaries = await agentHostService.listConversationSnapshots(
+      "project-1",
+      "provider:cli:one",
+    );
+
+    expect(summaries).toHaveLength(1);
+    expect(mocks.invokeRawCommand).toHaveBeenCalledWith(
+      "agent_list_conversation_snapshots",
+      {
+        projectId: "project-1",
+        conversationScope: "provider:cli:one",
+      },
+    );
+  });
+
   it("keeps artifact access project-scoped and uses explicit export commands", async () => {
     mocks.invokeRawCommand
       .mockResolvedValueOnce({
