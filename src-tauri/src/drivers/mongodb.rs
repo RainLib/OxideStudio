@@ -10,6 +10,7 @@ use mongodb::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 pub struct MongoDbDriver {
@@ -723,15 +724,18 @@ fn documents_result(documents: Vec<Document>) -> QueryResult {
 
 fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
     let mut fields = Vec::<(String, String, usize)>::new();
+    let mut field_positions = HashMap::<String, usize>::new();
     for document in documents {
-        for (name, value) in document {
-            if let Some((_, data_type, seen_count)) =
-                fields.iter_mut().find(|(field, _, _)| field == name)
-            {
+        let mut sampled_fields = HashMap::<String, String>::new();
+        collect_mongodb_document_fields(document, "", 0, &mut sampled_fields);
+        for (name, data_type) in sampled_fields {
+            if let Some(position) = field_positions.get(&name).copied() {
+                let (_, existing_type, seen_count) = &mut fields[position];
                 *seen_count += 1;
-                *data_type = merge_bson_type(data_type, bson_type_name(value));
+                *existing_type = merge_bson_type(existing_type, &data_type);
             } else {
-                fields.push((name.to_string(), bson_type_name(value).to_string(), 1));
+                field_positions.insert(name.clone(), fields.len());
+                fields.push((name, data_type, 1));
             }
         }
     }
@@ -757,6 +761,49 @@ fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
             data_type,
         })
         .collect()
+}
+
+const MAX_MONGODB_COMPLETION_FIELD_DEPTH: usize = 4;
+
+/// MongoDB fields are addressed with dotted paths. Include sampled nested
+/// document fields (and document values inside arrays) so JSON Console
+/// completion can suggest paths which the native driver can execute directly.
+/// The depth cap prevents a pathological document from expanding metadata
+/// without bound.
+fn collect_mongodb_document_fields(
+    document: &Document,
+    prefix: &str,
+    depth: usize,
+    fields: &mut HashMap<String, String>,
+) {
+    for (name, value) in document {
+        let field_name = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        let data_type = bson_type_name(value).to_string();
+        fields
+            .entry(field_name.clone())
+            .and_modify(|existing| *existing = merge_bson_type(existing, &data_type))
+            .or_insert(data_type);
+        if depth >= MAX_MONGODB_COMPLETION_FIELD_DEPTH {
+            continue;
+        }
+        match value {
+            Bson::Document(nested) => {
+                collect_mongodb_document_fields(nested, &field_name, depth + 1, fields);
+            }
+            Bson::Array(values) => {
+                for value in values {
+                    if let Bson::Document(nested) = value {
+                        collect_mongodb_document_fields(nested, &field_name, depth + 1, fields);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn mongodb_indexes_to_info(indexes: Vec<Document>) -> Vec<IndexInfo> {
@@ -1200,6 +1247,13 @@ mod tests {
             .unwrap();
         assert_eq!(profile.data_type, "object");
         assert!(profile.is_nullable);
+
+        let profile_role = columns
+            .iter()
+            .find(|column| column.name == "profile.role")
+            .unwrap();
+        assert_eq!(profile_role.data_type, "string");
+        assert!(profile_role.is_nullable);
 
         let tags = columns.iter().find(|column| column.name == "tags").unwrap();
         assert_eq!(tags.data_type, "array");

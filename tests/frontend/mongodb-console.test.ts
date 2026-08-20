@@ -81,6 +81,51 @@ describe("MongoDB JSON Console completion", () => {
     );
   });
 
+  it("completes executable lookup stage options, collections, and dotted fields", () => {
+    const lookupOptions =
+      '{ "aggregate": "orders", "pipeline": [ { "$lookup": { "';
+    const options = buildMongoDbConsoleCompletions(
+      lookupOptions,
+      lookupOptions.length,
+    );
+    expect(options.context).toMatchObject({
+      area: "stage-option",
+      parentKey: "$lookup",
+    });
+    expect(options.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "foreignField",
+          insertText: '"foreignField": "${1:field}"',
+        }),
+        expect.objectContaining({
+          label: "from",
+          insertText: '"from": "${1:collection}"',
+        }),
+      ]),
+    );
+
+    const collectionSource =
+      '{ "aggregate": "orders", "pipeline": [ { "$lookup": { "from": "cust';
+    const collections = buildMongoDbConsoleCompletions(
+      collectionSource,
+      collectionSource.length,
+      { collections: ["customers", "orders"] },
+    );
+    expect(collections.context.area).toBe("collection");
+    expect(collections.items.map((item) => item.label)).toEqual(["customers"]);
+
+    const fieldSource =
+      '{ "aggregate": "orders", "pipeline": [ { "$lookup": { "localField": "profile.';
+    const fields = buildMongoDbConsoleCompletions(fieldSource, fieldSource.length, {
+      fields: [{ name: "profile.id", dataType: "string" }],
+    });
+    expect(fields.context.area).toBe("field");
+    expect(fields.items).toEqual([
+      expect.objectContaining({ label: "profile.id", detail: "string" }),
+    ]);
+  });
+
   it("opens automatically for semantic positions but not arbitrary values", () => {
     const root = '{ "';
     expect(shouldOfferMongoDbCompletions(root, root.length)).toBe(true);

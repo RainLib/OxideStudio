@@ -10,6 +10,8 @@
 | 能力 | DBX 位置 | 旧 Oxide 差距 | 本次处理 |
 | --- | --- | --- | --- |
 | Mongo 命令上下文 | `apps/desktop/src/lib/mongo/mongoCompletion.ts:184-325` | 只有建议触发分类，没有 Mongo 候选；`vendor/sql-lsp` 明确把 Mongo 视为非 SQL，返回空 builtins | 新增 `src/lib/mongodbCompletion.ts` 的容错 JSON 上下文与候选构建器；根命令、集合、采样字段、查询/更新操作符和聚合 stage 都有独立候选 |
+| Mongo aggregate lookup 语义 | `mongoCompletion.ts` 的 `$lookup`/`$graphLookup` stage option、field reference 与 collection reference | 原生 JSON Console 只能识别一般 pipeline stage，进入 lookup body 后退化为通用 command keys | 对原生 JSON command 加入 `$lookup`、`$graphLookup`、`$merge`、`$unionWith` 的 option/collection/field 路由；输出均是可直接执行的 JSON snippets，不混入 DBX shell 语法 |
+| Mongo nested sampled fields | `inferMongoCompletionFields` | 仅采样顶层 BSON field，`profile.id` 等合法 dotted path 无法出现在建议中 | Rust metadata 在每个 sample 内合并对象与数组对象的 dotted field，最大递归深度 4；字段类型/nullable 保持 sample 语义 |
 | Mongo 元数据按需加载 | `QueryEditor.vue:3389-3438`；`connectionStore.ts:7047-7071` | 集合/字段没有绑定到 Monaco provider | `QueryEditor.tsx` 为仅 Mongo 文档注册 JSON provider；集合从 Explorer 共享状态或只读 `getCollections` 加载，字段复用 `loadTableMetadata`，并以连接/命名空间/集合作为缓存边界 |
 | Mongo 执行语法安全 | DBX 是 shell (`db.collection.find`) | Oxide native 驱动只接受 JSON，不能直接复制 DBX shell 补全 | 模板严格生成 Rust 执行器接受的 `{ "find": "…", "filter": {} }`、`aggregate/pipeline`、CRUD JSON，拒绝引入无法执行的 `db.*` 语法 |
 | Mongo provider 职责 | DBX 的 Mongo completion 不经 SQL language service | 通用 provider 会为 Mongo 发出一个没有 builtin 的 SQL-LSP 请求 | Mongo 文档由 JSON Console provider 独占；通用 LSP provider 立即返回，减少每次自动建议的一次 IPC 往返 |
@@ -30,13 +32,12 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
 
 ## 仍有差距与后续顺序
 
-1. **Mongo JSON 上下文深度（P1）**：DBX 已覆盖 `$lookup`、`$graphLookup`、
-   accumulator、expression、field reference 和 stage option。Oxide 当前先覆盖
-   native driver 可直接执行的常见 CRUD/filter/update/pipeline；下一阶段扩展
-   这些高级 aggregate 位置，但仍输出 JSON。
-2. **Mongo 字段类型推断（P1）**：Oxide 复用 driver 的 20-document sampling
-   metadata；应补充嵌套 dotted-path 与多类型提示的专用测试。DBX 的对应实现是
-   `inferMongoCompletionFields`（`mongoCompletion.ts:346`）。
+1. **Mongo aggregation expression 深度（P1）**：DBX 还覆盖 `$group` accumulator、
+   expression 与嵌套 pipeline 的 field reference。Oxide 已完成四个跨 collection
+   stage 的 option/field/collection 路由；下一步按原生 JSON command 扩展 expression，
+   但不引入不可执行 shell helper。
+2. **Mongo 采样覆盖（P1）**：dotted path 已按对象和数组对象采样、深度限制为 4；仍需
+   在 MongoDB 4.4–7 的真实数据上验证稀疏字段、多类型和深层数组的 metadata 成本。
 3. **ES mapping 与 aliases/data streams（P1）**：索引候选当前来自 collection
    API；后续需以驱动能力明确标注 alias/data stream，而不能把它们一律当普通
    index。

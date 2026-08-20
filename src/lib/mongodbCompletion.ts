@@ -8,6 +8,7 @@ export type MongoDbCompletionArea =
   | "key"
   | "collection"
   | "field"
+  | "stage-option"
   | "query-operator"
   | "update-operator"
   | "pipeline-stage"
@@ -43,7 +44,15 @@ type JsonFrame = {
   expectingKey: boolean;
 };
 
-const COLLECTION_VALUE_KEYS = new Set(["collection", "find", "aggregate", "count"]);
+const COLLECTION_VALUE_KEYS = new Set([
+  "collection",
+  "find",
+  "aggregate",
+  "count",
+  "from",
+  "into",
+  "coll",
+]);
 const FIELD_OBJECT_KEYS = new Set([
   "filter",
   "projection",
@@ -64,6 +73,28 @@ const FIELD_OBJECT_KEYS = new Set([
   "$pull",
 ]);
 const UPDATE_OBJECT_KEYS = new Set(["update"]);
+const STAGE_OPTION_KEYS: Record<string, readonly string[]> = {
+  $lookup: ["from", "localField", "foreignField", "as", "let", "pipeline"],
+  $graphLookup: [
+    "from",
+    "startWith",
+    "connectFromField",
+    "connectToField",
+    "as",
+    "maxDepth",
+    "depthField",
+    "restrictSearchWithMatch",
+  ],
+  $merge: ["into", "on", "let", "whenMatched", "whenNotMatched"],
+  $unionWith: ["coll", "pipeline"],
+};
+const STAGE_FIELD_VALUE_KEYS = new Set([
+  "localField",
+  "foreignField",
+  "connectFromField",
+  "connectToField",
+  "on",
+]);
 const QUERY_OPERATORS = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$regex", "$and", "$or", "$nor", "$not", "$elemMatch", "$size", "$all", "$type"];
 const UPDATE_OPERATORS = ["$set", "$unset", "$inc", "$mul", "$min", "$max", "$rename", "$currentDate", "$push", "$addToSet", "$pull", "$pop"];
 const PIPELINE_STAGES = ["$match", "$project", "$set", "$addFields", "$unset", "$group", "$sort", "$limit", "$skip", "$unwind", "$lookup", "$facet", "$count", "$replaceRoot"];
@@ -173,6 +204,9 @@ export function mongodbConsoleCompletionContext(source: string, cursorOffset: nu
 
   if (isKeyPosition) {
     if (ownerKey === "pipeline") return { area: "pipeline-stage", typed, activeKey, parentKey: ownerKey, collection };
+    if (ownerKey && STAGE_OPTION_KEYS[ownerKey]) {
+      return { area: "stage-option", typed, activeKey, parentKey: ownerKey, collection };
+    }
     if (UPDATE_OBJECT_KEYS.has(ownerKey || "")) return { area: "update-operator", typed, activeKey, parentKey: ownerKey, collection };
     if (FIELD_OBJECT_KEYS.has(ownerKey || "")) {
       return typed.startsWith("$")
@@ -185,7 +219,12 @@ export function mongodbConsoleCompletionContext(source: string, cursorOffset: nu
   if (scan.inString && COLLECTION_VALUE_KEYS.has(activeKey || "")) {
     return { area: "collection", typed, activeKey, parentKey: ownerKey, collection };
   }
-  if (scan.inString && ["field", "path"].includes(activeKey || "")) {
+  if (
+    scan.inString &&
+    (["field", "path"].includes(activeKey || "") ||
+      (Boolean(ownerKey && STAGE_OPTION_KEYS[ownerKey]) &&
+        STAGE_FIELD_VALUE_KEYS.has(activeKey || "")))
+  ) {
     return { area: "field", typed, activeKey, parentKey: ownerKey, collection };
   }
   return { area: "value", typed, activeKey, parentKey: ownerKey, collection };
@@ -213,6 +252,35 @@ function operatorItems(values: readonly string[], typed: string, detail: string)
   }));
 }
 
+function stageOptionItems(stage: string | undefined, typed: string): MongoDbConsoleCompletion[] {
+  return (STAGE_OPTION_KEYS[stage || ""] || [])
+    .filter((key) => matches(key, typed))
+    .map((key) => ({
+      label: key,
+      detail: `${stage} option`,
+      insertText: stageOptionInsertText(key),
+      kind: "property" as const,
+    }));
+}
+
+function stageOptionInsertText(key: string) {
+  if (["from", "into", "coll"].includes(key)) {
+    return `"${key}": "\${1:collection}"`;
+  }
+  if (STAGE_FIELD_VALUE_KEYS.has(key)) {
+    return `"${key}": "\${1:field}"`;
+  }
+  if (key === "pipeline") return `"pipeline": [\n  \${1}\n]`;
+  if (key === "let") return `"let": {\n  "\${1:name}": "\${2:$field}"\n}`;
+  if (key === "startWith") return `"startWith": "\${1:$field}"`;
+  if (key === "as" || key === "depthField") return `"${key}": "\${1:field}"`;
+  if (key === "maxDepth") return `"maxDepth": \${1:0}`;
+  if (key === "restrictSearchWithMatch") return `"restrictSearchWithMatch": { \${1} }`;
+  if (key === "whenMatched") return `"whenMatched": "\${1:merge}"`;
+  if (key === "whenNotMatched") return `"whenNotMatched": "\${1:insert}"`;
+  return `"${key}": \${1}`;
+}
+
 export function buildMongoDbConsoleCompletions(source: string, cursorOffset: number, input: MongoDbCompletionInput = {}) {
   const context = mongodbConsoleCompletionContext(source, cursorOffset);
   const collections = [...new Set(input.collections || [])].sort((left, right) => left.localeCompare(right));
@@ -237,6 +305,9 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
       break;
     case "pipeline-stage":
       items = operatorItems(PIPELINE_STAGES, context.typed, "MongoDB aggregation stage");
+      break;
+    case "stage-option":
+      items = stageOptionItems(context.parentKey, context.typed);
       break;
     case "key":
       items = propertyItems(COMMAND_OPTIONS[context.parentKey || ""] || ["filter", "projection", "sort", "limit", "skip", "database"], context.typed, "MongoDB command option");
