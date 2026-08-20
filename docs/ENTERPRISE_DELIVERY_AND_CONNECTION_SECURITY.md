@@ -41,7 +41,7 @@
 
 | 缺口 | 下一步 |
 | --- | --- |
-| OIDC JWKS rotation | 对未知 key id 实现单飞刷新、TTL 缓存和审计；当前启动时只拉取一次 JWKS。 |
+| OIDC JWKS rotation | 已对未知 key id 实现单飞 JWKS 刷新，避免轮换后必须重启 control plane；后续补充周期性 refresh telemetry/告警。 |
 | 身份生命周期 | 增加 SCIM/JIT、group sync、停用传播及审计；目前 principal kind 已预留 user/group，但没有企业目录同步。 |
 | 数据面 HA | 控制面 policy revision heartbeat、Gateway health、负载均衡和故障域策略。 |
 | 数据治理 | 行/列级 policy、字段掩码、分类标签、查询指纹与 SIEM 事件。 |

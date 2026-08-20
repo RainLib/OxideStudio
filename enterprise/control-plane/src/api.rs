@@ -106,7 +106,7 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<MeResponse>, ApiError> {
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     let memberships = state.store.memberships(user.id).await?;
     Ok(Json(MeResponse { user, memberships }))
@@ -116,7 +116,7 @@ async fn managed_projects(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<oxide_enterprise_contracts::ManagedProject>>, ApiError> {
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     Ok(Json(state.store.managed_projects(user.id).await?))
 }
@@ -127,7 +127,7 @@ async fn create_access_session(
     Json(input): Json<AccessSessionRequest>,
 ) -> Result<Json<AccessSessionResponse>, ApiError> {
     validate_access_session_request(&input)?;
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
         .store
@@ -338,7 +338,7 @@ async fn create_organization(
             "organization slug must use lowercase letters, numbers, and internal hyphens",
         ));
     }
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     let organization_id = state
         .store
@@ -359,7 +359,7 @@ async fn create_managed_project(
     Json(input): Json<CreateManagedProjectRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let display_name = validate_display_name(&input.display_name)?;
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     require_admin(&state, user.id, organization_id).await?;
     let project_id = state
@@ -380,7 +380,7 @@ async fn register_gateway(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let display_name = validate_display_name(&input.display_name)?;
     let endpoint = validated_gateway_endpoint(&input.direct_endpoint)?;
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     require_admin(&state, user.id, organization_id).await?;
     let gateway_id = state
@@ -413,7 +413,7 @@ async fn register_data_source(
             "stage-one managed data sources support PostgreSQL and MySQL with read-only Gateway capabilities only",
         ));
     }
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     require_admin(&state, user.id, organization_id).await?;
     let data_source_id = state
@@ -440,7 +440,7 @@ async fn activate_gateway(
     Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     require_admin(&state, user.id, organization_id).await?;
     state
@@ -480,7 +480,7 @@ async fn admin_overview(
     Path(organization_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
         .store
@@ -503,7 +503,7 @@ async fn invite_member(
     if !matches!(input.role.as_str(), "member" | "administrator") {
         return Err(ApiError::bad_request("unsupported organization role"));
     }
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
         .store
@@ -527,7 +527,7 @@ async fn assign_project(
     Json(input): Json<ProjectAssignmentRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_principal_kind(&input.principal_kind)?;
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
         .store
@@ -567,7 +567,7 @@ async fn create_access_grant(
     {
         return Err(ApiError::bad_request("invalid access grant scope"));
     }
-    let identity = state.verifier.authenticate(&headers)?;
+    let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
         .store
