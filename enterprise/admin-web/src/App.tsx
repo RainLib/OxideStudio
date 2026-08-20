@@ -63,6 +63,8 @@ export function App() {
   const [sourceName, setSourceName] = useState("");
   const [sourceDriver, setSourceDriver] = useState("postgres");
   const [sourceTargetBinding, setSourceTargetBinding] = useState("");
+  const [renewSourceId, setRenewSourceId] = useState("");
+  const [renewTargetBinding, setRenewTargetBinding] = useState("");
   const [assignmentProjectId, setAssignmentProjectId] = useState("");
   const [assignmentUserId, setAssignmentUserId] = useState("");
   const [grantProjectId, setGrantProjectId] = useState("");
@@ -416,6 +418,21 @@ export function App() {
     }
   };
 
+  const renewDataSourceTargetBinding = async (event: FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.renewDataSourceTargetBinding(organizationId, renewSourceId, renewTargetBinding);
+      setRenewSourceId("");
+      setRenewTargetBinding("");
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : String(requestError));
+      setLoading(false);
+    }
+  };
+
   const assignProject = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true);
@@ -748,6 +765,23 @@ export function App() {
                   </button>
                 </form>
               )}
+              <form className="inline-form" onSubmit={renewDataSourceTargetBinding}>
+                <label>
+                  Renew source binding
+                  <select required value={renewSourceId} onChange={(event) => setRenewSourceId(event.target.value)}>
+                    <option value="">Select data source</option>
+                    {overview?.projects.flatMap((project) => project.dataSources).map((source) => (
+                      <option key={source.id} value={source.id}>{source.displayName} · {source.driver}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="source-target-binding">
+                  New target binding
+                  <input required maxLength={64} pattern="[a-fA-F0-9]{64}" autoComplete="off" spellCheck={false} value={renewTargetBinding} onChange={(event) => setRenewTargetBinding(event.target.value)} />
+                </label>
+                <p className="inline-form-hint source-binding-hint">Rotate this only after updating the Gateway-local source. Existing grants and the data source ID remain unchanged.</p>
+                <button className="quiet-button" disabled={loading}>Renew binding</button>
+              </form>
               <div className="table">
                 <div className="table-row table-head">
                   <span>Project</span>

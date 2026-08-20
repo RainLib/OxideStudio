@@ -185,6 +185,11 @@ export const adminApi = {
         body: JSON.stringify(input),
       },
     ),
+  renewDataSourceTargetBinding: (organizationId: string, dataSourceId: string, targetBinding: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/data-sources/${encodeURIComponent(dataSourceId)}/target-binding`,
+      { method: "POST", body: JSON.stringify({ targetBinding }) },
+    ),
   registerManagedDevice: (
     organizationId: string,
     input: {
