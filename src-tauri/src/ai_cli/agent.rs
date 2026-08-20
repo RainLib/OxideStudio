@@ -516,13 +516,9 @@ pub async fn prepare_cli_run(
         let store = app
             .try_state::<MetaStore>()
             .ok_or_else(|| anyhow!("project metadata store is unavailable"))?;
-        crate::commands::project_files::agent_project_directory(
-            &store,
-            &request.project_id,
-            None,
-        )
-        .await?
-        .1
+        crate::commands::project_files::agent_project_directory(&store, &request.project_id, None)
+            .await?
+            .1
     } else {
         isolated_working_directory.path().to_path_buf()
     };
@@ -534,9 +530,7 @@ pub async fn prepare_cli_run(
             .clamp(MIN_CLI_TIMEOUT_MS, MAX_CLI_TIMEOUT_MS),
     );
     let args = match provider_kind {
-        CliProviderKind::CodexCli => {
-            codex_args(provider, &oxide_agent, request, full_access)
-        }
+        CliProviderKind::CodexCli => codex_args(provider, &oxide_agent, request, full_access),
         CliProviderKind::CodebuddyCli => {
             codebuddy_args(provider, &oxide_agent, request, &working_directory)?
         }

@@ -259,9 +259,12 @@ impl AgentTurnRequest {
             }
             _ => {}
         }
-        if self.provider.access_mode.as_deref().is_some_and(|mode| {
-            !matches!(mode, "restricted" | "full")
-        }) {
+        if self
+            .provider
+            .access_mode
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "restricted" | "full"))
+        {
             return Err("provider accessMode must be restricted or full".to_string());
         }
         if self.provider.kind != AgentProviderKind::CodexCli
