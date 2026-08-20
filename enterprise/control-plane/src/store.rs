@@ -17,6 +17,14 @@ use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 const GATEWAY_ENROLLMENT_TTL_MINUTES: i64 = 15;
+/// Gate new desktop tickets on the Gateway's signed revocation-feed heartbeat.
+///
+/// Gateways refresh the feed every five seconds and fail their own data plane
+/// closed after twenty seconds without a successful refresh. The control plane
+/// uses a slightly larger window so short scheduling or network jitter does not
+/// interrupt healthy clients, while an offline Gateway cannot receive fresh
+/// tickets indefinitely.
+const GATEWAY_TICKET_HEARTBEAT_MAX_AGE_SECONDS: i64 = 30;
 
 /// The plaintext enrollment token is deliberately returned only at creation
 /// time. The database receives its SHA-256 digest, never the token itself.
@@ -1371,7 +1379,7 @@ impl ControlPlaneStore {
         data_source_id: Uuid,
     ) -> Result<(Uuid, String, String)> {
         let row = sqlx::query(
-            "SELECT d.gateway_id, d.policy_revision, g.direct_endpoint
+            "SELECT d.gateway_id, d.policy_revision, g.direct_endpoint, g.last_seen_at
              FROM data_sources d
              JOIN gateways g ON g.id = d.gateway_id
              WHERE d.id = $1 AND d.organization_id = $2 AND d.project_id = $3
@@ -1383,6 +1391,12 @@ impl ControlPlaneStore {
         .fetch_optional(&self.pool)
         .await?
         .context("managed data source is not available")?;
+        let last_seen_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("last_seen_at")?;
+        if !gateway_heartbeat_is_fresh(last_seen_at, chrono::Utc::now()) {
+            anyhow::bail!(
+                "Gateway signed heartbeat is stale; new access tickets are temporarily unavailable"
+            );
+        }
         Ok((
             row.try_get("gateway_id")?,
             row.try_get("direct_endpoint")?,
@@ -1560,6 +1574,17 @@ fn verify_gateway_signature(public_key: Option<&str>, signature: &str, message: 
     verifying_key.verify(message, &signature).is_ok()
 }
 
+fn gateway_heartbeat_is_fresh(
+    last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(last_seen_at) = last_seen_at else {
+        return false;
+    };
+    last_seen_at <= now
+        && last_seen_at >= now - chrono::Duration::seconds(GATEWAY_TICKET_HEARTBEAT_MAX_AGE_SECONDS)
+}
+
 #[cfg(test)]
 mod enrollment_tests {
     use super::*;
@@ -1644,6 +1669,24 @@ mod enrollment_tests {
             Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
             &STANDARD.encode(signature.to_bytes()),
             &gateway_enrollment_signing_message(gateway_id, endpoint, &fingerprint, ""),
+        ));
+    }
+
+    #[test]
+    fn gateway_ticket_issuance_requires_a_recent_signed_heartbeat() {
+        let now = chrono::Utc::now();
+        assert!(gateway_heartbeat_is_fresh(
+            Some(now - chrono::Duration::seconds(GATEWAY_TICKET_HEARTBEAT_MAX_AGE_SECONDS)),
+            now,
+        ));
+        assert!(!gateway_heartbeat_is_fresh(
+            Some(now - chrono::Duration::seconds(GATEWAY_TICKET_HEARTBEAT_MAX_AGE_SECONDS + 1,)),
+            now,
+        ));
+        assert!(!gateway_heartbeat_is_fresh(None, now));
+        assert!(!gateway_heartbeat_is_fresh(
+            Some(now + chrono::Duration::seconds(1)),
+            now,
         ));
     }
 }
