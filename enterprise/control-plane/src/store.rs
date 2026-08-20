@@ -605,6 +605,65 @@ impl ControlPlaneStore {
         Ok(())
     }
 
+    pub async fn require_minimum_desktop_version(
+        &self,
+        organization_id: Uuid,
+        desktop_version: &semver::Version,
+    ) -> Result<()> {
+        let minimum = sqlx::query_scalar::<_, String>(
+            "SELECT minimum_desktop_version FROM organizations WHERE id = $1",
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("organization is not available")?;
+        let minimum = semver::Version::parse(&minimum)
+            .context("organization minimum desktop version is invalid")?;
+        if desktop_version < &minimum {
+            anyhow::bail!("desktop version is below the organization minimum");
+        }
+        Ok(())
+    }
+
+    pub async fn set_minimum_desktop_version(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        minimum_desktop_version: &semver::Version,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE organizations
+             SET minimum_desktop_version = $1
+             WHERE id = $2",
+        )
+        .bind(minimum_desktop_version.to_string())
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            anyhow::bail!("organization is not available");
+        }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &[
+                "organizations".into(),
+                organization_id.to_string(),
+                "desktop-minimum-version".into(),
+            ],
+            "organization.desktop-minimum-version.set",
+            serde_json::json!({ "minimumDesktopVersion": minimum_desktop_version.to_string() }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn register_managed_device(
         &self,
         organization_id: Uuid,
@@ -1188,11 +1247,13 @@ impl ControlPlaneStore {
     }
 
     pub async fn admin_overview(&self, organization_id: Uuid) -> Result<serde_json::Value> {
-        let organization = sqlx::query("SELECT id, display_name FROM organizations WHERE id = $1")
-            .bind(organization_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .context("organization is not available")?;
+        let organization = sqlx::query(
+            "SELECT id, display_name, minimum_desktop_version FROM organizations WHERE id = $1",
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("organization is not available")?;
         let member_rows = sqlx::query(
             "SELECT u.id, u.display_name, m.status, m.organization_role,
                     COALESCE(
@@ -1264,6 +1325,7 @@ impl ControlPlaneStore {
             "organization": {
                 "id": organization.try_get::<Uuid, _>("id")?,
                 "displayName": organization.try_get::<String, _>("display_name")?,
+                "minimumDesktopVersion": organization.try_get::<String, _>("minimum_desktop_version")?,
             },
             "members": member_rows.into_iter().map(|row| {
                 serde_json::json!({

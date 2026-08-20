@@ -41,6 +41,7 @@
 | 审计 outbox 与 SIEM | `audit_events` 由数据库触发器保护为 append-only，并在同一事务写入 `audit_outbox`；可选 HTTPS webhook 仅接受私有 token 文件，失败以有界退避重试且不阻塞控制面。 | 尚无针对 outbox 表的独立 DB role、死信告警或 SIEM 端到端验收。 | 增加最小权限 DB role、投递指标/告警和生产 SIEM 连通性验证。 |
 | Kubernetes 生产基线 | 已提供非 root、只读根文件系统、seccomp、Secret CSI 只读挂载、禁止 service-account token、digest 占位与 NetworkPolicy 的 control plane/Gateway manifests。 | DNS、镜像 digest、CSI provider、L4 mTLS passthrough 和 CNI FQDN egress 仍须按集群实际配置。 | 在受控集群进行策略、mTLS、Vault、SIEM 和数据库联调后再推广。 |
 | 生产部署保护 | compose 明确为开发配置；没有生产 Helm/secret policy/NetworkPolicy | 运维人员可能把环境变量 secret 或 HTTP compose 用于生产 | 提供生产 deployment 模板、admission checks、secret provider allowlist、egress/ingress NetworkPolicy。 |
+| 桌面版本合规 | 组织管理员可设置最低稳定 SemVer；桌面端每次申请 managed access ticket 都传递自身包版本，控制面在签发前比较并对低版本返回 `426 DESKTOP_UPGRADE_REQUIRED`，同时记录管理员配置审计。 | 该字段来自客户端，属于兼容性/运营门禁，不是设备反篡改或远程度量。 | 引入设备 attestation、版本合规报表、强制更新 channel 与分阶段 rollout。 |
 
 Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动前必须取得成功快照，连续二十秒未成功刷新便拒绝数据面请求。控制面只会向最近三十秒内成功完成该签名轮询的 Gateway 签发新 ticket。剩余工作是增量 feed、撤销指标及用户/Gateway 级显式失效。
 

@@ -415,6 +415,7 @@ impl EnterpriseClient {
                 "resourcePath": input.resource_path,
                 "requestId": request_id,
                 "source": "desktop",
+                "desktopVersion": self.app.package_info().version.to_string(),
                 "maxRows": input.max_rows,
                 "maxResultBytes": input.max_result_bytes,
             }))

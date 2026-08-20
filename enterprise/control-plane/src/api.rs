@@ -44,6 +44,7 @@ struct AccessSessionRequest {
     resource_path: Vec<String>,
     request_id: Uuid,
     source: String,
+    desktop_version: String,
     max_rows: Option<u32>,
     max_result_bytes: Option<u64>,
 }
@@ -75,6 +76,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/admin/organizations/{organization_id}/overview",
             get(admin_overview),
+        )
+        .route(
+            "/v1/admin/organizations/{organization_id}/desktop-minimum-version",
+            post(set_minimum_desktop_version),
         )
         .route(
             "/v1/admin/organizations/{organization_id}/audit-events",
@@ -168,6 +173,7 @@ async fn create_access_session(
     Json(input): Json<AccessSessionRequest>,
 ) -> Result<Json<AccessSessionResponse>, ApiError> {
     validate_access_session_request(&input)?;
+    let desktop_version = validate_desktop_version(&input.desktop_version)?;
     let device_certificate_fingerprint =
         normalize_certificate_fingerprint(&input.device_certificate_fingerprint)?;
     let identity = state.verifier.authenticate(&headers).await?;
@@ -187,6 +193,11 @@ async fn create_access_session(
         )
         .await
         .map_err(|_| ApiError::forbidden("this managed device certificate is not enrolled"))?;
+    state
+        .store
+        .require_minimum_desktop_version(input.organization_id, &desktop_version)
+        .await
+        .map_err(|_| ApiError::desktop_upgrade_required())?;
     let request = AuthorizationRequest {
         principal_id: user.id,
         organization_id: input.organization_id,
@@ -323,6 +334,18 @@ fn validate_access_session_request(input: &AccessSessionRequest) -> Result<(), A
     Ok(())
 }
 
+fn validate_desktop_version(value: &str) -> Result<semver::Version, ApiError> {
+    let value = value.trim();
+    let version = semver::Version::parse(value)
+        .map_err(|_| ApiError::bad_request("desktopVersion must be a valid semantic version"))?;
+    if !version.pre.is_empty() || !version.build.is_empty() {
+        return Err(ApiError::bad_request(
+            "desktopVersion must be a stable semantic version",
+        ));
+    }
+    Ok(version)
+}
+
 fn validated_gateway_endpoint(value: &str) -> Result<String, ApiError> {
     let endpoint = reqwest::Url::parse(value)
         .map_err(|_| ApiError::internal("stored Gateway endpoint is invalid"))?;
@@ -371,6 +394,12 @@ struct RegisterGatewayRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RotateGatewayCertificateRequest {
     certificate_fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetMinimumDesktopVersionRequest {
+    minimum_desktop_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,6 +760,25 @@ async fn rotate_gateway_certificate(
     })))
 }
 
+async fn set_minimum_desktop_version(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<SetMinimumDesktopVersionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let minimum_desktop_version = validate_desktop_version(&input.minimum_desktop_version)?;
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .set_minimum_desktop_version(organization_id, user.id, &minimum_desktop_version)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "minimumDesktopVersion": minimum_desktop_version.to_string(),
+    })))
+}
+
 async fn revoke_access_ticket(
     State(state): State<AppState>,
     Path(organization_id): Path<Uuid>,
@@ -1051,6 +1099,14 @@ impl ApiError {
             message: "The assigned Gateway is offline or has not completed a recent signed control-plane check. Try again shortly.".into(),
         }
     }
+
+    fn desktop_upgrade_required() -> Self {
+        Self {
+            status: StatusCode::UPGRADE_REQUIRED,
+            code: "DESKTOP_UPGRADE_REQUIRED",
+            message: "This organization requires a newer OxideStudio desktop version before managed data access can continue.".into(),
+        }
+    }
 }
 
 impl ApiError {
@@ -1123,6 +1179,7 @@ mod tests {
             resource_path: vec!["warehouse".into(), "public".into()],
             request_id: Uuid::new_v4(),
             source: source.into(),
+            desktop_version: "0.1.13".into(),
             max_rows: None,
             max_result_bytes: None,
         }
@@ -1146,6 +1203,19 @@ mod tests {
     fn access_sessions_accept_desktop_read_only_requests() {
         let input = access_session_request(AccessAction::QueryRead, "desktop");
         assert!(validate_access_session_request(&input).is_ok());
+    }
+
+    #[test]
+    fn managed_access_requires_a_stable_desktop_semantic_version() {
+        assert_eq!(
+            validate_desktop_version("0.1.13").unwrap().to_string(),
+            "0.1.13"
+        );
+        assert!(validate_desktop_version("0.1.13-beta.1").is_err());
+        assert!(validate_desktop_version("not-a-version").is_err());
+        let error = ApiError::desktop_upgrade_required();
+        assert_eq!(error.status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(error.code, "DESKTOP_UPGRADE_REQUIRED");
     }
 
     #[test]

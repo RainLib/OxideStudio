@@ -153,6 +153,25 @@ export function App() {
     }
   };
 
+  const setMinimumDesktopVersion = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const value = new FormData(event.currentTarget).get("minimumDesktopVersion");
+    if (typeof value !== "string") return;
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.setMinimumDesktopVersion(organizationId, value);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
   const refreshAuditEvents = async () => {
     if (!organizationId) return;
     setAuditLoading(true);
@@ -975,6 +994,29 @@ export function App() {
                   </div>
                 )}
               </div>
+            </section>
+
+            <section className="organization-baseline">
+              <SectionHeading
+                title="Desktop compatibility"
+                detail="Older desktop builds cannot receive new managed access tickets after this version takes effect."
+              />
+              <form className="inline-form" onSubmit={setMinimumDesktopVersion}>
+                <label>
+                  Minimum desktop version
+                  <input
+                    key={overview?.organization.minimumDesktopVersion}
+                    name="minimumDesktopVersion"
+                    required
+                    pattern="[0-9]+\\.[0-9]+\\.[0-9]+"
+                    defaultValue={overview?.organization.minimumDesktopVersion || "0.0.0"}
+                    title="Stable semantic version, for example 0.1.13"
+                  />
+                </label>
+                <button className="primary-button" disabled={loading}>
+                  Enforce version
+                </button>
+              </form>
             </section>
 
             <section id="gateways">

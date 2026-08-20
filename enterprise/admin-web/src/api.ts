@@ -1,5 +1,5 @@
 export interface AdminOverview {
-  organization: { id: string; displayName: string };
+  organization: { id: string; displayName: string; minimumDesktopVersion: string };
   viewerRole: string;
   members: Array<{
     id: string;
@@ -110,6 +110,11 @@ export const adminApi = {
   overview: (organizationId: string) =>
     request<AdminOverview>(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/overview`,
+    ),
+  setMinimumDesktopVersion: (organizationId: string, minimumDesktopVersion: string) =>
+    request<{ minimumDesktopVersion: string }>(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/desktop-minimum-version`,
+      { method: "POST", body: JSON.stringify({ minimumDesktopVersion }) },
     ),
   auditEvents: (organizationId: string) =>
     request<{ events: AdminAuditEvent[] }>(
