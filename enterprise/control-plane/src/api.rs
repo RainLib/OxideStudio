@@ -68,6 +68,10 @@ pub fn router(state: AppState) -> Router {
             get(admin_overview),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/audit-events",
+            get(admin_audit_events),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/invitations",
             post(invite_member),
         )
@@ -668,6 +672,17 @@ impl IntoResponse for ApiError {
         )
             .into_response()
     }
+}
+
+async fn admin_audit_events(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    Ok(Json(state.store.audit_events(organization_id, 200).await?))
 }
 
 #[cfg(test)]

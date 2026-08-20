@@ -518,6 +518,40 @@ impl ControlPlaneStore {
         }))
     }
 
+    pub async fn audit_events(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<serde_json::Value> {
+        let rows = sqlx::query(
+            "SELECT occurred_at, user_id, project_id, data_source_id, resource_path,
+                    action, decision, reason_code, request_id, source, metadata
+             FROM audit_events
+             WHERE organization_id = $1
+             ORDER BY occurred_at DESC, id DESC
+             LIMIT $2",
+        )
+        .bind(organization_id)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(serde_json::json!({
+            "events": rows.into_iter().map(|row| serde_json::json!({
+                "occurredAt": row.get::<chrono::DateTime<chrono::Utc>, _>("occurred_at"),
+                "userId": row.try_get::<Option<Uuid>, _>("user_id").ok().flatten(),
+                "projectId": row.try_get::<Option<Uuid>, _>("project_id").ok().flatten(),
+                "dataSourceId": row.try_get::<Option<Uuid>, _>("data_source_id").ok().flatten(),
+                "resourcePath": row.try_get::<serde_json::Value, _>("resource_path").ok(),
+                "action": row.get::<String, _>("action"),
+                "decision": row.get::<String, _>("decision"),
+                "reasonCode": row.get::<String, _>("reason_code"),
+                "requestId": row.get::<Uuid, _>("request_id"),
+                "source": row.get::<String, _>("source"),
+                "metadata": row.get::<serde_json::Value, _>("metadata"),
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
     pub async fn invite_member(
         &self,
         organization_id: Uuid,
