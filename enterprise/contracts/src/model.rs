@@ -172,6 +172,19 @@ impl AccessAction {
             Self::McpUse => "mcp.use",
         }
     }
+
+    /// Actions implemented by the current managed Gateway data plane.
+    ///
+    /// Keep this deliberately narrower than the policy vocabulary. The
+    /// control plane may model future write, export, AI, and MCP permissions,
+    /// but it must not advertise or issue them until a Gateway RPC can enforce
+    /// them end-to-end.
+    pub const fn is_stage_one_managed_action(self) -> bool {
+        matches!(
+            self,
+            Self::ResourceDiscover | Self::MetadataRead | Self::QueryRead
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +267,22 @@ mod tests {
         let serialized = serde_json::to_string(&source).unwrap().to_ascii_lowercase();
         for forbidden in ["password", "connectionurl", "ssh", "secretref"] {
             assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn stage_one_gateway_actions_are_read_only() {
+        assert!(AccessAction::ResourceDiscover.is_stage_one_managed_action());
+        assert!(AccessAction::MetadataRead.is_stage_one_managed_action());
+        assert!(AccessAction::QueryRead.is_stage_one_managed_action());
+        for action in [
+            AccessAction::DataWrite,
+            AccessAction::SchemaDdl,
+            AccessAction::DataExport,
+            AccessAction::AiUse,
+            AccessAction::McpUse,
+        ] {
+            assert!(!action.is_stage_one_managed_action());
         }
     }
 

@@ -2,8 +2,15 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
-use std::{collections::HashMap, env, fs, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
+
+const MAX_SOURCES_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,14 +51,11 @@ impl GatewayConfig {
             )
         })?;
         let source_path = PathBuf::from(required("OXIDE_GATEWAY_SOURCES_FILE")?);
-        let sources = fs::read(&source_path)
-            .with_context(|| format!("failed to read {}", source_path.display()))?;
-        let sources: Vec<DataSourceConfig> =
-            serde_json::from_slice(&sources).context("gateway source file is invalid")?;
-        let sources = sources
-            .into_iter()
-            .map(|source| (source.id, source))
-            .collect();
+        let sources = parse_sources(&read_private_file(
+            &source_path,
+            "OXIDE_GATEWAY_SOURCES_FILE",
+            MAX_SOURCES_FILE_BYTES,
+        )?)?;
         Ok(Self {
             id,
             bind: env::var("OXIDE_GATEWAY_BIND")
@@ -64,7 +68,11 @@ impl GatewayConfig {
             allow_environment_secrets: env::var("OXIDE_ALLOW_ENVIRONMENT_SECRETS")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             tls_certificate: read_required_file("OXIDE_GATEWAY_TLS_CERTIFICATE")?,
-            tls_private_key: read_required_file("OXIDE_GATEWAY_TLS_PRIVATE_KEY")?,
+            tls_private_key: read_private_file(
+                &PathBuf::from(required("OXIDE_GATEWAY_TLS_PRIVATE_KEY")?),
+                "OXIDE_GATEWAY_TLS_PRIVATE_KEY",
+                MAX_SOURCES_FILE_BYTES,
+            )?,
             client_ca_certificate: read_required_file("OXIDE_GATEWAY_CLIENT_CA_CERTIFICATE")?,
         })
     }
@@ -72,7 +80,100 @@ impl GatewayConfig {
 
 fn read_required_file(name: &str) -> Result<Vec<u8>> {
     let path = PathBuf::from(required(name)?);
-    fs::read(&path).with_context(|| format!("failed to read {} from {name}", path.display()))
+    read_file(&path, name, None)
+}
+
+fn read_private_file(path: &Path, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect {} from {name}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} from {name} must be a regular file", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!(
+                "{} from {name} must not be readable by group or other users",
+                path.display()
+            );
+        }
+    }
+    read_file(path, name, Some(max_bytes))
+}
+
+fn read_file(path: &Path, name: &str, max_bytes: Option<u64>) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect {} from {name}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} from {name} must be a regular file", path.display());
+    }
+    if max_bytes.is_some_and(|limit| metadata.len() > limit) {
+        anyhow::bail!(
+            "{} from {name} exceeds the maximum allowed size",
+            path.display()
+        );
+    }
+    fs::read(path).with_context(|| format!("failed to read {} from {name}", path.display()))
+}
+
+fn parse_sources(payload: &[u8]) -> Result<HashMap<Uuid, DataSourceConfig>> {
+    let sources: Vec<DataSourceConfig> =
+        serde_json::from_slice(payload).context("gateway source file is invalid")?;
+    let mut parsed = HashMap::with_capacity(sources.len());
+    for source in sources {
+        validate_source(&source)?;
+        match parsed.entry(source.id) {
+            Entry::Vacant(entry) => {
+                entry.insert(source);
+            }
+            Entry::Occupied(_) => {
+                anyhow::bail!("gateway source file contains duplicate source IDs")
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn validate_source(source: &DataSourceConfig) -> Result<()> {
+    if !matches!(
+        source.driver.trim().to_ascii_lowercase().as_str(),
+        "postgres" | "postgresql" | "mysql"
+    ) {
+        anyhow::bail!("gateway source {} has an unsupported driver", source.id);
+    }
+    if source.secret_ref.trim().is_empty()
+        || source.secret_ref.len() > 512
+        || source.secret_ref.chars().any(char::is_control)
+    {
+        anyhow::bail!(
+            "gateway source {} has an invalid secret reference",
+            source.id
+        );
+    }
+    if let Some(template) = &source.connection_template {
+        if template.trim().is_empty()
+            || template.len() > 8_192
+            || !template.contains("{username}")
+            || !template.contains("{password}")
+        {
+            anyhow::bail!(
+                "gateway source {} connection template must include username and password placeholders",
+                source.id
+            );
+        }
+    }
+    if source.capabilities.is_empty()
+        || source.capabilities.iter().any(|capability| {
+            !matches!(
+                capability.as_str(),
+                "resource.discover" | "metadata.read" | "query.read"
+            )
+        })
+    {
+        anyhow::bail!("gateway source {} has unsupported capabilities", source.id);
+    }
+    Ok(())
 }
 
 fn required(name: &str) -> Result<String> {
@@ -80,4 +181,37 @@ fn required(name: &str) -> Result<String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .with_context(|| format!("{name} is required"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(id: Uuid) -> String {
+        format!(
+            r#"{{"id":"{id}","driver":"postgres","secretRef":"vault:database/analytics","capabilities":["resource.discover","metadata.read","query.read"]}}"#
+        )
+    }
+
+    #[test]
+    fn source_file_rejects_duplicate_ids() {
+        let id = Uuid::new_v4();
+        let payload = format!("[{},{}]", source(id), source(id));
+        assert!(parse_sources(payload.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn source_file_rejects_write_capabilities() {
+        let payload = source(Uuid::new_v4()).replace("query.read", "data.write");
+        assert!(parse_sources(format!("[{payload}]").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn source_file_requires_dynamic_credential_placeholders() {
+        let payload = format!(
+            r#"[{{"id":"{}","driver":"mysql","secretRef":"vault:database/analytics","connectionTemplate":"mysql://localhost/analytics","capabilities":["query.read"]}}]"#,
+            Uuid::new_v4()
+        );
+        assert!(parse_sources(payload.as_bytes()).is_err());
+    }
 }

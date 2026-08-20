@@ -126,14 +126,7 @@ async fn create_access_session(
     headers: HeaderMap,
     Json(input): Json<AccessSessionRequest>,
 ) -> Result<Json<AccessSessionResponse>, ApiError> {
-    if input.resource_path.len() > 16
-        || input
-            .resource_path
-            .iter()
-            .any(|segment| segment.is_empty() || segment.len() > 256)
-    {
-        return Err(ApiError::bad_request("invalid resource path"));
-    }
+    validate_access_session_request(&input)?;
     let identity = state.verifier.authenticate(&headers)?;
     let user = state.store.sync_identity(&identity).await?;
     state
@@ -232,6 +225,26 @@ async fn create_access_session(
         policy_revision,
         gateway_endpoint,
     }))
+}
+
+fn validate_access_session_request(input: &AccessSessionRequest) -> Result<(), ApiError> {
+    if !input.action.is_stage_one_managed_action() {
+        return Err(ApiError::bad_request(
+            "the managed Gateway currently supports resource discovery, metadata reads, and read-only queries only",
+        ));
+    }
+    if input.source != "desktop" {
+        return Err(ApiError::bad_request("unsupported managed access source"));
+    }
+    if input.resource_path.len() > 16
+        || input
+            .resource_path
+            .iter()
+            .any(|segment| segment.is_empty() || segment.len() > 256)
+    {
+        return Err(ApiError::bad_request("invalid resource path"));
+    }
+    Ok(())
 }
 
 fn validated_gateway_endpoint(value: &str) -> Result<String, ApiError> {
@@ -391,9 +404,13 @@ async fn register_data_source(
     let driver = input.driver.trim().to_ascii_lowercase();
     if !matches!(driver.as_str(), "postgres" | "postgresql" | "mysql")
         || input.capabilities.is_empty()
+        || !input
+            .capabilities
+            .iter()
+            .all(|action| action.is_stage_one_managed_action())
     {
         return Err(ApiError::bad_request(
-            "stage-one managed data sources support PostgreSQL and MySQL with at least one capability",
+            "stage-one managed data sources support PostgreSQL and MySQL with read-only Gateway capabilities only",
         ));
     }
     let identity = state.verifier.authenticate(&headers)?;
@@ -536,6 +553,10 @@ async fn create_access_grant(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_principal_kind(&input.principal_kind)?;
     if input.actions.is_empty()
+        || !input
+            .actions
+            .iter()
+            .all(|action| action.is_stage_one_managed_action())
         || input.resource_path.len() > 16
         || input
             .resource_path
@@ -643,5 +664,45 @@ impl IntoResponse for ApiError {
             })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn access_session_request(action: AccessAction, source: &str) -> AccessSessionRequest {
+        AccessSessionRequest {
+            device_id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            data_source_id: Uuid::new_v4(),
+            action,
+            resource_path: vec!["warehouse".into(), "public".into()],
+            request_id: Uuid::new_v4(),
+            source: source.into(),
+            max_rows: None,
+            max_result_bytes: None,
+        }
+    }
+
+    #[test]
+    fn access_sessions_reject_actions_without_a_gateway_rpc() {
+        let input = access_session_request(AccessAction::DataWrite, "desktop");
+        let error = validate_access_session_request(&input).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn access_sessions_are_limited_to_the_desktop_client() {
+        let input = access_session_request(AccessAction::QueryRead, "agent");
+        let error = validate_access_session_request(&input).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn access_sessions_accept_desktop_read_only_requests() {
+        let input = access_session_request(AccessAction::QueryRead, "desktop");
+        assert!(validate_access_session_request(&input).is_ok());
     }
 }

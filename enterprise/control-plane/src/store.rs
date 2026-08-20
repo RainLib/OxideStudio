@@ -704,11 +704,6 @@ impl ControlPlaneStore {
                 AccessAction::ResourceDiscover,
                 AccessAction::MetadataRead,
                 AccessAction::QueryRead,
-                AccessAction::DataWrite,
-                AccessAction::SchemaDdl,
-                AccessAction::DataExport,
-                AccessAction::AiUse,
-                AccessAction::McpUse,
             ]
             .into_iter()
             .filter(|action| {
