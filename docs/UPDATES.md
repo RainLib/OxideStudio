@@ -284,6 +284,13 @@ The publish job performs these gates before updating `latest.json`:
 - Retrieves the public manifest and verifies that every platform URL is served
   from `ALIYUN_OSS_PUBLIC_BASE_URL` and is downloadable.
 
+Independent driver publication applies the same immutable-version rule to
+**every** release object. Before upload it rejects an existing archive or its
+SHA-256 sidecar, and it never passes an overwrite flag to OSS. A failed or
+partial publication must be investigated and released under a new package
+version; it must not be retried by replacing files at the existing version
+path.
+
 ## Local validation
 
 ```bash

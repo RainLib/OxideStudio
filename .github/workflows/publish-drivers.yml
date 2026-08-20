@@ -164,10 +164,19 @@ jobs:
             tar -C "$PACKAGE_DIR" -czf "$ARCHIVE" -- *
             sha256sum "$ARCHIVE" | tee "$ARCHIVE.sha256"
             OBJECT_ROOT="$DESTINATION/$DRIVER_ID/$PACKAGE_VERSION/$TARGET"
-            if ossutil stat "$OBJECT_ROOT/package.tar.gz" >/dev/null 2>&1; then echo "Driver package already exists in OSS." >&2; exit 1; fi
-            ossutil cp "$ARCHIVE" "$OBJECT_ROOT/package.tar.gz" --force --cache-control "public,max-age=31536000,immutable"
-            ossutil cp "$ARCHIVE.sha256" "$OBJECT_ROOT/package.tar.gz.sha256" --force --cache-control "public,max-age=31536000,immutable"
+            for OBJECT in package.tar.gz package.tar.gz.sha256; do
+              if ossutil stat "$OBJECT_ROOT/$OBJECT" >/dev/null 2>&1; then
+                echo "Driver release object already exists in OSS: $OBJECT_ROOT/$OBJECT" >&2
+                echo "Driver package versions are immutable; publish a new package version instead." >&2
+                exit 1
+              fi
+            done
+            # Deliberately omit --force: a race or a partially published release
+            # must fail rather than replace evidence for an existing version.
+            ossutil cp "$ARCHIVE" "$OBJECT_ROOT/package.tar.gz" --cache-control "public,max-age=31536000,immutable"
+            ossutil cp "$ARCHIVE.sha256" "$OBJECT_ROOT/package.tar.gz.sha256" --cache-control "public,max-age=31536000,immutable"
             ossutil stat "$OBJECT_ROOT/package.tar.gz"
+            ossutil stat "$OBJECT_ROOT/package.tar.gz.sha256"
           done < <(find driver-artifacts -type f -name manifest.json -print0)
       - uses: actions/upload-artifact@v4
         with:
