@@ -230,7 +230,11 @@ async fn create_access_session(
             input.project_id,
             input.data_source_id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "managed access ticket was blocked by Gateway availability");
+            ApiError::gateway_unavailable()
+        })?;
     let gateway_endpoint = validated_gateway_endpoint(&gateway_endpoint)?;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -969,6 +973,14 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn gateway_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "GATEWAY_UNAVAILABLE",
+            message: "The assigned Gateway is offline or has not completed a recent signed control-plane check. Try again shortly.".into(),
+        }
+    }
 }
 
 impl ApiError {
@@ -1064,6 +1076,14 @@ mod tests {
     fn access_sessions_accept_desktop_read_only_requests() {
         let input = access_session_request(AccessAction::QueryRead, "desktop");
         assert!(validate_access_session_request(&input).is_ok());
+    }
+
+    #[test]
+    fn unavailable_gateway_errors_are_retryable_without_leaking_route_details() {
+        let error = ApiError::gateway_unavailable();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "GATEWAY_UNAVAILABLE");
+        assert!(!error.message.contains("gateway.example"));
     }
 
     #[test]
