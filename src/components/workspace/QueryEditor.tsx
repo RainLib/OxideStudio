@@ -100,6 +100,11 @@ import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
 import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
+import {
+  documentMetadataCacheKey,
+  invalidateDocumentMetadataScope,
+  loadDocumentMetadata,
+} from "@/services/documentMetadataCache";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
@@ -428,18 +433,7 @@ export function QueryEditor({
   >(null);
   const elasticsearchDecorationIdsRef = useRef<string[]>([]);
   const elasticsearchRequestLinesRef = useRef<Set<number>>(new Set());
-  const elasticsearchFieldCacheRef = useRef<
-    Map<string, Promise<Array<{ name: string; dataType: string }>>>
-  >(new Map());
-  const elasticsearchIndexCacheRef = useRef<Map<string, Promise<string[]>>>(
-    new Map(),
-  );
-  const mongodbCollectionCacheRef = useRef<Map<string, Promise<string[]>>>(
-    new Map(),
-  );
-  const mongodbFieldCacheRef = useRef<
-    Map<string, Promise<Array<{ name: string; dataType: string }>>>
-  >(new Map());
+  const documentMetadataVersionRef = useRef(metadataVersion);
   const pendingElasticsearchSqlRef = useRef<{
     tabId: string;
     value: string;
@@ -1137,14 +1131,21 @@ export function QueryEditor({
   }, [keymap, monaco]);
 
   useEffect(() => {
-    elasticsearchFieldCacheRef.current.clear();
-    elasticsearchIndexCacheRef.current.clear();
-  }, [effectiveConnectionId, metadataVersion]);
-
-  useEffect(() => {
-    mongodbCollectionCacheRef.current.clear();
-    mongodbFieldCacheRef.current.clear();
-  }, [effectiveConnectionId, metadataVersion]);
+    if (documentMetadataVersionRef.current === metadataVersion) return;
+    documentMetadataVersionRef.current = metadataVersion;
+    if (!effectiveConnectionId) return;
+    const projectScope = activeProjectId || "local";
+    invalidateDocumentMetadataScope({
+      projectId: projectScope,
+      connectionId: effectiveConnectionId,
+      driver: "mongodb",
+    });
+    invalidateDocumentMetadataScope({
+      projectId: projectScope,
+      connectionId: effectiveConnectionId,
+      driver: "elasticsearch",
+    });
+  }, [activeProjectId, effectiveConnectionId, metadataVersion]);
 
   // MongoDB uses the native JSON command contract rather than the SQL LSP.
   // Register a document-gated provider so Mongo semantic candidates neither
@@ -1165,14 +1166,14 @@ export function QueryEditor({
       currentSchema ||
       activeConnection?.database ||
       "";
-    const collectionCacheKey = [
-      activeProjectId || "local",
-      effectiveConnectionId,
-      collectionNamespace,
-    ].join("\u0000");
+    const collectionCacheKey = documentMetadataCacheKey({
+      projectId: activeProjectId || "local",
+      connectionId: effectiveConnectionId,
+      driver: "mongodb",
+      namespace: collectionNamespace,
+      kind: "collections",
+    });
     const loadCollections = () => {
-      const cached = mongodbCollectionCacheRef.current.get(collectionCacheKey);
-      if (cached) return cached;
       const knownCollections = schemaCollections
         .filter(
           (collection) =>
@@ -1187,43 +1188,46 @@ export function QueryEditor({
         : schemaService
             .getCollections(effectiveConnectionId, collectionNamespace)
             .then((collections) => collections.map((collection) => collection.name));
-      const normalized = request
+      return loadDocumentMetadata(collectionCacheKey, () => request
         .then((collections) => [...new Set(collections.map((name) => name.trim()).filter(Boolean))])
         .catch((error) => {
           console.debug("[MongoDB Console] Collections unavailable", error);
           return [];
-        });
-      mongodbCollectionCacheRef.current.set(collectionCacheKey, normalized);
-      return normalized;
+        }));
     };
     const loadFields = (collection: string) => {
-      const cacheKey = `${collectionCacheKey}\u0000${collection}`;
-      const cached = mongodbFieldCacheRef.current.get(cacheKey);
-      if (cached) return cached;
-      const request = loadTableMetadata({
-        projectId: activeProjectId || undefined,
+      const cacheKey = documentMetadataCacheKey({
+        projectId: activeProjectId || "local",
         connectionId: effectiveConnectionId,
         driver: "mongodb",
-        schema: collectionNamespace,
-        table: collection,
-        includeIndexes: false,
-        includeConstraints: false,
-      })
-        .then((metadata) =>
-          metadata.columns.map((column) => ({
-            name: column.name,
-            dataType: column.data_type || "field",
-          })),
-        )
-        .catch((error) => {
-          console.debug(
-            `[MongoDB Console] Fields unavailable for ${collection}`,
-            error,
-          );
-          return [];
-        });
-      mongodbFieldCacheRef.current.set(cacheKey, request);
-      return request;
+        namespace: collectionNamespace,
+        kind: "fields",
+        objectName: collection,
+      });
+      return loadDocumentMetadata(cacheKey, () =>
+        loadTableMetadata({
+          projectId: activeProjectId || undefined,
+          connectionId: effectiveConnectionId,
+          driver: "mongodb",
+          schema: collectionNamespace,
+          table: collection,
+          includeIndexes: false,
+          includeConstraints: false,
+        })
+          .then((metadata) =>
+            metadata.columns.map((column) => ({
+              name: column.name,
+              dataType: column.data_type || "field",
+            })),
+          )
+          .catch((error) => {
+            console.debug(
+              `[MongoDB Console] Fields unavailable for ${collection}`,
+              error,
+            );
+            return [];
+          }),
+      );
     };
 
     const disposable = monaco.languages.registerCompletionItemProvider("json", {
@@ -1358,12 +1362,6 @@ export function QueryEditor({
             return { suggestions: [] };
           }
 
-          const cacheKey = [
-            activeProjectId || "local",
-            effectiveConnectionId,
-            elasticsearchMetadataNamespace,
-            isIndexPath ? "__indices__" : indexName!,
-          ].join("\u0000");
           const modelVersion = model.getVersionId();
           let fieldCompletions: Array<{
             label: string;
@@ -1372,9 +1370,15 @@ export function QueryEditor({
             sortText?: string;
           }> = [];
           if (isIndexPath) {
-            let indexRequest = elasticsearchIndexCacheRef.current.get(cacheKey);
-            if (!indexRequest) {
-              indexRequest = schemaService
+            const cacheKey = documentMetadataCacheKey({
+              projectId: activeProjectId || "local",
+              connectionId: effectiveConnectionId,
+              driver: "elasticsearch",
+              namespace: elasticsearchMetadataNamespace,
+              kind: "collections",
+            });
+            const indices = await loadDocumentMetadata(cacheKey, () =>
+              schemaService
                 .getCollections(
                   effectiveConnectionId,
                   elasticsearchMetadataNamespace,
@@ -1390,10 +1394,8 @@ export function QueryEditor({
                     error,
                   );
                   return [];
-                });
-              elasticsearchIndexCacheRef.current.set(cacheKey, indexRequest);
-            }
-            const indices = await indexRequest;
+                }),
+            );
             fieldCompletions = elasticsearchSchemaCompletionsForContext(
               indices.map((name) => ({
                 label: name,
@@ -1404,9 +1406,15 @@ export function QueryEditor({
               preferredElasticsearchIndex,
             );
           } else {
-            let fieldsRequest = elasticsearchFieldCacheRef.current.get(cacheKey);
-            if (!fieldsRequest) {
-              fieldsRequest = (async () => {
+            const cacheKey = documentMetadataCacheKey({
+              projectId: activeProjectId || "local",
+              connectionId: effectiveConnectionId,
+              driver: "elasticsearch",
+              namespace: elasticsearchMetadataNamespace,
+              kind: "fields",
+              objectName: indexName!,
+            });
+            const fields = await loadDocumentMetadata(cacheKey, async () => {
                 try {
                   const metadataOptions = {
                     projectId: activeProjectId || undefined,
@@ -1438,10 +1446,7 @@ export function QueryEditor({
                   );
                   return [];
                 }
-              })();
-              elasticsearchFieldCacheRef.current.set(cacheKey, fieldsRequest);
-            }
-            const fields = await fieldsRequest;
+              });
             fieldCompletions = elasticsearchMappingFieldCompletions(
               fields,
               completionContext,

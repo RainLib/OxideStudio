@@ -15,6 +15,7 @@
 | Mongo provider 职责 | DBX 的 Mongo completion 不经 SQL language service | 通用 provider 会为 Mongo 发出一个没有 builtin 的 SQL-LSP 请求 | Mongo 文档由 JSON Console provider 独占；通用 LSP provider 立即返回，减少每次自动建议的一次 IPC 往返 |
 | Elasticsearch 索引目录 | `QueryEditor.vue:3332`；`connectionStore.ts:6974` | 本地 Console 擅长 DSL，但路径索引主要依赖 LSP 目录；LSP 离线或迟到时没有稳定的 Explorer 元数据回退 | Elasticsearch Console provider 在 path 上通过 `getCollections` 读取 index 名称；index 与 mapping 都使用连接/命名空间 single-flight 缓存，并保留同一文档版本/取消保护 |
 | ES provider 职责收口 | DBX Console provider 自己拥有 method/path/json | 通用 LSP provider 仍可能同时返回 ES path 条目，易与 live metadata 混入或重复 | Console provider 统一拥有 ES method、path、DSL、index、mapping-field 位置；LSP 仅作为该 provider 内的失败回退 |
+| 文档目录缓存生命周期 | `connectionStore.ts` 按 connection 保存 completion metadata | Mongo collection、ES index 与 mapping 的 single-flight 过去仅存在于一个 `QueryEditor` 实例，切换标签会重新探测 | 新增 `documentMetadataCache`：连接/driver/namespace/object 精确分区、跨标签共享、2 分钟 TTL、过期时 stale-while-revalidate、失败保留短期 last-known 目录、256 项 LRU 上限；metadata revision 时按连接/driver 主动失效 |
 
 ## 保持而不倒迁的 Oxide 能力
 
@@ -36,15 +37,11 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
 2. **Mongo 字段类型推断（P1）**：Oxide 复用 driver 的 20-document sampling
    metadata；应补充嵌套 dotted-path 与多类型提示的专用测试。DBX 的对应实现是
    `inferMongoCompletionFields`（`mongoCompletion.ts:346`）。
-3. **Elasticsearch index cache 生命周期（P1）**：当前是 editor-session
-   single-flight；应提升为连接级 bounded TTL/stale-while-revalidate cache，
-   对齐 DBX `connectionStore.ts:6974` 的目录生命周期，避免切换标签后再次探测。
-4. **ES mapping 与 aliases/data streams（P1）**：索引候选当前来自 collection
+3. **ES mapping 与 aliases/data streams（P1）**：索引候选当前来自 collection
    API；后续需以驱动能力明确标注 alias/data stream，而不能把它们一律当普通
    index。
-5. **Editor 流式性能（P1）**：Mongo/ES metadata 请求已经用 model revision 和
-   cancellation token 丢弃迟到结果；还需将 field/index cache 提升到共享 service
-   并加有界淘汰，避免长会话累积。
+4. **元数据刷新体验（P1）**：共享 cache 已有 TTL、single-flight 和有界淘汰；下一步是
+   在 Explorer refresh 后主动重新触发当前 Monaco completion，而非等待用户下一次输入。
 
 ## 延后真实环境验证
 
