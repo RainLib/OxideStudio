@@ -24,4 +24,6 @@ pub use ticket::*;
 // Keeping this tied to tickets/capability negotiation prevents a desktop from
 // treating an older SQL-only Gateway as a managed MongoDB or Elasticsearch
 // endpoint.
-pub const ENTERPRISE_CONTRACT_VERSION: u16 = 3;
+// Version 4 binds an access ticket to the credential-free fingerprint of the
+// Gateway's resolved database target, not merely its provider type.
+pub const ENTERPRISE_CONTRACT_VERSION: u16 = 4;

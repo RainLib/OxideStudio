@@ -242,7 +242,7 @@ async fn create_access_session(
         ));
     }
 
-    let (gateway_id, gateway_endpoint, policy_revision, driver) = state
+    let (gateway_id, gateway_endpoint, policy_revision, driver, target_binding) = state
         .store
         .gateway_for_source(
             input.organization_id,
@@ -271,6 +271,7 @@ async fn create_access_session(
         project_id: input.project_id,
         data_source_id: input.data_source_id,
         driver,
+        target_binding,
         actions: BTreeSet::from([input.action]),
         resource_path: input.resource_path,
         allowed_resource_paths,
@@ -427,6 +428,7 @@ struct RegisterDataSourceRequest {
     project_id: Uuid,
     gateway_id: Uuid,
     driver: String,
+    target_binding: String,
     display_name: String,
     capabilities: BTreeSet<AccessAction>,
 }
@@ -573,6 +575,7 @@ async fn register_data_source(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let display_name = validate_display_name(&input.display_name)?;
     let driver = input.driver.trim().to_ascii_lowercase();
+    let target_binding = normalize_target_binding(&input.target_binding)?;
     if !matches!(
         driver.as_str(),
         "postgres"
@@ -604,6 +607,7 @@ async fn register_data_source(
             input.project_id,
             input.gateway_id,
             &driver,
+            &target_binding,
             &display_name,
             &input.capabilities,
         )
@@ -612,7 +616,18 @@ async fn register_data_source(
         "id": data_source_id,
         "displayName": display_name,
         "driver": driver,
+        "targetBinding": target_binding,
     })))
+}
+
+fn normalize_target_binding(value: &str) -> Result<String, ApiError> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "target binding must be a 64-character SHA-256 fingerprint",
+        ));
+    }
+    Ok(value)
 }
 
 async fn register_managed_device(

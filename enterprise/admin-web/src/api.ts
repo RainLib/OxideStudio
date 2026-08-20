@@ -173,6 +173,7 @@ export const adminApi = {
       projectId: string;
       gatewayId: string;
       driver: string;
+      targetBinding: string;
       displayName: string;
       capabilities: string[];
     },

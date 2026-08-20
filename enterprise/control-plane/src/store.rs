@@ -471,6 +471,7 @@ impl ControlPlaneStore {
         project_id: Uuid,
         gateway_id: Uuid,
         driver: &str,
+        target_binding: &str,
         display_name: &str,
         capabilities: &BTreeSet<AccessAction>,
     ) -> Result<Uuid> {
@@ -499,14 +500,15 @@ impl ControlPlaneStore {
             .collect::<Vec<_>>();
         sqlx::query(
             "INSERT INTO data_sources
-             (id, organization_id, project_id, gateway_id, driver, display_name, capabilities)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             (id, organization_id, project_id, gateway_id, driver, target_binding, display_name, capabilities)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(data_source_id)
         .bind(organization_id)
         .bind(project_id)
         .bind(gateway_id)
         .bind(driver)
+        .bind(target_binding)
         .bind(display_name)
         .bind(serde_json::to_value(capabilities)?)
         .execute(&mut *tx)
@@ -519,7 +521,7 @@ impl ControlPlaneStore {
             Some(data_source_id),
             &["data-sources".into(), data_source_id.to_string()],
             "data-source.register",
-            serde_json::json!({ "driver": driver, "displayName": display_name }),
+            serde_json::json!({ "driver": driver, "targetBinding": target_binding, "displayName": display_name }),
         )
         .await?;
         tx.commit().await?;
@@ -1727,9 +1729,9 @@ impl ControlPlaneStore {
         organization_id: Uuid,
         project_id: Uuid,
         data_source_id: Uuid,
-    ) -> Result<(Uuid, String, String, String)> {
+    ) -> Result<(Uuid, String, String, String, String)> {
         let row = sqlx::query(
-            "SELECT d.gateway_id, d.policy_revision, d.driver, g.direct_endpoint, g.last_seen_at
+            "SELECT d.gateway_id, d.policy_revision, d.driver, d.target_binding, g.direct_endpoint, g.last_seen_at
              FROM data_sources d
              JOIN gateways g ON g.id = d.gateway_id
              WHERE d.id = $1 AND d.organization_id = $2 AND d.project_id = $3
@@ -1747,11 +1749,16 @@ impl ControlPlaneStore {
                 "Gateway signed heartbeat is stale; new access tickets are temporarily unavailable"
             );
         }
+        let target_binding: Option<String> = row.try_get("target_binding")?;
+        let target_binding = target_binding.context(
+            "managed data source requires a target binding renewal before issuing access tickets",
+        )?;
         Ok((
             row.try_get("gateway_id")?,
             row.try_get("direct_endpoint")?,
             row.try_get("policy_revision")?,
             row.try_get("driver")?,
+            target_binding,
         ))
     }
 

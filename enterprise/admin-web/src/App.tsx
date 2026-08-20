@@ -62,6 +62,7 @@ export function App() {
   const [sourceGatewayId, setSourceGatewayId] = useState("");
   const [sourceName, setSourceName] = useState("");
   const [sourceDriver, setSourceDriver] = useState("postgres");
+  const [sourceTargetBinding, setSourceTargetBinding] = useState("");
   const [assignmentProjectId, setAssignmentProjectId] = useState("");
   const [assignmentUserId, setAssignmentUserId] = useState("");
   const [grantProjectId, setGrantProjectId] = useState("");
@@ -393,6 +394,7 @@ export function App() {
         projectId: sourceProjectId,
         gatewayId: sourceGatewayId,
         driver: sourceDriver,
+        targetBinding: sourceTargetBinding,
         displayName: sourceName,
         capabilities: [
           "resourceDiscover",
@@ -401,6 +403,7 @@ export function App() {
         ],
       });
       setSourceName("");
+      setSourceTargetBinding("");
       setSourceOpen(false);
       await refresh();
     } catch (requestError) {
@@ -712,6 +715,23 @@ export function App() {
                       <option value="redis">Redis</option>
                     </select>
                   </label>
+                  <label className="source-target-binding">
+                    Target binding
+                    <input
+                      required
+                      inputMode="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={64}
+                      pattern="[a-fA-F0-9]{64}"
+                      placeholder="Gateway-generated SHA-256 fingerprint"
+                      value={sourceTargetBinding}
+                      onChange={(event) => setSourceTargetBinding(event.target.value)}
+                    />
+                  </label>
+                  <p className="inline-form-hint source-binding-hint">
+                    Paste the credential-free target fingerprint generated beside the Gateway. It binds this source to its approved database without sending a connection URL or secret here.
+                  </p>
                   {(sourceDriver === "mongodb" ||
                     sourceDriver === "elasticsearch" ||
                     sourceDriver === "redis") && (

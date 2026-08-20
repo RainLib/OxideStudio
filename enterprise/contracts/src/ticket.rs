@@ -26,6 +26,10 @@ pub struct AccessSessionClaims {
     /// compares this signed identity to its local source before it resolves a
     /// secret or executes a request.
     pub driver: String,
+    /// SHA-256 fingerprint of the credential-free database target registered
+    /// by an administrator. The Gateway compares this against its local
+    /// source configuration and the target resolved from its secret provider.
+    pub target_binding: String,
     pub actions: BTreeSet<AccessAction>,
     pub resource_path: Vec<String>,
     /// Effective permit scopes for the ticket action. Discovery may expose
@@ -192,6 +196,7 @@ mod tests {
             project_id: Uuid::new_v4(),
             data_source_id: Uuid::new_v4(),
             driver: "postgres".into(),
+            target_binding: "a".repeat(64),
             actions: BTreeSet::from([AccessAction::QueryRead]),
             resource_path: vec!["warehouse".into(), "public".into()],
             allowed_resource_paths: vec![vec!["warehouse".into(), "public".into()]],

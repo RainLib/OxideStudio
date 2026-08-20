@@ -1,5 +1,8 @@
 use crate::{
-    config::{allows_insecure_transport, validate_connection_transport, DataSourceConfig},
+    config::{
+        allows_insecure_transport, database_target_binding, validate_connection_transport,
+        DataSourceConfig,
+    },
     proto::{
         data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse,
         NativeQueryRequest, QueryChunk, QueryRequest, RequestScope, ResourceItem, ResourceRequest,
@@ -180,6 +183,15 @@ impl DataPlaneService {
                 "managed data source requires a verified database TLS connection",
             )
         })?;
+        if database_target_binding(&source.driver, secret.connection_url())
+            .map_err(|_| Status::failed_precondition("managed data source target is invalid"))?
+            != source.target_binding
+        {
+            tracing::warn!(data_source_id = %source_id, "gateway rejected a resolved data source target binding mismatch");
+            return Err(Status::failed_precondition(
+                "managed data source target binding does not match its registered source",
+            ));
+        }
         let driver = connect_driver(&source.driver, secret.connection_url())
             .await
             .map_err(|error| {
@@ -225,6 +237,7 @@ impl DataPlane for DataPlaneService {
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         require_ticket_driver(&claims, source)?;
+        require_ticket_target_binding(&claims, source)?;
         Ok(Response::new(CapabilitiesResponse {
             contract_version: ENTERPRISE_CONTRACT_VERSION.into(),
             capabilities: source.capabilities.clone(),
@@ -251,6 +264,7 @@ impl DataPlane for DataPlaneService {
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         require_ticket_driver(&claims, source)?;
+        require_ticket_target_binding(&claims, source)?;
         require_metadata_scope_for_source(&request, &authorization.resource_path, &source.driver)?;
         let driver = self.driver(authorization.data_source_id).await?;
         let mut items = match request.kind.as_str() {
@@ -398,6 +412,7 @@ impl DataPlane for DataPlaneService {
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         require_ticket_driver(&claims, source)?;
+        require_ticket_target_binding(&claims, source)?;
         let driver = self.driver(authorization.data_source_id).await?;
         let dialect = driver
             .statement_scan_dialect()
@@ -467,6 +482,7 @@ impl DataPlane for DataPlaneService {
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         require_ticket_driver(&claims, source)?;
+        require_ticket_target_binding(&claims, source)?;
         let provider = canonical_native_provider(&request.provider)?;
         if canonical_native_provider(&source.driver)? != provider {
             return Err(Status::failed_precondition(
@@ -566,6 +582,22 @@ fn require_ticket_driver(
         );
         return Err(Status::failed_precondition(
             "managed data source driver configuration does not match the signed access ticket",
+        ));
+    }
+    Ok(())
+}
+
+fn require_ticket_target_binding(
+    claims: &oxide_enterprise_contracts::AccessSessionClaims,
+    source: &DataSourceConfig,
+) -> Result<(), Status> {
+    if claims.target_binding != source.target_binding {
+        tracing::warn!(
+            data_source_id = %source.id,
+            "access ticket target binding does not match the local Gateway source"
+        );
+        return Err(Status::failed_precondition(
+            "access ticket target binding does not match the configured managed source",
         ));
     }
     Ok(())
@@ -1443,6 +1475,7 @@ mod tests {
             project_id: Uuid::new_v4(),
             data_source_id: Uuid::new_v4(),
             driver: "postgres".into(),
+            target_binding: "a".repeat(64),
             actions: Default::default(),
             resource_path: vec![],
             allowed_resource_paths: vec![],
@@ -1457,17 +1490,21 @@ mod tests {
         let source = DataSourceConfig {
             id: claims.data_source_id,
             driver: "mysql".into(),
+            target_binding: "b".repeat(64),
             secret_ref: "vault:test".into(),
             connection_template: None,
             allow_insecure_transport: false,
             capabilities: vec!["query.read".into()],
         };
         assert!(require_ticket_driver(&claims, &source).is_err());
+        assert!(require_ticket_target_binding(&claims, &source).is_err());
         claims.driver = "postgresql".into();
         let postgres = DataSourceConfig {
             driver: "postgres".into(),
             ..source
         };
         assert!(require_ticket_driver(&claims, &postgres).is_ok());
+        claims.target_binding = postgres.target_binding.clone();
+        assert!(require_ticket_target_binding(&claims, &postgres).is_ok());
     }
 }

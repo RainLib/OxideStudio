@@ -19,6 +19,9 @@ const MAX_SOURCES_FILE_BYTES: u64 = 1_048_576;
 pub struct DataSourceConfig {
     pub id: Uuid,
     pub driver: String,
+    /// SHA-256 of the credential-free canonical target locator. This must
+    /// match both the control-plane ticket and the resolved connection URL.
+    pub target_binding: String,
     /// Gateway-local lookup key. This value never leaves the gateway.
     pub secret_ref: String,
     /// Optional Gateway-local URL template used with dynamic credentials.
@@ -285,6 +288,9 @@ fn validate_source(
             source.id
         );
     }
+    if !is_target_binding(&source.target_binding) {
+        anyhow::bail!("gateway source {} has an invalid target binding", source.id);
+    }
     if source.allow_insecure_transport && !allow_insecure_database_transport {
         anyhow::bail!(
             "gateway source {} requests insecure database transport without the Gateway development opt-in",
@@ -310,6 +316,12 @@ fn validate_source(
             &template_url,
             allows_insecure_transport(source, allow_insecure_database_transport),
         )?;
+        if database_target_binding(&source.driver, &template_url)? != source.target_binding {
+            anyhow::bail!(
+                "gateway source {} target binding does not match its connection template",
+                source.id
+            );
+        }
     }
     if source.capabilities.is_empty()
         || source.capabilities.iter().any(|capability| {
@@ -322,6 +334,34 @@ fn validate_source(
         anyhow::bail!("gateway source {} has unsupported capabilities", source.id);
     }
     Ok(())
+}
+
+pub(crate) fn database_target_binding(driver: &str, connection_url: &str) -> Result<String> {
+    let url = Url::parse(connection_url).context("Gateway database URL is invalid")?;
+    let host = url
+        .host_str()
+        .context("Gateway database URL must include a host")?
+        .to_ascii_lowercase();
+    let driver = match driver.trim().to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" => "postgres",
+        "mongodb" | "mongo" => "mongodb",
+        "elasticsearch" | "elastic" => "elasticsearch",
+        "mysql" => "mysql",
+        "redis" => "redis",
+        _ => anyhow::bail!("Gateway database driver is unsupported"),
+    };
+    let port = url.port_or_known_default().unwrap_or(0);
+    // Query parameters can contain credentials. The driver, scheme, normalized
+    // host, port, and path identify the target without hashing secret material.
+    let locator = format!("{driver}|{}|{host}|{port}|{}", url.scheme(), url.path());
+    Ok(Sha256::digest(locator.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn is_target_binding(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 pub(crate) fn allows_insecure_transport(
@@ -409,7 +449,7 @@ mod tests {
 
     fn source(id: Uuid) -> String {
         format!(
-            r#"{{"id":"{id}","driver":"postgres","secretRef":"vault:database/analytics","capabilities":["resource.discover","metadata.read","query.read"]}}"#
+            r#"{{"id":"{id}","driver":"postgres","targetBinding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","secretRef":"vault:database/analytics","capabilities":["resource.discover","metadata.read","query.read"]}}"#
         )
     }
 
@@ -429,11 +469,11 @@ mod tests {
     #[test]
     fn source_file_accepts_supported_native_read_only_engines() {
         let mongo = format!(
-            r#"[{{"id":"{}","driver":"mongodb","secretRef":"vault:database/documents","capabilities":["query.read"]}}]"#,
+            r#"[{{"id":"{}","driver":"mongodb","targetBinding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","secretRef":"vault:database/documents","capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
         );
         let elastic = format!(
-            r#"[{{"id":"{}","driver":"elasticsearch","secretRef":"vault:database/search","capabilities":["query.read"]}}]"#,
+            r#"[{{"id":"{}","driver":"elasticsearch","targetBinding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","secretRef":"vault:database/search","capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
         );
         assert!(parse_sources(mongo.as_bytes(), false).is_ok());
@@ -447,7 +487,7 @@ mod tests {
     #[test]
     fn source_file_requires_dynamic_credential_placeholders() {
         let payload = format!(
-            r#"[{{"id":"{}","driver":"mysql","secretRef":"vault:database/analytics","connectionTemplate":"mysql://localhost/analytics","capabilities":["query.read"]}}]"#,
+            r#"[{{"id":"{}","driver":"mysql","targetBinding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","secretRef":"vault:database/analytics","connectionTemplate":"mysql://localhost/analytics","capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
         );
         assert!(parse_sources(payload.as_bytes(), false).is_err());
@@ -542,7 +582,7 @@ mod tests {
     #[test]
     fn source_insecure_transport_needs_two_explicit_development_opt_ins() {
         let payload = format!(
-            r#"[{{"id":"{}","driver":"postgres","secretRef":"env:OXIDE_SECRET_DEV_DATABASE","allowInsecureTransport":true,"capabilities":["query.read"]}}]"#,
+            r#"[{{"id":"{}","driver":"postgres","targetBinding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","secretRef":"env:OXIDE_SECRET_DEV_DATABASE","allowInsecureTransport":true,"capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
         );
         assert!(parse_sources(payload.as_bytes(), false).is_err());
@@ -552,8 +592,16 @@ mod tests {
     #[test]
     fn source_template_is_checked_for_verified_transport_before_startup() {
         let id = Uuid::new_v4();
+        let template = "postgres://{username}:{password}@db.example.test/analytics?sslmode=require";
+        let target_binding = database_target_binding(
+            "postgres",
+            &template
+                .replace("{username}", "placeholder")
+                .replace("{password}", "placeholder"),
+        )
+        .unwrap();
         let insecure = format!(
-            r#"[{{"id":"{id}","driver":"postgres","secretRef":"vault:database/analytics","connectionTemplate":"postgres://{{username}}:{{password}}@db.example.test/analytics?sslmode=require","capabilities":["query.read"]}}]"#,
+            r#"[{{"id":"{id}","driver":"postgres","targetBinding":"{target_binding}","secretRef":"vault:database/analytics","connectionTemplate":"{template}","capabilities":["query.read"]}}]"#,
         );
         assert!(parse_sources(insecure.as_bytes(), false).is_err());
         let verified = insecure.replace("sslmode=require", "sslmode=verify-full");

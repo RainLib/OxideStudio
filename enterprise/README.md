@@ -160,6 +160,15 @@ Gateway routes and data-source descriptors, invite members, assign projects,
 and create permit/forbid policies. Database credentials and even
 Gateway-local secret references are intentionally absent from those APIs.
 
+When registering a data source, an administrator also pastes its **target
+binding**: the SHA-256 digest of the Gateway's credential-free canonical
+locator (`driver|scheme|host|port|path`). Generate it on the Gateway host from
+the same connection template or private secret file that the Gateway will
+resolve, and store that digest in the local `sources.json` as `targetBinding`.
+The control plane signs the digest into every ticket; the Gateway checks both
+its local source entry and the resolved connection URL before opening a driver.
+The digest never includes a username, password, or URL query parameter.
+
 ## Security invariants
 
 For a Kubernetes production baseline, see

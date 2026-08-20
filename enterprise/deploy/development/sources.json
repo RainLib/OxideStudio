@@ -2,6 +2,7 @@
   {
     "id": "00000000-0000-0000-0000-000000000002",
     "driver": "postgres",
+    "targetBinding": "bba64aaf897cd9331a33cff641d10010ffb890abe1e51845b96069538917c1b9",
     "secretRef": "env:OXIDE_SECRET_DEV_DATABASE",
     "connectionTemplate": null,
     "allowInsecureTransport": true,

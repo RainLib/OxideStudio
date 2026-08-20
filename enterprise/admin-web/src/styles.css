@@ -412,6 +412,16 @@ small {
   line-height: 1.45;
 }
 
+.source-target-binding input {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.015em;
+}
+
+.source-binding-hint {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+}
+
 .gateway-registration-form {
   grid-template-columns: repeat(2, minmax(220px, 1fr)) auto;
 }
