@@ -27,6 +27,12 @@ pub struct GatewayRegistration {
     pub enrollment_expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug)]
+pub struct GatewayRevocationSnapshot {
+    pub revoked_device_certificate_fingerprints: Vec<String>,
+    pub revoked_access_nonces: Vec<Uuid>,
+}
+
 #[derive(Clone)]
 pub struct ControlPlaneStore {
     pool: PgPool,
@@ -253,7 +259,7 @@ impl ControlPlaneStore {
         direct_endpoint: &str,
         certificate_fingerprint: &str,
         request_signature: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<GatewayRevocationSnapshot> {
         let mut tx = self.pool.begin().await?;
         let gateway = sqlx::query(
             "SELECT organization_id, direct_endpoint, certificate_fingerprint,
@@ -291,6 +297,13 @@ impl ControlPlaneStore {
             .bind(gateway_id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "DELETE FROM revoked_access_nonces
+             WHERE organization_id = $1 AND expires_at <= now()",
+        )
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
         let fingerprints = sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT d.certificate_fingerprint
              FROM managed_devices d
@@ -303,8 +316,19 @@ impl ControlPlaneStore {
         .bind(organization_id)
         .fetch_all(&mut *tx)
         .await?;
+        let nonces = sqlx::query_scalar::<_, Uuid>(
+            "SELECT nonce FROM revoked_access_nonces
+             WHERE organization_id = $1 AND expires_at > now()
+             ORDER BY expires_at, nonce",
+        )
+        .bind(organization_id)
+        .fetch_all(&mut *tx)
+        .await?;
         tx.commit().await?;
-        Ok(fingerprints)
+        Ok(GatewayRevocationSnapshot {
+            revoked_device_certificate_fingerprints: fingerprints,
+            revoked_access_nonces: nonces,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -667,6 +691,60 @@ impl ControlPlaneStore {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn revoke_access_ticket(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        nonce: Uuid,
+        reason: &str,
+    ) -> Result<i64> {
+        let mut tx = self.pool.begin().await?;
+        let expires_at = sqlx::query_scalar::<_, String>(
+            "SELECT metadata ->> 'ticketExpiresAt'
+             FROM audit_events
+             WHERE organization_id = $1 AND metadata ->> 'ticketNonce' = $2
+             ORDER BY occurred_at DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(nonce.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("access ticket nonce is not available in this organization")?
+        .parse::<i64>()
+        .context("access ticket audit record has an invalid expiry")?;
+        let now = chrono::Utc::now().timestamp();
+        if expires_at <= now {
+            anyhow::bail!("access ticket has already expired");
+        }
+        sqlx::query(
+            "INSERT INTO revoked_access_nonces (nonce, organization_id, expires_at, reason)
+             VALUES ($1, $2, to_timestamp($3), $4)
+             ON CONFLICT (nonce) DO UPDATE SET reason = EXCLUDED.reason,
+                                             organization_id = EXCLUDED.organization_id,
+                                             expires_at = GREATEST(revoked_access_nonces.expires_at, EXCLUDED.expires_at)",
+        )
+        .bind(nonce)
+        .bind(organization_id)
+        .bind(expires_at as f64)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["access-tickets".into(), nonce.to_string()],
+            "access-ticket.revoke",
+            serde_json::json!({ "reason": reason, "expiresAt": expires_at }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(expires_at)
     }
 
     async fn accept_verified_invitations(
@@ -1392,12 +1470,13 @@ impl ControlPlaneStore {
         reason: &str,
         request_id: Uuid,
         source: &str,
+        metadata: serde_json::Value,
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO audit_events
              (id, organization_id, user_id, device_id, project_id, data_source_id,
-              resource_path, action, decision, reason_code, request_id, source)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+              resource_path, action, decision, reason_code, request_id, source, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(Uuid::new_v4())
         .bind(organization_id)
@@ -1411,6 +1490,7 @@ impl ControlPlaneStore {
         .bind(reason)
         .bind(request_id)
         .bind(source)
+        .bind(metadata)
         .execute(&self.pool)
         .await?;
         Ok(())

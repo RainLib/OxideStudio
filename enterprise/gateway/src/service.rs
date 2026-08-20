@@ -98,6 +98,7 @@ impl DataPlaneService {
             .map_err(|error| Status::permission_denied(error.to_string()))?;
         self.revocations
             .authorize_device_certificate(&claims.device_certificate_fingerprint)?;
+        self.revocations.authorize_ticket_nonce(claims.nonce)?;
         if scope.action != expected_action.as_str() {
             return Err(Status::invalid_argument(
                 "request action does not match the RPC operation",

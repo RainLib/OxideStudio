@@ -124,6 +124,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/admin/organizations/{organization_id}/access-grants",
             post(create_access_grant),
         )
+        .route(
+            "/v1/admin/organizations/{organization_id}/access-tickets/revoke",
+            post(revoke_access_ticket),
+        )
         .with_state(state)
 }
 
@@ -196,27 +200,24 @@ async fn create_access_session(
         ControlPlaneStore::forbidden_paths_for_action(&grants, input.data_source_id, input.action);
     let allowed_resource_paths =
         allowed_paths_for_action(user.id, input.data_source_id, &grants, input.action);
-    state
-        .store
-        .write_audit(
-            input.organization_id,
-            user.id,
-            input.device_id,
-            input.project_id,
-            input.data_source_id,
-            &input.resource_path,
-            input.action,
-            if allowed { "allow" } else { "deny" },
-            if allowed {
-                "POLICY_ALLOWED"
-            } else {
-                "POLICY_DENIED"
-            },
-            input.request_id,
-            &input.source,
-        )
-        .await?;
     if !allowed {
+        state
+            .store
+            .write_audit(
+                input.organization_id,
+                user.id,
+                input.device_id,
+                input.project_id,
+                input.data_source_id,
+                &input.resource_path,
+                input.action,
+                "deny",
+                "POLICY_DENIED",
+                input.request_id,
+                &input.source,
+                serde_json::json!({}),
+            )
+            .await?;
         return Err(ApiError::forbidden(
             "the assigned enterprise policy does not allow this operation",
         ));
@@ -261,6 +262,26 @@ async fn create_access_session(
             .clamp(4_096, 1_048_576),
     };
     let ticket = state.ticket_signer.sign(&claims)?;
+    state
+        .store
+        .write_audit(
+            claims.organization_id,
+            claims.principal_id,
+            claims.device_id,
+            claims.project_id,
+            claims.data_source_id,
+            &claims.resource_path,
+            input.action,
+            "allow",
+            "POLICY_ALLOWED",
+            input.request_id,
+            &input.source,
+            serde_json::json!({
+                "ticketNonce": claims.nonce,
+                "ticketExpiresAt": claims.expires_at,
+            }),
+        )
+        .await?;
     Ok(Json(AccessSessionResponse {
         ticket,
         expires_at,
@@ -376,6 +397,13 @@ struct RegisterManagedDeviceRequest {
 struct RevokeManagedDeviceRequest {
     user_id: Uuid,
     device_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevokeAccessTicketRequest {
+    nonce: Uuid,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -635,6 +663,32 @@ async fn revoke_gateway(
     })))
 }
 
+async fn revoke_access_ticket(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RevokeAccessTicketRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let reason = input.reason.trim();
+    if reason.is_empty() || reason.len() > 256 || reason.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "ticket revocation reason must contain between 1 and 256 visible characters",
+        ));
+    }
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    let expires_at = state
+        .store
+        .revoke_access_ticket(organization_id, user.id, input.nonce, reason)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "nonce": input.nonce,
+        "expiresAt": expires_at,
+        "status": "revoked",
+    })))
+}
+
 async fn activate_gateway_enrollment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -680,7 +734,8 @@ async fn gateway_revocation_snapshot(
         .await
         .map_err(|_| ApiError::forbidden("Gateway revocation feed authentication failed"))?;
     Ok(Json(serde_json::json!({
-        "revokedDeviceCertificateFingerprints": revoked,
+        "revokedDeviceCertificateFingerprints": revoked.revoked_device_certificate_fingerprints,
+        "revokedAccessNonces": revoked.revoked_access_nonces,
     })))
 }
 

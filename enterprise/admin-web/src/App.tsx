@@ -66,6 +66,8 @@ export function App() {
     "metadataRead",
     "queryRead",
   ]);
+  const [ticketNonce, setTicketNonce] = useState("");
+  const [ticketRevocationReason, setTicketRevocationReason] = useState("");
   const [signedIn, setSignedIn] = useState(Boolean(adminAuth.accessToken()));
   const [organizationName, setOrganizationName] = useState("");
   const [organizationSlug, setOrganizationSlug] = useState("");
@@ -224,6 +226,28 @@ export function App() {
     try {
       await adminApi.revokeGateway(organizationId, gatewayId);
       await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
+  const revokeAccessTicket = async (event: FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.revokeAccessTicket(organizationId, {
+        nonce: ticketNonce,
+        reason: ticketRevocationReason,
+      });
+      setTicketNonce("");
+      setTicketRevocationReason("");
+      setLoading(false);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -1093,6 +1117,43 @@ export function App() {
                   disabled={loading || grantActions.length === 0}
                 >
                   Save policy
+                </button>
+              </form>
+            </section>
+
+            <section id="security-controls">
+              <SectionHeading
+                title="Emergency ticket revocation"
+                detail="Use a ticket nonce from a security audit event to reject that exact managed access ticket at every Gateway."
+              />
+              <form
+                className="inline-form ticket-revocation-form"
+                onSubmit={revokeAccessTicket}
+              >
+                <label>
+                  Ticket nonce
+                  <input
+                    required
+                    pattern="[0-9a-fA-F-]{36}"
+                    placeholder="UUID from the access-ticket audit event"
+                    value={ticketNonce}
+                    onChange={(event) => setTicketNonce(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Reason
+                  <input
+                    required
+                    maxLength={256}
+                    placeholder="Why this specific ticket is no longer valid"
+                    value={ticketRevocationReason}
+                    onChange={(event) =>
+                      setTicketRevocationReason(event.target.value)
+                    }
+                  />
+                </label>
+                <button className="primary-button" disabled={loading}>
+                  Revoke ticket
                 </button>
               </form>
             </section>

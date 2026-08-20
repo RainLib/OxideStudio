@@ -192,6 +192,14 @@ export const adminApi = {
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/revoke`,
       { method: "POST" },
     ),
+  revokeAccessTicket: (
+    organizationId: string,
+    input: { nonce: string; reason: string },
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/access-tickets/revoke`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
   assignProject: (
     organizationId: string,
     projectId: string,
