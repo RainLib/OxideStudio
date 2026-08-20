@@ -5,7 +5,9 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use oxide_enterprise_contracts::{AccessAction, ManagedProject, OrganizationMembership, User};
+use oxide_enterprise_contracts::{
+    certificate_fingerprint, AccessAction, ManagedProject, OrganizationMembership, User,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -160,6 +162,13 @@ pub struct ManagedAccessSession {
     pub expires_at: i64,
     pub policy_revision: String,
     pub gateway_endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedDeviceEnrollment {
+    pub device_id: uuid::Uuid,
+    pub certificate_fingerprint: String,
 }
 
 struct EnterpriseSession {
@@ -390,12 +399,15 @@ impl EnterpriseClient {
         };
         let request_id = uuid::Uuid::new_v4();
         let device_id = self.load_or_create_device_id()?;
+        let device_certificate_fingerprint =
+            self.gateway_client_certificate_fingerprint(&config)?;
         let response = self
             .http
             .post(format!("{}/v1/access-sessions", config.control_plane_url))
             .bearer_auth(&access_token)
             .json(&serde_json::json!({
                 "deviceId": device_id,
+                "deviceCertificateFingerprint": device_certificate_fingerprint,
                 "organizationId": input.organization_id,
                 "projectId": input.project_id,
                 "dataSourceId": input.data_source_id,
@@ -451,6 +463,45 @@ impl EnterpriseClient {
                 "This organization requires a managed Gateway device certificate. Ask your administrator to enroll this device."
             )),
         }
+    }
+
+    fn gateway_client_certificate_fingerprint(
+        &self,
+        config: &EnterprisePublicConfig,
+    ) -> Result<String> {
+        let path = config
+            .gateway_client_certificate_path
+            .as_ref()
+            .context("This organization requires a managed Gateway device certificate. Ask your administrator to enroll this device.")?;
+        let certificate = fs::read(path).with_context(|| {
+            format!("failed to read managed Gateway device certificate at {path}")
+        })?;
+        let der = if certificate.starts_with(b"-----BEGIN") {
+            let mut reader = std::io::BufReader::new(certificate.as_slice());
+            let certificates = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .context("managed Gateway device certificate PEM is invalid")?;
+            let certificate = certificates
+                .first()
+                .context("managed Gateway device certificate contains no leaf certificate")?;
+            certificate.as_ref().to_vec()
+        } else {
+            certificate
+        };
+        Ok(certificate_fingerprint(&der))
+    }
+
+    pub fn managed_device_enrollment(&self) -> Result<Option<ManagedDeviceEnrollment>> {
+        let Some(config) = self.load_config()? else {
+            return Ok(None);
+        };
+        if config.gateway_client_certificate_path.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(ManagedDeviceEnrollment {
+            device_id: self.load_or_create_device_id()?,
+            certificate_fingerprint: self.gateway_client_certificate_fingerprint(&config)?,
+        }))
     }
 
     async fn current_status(&self) -> Option<EnterpriseAccountStatus> {
@@ -760,6 +811,15 @@ pub fn enterprise_get_public_config(
     client: tauri::State<'_, EnterpriseClient>,
 ) -> Result<Option<EnterprisePublicConfig>, String> {
     client.load_config().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn enterprise_get_managed_device_enrollment(
+    client: tauri::State<'_, EnterpriseClient>,
+) -> Result<Option<ManagedDeviceEnrollment>, String> {
+    client
+        .managed_device_enrollment()
+        .map_err(|error| user_facing_enterprise_error(&error))
 }
 
 #[tauri::command]

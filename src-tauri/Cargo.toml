@@ -63,6 +63,7 @@ russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa
 url = "2.5"
 percent-encoding = "2.3"
 sha2 = "0.10"
+rustls-pemfile = "2.2"
 hmac = "0.12"
 minisign-verify = "0.2.5"
 tempfile = "3"

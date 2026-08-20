@@ -61,6 +61,11 @@ export interface EnterprisePublicConfig {
   gatewayClientPrivateKeyPath?: string | null;
 }
 
+export interface ManagedDeviceEnrollment {
+  deviceId: string;
+  certificateFingerprint: string;
+}
+
 export const enterpriseService = {
   getPublicConfig: () =>
     invokeRawCommand<EnterprisePublicConfig | null>(
@@ -70,6 +75,11 @@ export const enterpriseService = {
   getStatus: () =>
     invokeRawCommand<EnterpriseAccountStatus>(
       "enterprise_get_account_status",
+    ),
+
+  getManagedDeviceEnrollment: () =>
+    invokeRawCommand<ManagedDeviceEnrollment | null>(
+      "enterprise_get_managed_device_enrollment",
     ),
 
   configure: (config: EnterprisePublicConfig) =>

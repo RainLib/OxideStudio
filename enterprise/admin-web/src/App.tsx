@@ -31,11 +31,16 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [deviceOpen, setDeviceOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [gatewayOpen, setGatewayOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
+  const [deviceUserId, setDeviceUserId] = useState("");
+  const [deviceId, setDeviceId] = useState("");
+  const [deviceFingerprint, setDeviceFingerprint] = useState("");
+  const [deviceName, setDeviceName] = useState("");
   const [projectName, setProjectName] = useState("");
   const [gatewayName, setGatewayName] = useState("");
   const [gatewayEndpoint, setGatewayEndpoint] = useState("");
@@ -127,6 +132,33 @@ export function App() {
       await adminApi.createProject(organizationId, projectName);
       setProjectName("");
       setProjectOpen(false);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
+  const registerManagedDevice = async (event: FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.registerManagedDevice(organizationId, {
+        userId: deviceUserId,
+        deviceId,
+        certificateFingerprint: deviceFingerprint,
+        displayName: deviceName || undefined,
+      });
+      setDeviceOpen(false);
+      setDeviceUserId("");
+      setDeviceId("");
+      setDeviceFingerprint("");
+      setDeviceName("");
       await refresh();
     } catch (requestError) {
       setError(
@@ -566,12 +598,20 @@ export function App() {
                 title="Members"
                 detail="Personal identities keep their local projects when enterprise access changes."
                 action={
-                  <button
-                    className="primary-button"
-                    onClick={() => setInviteOpen((value) => !value)}
-                  >
-                    <Plus size={14} /> Invite member
-                  </button>
+                  <div className="header-actions">
+                    <button
+                      className="quiet-button"
+                      onClick={() => setDeviceOpen((value) => !value)}
+                    >
+                      <KeyRound size={14} /> Enroll device
+                    </button>
+                    <button
+                      className="primary-button"
+                      onClick={() => setInviteOpen((value) => !value)}
+                    >
+                      <Plus size={14} /> Invite member
+                    </button>
+                  </div>
                 }
               />
               {inviteOpen && (
@@ -690,6 +730,32 @@ export function App() {
                   <button className="primary-button" disabled={loading}>
                     Register Gateway
                   </button>
+                </form>
+              )}
+              {deviceOpen && (
+                <form className="inline-form device-enrollment-form" onSubmit={registerManagedDevice}>
+                  <label>
+                    Member
+                    <select required value={deviceUserId} onChange={(event) => setDeviceUserId(event.target.value)}>
+                      <option value="">Select member</option>
+                      {overview?.members.filter((member) => member.status === "active").map((member) => (
+                        <option key={member.id} value={member.id}>{member.displayName}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Device UUID
+                    <input required value={deviceId} placeholder="Desktop enrollment ID" onChange={(event) => setDeviceId(event.target.value)} />
+                  </label>
+                  <label>
+                    Client certificate SHA-256
+                    <input required minLength={64} maxLength={64} pattern="[A-Fa-f0-9]{64}" value={deviceFingerprint} onChange={(event) => setDeviceFingerprint(event.target.value)} />
+                  </label>
+                  <label>
+                    Device name
+                    <input maxLength={128} value={deviceName} placeholder="Optional" onChange={(event) => setDeviceName(event.target.value)} />
+                  </label>
+                  <button className="primary-button" disabled={loading}>Enroll device</button>
                 </form>
               )}
               {gatewayEnrollment && (

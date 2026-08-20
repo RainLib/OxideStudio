@@ -117,9 +117,13 @@ traversal segments, and files are size/type checked before use.
 The desktop’s enterprise account settings accept three optional,
 organization-installed paths: Gateway CA certificate, device client
 certificate, and device private key. All three are required together before a
-managed data source can be opened. This is the stage-one enrollment mechanism;
-automatic short-lived device certificate enrollment remains a follow-up and
-must not be emulated by returning private keys from the control plane.
+managed data source can be opened. The administrator must enroll the desktop's
+reported device UUID and SHA-256 client-certificate fingerprint before access
+tickets can be issued; the Gateway compares that ticket binding against the
+actual peer certificate on every RPC. Certificate private keys are never sent
+through the control plane. Automatic short-lived device certificate enrollment
+remains a follow-up and must not be emulated by returning private keys from the
+control plane.
 
 The administration UI can create managed projects, register credential-free
 Gateway routes and data-source descriptors, invite members, assign projects,

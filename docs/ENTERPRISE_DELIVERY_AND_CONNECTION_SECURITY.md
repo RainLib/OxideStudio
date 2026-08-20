@@ -31,7 +31,7 @@
 
 | 缺口 | 当前状态 | 风险 | 下一步 |
 | --- | --- | --- | --- |
-| 设备身份绑定 | ticket 只有客户端提交的 `device_id`；Gateway mTLS 未把客户端证书指纹绑定到 ticket | 被窃取的短期 ticket 在有效期内缺乏设备证明 | 增加设备注册/撤销记录，在 ticket 中写入证书指纹，Gateway 从 TLS peer certificate 计算并比较。 |
+| 设备身份绑定 | 管理员登记 organization/user/device UUID 与 mTLS 叶证书 SHA-256 指纹；控制面只为 active 记录签发 ticket，ticket 带指纹，Gateway 每个 RPC 都从 TLS peer certificate 计算并比较。 | 被窃取的短期 ticket 不能在另一张客户证书上重放；下一步仍需实现管理员 revoke API 和 control-plane 到 Gateway 的立即撤销分发。 | 增加设备 revoke、证书轮换 enrollment 和低延迟撤销 deny cache。 |
 | Gateway 注册与激活证明 | 控制面登记证书 SHA-256 指纹和 Gateway 专用 Ed25519 公钥，签发 15 分钟的一次性 token（仅在创建响应中返回其明文）；Gateway 在开始监听前必须通过 HTTPS 回连，提交端点、指纹、token 的 Ed25519 签名。控制面只保存 token 摘要，成功后立刻销毁摘要并写入 Gateway 系统审计事件；后续重启只需同一私钥的空-token身份签名，并刷新 last-seen。旧的手工 Activate API 已移除，旧 Gateway 会被迁回 pending。 | token 只可用一次，且单独持有 token 或复述证书指纹均不能激活；Gateway 不会在未注册身份下开放数据平面，也可以安全重启。仍需加入持续 health/证书轮换流程。 | 加入 Gateway heartbeat、证书轮换 enrollment 与 last-seen health gate。 |
 | 票据撤销 | 数据库有 `revoked_access_nonces`，但 control plane/Gateway 未使用 | 60 秒 TTL 内无法紧急撤销已签发票据 | 实现按 nonce、设备、用户、gateway 的撤销分发；数据面要有低延迟 deny cache。 |
 | 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |

@@ -361,6 +361,89 @@ impl ControlPlaneStore {
         })
     }
 
+    pub async fn require_active_device_certificate(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+        device_id: Uuid,
+        certificate_fingerprint: &str,
+    ) -> Result<()> {
+        let enrolled: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM managed_devices
+               WHERE organization_id = $1 AND user_id = $2 AND device_id = $3
+                 AND certificate_fingerprint = $4 AND status = 'active'
+             )",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(certificate_fingerprint)
+        .fetch_one(&self.pool)
+        .await?;
+        if !enrolled {
+            anyhow::bail!("managed device certificate is not enrolled");
+        }
+        Ok(())
+    }
+
+    pub async fn register_managed_device(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        user_id: Uuid,
+        device_id: Uuid,
+        certificate_fingerprint: &str,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let member: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM organization_memberships
+               WHERE organization_id = $1 AND user_id = $2 AND status = 'active'
+             )",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !member {
+            anyhow::bail!("device owner is not an active organization member");
+        }
+        sqlx::query(
+            "INSERT INTO managed_devices
+             (organization_id, user_id, device_id, certificate_fingerprint, display_name, enrolled_by)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (organization_id, user_id, device_id)
+             DO UPDATE SET certificate_fingerprint = EXCLUDED.certificate_fingerprint,
+                           display_name = EXCLUDED.display_name,
+                           status = 'active', revoked_at = NULL,
+                           enrolled_by = EXCLUDED.enrolled_by, enrolled_at = now()",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(certificate_fingerprint)
+        .bind(display_name)
+        .bind(actor_user_id)
+        .execute(&mut *tx)
+        .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["managed-devices".into(), device_id.to_string()],
+            "managed-device.enroll",
+            serde_json::json!({ "principalId": user_id, "certificateFingerprint": certificate_fingerprint }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn accept_verified_invitations(
         &self,
         user_id: Uuid,

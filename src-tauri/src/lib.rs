@@ -172,6 +172,7 @@ pub fn run() {
             // initialize lazily and never block anonymous/local startup.
             enterprise::enterprise_get_account_status,
             enterprise::enterprise_get_public_config,
+            enterprise::enterprise_get_managed_device_enrollment,
             enterprise::enterprise_configure_account,
             enterprise::enterprise_sign_in,
             enterprise::enterprise_sync_projects,

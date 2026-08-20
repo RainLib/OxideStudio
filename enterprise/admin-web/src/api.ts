@@ -146,6 +146,19 @@ export const adminApi = {
         body: JSON.stringify(input),
       },
     ),
+  registerManagedDevice: (
+    organizationId: string,
+    input: {
+      userId: string;
+      deviceId: string;
+      certificateFingerprint: string;
+      displayName?: string;
+    },
+  ) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/managed-devices`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
   assignProject: (
     organizationId: string,
     projectId: string,

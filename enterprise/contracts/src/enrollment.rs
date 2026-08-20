@@ -1,4 +1,15 @@
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// Stable lowercase SHA-256 fingerprint for a DER-encoded X.509 certificate.
+/// The same helper is used when Desktop requests a ticket and when Gateway
+/// reads the peer certificate from its mTLS connection.
+pub fn certificate_fingerprint(certificate_der: &[u8]) -> String {
+    Sha256::digest(certificate_der)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Domain-separated canonical payload signed by a Gateway during its one-time
 /// enrollment. Newlines make fields unambiguous while preserving stable bytes

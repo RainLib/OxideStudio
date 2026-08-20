@@ -16,6 +16,9 @@ pub struct AccessSessionClaims {
     pub audience: Uuid,
     pub principal_id: Uuid,
     pub device_id: Uuid,
+    /// SHA-256 fingerprint of the client mTLS leaf certificate. The Gateway
+    /// extracts its peer certificate for every RPC and compares this value.
+    pub device_certificate_fingerprint: String,
     pub organization_id: Uuid,
     pub project_id: Uuid,
     pub data_source_id: Uuid,
@@ -74,6 +77,16 @@ impl AccessSessionClaims {
                 .any(|scope| path_is_within(&request.resource_path, scope))
         {
             return Err(TicketError::ActionNotGranted);
+        }
+        Ok(())
+    }
+
+    pub fn authorizes_device_certificate(
+        &self,
+        peer_certificate_fingerprint: &str,
+    ) -> Result<(), TicketError> {
+        if self.device_certificate_fingerprint != peer_certificate_fingerprint {
+            return Err(TicketError::DeviceCertificateMismatch);
         }
         Ok(())
     }
@@ -148,6 +161,8 @@ pub enum TicketError {
     AudienceMismatch,
     #[error("access ticket scope does not match the request")]
     ScopeMismatch,
+    #[error("access ticket is not bound to this device certificate")]
+    DeviceCertificateMismatch,
     #[error("access ticket does not grant the requested action or resource")]
     ActionNotGranted,
     #[error("access ticket contract version {0} is unsupported")]
@@ -159,6 +174,7 @@ pub enum TicketError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::certificate_fingerprint;
 
     fn claims(now: i64) -> AccessSessionClaims {
         AccessSessionClaims {
@@ -167,6 +183,7 @@ mod tests {
             audience: Uuid::new_v4(),
             principal_id: Uuid::new_v4(),
             device_id: Uuid::new_v4(),
+            device_certificate_fingerprint: certificate_fingerprint(b"device certificate"),
             organization_id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             data_source_id: Uuid::new_v4(),
@@ -213,6 +230,18 @@ mod tests {
         assert!(matches!(
             verify_ticket(&ticket, &signer.verifying_key()),
             Err(TicketError::InvalidSignature | TicketError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn tickets_are_bound_to_the_presented_device_certificate() {
+        let claims = claims(1_900_000_000);
+        assert!(claims
+            .authorizes_device_certificate(&claims.device_certificate_fingerprint)
+            .is_ok());
+        assert!(matches!(
+            claims.authorizes_device_certificate(&certificate_fingerprint(b"other device")),
+            Err(TicketError::DeviceCertificateMismatch)
         ));
     }
 

@@ -8,8 +8,8 @@ use crate::{
 };
 use ed25519_dalek::VerifyingKey;
 use oxide_enterprise_contracts::{
-    verify_ticket, AccessAction, AccessSessionTicket, AuthorizationRequest,
-    ENTERPRISE_CONTRACT_VERSION,
+    certificate_fingerprint, verify_ticket, AccessAction, AccessSessionTicket,
+    AuthorizationRequest, ENTERPRISE_CONTRACT_VERSION,
 };
 use oxide_studio_lib::{
     core::{driver::DatabaseDriver, statement::validate_read_only_sql},
@@ -67,6 +67,7 @@ impl DataPlaneService {
         ticket: &str,
         scope: Option<&RequestScope>,
         expected_action: AccessAction,
+        peer_certificate_fingerprint: &str,
     ) -> Result<
         (
             oxide_enterprise_contracts::AccessSessionClaims,
@@ -88,12 +89,25 @@ impl DataPlaneService {
         claims
             .authorizes(&request, self.gateway_id, now)
             .map_err(|error| Status::permission_denied(error.to_string()))?;
+        claims
+            .authorizes_device_certificate(peer_certificate_fingerprint)
+            .map_err(|error| Status::permission_denied(error.to_string()))?;
         if scope.action != expected_action.as_str() {
             return Err(Status::invalid_argument(
                 "request action does not match the RPC operation",
             ));
         }
         Ok((claims, request))
+    }
+
+    fn peer_certificate_fingerprint<T>(request: &Request<T>) -> Result<String, Status> {
+        let certificate = request
+            .peer_certs()
+            .and_then(|certificates| certificates.first().cloned())
+            .ok_or_else(|| {
+                Status::unauthenticated("a managed Gateway device certificate is required")
+            })?;
+        Ok(certificate_fingerprint(certificate.as_ref()))
     }
 
     async fn driver(&self, source_id: Uuid) -> Result<Arc<dyn DatabaseDriver>, Status> {
@@ -173,11 +187,13 @@ impl DataPlane for DataPlaneService {
         &self,
         request: Request<CapabilitiesRequest>,
     ) -> Result<Response<CapabilitiesResponse>, Status> {
+        let peer_certificate_fingerprint = Self::peer_certificate_fingerprint(&request)?;
         let request = request.into_inner();
         let (claims, authorization) = self.authorize(
             &request.access_ticket,
             request.scope.as_ref(),
             AccessAction::ResourceDiscover,
+            &peer_certificate_fingerprint,
         )?;
         let source = self.require_source(authorization.data_source_id)?;
         Ok(Response::new(CapabilitiesResponse {
@@ -191,14 +207,19 @@ impl DataPlane for DataPlaneService {
         &self,
         request: Request<ResourceRequest>,
     ) -> Result<Response<ResourceResponse>, Status> {
+        let peer_certificate_fingerprint = Self::peer_certificate_fingerprint(&request)?;
         let request = request.into_inner();
         let action = if request.kind == "column" {
             AccessAction::MetadataRead
         } else {
             AccessAction::ResourceDiscover
         };
-        let (claims, authorization) =
-            self.authorize(&request.access_ticket, request.scope.as_ref(), action)?;
+        let (claims, authorization) = self.authorize(
+            &request.access_ticket,
+            request.scope.as_ref(),
+            action,
+            &peer_certificate_fingerprint,
+        )?;
         self.require_source(authorization.data_source_id)?;
         require_metadata_scope(&request, &authorization.resource_path)?;
         let driver = self.driver(authorization.data_source_id).await?;
@@ -307,6 +328,7 @@ impl DataPlane for DataPlaneService {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<Self::ExecuteReadOnlyStream>, Status> {
+        let peer_certificate_fingerprint = Self::peer_certificate_fingerprint(&request)?;
         let request = request.into_inner();
         if request.sql.len() > 200_000 || request.sql.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -317,6 +339,7 @@ impl DataPlane for DataPlaneService {
             &request.access_ticket,
             request.scope.as_ref(),
             AccessAction::QueryRead,
+            &peer_certificate_fingerprint,
         )?;
         self.require_source(authorization.data_source_id)?;
         let driver = self.driver(authorization.data_source_id).await?;

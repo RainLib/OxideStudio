@@ -358,6 +358,10 @@ small {
   grid-template-columns: repeat(2, minmax(220px, 1fr)) auto;
 }
 
+.device-enrollment-form {
+  grid-template-columns: repeat(2, minmax(220px, 1fr)) auto;
+}
+
 .enrollment-instructions {
   display: grid;
   gap: 10px;

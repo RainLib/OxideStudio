@@ -36,6 +36,7 @@ struct MeResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccessSessionRequest {
     device_id: Uuid,
+    device_certificate_fingerprint: String,
     organization_id: Uuid,
     project_id: Uuid,
     data_source_id: Uuid,
@@ -88,6 +89,10 @@ pub fn router(state: AppState) -> Router {
             post(register_gateway),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/managed-devices",
+            post(register_managed_device),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/data-sources",
             post(register_data_source),
         )
@@ -131,6 +136,8 @@ async fn create_access_session(
     Json(input): Json<AccessSessionRequest>,
 ) -> Result<Json<AccessSessionResponse>, ApiError> {
     validate_access_session_request(&input)?;
+    let device_certificate_fingerprint =
+        normalize_certificate_fingerprint(&input.device_certificate_fingerprint)?;
     let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     state
@@ -138,6 +145,16 @@ async fn create_access_session(
         .require_project_assignment(user.id, input.organization_id, input.project_id)
         .await
         .map_err(|_| ApiError::forbidden("managed project access is not assigned"))?;
+    state
+        .store
+        .require_active_device_certificate(
+            user.id,
+            input.organization_id,
+            input.device_id,
+            &device_certificate_fingerprint,
+        )
+        .await
+        .map_err(|_| ApiError::forbidden("this managed device certificate is not enrolled"))?;
     let request = AuthorizationRequest {
         principal_id: user.id,
         organization_id: input.organization_id,
@@ -205,6 +222,7 @@ async fn create_access_session(
         audience: gateway_id,
         principal_id: user.id,
         device_id: input.device_id,
+        device_certificate_fingerprint,
         organization_id: input.organization_id,
         project_id: input.project_id,
         data_source_id: input.data_source_id,
@@ -248,6 +266,7 @@ fn validate_access_session_request(input: &AccessSessionRequest) -> Result<(), A
     {
         return Err(ApiError::bad_request("invalid resource path"));
     }
+    normalize_certificate_fingerprint(&input.device_certificate_fingerprint)?;
     Ok(())
 }
 
@@ -312,6 +331,15 @@ struct RegisterDataSourceRequest {
     driver: String,
     display_name: String,
     capabilities: BTreeSet<AccessAction>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterManagedDeviceRequest {
+    user_id: Uuid,
+    device_id: Uuid,
+    certificate_fingerprint: String,
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +491,38 @@ async fn register_data_source(
         "id": data_source_id,
         "displayName": display_name,
         "driver": driver,
+    })))
+}
+
+async fn register_managed_device(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterManagedDeviceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let fingerprint = normalize_certificate_fingerprint(&input.certificate_fingerprint)?;
+    let display_name = input
+        .display_name
+        .as_deref()
+        .map(validate_display_name)
+        .transpose()?;
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    require_admin(&state, user.id, organization_id).await?;
+    state
+        .store
+        .register_managed_device(
+            organization_id,
+            user.id,
+            input.user_id,
+            input.device_id,
+            &fingerprint,
+            display_name.as_deref(),
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "deviceId": input.device_id,
+        "status": "active",
     })))
 }
 
@@ -786,6 +846,7 @@ mod tests {
     fn access_session_request(action: AccessAction, source: &str) -> AccessSessionRequest {
         AccessSessionRequest {
             device_id: Uuid::new_v4(),
+            device_certificate_fingerprint: "a".repeat(64),
             organization_id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             data_source_id: Uuid::new_v4(),
