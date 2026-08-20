@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import {
   adminApi,
+  type AdminAuditEvent,
   type AdminOverview,
   type GatewayRegistration,
 } from "./api";
@@ -28,6 +29,8 @@ const accessActions = [
 
 export function App() {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
+  const [auditEvents, setAuditEvents] = useState<AdminAuditEvent[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -142,6 +145,24 @@ export function App() {
           : String(requestError),
       );
       setLoading(false);
+    }
+  };
+
+  const refreshAuditEvents = async () => {
+    if (!organizationId) return;
+    setAuditLoading(true);
+    setError(null);
+    try {
+      const result = await adminApi.auditEvents(organizationId);
+      setAuditEvents(result.events);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+    } finally {
+      setAuditLoading(false);
     }
   };
 
@@ -1125,6 +1146,17 @@ export function App() {
               <SectionHeading
                 title="Emergency ticket revocation"
                 detail="Use a ticket nonce from a security audit event to reject that exact managed access ticket at every Gateway."
+                action={
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    disabled={auditLoading}
+                    onClick={() => void refreshAuditEvents()}
+                  >
+                    <RefreshCw size={14} className={auditLoading ? "spin" : undefined} />
+                    Refresh security audit
+                  </button>
+                }
               />
               <form
                 className="inline-form ticket-revocation-form"
@@ -1156,6 +1188,33 @@ export function App() {
                   Revoke ticket
                 </button>
               </form>
+              {auditEvents.length > 0 && (
+                <div className="audit-list" aria-label="Recent security audit events">
+                  {auditEvents
+                    .filter(
+                      (event) =>
+                        typeof event.metadata.ticketNonce === "string",
+                    )
+                    .map((event) => (
+                      <div className="audit-line" key={event.requestId}>
+                        <span>
+                          <strong>{event.action}</strong>
+                          <small>
+                            {new Date(event.occurredAt).toLocaleString()} · {event.reasonCode}
+                          </small>
+                        </span>
+                        <code>{event.metadata.ticketNonce as string}</code>
+                        <button
+                          type="button"
+                          className="quiet-button"
+                          onClick={() => setTicketNonce(event.metadata.ticketNonce as string)}
+                        >
+                          Use nonce
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
             </section>
           </>
         )}
