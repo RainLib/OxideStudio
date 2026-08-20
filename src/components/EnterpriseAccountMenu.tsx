@@ -25,7 +25,10 @@ import {
 import { useEnterpriseAccountStore } from "@/store/useEnterpriseAccountStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useI18n } from "@/i18n";
-import { enterpriseService } from "@/services/tauri/enterprise.service";
+import {
+  enterpriseService,
+  type ManagedDeviceEnrollment,
+} from "@/services/tauri/enterprise.service";
 
 export function EnterpriseAccountMenu() {
   const { t } = useI18n();
@@ -39,6 +42,10 @@ export function EnterpriseAccountMenu() {
     useState("");
   const [gatewayClientPrivateKeyPath, setGatewayClientPrivateKeyPath] =
     useState("");
+  const [managedDeviceEnrollment, setManagedDeviceEnrollment] =
+    useState<ManagedDeviceEnrollment | null>(null);
+  const [managedDeviceEnrollmentError, setManagedDeviceEnrollmentError] =
+    useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const {
     status,
@@ -106,6 +113,44 @@ export function EnterpriseAccountMenu() {
 
   const completeAccountChoice = () => {
     setMenuOpen(false);
+  };
+
+  const openConfiguration = () => {
+    setMenuOpen(false);
+    setManagedDeviceEnrollment(null);
+    setManagedDeviceEnrollmentError(null);
+    void enterpriseService
+      .getPublicConfig()
+      .then((config) => {
+        if (config) {
+          setControlPlaneUrl(config.controlPlaneUrl);
+          setOidcIssuer(config.oidcIssuer);
+          setOidcClientId(config.oidcClientId);
+          setGatewayCaCertificatePath(config.gatewayCaCertificatePath || "");
+          setGatewayClientCertificatePath(
+            config.gatewayClientCertificatePath || "",
+          );
+          setGatewayClientPrivateKeyPath(
+            config.gatewayClientPrivateKeyPath || "",
+          );
+        }
+      })
+      .catch(() => {
+        // The account store retains the existing configuration error surface.
+      });
+    void enterpriseService
+      .getManagedDeviceEnrollment()
+      .then((enrollment) => {
+        setManagedDeviceEnrollment(enrollment);
+      })
+      .catch((configurationError) => {
+        setManagedDeviceEnrollmentError(
+          configurationError instanceof Error
+            ? configurationError.message
+            : String(configurationError),
+        );
+      });
+    setConfigurationOpen(true);
   };
 
   const saveConfiguration = async (event: FormEvent<HTMLFormElement>) => {
@@ -262,30 +307,7 @@ export function EnterpriseAccountMenu() {
                     : t("account.configure")
                 }
                 disabled={busy}
-                onClick={() => {
-                  setMenuOpen(false);
-                  void enterpriseService
-                    .getPublicConfig()
-                    .then((config) => {
-                      if (!config) return;
-                      setControlPlaneUrl(config.controlPlaneUrl);
-                      setOidcIssuer(config.oidcIssuer);
-                      setOidcClientId(config.oidcClientId);
-                      setGatewayCaCertificatePath(
-                        config.gatewayCaCertificatePath || "",
-                      );
-                      setGatewayClientCertificatePath(
-                        config.gatewayClientCertificatePath || "",
-                      );
-                      setGatewayClientPrivateKeyPath(
-                        config.gatewayClientPrivateKeyPath || "",
-                      );
-                    })
-                    .catch(() => {
-                      // The existing account error remains visible in the menu.
-                    });
-                  setConfigurationOpen(true);
-                }}
+                onClick={openConfiguration}
               />
             </>
           )}
@@ -351,6 +373,29 @@ export function EnterpriseAccountMenu() {
                     placeholder="/managed/oxide/device.key"
                     onChange={setGatewayClientPrivateKeyPath}
                   />
+                  {managedDeviceEnrollment && (
+                    <div className="space-y-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
+                      <p className="text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                        Register these exact values for this member in the
+                        enterprise administrator console. The private key never
+                        leaves this device.
+                      </p>
+                      <AccountReadOnlyField
+                        label="Device enrollment ID"
+                        value={managedDeviceEnrollment.deviceId}
+                      />
+                      <AccountReadOnlyField
+                        label="Client certificate SHA-256"
+                        value={managedDeviceEnrollment.certificateFingerprint}
+                      />
+                    </div>
+                  )}
+                  {managedDeviceEnrollmentError && (
+                    <div className="border-l-2 border-[hsl(var(--destructive))] px-2 text-[10px] leading-4 text-[hsl(var(--destructive))]">
+                      Unable to read this device enrollment identity: {" "}
+                      {managedDeviceEnrollmentError}
+                    </div>
+                  )}
                 </div>
               </details>
               {formError && (
@@ -447,6 +492,29 @@ function AccountField({
         spellCheck={false}
         onChange={(event) => onChange(event.target.value)}
         className="h-8 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[11px] outline-none focus:border-[hsl(var(--wb-accent))] focus:ring-1 focus:ring-[hsl(var(--wb-accent)/0.35)]"
+      />
+    </label>
+  );
+}
+
+function AccountReadOnlyField({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  const id = `enterprise-readonly-${label.toLowerCase().replace(/\s+/g, "-")}`;
+  return (
+    <label htmlFor={id} className="block space-y-1">
+      <span className="text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
+        {label}
+      </span>
+      <input
+        id={id}
+        readOnly
+        value={value}
+        className="h-7 w-full rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-2 font-mono text-[10px] text-[hsl(var(--wb-text-muted))] outline-none"
       />
     </label>
   );
