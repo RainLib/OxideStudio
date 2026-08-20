@@ -2,7 +2,7 @@ use super::{EnterpriseClient, ManagedAccessSessionRequest};
 use crate::core::{
     dialect::{database_capabilities_for_driver, DatabaseCapabilities},
     driver::DatabaseDriver,
-    protocol::{ColumnInfo, QueryResult, TableInfo},
+    protocol::{CollectionInfo, ColumnInfo, QueryResult, TableInfo},
     statement::StatementScanDialect,
 };
 use anyhow::{anyhow, Context, Result};
@@ -172,7 +172,14 @@ impl ManagedGatewayDriver {
         schema: Option<&str>,
         object_name: Option<&str>,
     ) -> Result<Vec<proto::ResourceItem>> {
-        let resource_path = metadata_parent_path(kind, database, schema, object_name)?;
+        let resource_path = if self.native_provider() == Some("elasticsearch") && kind == "column" {
+            object_name
+                .map(str::to_string)
+                .map(|value| vec![value])
+                .context("index is required to list managed Elasticsearch fields")?
+        } else {
+            metadata_parent_path(kind, database, schema, object_name)?
+        };
         let action = if kind == "column" {
             AccessAction::MetadataRead
         } else {
@@ -614,6 +621,12 @@ impl DatabaseDriver for ManagedGatewayDriver {
     }
 
     async fn get_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
+        if self.native_provider() == Some("elasticsearch") {
+            return decode_items(
+                self.list_resources("column", None, None, Some(table))
+                    .await?,
+            );
+        }
         decode_items(
             self.list_resources("column", None, Some(schema), Some(table))
                 .await?,
@@ -630,6 +643,19 @@ impl DatabaseDriver for ManagedGatewayDriver {
             self.list_resources("column", Some(database), Some(schema), Some(table))
                 .await?,
         )
+    }
+
+    async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
+        match self.native_provider() {
+            Some("mongodb") => decode_items(
+                self.list_resources("collection", Some(namespace), None, None)
+                    .await?,
+            ),
+            Some("elasticsearch") => {
+                decode_items(self.list_resources("collection", None, None, None).await?)
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 }
 
@@ -717,6 +743,11 @@ fn metadata_parent_path(
                     .context("table is required to list managed columns")?
                     .to_string(),
             );
+        }
+        "collection" => {
+            if let Some(database) = database {
+                path.push(database.to_string());
+            }
         }
         _ => return Err(anyhow!("unsupported managed resource kind")),
     }

@@ -248,8 +248,8 @@ impl DataPlane for DataPlaneService {
             action,
             &peer_certificate_fingerprint,
         )?;
-        self.require_source(authorization.data_source_id)?;
-        require_metadata_scope(&request, &authorization.resource_path)?;
+        let source = self.require_source(authorization.data_source_id)?;
+        require_metadata_scope_for_source(&request, &authorization.resource_path, &source.driver)?;
         let driver = self.driver(authorization.data_source_id).await?;
         let mut items = match request.kind.as_str() {
             "database" => driver
@@ -291,34 +291,57 @@ impl DataPlane for DataPlaneService {
                     .collect::<Result<Vec<_>, _>>()?
             }
             "column" => {
-                let schema = request
-                    .schema
-                    .as_deref()
-                    .ok_or_else(|| Status::invalid_argument("schema is required"))?;
                 let object_name = request
                     .object_name
                     .as_deref()
                     .ok_or_else(|| Status::invalid_argument("object_name is required"))?;
-                let columns = if let Some(database) = request.database.as_deref() {
-                    driver
-                        .get_database_columns(database, schema, object_name)
-                        .await
-                } else {
-                    driver.get_columns(schema, object_name).await
-                }
-                .map_err(metadata_error)?;
+                let columns =
+                    if canonical_native_provider(&source.driver).ok() == Some("elasticsearch") {
+                        driver.get_columns("", object_name).await
+                    } else if let Some(database) = request.database.as_deref() {
+                        let schema = request
+                            .schema
+                            .as_deref()
+                            .ok_or_else(|| Status::invalid_argument("schema is required"))?;
+                        driver
+                            .get_database_columns(database, schema, object_name)
+                            .await
+                    } else {
+                        let schema = request
+                            .schema
+                            .as_deref()
+                            .ok_or_else(|| Status::invalid_argument("schema is required"))?;
+                        driver.get_columns(schema, object_name).await
+                    }
+                    .map_err(metadata_error)?;
                 columns
                     .into_iter()
                     .map(|column| resource_item("column", column.name.clone(), &column))
                     .collect::<Result<Vec<_>, _>>()?
             }
+            "collection" => {
+                let namespace = request
+                    .database
+                    .as_deref()
+                    .or(request.schema.as_deref())
+                    .unwrap_or("");
+                driver
+                    .get_collections(namespace)
+                    .await
+                    .map_err(metadata_error)?
+                    .into_iter()
+                    .map(|collection| {
+                        resource_item("collection", collection.name.clone(), &collection)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
             _ => {
                 return Err(Status::invalid_argument(
-                    "kind must be database, schema, table, or column",
+                    "kind must be database, schema, table, column, or collection",
                 ));
             }
         };
-        let parent_path = metadata_parent_path(&request)?;
+        let parent_path = metadata_parent_path_for_source(&request, &source.driver)?;
         items.retain(|item| {
             let mut item_path = parent_path.clone();
             item_path.push(item.name.clone());
@@ -912,19 +935,12 @@ fn authorize_native_resource(
     Ok(())
 }
 
-fn metadata_error(error: anyhow::Error) -> Status {
-    tracing::warn!(
-        error = %oxide_studio_lib::core::redaction::redact_connection_url(&error.to_string()),
-        "managed metadata request failed"
-    );
-    Status::internal("managed metadata request failed")
-}
-
-fn require_metadata_scope(
+fn require_metadata_scope_for_source(
     request: &ResourceRequest,
     authorized_path: &[String],
+    driver: &str,
 ) -> Result<(), Status> {
-    let expected = metadata_parent_path(request)?;
+    let expected = metadata_parent_path_for_source(request, driver)?;
     if expected.len() != authorized_path.len()
         || !expected
             .iter()
@@ -936,6 +952,40 @@ fn require_metadata_scope(
         ));
     }
     Ok(())
+}
+
+fn metadata_parent_path_for_source(
+    request: &ResourceRequest,
+    driver: &str,
+) -> Result<Vec<String>, Status> {
+    let native = canonical_native_provider(driver).ok();
+    if request.kind == "collection" {
+        return match native {
+            Some("mongodb") => request
+                .database
+                .clone()
+                .map(|value| vec![value])
+                .ok_or_else(|| Status::invalid_argument("database is required")),
+            Some("elasticsearch") => Ok(Vec::new()),
+            _ => metadata_parent_path(request),
+        };
+    }
+    if native == Some("elasticsearch") && request.kind == "column" {
+        return request
+            .object_name
+            .clone()
+            .map(|value| vec![value])
+            .ok_or_else(|| Status::invalid_argument("object_name is required"));
+    }
+    metadata_parent_path(request)
+}
+
+fn metadata_error(error: anyhow::Error) -> Status {
+    tracing::warn!(
+        error = %oxide_studio_lib::core::redaction::redact_connection_url(&error.to_string()),
+        "managed metadata request failed"
+    );
+    Status::internal("managed metadata request failed")
 }
 
 fn metadata_parent_path(request: &ResourceRequest) -> Result<Vec<String>, Status> {
@@ -1237,5 +1287,33 @@ mod tests {
             &[vec!["app".into(), "orders".into()]],
         )
         .is_err());
+    }
+
+    #[test]
+    fn native_metadata_scope_preserves_collection_and_index_boundaries() {
+        let mongo = ResourceRequest {
+            access_ticket: String::new(),
+            scope: None,
+            kind: "collection".into(),
+            database: Some("app".into()),
+            schema: None,
+            object_name: None,
+        };
+        assert_eq!(
+            metadata_parent_path_for_source(&mongo, "mongodb").unwrap(),
+            ["app"]
+        );
+        let elastic = ResourceRequest {
+            access_ticket: String::new(),
+            scope: None,
+            kind: "column".into(),
+            database: None,
+            schema: None,
+            object_name: Some("logs-2026".into()),
+        };
+        assert_eq!(
+            metadata_parent_path_for_source(&elastic, "elasticsearch").unwrap(),
+            ["logs-2026"]
+        );
     }
 }
