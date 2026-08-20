@@ -164,7 +164,15 @@ When registering a data source, an administrator also pastes its **target
 binding**: the SHA-256 digest of the Gateway's credential-free canonical
 locator (`driver|scheme|host|port|path`). Generate it on the Gateway host from
 the same connection template or private secret file that the Gateway will
-resolve, and store that digest in the local `sources.json` as `targetBinding`.
+resolve; the command prints only the digest, never the URL:
+
+```bash
+npm run enterprise:target-binding -- \
+  --driver postgres \
+  --connection-url-file /run/secrets/oxide/database-url
+```
+
+Store that digest in the local `sources.json` as `targetBinding`.
 The control plane signs the digest into every ticket; the Gateway checks both
 its local source entry and the resolved connection URL before opening a driver.
 The digest never includes a username, password, or URL query parameter.

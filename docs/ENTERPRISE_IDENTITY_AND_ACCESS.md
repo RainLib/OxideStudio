@@ -129,6 +129,15 @@ cannot be parsed as read-only fails closed. The same permission manifest will
 be consumed by Deep Agents and `oxide-agent`; model prompts and tool arguments
 can only narrow the effective scope.
 
+Every managed ticket also carries a target binding: a SHA-256 digest of the
+credential-free canonical database locator. Registration requires the digest,
+the Gateway source file repeats it, and the Gateway recomputes it after its
+local secret provider resolves a connection URL. A ticket can therefore not be
+reused against a different same-driver target, while the control plane and
+desktop still never receive a database URL, username, password, or query
+credential. The operator generates the value from a private file with
+`npm run enterprise:target-binding -- --driver <driver> --connection-url-file <path>`.
+
 ## Source map
 
 - Shared model/policy/tickets: `enterprise/contracts`
