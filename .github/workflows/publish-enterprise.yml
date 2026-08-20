@@ -50,9 +50,57 @@ jobs:
         shell: bash
         run: echo "value=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+  quality:
+    name: Validate enterprise release inputs
+    needs: prepare
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Restore Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./enterprise -> target
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Validate enterprise sources and contracts
+        run: |
+          cargo fmt --manifest-path enterprise/Cargo.toml --all -- --check
+          cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo test --manifest-path enterprise/Cargo.toml --workspace
+          node --test scripts/print-enterprise-target-binding.node-test.mjs
+          npm run enterprise:admin:build
+
   publish:
     name: Publish ${{ matrix.component }}
-    needs: prepare
+    needs: [prepare, quality]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
