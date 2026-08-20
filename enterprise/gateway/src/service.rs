@@ -4,6 +4,7 @@ use crate::{
         data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse, QueryChunk,
         QueryRequest, RequestScope, ResourceItem, ResourceRequest, ResourceResponse,
     },
+    revocation::RevocationState,
     secret::SecretProvider,
 };
 use ed25519_dalek::VerifyingKey;
@@ -37,6 +38,7 @@ pub struct DataPlaneService {
     verifying_key: VerifyingKey,
     sources: HashMap<Uuid, DataSourceConfig>,
     secrets: Arc<dyn SecretProvider>,
+    revocations: Arc<RevocationState>,
     drivers: Mutex<HashMap<Uuid, CachedDriver>>,
 }
 
@@ -52,12 +54,14 @@ impl DataPlaneService {
         verifying_key: VerifyingKey,
         sources: HashMap<Uuid, DataSourceConfig>,
         secrets: Arc<dyn SecretProvider>,
+        revocations: Arc<RevocationState>,
     ) -> Self {
         Self {
             gateway_id,
             verifying_key,
             sources,
             secrets,
+            revocations,
             drivers: Mutex::new(HashMap::new()),
         }
     }
@@ -92,6 +96,8 @@ impl DataPlaneService {
         claims
             .authorizes_device_certificate(peer_certificate_fingerprint)
             .map_err(|error| Status::permission_denied(error.to_string()))?;
+        self.revocations
+            .authorize_device_certificate(&claims.device_certificate_fingerprint)?;
         if scope.action != expected_action.as_str() {
             return Err(Status::invalid_argument(
                 "request action does not match the RPC operation",

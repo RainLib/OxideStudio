@@ -6,9 +6,9 @@ use base64::{
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use oxide_enterprise_contracts::{
-    gateway_enrollment_signing_message, AccessAction, AccessGrant, AuthorizationRequest,
-    GrantEffect, ManagedDataSourceDescriptor, ManagedProject, MembershipStatus,
-    OrganizationMembership, OrganizationSummary, PolicyEvaluator, User,
+    gateway_enrollment_signing_message, gateway_revocation_snapshot_signing_message, AccessAction,
+    AccessGrant, AuthorizationRequest, GrantEffect, ManagedDataSourceDescriptor, ManagedProject,
+    MembershipStatus, OrganizationMembership, OrganizationSummary, PolicyEvaluator, User,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -245,6 +245,63 @@ impl ControlPlaneStore {
         write_gateway_enrollment_audit(&mut tx, organization_id, gateway_id).await?;
         tx.commit().await?;
         Ok(organization_id)
+    }
+
+    pub async fn gateway_revocation_snapshot(
+        &self,
+        gateway_id: Uuid,
+        direct_endpoint: &str,
+        certificate_fingerprint: &str,
+        request_signature: &str,
+    ) -> Result<Vec<String>> {
+        let mut tx = self.pool.begin().await?;
+        let gateway = sqlx::query(
+            "SELECT organization_id, direct_endpoint, certificate_fingerprint,
+                    enrollment_public_key, status
+             FROM gateways
+             WHERE id = $1
+             FOR UPDATE",
+        )
+        .bind(gateway_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Gateway revocation feed is not available")?;
+        let organization_id: Uuid = gateway.try_get("organization_id")?;
+        let stored_endpoint: String = gateway.try_get("direct_endpoint")?;
+        let stored_fingerprint: Option<String> = gateway.try_get("certificate_fingerprint")?;
+        let enrollment_public_key: Option<String> = gateway.try_get("enrollment_public_key")?;
+        let status: String = gateway.try_get("status")?;
+        let proof = gateway_revocation_snapshot_signing_message(
+            gateway_id,
+            direct_endpoint,
+            certificate_fingerprint,
+        );
+        if status != "active"
+            || stored_endpoint != direct_endpoint
+            || stored_fingerprint.as_deref() != Some(certificate_fingerprint)
+            || !verify_gateway_signature(
+                enrollment_public_key.as_deref(),
+                request_signature,
+                &proof,
+            )
+        {
+            anyhow::bail!("Gateway revocation feed proof was rejected");
+        }
+        sqlx::query("UPDATE gateways SET last_seen_at = now() WHERE id = $1")
+            .bind(gateway_id)
+            .execute(&mut *tx)
+            .await?;
+        let fingerprints = sqlx::query_scalar::<_, String>(
+            "SELECT certificate_fingerprint
+             FROM managed_devices
+             WHERE organization_id = $1 AND status = 'revoked'
+             ORDER BY revoked_at DESC, certificate_fingerprint",
+        )
+        .bind(organization_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(fingerprints)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1258,6 +1315,19 @@ fn verify_enrollment_signature(
     certificate_fingerprint: &str,
     enrollment_token: &str,
 ) -> bool {
+    verify_gateway_signature(
+        public_key,
+        signature,
+        &gateway_enrollment_signing_message(
+            gateway_id,
+            direct_endpoint,
+            certificate_fingerprint,
+            enrollment_token,
+        ),
+    )
+}
+
+fn verify_gateway_signature(public_key: Option<&str>, signature: &str, message: &[u8]) -> bool {
     let Some(public_key) = public_key else {
         return false;
     };
@@ -1276,17 +1346,7 @@ fn verify_enrollment_signature(
     let Ok(signature) = Signature::try_from(signature.as_slice()) else {
         return false;
     };
-    verifying_key
-        .verify(
-            &gateway_enrollment_signing_message(
-                gateway_id,
-                direct_endpoint,
-                certificate_fingerprint,
-                enrollment_token,
-            ),
-            &signature,
-        )
-        .is_ok()
+    verifying_key.verify(message, &signature).is_ok()
 }
 
 #[cfg(test)]
@@ -1349,6 +1409,30 @@ mod enrollment_tests {
             endpoint,
             &fingerprint,
             "",
+        ));
+    }
+
+    #[test]
+    fn gateway_signature_is_bound_to_the_revocation_snapshot_domain() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::from_bytes(&[3; 32]);
+        let gateway_id = Uuid::new_v4();
+        let endpoint = "https://gateway.example.test";
+        let fingerprint = "b".repeat(64);
+        let signature = signing_key.sign(&gateway_revocation_snapshot_signing_message(
+            gateway_id,
+            endpoint,
+            &fingerprint,
+        ));
+        assert!(verify_gateway_signature(
+            Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
+            &STANDARD.encode(signature.to_bytes()),
+            &gateway_revocation_snapshot_signing_message(gateway_id, endpoint, &fingerprint),
+        ));
+        assert!(!verify_gateway_signature(
+            Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
+            &STANDARD.encode(signature.to_bytes()),
+            &gateway_enrollment_signing_message(gateway_id, endpoint, &fingerprint, ""),
         ));
     }
 }

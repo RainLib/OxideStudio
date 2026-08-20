@@ -1,5 +1,6 @@
 mod config;
 mod enrollment;
+mod revocation;
 mod secret;
 mod service;
 
@@ -10,8 +11,13 @@ pub mod proto {
 use anyhow::Result;
 use config::GatewayConfig;
 use proto::data_plane_server::DataPlaneServer;
+use revocation::{
+    RevocationClient, RevocationState, MAX_REVOCATION_SNAPSHOT_AGE, REVOCATION_REFRESH_INTERVAL,
+};
 use secret::configured_provider;
 use service::DataPlaneService;
+use std::sync::Arc;
+use tokio::time;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -26,6 +32,21 @@ async fn main() -> Result<()> {
         .init();
     let config = GatewayConfig::from_env()?;
     enrollment::activate(&config).await?;
+    let revocation_client = RevocationClient::from_config(&config)?;
+    let revocations = Arc::new(RevocationState::new(MAX_REVOCATION_SNAPSHOT_AGE));
+    revocation_client.refresh(&revocations).await?;
+    let refresh_client = revocation_client.clone();
+    let refresh_state = Arc::clone(&revocations);
+    tokio::spawn(async move {
+        let mut interval = time::interval(REVOCATION_REFRESH_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = refresh_client.refresh(&refresh_state).await {
+                tracing::warn!(error = %error, "Gateway revocation snapshot refresh failed; data plane will fail closed when the last snapshot becomes stale");
+            }
+        }
+    });
     let secret_provider = configured_provider(config.allow_environment_secrets)?;
     let address = config.bind;
     let tls = ServerTlsConfig::new()
@@ -39,6 +60,7 @@ async fn main() -> Result<()> {
         config.control_plane_verifying_key,
         config.sources,
         secret_provider,
+        revocations,
     );
     tracing::info!(gateway_id = %config.id, %address, "Oxide enterprise gateway enrollment accepted; listening");
     Server::builder()

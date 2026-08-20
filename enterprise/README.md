@@ -145,5 +145,7 @@ Gateway-local secret references are intentionally absent from those APIs.
 
 The Gateway trusts only current, signed 60-second tickets. It does not accept a
 client-supplied policy revision or keep a manually synchronized policy number
-in `sources.json`; revocation stops new ticket issuance immediately and any
-already issued ticket expires within the acceptance window.
+in `sources.json`. In addition to blocking new ticket issuance, the Gateway
+fetches the organization's revoked device-certificate fingerprints with its
+enrolled Ed25519 identity every five seconds. It will not start without that
+snapshot and fails closed if it cannot refresh one for twenty seconds.

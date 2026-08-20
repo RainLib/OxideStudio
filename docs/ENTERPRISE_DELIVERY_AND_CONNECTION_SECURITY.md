@@ -37,6 +37,8 @@
 | 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |
 | 生产部署保护 | compose 明确为开发配置；没有生产 Helm/secret policy/NetworkPolicy | 运维人员可能把环境变量 secret 或 HTTP compose 用于生产 | 提供生产 deployment 模板、admission checks、secret provider allowlist、egress/ingress NetworkPolicy。 |
 
+设备撤销现已使用签名 Gateway 拉取 feed：Gateway 每五秒获取本组织已撤销的设备证书指纹，启动前必须取得成功快照，连续二十秒未成功刷新便拒绝数据面请求。剩余票据撤销工作是 nonce、用户、Gateway 级失效，以及大组织的增量 feed。
+
 ### P1：规模化与可运维性
 
 | 缺口 | 下一步 |

@@ -69,6 +69,10 @@ pub fn router(state: AppState) -> Router {
             post(activate_gateway_enrollment),
         )
         .route(
+            "/v1/gateway-revocations/snapshot",
+            post(gateway_revocation_snapshot),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/overview",
             get(admin_overview),
         )
@@ -329,6 +333,15 @@ struct ActivateGatewayEnrollmentRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GatewayRevocationSnapshotRequest {
+    gateway_id: Uuid,
+    direct_endpoint: String,
+    certificate_fingerprint: String,
+    request_signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisterDataSourceRequest {
     project_id: Uuid,
     gateway_id: Uuid,
@@ -579,6 +592,29 @@ async fn activate_gateway_enrollment(
     Ok(Json(serde_json::json!({
         "id": input.gateway_id,
         "status": "active",
+    })))
+}
+
+async fn gateway_revocation_snapshot(
+    State(state): State<AppState>,
+    Json(input): Json<GatewayRevocationSnapshotRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let endpoint = validated_gateway_endpoint(&input.direct_endpoint)?;
+    let certificate_fingerprint =
+        normalize_certificate_fingerprint(&input.certificate_fingerprint)?;
+    let request_signature = normalize_enrollment_signature(&input.request_signature)?;
+    let revoked = state
+        .store
+        .gateway_revocation_snapshot(
+            input.gateway_id,
+            &endpoint,
+            &certificate_fingerprint,
+            &request_signature,
+        )
+        .await
+        .map_err(|_| ApiError::forbidden("Gateway revocation feed authentication failed"))?;
+    Ok(Json(serde_json::json!({
+        "revokedDeviceCertificateFingerprints": revoked,
     })))
 }
 
