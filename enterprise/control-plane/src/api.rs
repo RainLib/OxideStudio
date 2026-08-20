@@ -113,6 +113,10 @@ pub fn router(state: AppState) -> Router {
             post(activate_member),
         )
         .route(
+            "/v1/admin/organizations/{organization_id}/members/{member_id}/transfer-ownership",
+            post(transfer_organization_ownership),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/data-sources",
             post(register_data_source),
         )
@@ -649,6 +653,25 @@ async fn activate_member(
     })))
 }
 
+async fn transfer_organization_ownership(
+    State(state): State<AppState>,
+    Path((organization_id, member_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = state.verifier.authenticate(&headers).await?;
+    let user = state.store.sync_identity(&identity).await?;
+    validate_ownership_transfer(user.id, member_id)?;
+    state
+        .store
+        .transfer_organization_ownership(organization_id, user.id, member_id)
+        .await
+        .map_err(|_| ApiError::forbidden("active organization owner access is required"))?;
+    Ok(Json(serde_json::json!({
+        "memberId": member_id,
+        "organizationRole": "owner",
+    })))
+}
+
 async fn revoke_gateway(
     State(state): State<AppState>,
     Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
@@ -835,7 +858,13 @@ async fn admin_overview(
         .require_organization_admin(user.id, organization_id)
         .await
         .map_err(|_| ApiError::forbidden("organization administrator access is required"))?;
-    Ok(Json(state.store.admin_overview(organization_id).await?))
+    let viewer_role = state
+        .store
+        .organization_role(user.id, organization_id)
+        .await?;
+    let mut overview = state.store.admin_overview(organization_id).await?;
+    overview["viewerRole"] = serde_json::json!(viewer_role);
+    Ok(Json(overview))
 }
 
 async fn invite_member(
@@ -1079,6 +1108,13 @@ mod tests {
     }
 
     #[test]
+    fn ownership_transfer_rejects_a_self_transfer() {
+        let user_id = Uuid::new_v4();
+        let error = validate_ownership_transfer(user_id, user_id).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn unavailable_gateway_errors_are_retryable_without_leaking_route_details() {
         let error = ApiError::gateway_unavailable();
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1118,4 +1154,13 @@ mod tests {
         .is_ok());
         assert!(normalize_enrollment_public_key(&STANDARD.encode([7; 31])).is_err());
     }
+}
+
+fn validate_ownership_transfer(actor_user_id: Uuid, target_user_id: Uuid) -> Result<(), ApiError> {
+    if actor_user_id == target_user_id {
+        return Err(ApiError::bad_request(
+            "select another active member to receive organization ownership",
+        ));
+    }
+    Ok(())
 }

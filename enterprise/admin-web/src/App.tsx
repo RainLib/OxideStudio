@@ -241,6 +241,32 @@ export function App() {
     }
   };
 
+  const transferOrganizationOwnership = async (
+    memberId: string,
+    displayName: string,
+  ) => {
+    if (
+      !window.confirm(
+        `Transfer organization ownership to ${displayName}? Your owner role will become administrator.`,
+      )
+    ) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.transferOrganizationOwnership(organizationId, memberId);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
   const revokeGateway = async (gatewayId: string) => {
     setLoading(true);
     setError(null);
@@ -824,29 +850,48 @@ export function App() {
                     <span className={`status ${member.status}`}>
                       {member.status}
                     </span>
-                    <button
-                      type="button"
-                      className="quiet-button danger-button"
-                      disabled={
-                        loading ||
-                        member.status === "invited" ||
-                        (member.status === "active" && member.role === "owner")
-                      }
-                      title={
-                        member.role === "owner"
-                          ? "Transfer ownership before suspending an owner."
-                          : member.status === "invited"
-                            ? "An invited member must complete sign-in before it can be managed."
-                            : undefined
-                      }
-                      onClick={() =>
-                        void (member.status === "active"
-                          ? suspendMember(member.id)
-                          : activateMember(member.id))
-                      }
-                    >
-                      {member.status === "active" ? "Suspend" : "Reactivate"}
-                    </button>
+                    <span className="member-actions">
+                      {overview?.viewerRole === "owner" &&
+                        member.status === "active" &&
+                        member.role !== "owner" && (
+                        <button
+                          type="button"
+                          className="quiet-button"
+                          disabled={loading}
+                          onClick={() =>
+                            void transferOrganizationOwnership(
+                              member.id,
+                              member.displayName,
+                            )
+                          }
+                        >
+                          Make owner
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="quiet-button danger-button"
+                        disabled={
+                          loading ||
+                          member.status === "invited" ||
+                          (member.status === "active" && member.role === "owner")
+                        }
+                        title={
+                          member.role === "owner"
+                            ? "Transfer ownership before suspending an owner."
+                            : member.status === "invited"
+                              ? "An invited member must complete sign-in before it can be managed."
+                              : undefined
+                        }
+                        onClick={() =>
+                          void (member.status === "active"
+                            ? suspendMember(member.id)
+                            : activateMember(member.id))
+                        }
+                      >
+                        {member.status === "active" ? "Suspend" : "Reactivate"}
+                      </button>
+                    </span>
                   </div>
                 ))}
               </div>

@@ -1,5 +1,6 @@
 export interface AdminOverview {
   organization: { id: string; displayName: string };
+  viewerRole: string;
   members: Array<{
     id: string;
     displayName: string;
@@ -185,6 +186,11 @@ export const adminApi = {
   activateMember: (organizationId: string, memberId: string) =>
     request(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}/activate`,
+      { method: "POST" },
+    ),
+  transferOrganizationOwnership: (organizationId: string, memberId: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}/transfer-ownership`,
       { method: "POST" },
     ),
   revokeGateway: (organizationId: string, gatewayId: string) =>

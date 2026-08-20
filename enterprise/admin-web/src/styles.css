@@ -234,12 +234,18 @@ h2 {
 }
 
 .member-row {
-  grid-template-columns: minmax(240px, 1fr) 160px 100px 76px;
+  grid-template-columns: minmax(240px, 1fr) 160px 100px minmax(76px, max-content);
 }
 
 .member-row span:first-child {
   display: grid;
   gap: 2px;
+}
+
+.member-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 small {

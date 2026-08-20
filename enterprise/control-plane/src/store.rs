@@ -772,6 +772,93 @@ impl ControlPlaneStore {
         Ok(())
     }
 
+    pub async fn transfer_organization_ownership(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+    ) -> Result<()> {
+        if actor_user_id == target_user_id {
+            anyhow::bail!("organization ownership cannot be transferred to the current owner");
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        let actor_is_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM organization_memberships
+               WHERE organization_id = $1 AND user_id = $2
+                 AND status = 'active' AND organization_role = 'owner'
+             )",
+        )
+        .bind(organization_id)
+        .bind(actor_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !actor_is_owner {
+            anyhow::bail!("active organization owner access is required");
+        }
+        let target_is_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM organization_memberships
+               WHERE organization_id = $1 AND user_id = $2 AND status = 'active'
+             )",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !target_is_active {
+            anyhow::bail!("organization ownership can only be transferred to an active member");
+        }
+        sqlx::query(
+            "UPDATE organization_memberships
+             SET organization_role = 'administrator', updated_at = now()
+             WHERE organization_id = $1 AND user_id = $2
+               AND status = 'active' AND organization_role = 'owner'",
+        )
+        .bind(organization_id)
+        .bind(actor_user_id)
+        .execute(&mut *tx)
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE organization_memberships
+             SET organization_role = 'owner', updated_at = now()
+             WHERE organization_id = $1 AND user_id = $2 AND status = 'active'",
+        )
+        .bind(organization_id)
+        .bind(target_user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            anyhow::bail!("organization ownership transfer was not applied");
+        }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &[
+                "organizations".into(),
+                organization_id.to_string(),
+                "owners".into(),
+                target_user_id.to_string(),
+            ],
+            "organization.owner.transfer",
+            serde_json::json!({
+                "previousOwnerId": actor_user_id,
+                "newOwnerId": target_user_id,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn revoke_access_ticket(
         &self,
         organization_id: Uuid,
@@ -930,6 +1017,19 @@ impl ControlPlaneStore {
             anyhow::bail!("organization administrator access is required");
         }
         Ok(())
+    }
+
+    pub async fn organization_role(&self, user_id: Uuid, organization_id: Uuid) -> Result<String> {
+        sqlx::query_scalar(
+            "SELECT organization_role
+             FROM organization_memberships
+             WHERE organization_id = $1 AND user_id = $2 AND status = 'active'",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("active organization membership is required")
     }
 
     pub async fn require_project_assignment(
