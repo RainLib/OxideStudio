@@ -64,6 +64,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/managed-projects", get(managed_projects))
         .route("/v1/access-sessions", post(create_access_session))
         .route(
+            "/v1/gateway-enrollments/activate",
+            post(activate_gateway_enrollment),
+        )
+        .route(
             "/v1/admin/organizations/{organization_id}/overview",
             get(admin_overview),
         )
@@ -82,10 +86,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/admin/organizations/{organization_id}/gateways",
             post(register_gateway),
-        )
-        .route(
-            "/v1/admin/organizations/{organization_id}/gateways/{gateway_id}/activate",
-            post(activate_gateway),
         )
         .route(
             "/v1/admin/organizations/{organization_id}/data-sources",
@@ -291,6 +291,17 @@ struct CreateManagedProjectRequest {
 struct RegisterGatewayRequest {
     display_name: String,
     direct_endpoint: String,
+    certificate_fingerprint: String,
+    enrollment_public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivateGatewayEnrollmentRequest {
+    gateway_id: Uuid,
+    direct_endpoint: String,
+    certificate_fingerprint: String,
+    enrollment_signature: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,17 +395,33 @@ async fn register_gateway(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let display_name = validate_display_name(&input.display_name)?;
     let endpoint = validated_gateway_endpoint(&input.direct_endpoint)?;
+    let certificate_fingerprint =
+        normalize_certificate_fingerprint(&input.certificate_fingerprint)?;
+    let enrollment_public_key = normalize_enrollment_public_key(&input.enrollment_public_key)?;
     let identity = state.verifier.authenticate(&headers).await?;
     let user = state.store.sync_identity(&identity).await?;
     require_admin(&state, user.id, organization_id).await?;
-    let gateway_id = state
+    let registration = state
         .store
-        .register_gateway(organization_id, user.id, &display_name, &endpoint)
+        .register_gateway(
+            organization_id,
+            user.id,
+            &display_name,
+            &endpoint,
+            &certificate_fingerprint,
+            &enrollment_public_key,
+        )
         .await?;
     Ok(Json(serde_json::json!({
-        "id": gateway_id,
+        "id": registration.id,
         "displayName": display_name,
+        "directEndpoint": endpoint,
         "status": "pending",
+        "enrollment": {
+            "token": registration.enrollment_token,
+            "expiresAt": registration.enrollment_expires_at,
+            "certificateFingerprint": certificate_fingerprint,
+        },
     })))
 }
 
@@ -439,22 +466,88 @@ async fn register_data_source(
     })))
 }
 
-async fn activate_gateway(
+async fn activate_gateway_enrollment(
     State(state): State<AppState>,
-    Path((organization_id, gateway_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
+    Json(input): Json<ActivateGatewayEnrollmentRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = state.verifier.authenticate(&headers).await?;
-    let user = state.store.sync_identity(&identity).await?;
-    require_admin(&state, user.id, organization_id).await?;
+    let endpoint = validated_gateway_endpoint(&input.direct_endpoint)?;
+    let certificate_fingerprint =
+        normalize_certificate_fingerprint(&input.certificate_fingerprint)?;
+    let enrollment_signature = normalize_enrollment_signature(&input.enrollment_signature)?;
+    let enrollment_token = gateway_enrollment_token(&headers)?;
     state
         .store
-        .activate_gateway(organization_id, user.id, gateway_id)
+        .activate_gateway_enrollment(
+            input.gateway_id,
+            &endpoint,
+            &certificate_fingerprint,
+            enrollment_token,
+            &enrollment_signature,
+        )
         .await?;
     Ok(Json(serde_json::json!({
-        "id": gateway_id,
+        "id": input.gateway_id,
         "status": "active",
     })))
+}
+
+fn gateway_enrollment_token(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
+    let token = headers
+        .get("x-oxide-gateway-enrollment")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty());
+    if token.is_some_and(|value| value.len() < 32 || value.len() > 256) {
+        return Err(ApiError::forbidden(
+            "a valid Gateway enrollment token is required",
+        ));
+    }
+    Ok(token)
+}
+
+fn normalize_certificate_fingerprint(value: &str) -> Result<String, ApiError> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "certificateFingerprint must be a SHA-256 hexadecimal fingerprint",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_enrollment_public_key(value: &str) -> Result<String, ApiError> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use ed25519_dalek::VerifyingKey;
+    let value = value.trim();
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|_| ApiError::bad_request("enrollmentPublicKey must be base64-encoded"))?;
+    if decoded.len() != 32 {
+        return Err(ApiError::bad_request(
+            "enrollmentPublicKey must encode a 32-byte Ed25519 public key",
+        ));
+    }
+    let decoded: [u8; 32] = decoded.try_into().map_err(|_| {
+        ApiError::bad_request("enrollmentPublicKey must be valid Ed25519 key material")
+    })?;
+    VerifyingKey::from_bytes(&decoded).map_err(|_| {
+        ApiError::bad_request("enrollmentPublicKey must be a valid Ed25519 public key")
+    })?;
+    Ok(STANDARD.encode(decoded))
+}
+
+fn normalize_enrollment_signature(value: &str) -> Result<String, ApiError> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let value = value.trim();
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|_| ApiError::forbidden("Gateway enrollment signature is invalid"))?;
+    if decoded.len() != 64 {
+        return Err(ApiError::forbidden(
+            "Gateway enrollment signature is invalid",
+        ));
+    }
+    Ok(STANDARD.encode(decoded))
 }
 
 async fn require_admin(
@@ -606,6 +699,7 @@ fn validate_principal_kind(value: &str) -> Result<(), ApiError> {
     }
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -722,5 +816,38 @@ mod tests {
     fn access_sessions_accept_desktop_read_only_requests() {
         let input = access_session_request(AccessAction::QueryRead, "desktop");
         assert!(validate_access_session_request(&input).is_ok());
+    }
+
+    #[test]
+    fn enrollment_requires_a_sha256_certificate_fingerprint() {
+        assert_eq!(
+            normalize_certificate_fingerprint(&"AB".repeat(32)).unwrap(),
+            "ab".repeat(32)
+        );
+        assert!(normalize_certificate_fingerprint("abc").is_err());
+        assert!(normalize_certificate_fingerprint(&"x".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn enrollment_token_is_only_accepted_from_its_dedicated_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(gateway_enrollment_token(&headers).unwrap(), None);
+        headers.insert(
+            "x-oxide-gateway-enrollment",
+            "a_very_long_enrollment_token_value_123".parse().unwrap(),
+        );
+        assert!(gateway_enrollment_token(&headers).unwrap().is_some());
+    }
+
+    #[test]
+    fn enrollment_identity_key_has_a_fixed_ed25519_size() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        assert!(normalize_enrollment_public_key(
+            &STANDARD.encode(signing_key.verifying_key().as_bytes())
+        )
+        .is_ok());
+        assert!(normalize_enrollment_public_key(&STANDARD.encode([7; 31])).is_err());
     }
 }

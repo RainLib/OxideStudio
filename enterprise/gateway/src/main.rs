@@ -1,4 +1,5 @@
 mod config;
+mod enrollment;
 mod secret;
 mod service;
 
@@ -24,6 +25,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
     let config = GatewayConfig::from_env()?;
+    enrollment::activate(&config).await?;
     let secret_provider = configured_provider(config.allow_environment_secrets)?;
     let address = config.bind;
     let tls = ServerTlsConfig::new()
@@ -38,7 +40,7 @@ async fn main() -> Result<()> {
         config.sources,
         secret_provider,
     );
-    tracing::info!(gateway_id = %config.id, %address, "Oxide enterprise gateway listening");
+    tracing::info!(gateway_id = %config.id, %address, "Oxide enterprise gateway enrollment accepted; listening");
     Server::builder()
         .tls_config(tls)?
         .add_service(DataPlaneServer::new(service))

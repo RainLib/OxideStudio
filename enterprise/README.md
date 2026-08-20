@@ -40,7 +40,38 @@ docker compose --env-file enterprise/deploy/.env \
 ```
 
 The Gateway requires an Ed25519 verification key and mutual-TLS certificate,
-private key, and client CA. The environment secret provider is disabled unless
+private key, and client CA. Registration is a proof step, not a status switch:
+the administrator registers the exact SHA-256 DER fingerprint of the Gateway
+leaf certificate, receives a 15-minute enrollment token exactly once, and
+writes it to a private mounted file. Before opening the data-plane listener,
+the Gateway sends that token, its public endpoint, and its computed certificate
+fingerprint back to the control plane over HTTPS. The control plane stores only
+the token digest and consumes it on success.
+
+Generate the per-Gateway enrollment signing identity before registration, then
+paste only `public_key_base64` into the administration UI. Store
+`private_key_base64` in the private signing-key file shown below:
+
+```bash
+cargo run --manifest-path enterprise/Cargo.toml -p oxide-enterprise-gateway --bin enrollment-keygen
+```
+
+```text
+OXIDE_GATEWAY_ID=<registered gateway UUID>
+OXIDE_GATEWAY_PUBLIC_ENDPOINT=https://gateway.example.com:8790
+OXIDE_CONTROL_PLANE_URL=https://control-plane.example.com
+OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE=/run/secrets/oxide-gateway-enrollment
+# Optional when the control plane uses a private CA:
+OXIDE_CONTROL_PLANE_CA_CERTIFICATE=/run/secrets/oxide-control-plane-ca.pem
+```
+
+`OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE` must be a private regular file (mode 0600
+on Unix) for the first enrollment and may be removed after a successful
+activation. `OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE` remains required for
+later signed identity checks and must also be private. Do not put either value
+in an environment variable, deployment manifest, shell history, or source
+control. A pending or expired enrollment prevents the Gateway from listening.
+The environment secret provider is disabled unless
 `OXIDE_ALLOW_ENVIRONMENT_SECRETS=true`; it exists only for local integration.
 Production deployments must provide a Vault/cloud/Kubernetes
 `SecretProvider`.

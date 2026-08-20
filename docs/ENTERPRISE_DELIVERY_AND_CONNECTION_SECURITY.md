@@ -32,7 +32,7 @@
 | 缺口 | 当前状态 | 风险 | 下一步 |
 | --- | --- | --- | --- |
 | 设备身份绑定 | ticket 只有客户端提交的 `device_id`；Gateway mTLS 未把客户端证书指纹绑定到 ticket | 被窃取的短期 ticket 在有效期内缺乏设备证明 | 增加设备注册/撤销记录，在 ticket 中写入证书指纹，Gateway 从 TLS peer certificate 计算并比较。 |
-| Gateway 注册与激活证明 | 管理员可将 pending Gateway 标为 active；没有 registration token 或 Gateway proof | 端点/证书配置错误可能被激活 | 加入一次性注册 token、Gateway challenge/proof、证书 serial/fingerprint 校验和 last-seen health gate。 |
+| Gateway 注册与激活证明 | 控制面登记证书 SHA-256 指纹和 Gateway 专用 Ed25519 公钥，签发 15 分钟的一次性 token（仅在创建响应中返回其明文）；Gateway 在开始监听前必须通过 HTTPS 回连，提交端点、指纹、token 的 Ed25519 签名。控制面只保存 token 摘要，成功后立刻销毁摘要并写入 Gateway 系统审计事件；后续重启只需同一私钥的空-token身份签名，并刷新 last-seen。旧的手工 Activate API 已移除，旧 Gateway 会被迁回 pending。 | token 只可用一次，且单独持有 token 或复述证书指纹均不能激活；Gateway 不会在未注册身份下开放数据平面，也可以安全重启。仍需加入持续 health/证书轮换流程。 | 加入 Gateway heartbeat、证书轮换 enrollment 与 last-seen health gate。 |
 | 票据撤销 | 数据库有 `revoked_access_nonces`，但 control plane/Gateway 未使用 | 60 秒 TTL 内无法紧急撤销已签发票据 | 实现按 nonce、设备、用户、gateway 的撤销分发；数据面要有低延迟 deny cache。 |
 | 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |
 | 生产部署保护 | compose 明确为开发配置；没有生产 Helm/secret policy/NetworkPolicy | 运维人员可能把环境变量 secret 或 HTTP compose 用于生产 | 提供生产 deployment 模板、admission checks、secret provider allowlist、egress/ingress NetworkPolicy。 |
@@ -53,7 +53,7 @@
 1. control plane、OIDC issuer 和 Gateway endpoint 必须为 HTTPS，Gateway endpoint 不得含凭据。
 2. 数据库 secret 只能在客户网络 Gateway 的 Vault/Kubernetes provider 内解析；`OXIDE_ALLOW_ENVIRONMENT_SECRETS=true` 仅可用于受控开发环境。
 3. control plane 的数据库 URL 与 ticket signing seed 在生产环境应通过私有挂载文件的 `*_FILE` 变量提供；同名内联环境变量与文件变量同时存在会拒绝启动。
-4. 管理员创建 source 后应先通过 Gateway registration proof 再激活；在该机制完成前，生产变更必须走人工双人复核。
+4. 管理员注册 Gateway 时必须提供实际 TLS 叶证书的 SHA-256 DER 指纹及专用 Ed25519 公钥。返回的一次性 enrollment token 和匹配的 Ed25519 私钥只能写入 Gateway 的私有挂载文件；Gateway 回连签名证明成功后才会变为 active。激活后可移除 token 文件，但必须保留 Ed25519 私钥以完成重启身份证明。管理员没有手工激活入口。
 5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
 6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
 

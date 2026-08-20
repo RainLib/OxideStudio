@@ -12,7 +12,11 @@ import {
   LogOut,
   Users,
 } from "lucide-react";
-import { adminApi, type AdminOverview } from "./api";
+import {
+  adminApi,
+  type AdminOverview,
+  type GatewayRegistration,
+} from "./api";
 import { adminAuth } from "./auth";
 
 const organizationId = adminAuth.organizationId();
@@ -35,6 +39,12 @@ export function App() {
   const [projectName, setProjectName] = useState("");
   const [gatewayName, setGatewayName] = useState("");
   const [gatewayEndpoint, setGatewayEndpoint] = useState("");
+  const [gatewayCertificateFingerprint, setGatewayCertificateFingerprint] =
+    useState("");
+  const [gatewayEnrollmentPublicKey, setGatewayEnrollmentPublicKey] =
+    useState("");
+  const [gatewayEnrollment, setGatewayEnrollment] =
+    useState<GatewayRegistration | null>(null);
   const [sourceProjectId, setSourceProjectId] = useState("");
   const [sourceGatewayId, setSourceGatewayId] = useState("");
   const [sourceName, setSourceName] = useState("");
@@ -133,14 +143,19 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      await adminApi.registerGateway(
+      const registration = await adminApi.registerGateway(
         organizationId,
         gatewayName,
         gatewayEndpoint,
+        gatewayCertificateFingerprint,
+        gatewayEnrollmentPublicKey,
       );
       setGatewayName("");
       setGatewayEndpoint("");
+      setGatewayCertificateFingerprint("");
+      setGatewayEnrollmentPublicKey("");
       setGatewayOpen(false);
+      setGatewayEnrollment(registration);
       await refresh();
     } catch (requestError) {
       setError(
@@ -174,22 +189,6 @@ export function App() {
       });
       setSourceName("");
       setSourceOpen(false);
-      await refresh();
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : String(requestError),
-      );
-      setLoading(false);
-    }
-  };
-
-  const activateGateway = async (gatewayId: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      await adminApi.activateGateway(organizationId, gatewayId);
       await refresh();
     } catch (requestError) {
       setError(
@@ -636,7 +635,10 @@ export function App() {
                 }
               />
               {gatewayOpen && (
-                <form className="inline-form" onSubmit={registerGateway}>
+                <form
+                  className="inline-form gateway-registration-form"
+                  onSubmit={registerGateway}
+                >
                   <label>
                     Display name
                     <input
@@ -658,10 +660,73 @@ export function App() {
                       }
                     />
                   </label>
+                  <label>
+                    TLS certificate SHA-256
+                    <input
+                      required
+                      minLength={64}
+                      maxLength={64}
+                      pattern="[A-Fa-f0-9]{64}"
+                      placeholder="64 hexadecimal characters"
+                      value={gatewayCertificateFingerprint}
+                      onChange={(event) =>
+                        setGatewayCertificateFingerprint(event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    Enrollment public key (Ed25519)
+                    <input
+                      required
+                      minLength={44}
+                      maxLength={44}
+                      placeholder="base64-encoded 32-byte public key"
+                      value={gatewayEnrollmentPublicKey}
+                      onChange={(event) =>
+                        setGatewayEnrollmentPublicKey(event.target.value)
+                      }
+                    />
+                  </label>
                   <button className="primary-button" disabled={loading}>
                     Register Gateway
                   </button>
                 </form>
+              )}
+              {gatewayEnrollment && (
+                <div className="enrollment-instructions" role="status">
+                  <div>
+                    <strong>Save this one-time enrollment token now.</strong>
+                    <p>
+                      The control plane stores only a digest. The Gateway must
+                      present this token with the registered TLS certificate
+                      before it can become active. It expires at{" "}
+                      {new Date(
+                        gatewayEnrollment.enrollment.expiresAt,
+                      ).toLocaleString()}.
+                    </p>
+                  </div>
+                  <label>
+                    Enrollment token
+                    <textarea
+                      readOnly
+                      value={gatewayEnrollment.enrollment.token}
+                      aria-label="One-time Gateway enrollment token"
+                    />
+                  </label>
+                  <code className="enrollment-config">
+                    OXIDE_GATEWAY_ID={gatewayEnrollment.id}{"\n"}
+                    OXIDE_GATEWAY_PUBLIC_ENDPOINT={gatewayEnrollment.directEndpoint}{"\n"}
+                    OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE=/run/secrets/oxide-gateway-enrollment
+                    {"\n"}
+                    OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE=/run/secrets/oxide-gateway-enrollment-key
+                  </code>
+                  <p className="enrollment-note">
+                    Write both the token and its matching Ed25519 private key
+                    to private files (mode 0600 on Unix), then start the
+                    Gateway. Do not add either to source control, shell
+                    history, or a shared configuration file.
+                  </p>
+                </div>
               )}
               <div className="gateway-list">
                 {overview?.gateways.map((gateway) => (
@@ -674,15 +739,6 @@ export function App() {
                     <span className={`status ${gateway.status}`}>
                       {gateway.status}
                     </span>
-                    {gateway.status !== "active" && (
-                      <button
-                        className="quiet-button"
-                        disabled={loading}
-                        onClick={() => void activateGateway(gateway.id)}
-                      >
-                        Activate
-                      </button>
-                    )}
                   </div>
                 ))}
               </div>

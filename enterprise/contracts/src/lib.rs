@@ -4,12 +4,14 @@
 //! belong to a gateway-local [`SecretProvider`](../../gateway/src/secret.rs)
 //! implementation and must never be represented by these wire contracts.
 
+mod enrollment;
 mod model;
 #[cfg(feature = "policy")]
 mod policy;
 #[cfg(feature = "ticket")]
 mod ticket;
 
+pub use enrollment::*;
 pub use model::*;
 #[cfg(feature = "policy")]
 pub use policy::*;

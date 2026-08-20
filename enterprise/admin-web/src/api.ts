@@ -41,6 +41,18 @@ export interface AdminAuditEvent {
   metadata: Record<string, unknown>;
 }
 
+export interface GatewayRegistration {
+  id: string;
+  displayName: string;
+  directEndpoint: string;
+  status: "pending";
+  enrollment: {
+    token: string;
+    expiresAt: string;
+    certificateFingerprint: string;
+  };
+}
+
 const baseUrl = (
   import.meta.env.VITE_OXIDE_CONTROL_PLANE_URL || ""
 ).replace(/\/$/, "");
@@ -102,18 +114,20 @@ export const adminApi = {
     organizationId: string,
     displayName: string,
     directEndpoint: string,
+    certificateFingerprint: string,
+    enrollmentPublicKey: string,
   ) =>
-    request(
+    request<GatewayRegistration>(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways`,
       {
         method: "POST",
-        body: JSON.stringify({ displayName, directEndpoint }),
+        body: JSON.stringify({
+          displayName,
+          directEndpoint,
+          certificateFingerprint,
+          enrollmentPublicKey,
+        }),
       },
-    ),
-  activateGateway: (organizationId: string, gatewayId: string) =>
-    request(
-      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/activate`,
-      { method: "POST", body: "{}" },
     ),
   registerDataSource: (
     organizationId: string,

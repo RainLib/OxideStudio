@@ -50,8 +50,10 @@ services:
     ports:
       - "1430:8080"
 
-  # The development Gateway demonstrates process isolation only. Production
-  # deployments must use Vault/cloud SecretProvider and mounted mTLS material.
+  # The Gateway profile is intentionally not a one-command local data-plane
+  # demo: it now requires a real HTTPS control plane and one-time enrollment
+  # proof. Production deployments must use Vault/cloud SecretProvider, mounted
+  # mTLS material, and private enrollment token/signing-key files.
   gateway:
     profiles: ["gateway"]
     build:

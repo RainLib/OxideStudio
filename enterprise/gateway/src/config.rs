@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{hash_map::Entry, HashMap},
     env, fs,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
+use url::Url;
 use uuid::Uuid;
 
 const MAX_SOURCES_FILE_BYTES: u64 = 1_048_576;
@@ -29,6 +31,16 @@ pub struct DataSourceConfig {
 pub struct GatewayConfig {
     pub id: Uuid,
     pub bind: SocketAddr,
+    /// Public mTLS endpoint registered with the control plane. It is distinct
+    /// from the local bind address, which is often private or loopback.
+    pub public_endpoint: String,
+    pub control_plane_url: String,
+    /// Loaded from a private file and never logged or persisted by the gateway.
+    /// Required only until the first successful enrollment. An active Gateway
+    /// proves identity with its enrolled signing key on later restarts.
+    pub enrollment_token: Option<String>,
+    pub enrollment_signing_key: SigningKey,
+    pub control_plane_ca_certificate: Option<Vec<u8>>,
     pub control_plane_verifying_key: VerifyingKey,
     pub sources: HashMap<Uuid, DataSourceConfig>,
     pub allow_environment_secrets: bool,
@@ -56,18 +68,65 @@ impl GatewayConfig {
             "OXIDE_GATEWAY_SOURCES_FILE",
             MAX_SOURCES_FILE_BYTES,
         )?)?;
+        let tls_certificate = read_required_file("OXIDE_GATEWAY_TLS_CERTIFICATE")?;
+        let public_endpoint =
+            validated_https_endpoint(&required("OXIDE_GATEWAY_PUBLIC_ENDPOINT")?)?;
+        let control_plane_url = validated_https_endpoint(&required("OXIDE_CONTROL_PLANE_URL")?)?;
+        let enrollment_token = env::var("OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|path| {
+                read_private_text_file(
+                    &PathBuf::from(path),
+                    "OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE",
+                    4_096,
+                )
+            })
+            .transpose()?;
+        if enrollment_token
+            .as_ref()
+            .is_some_and(|token| token.len() < 32 || token.len() > 256)
+        {
+            anyhow::bail!(
+                "OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE does not contain a valid enrollment token"
+            );
+        }
+        let enrollment_signing_key = STANDARD
+            .decode(read_private_text_file(
+                &PathBuf::from(required("OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE")?),
+                "OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE",
+                4_096,
+            )?)
+            .context("OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE is not valid base64")?;
+        let enrollment_signing_key: [u8; 32] = enrollment_signing_key.try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE must decode to a 32-byte Ed25519 private key"
+            )
+        })?;
+        let control_plane_ca_certificate = env::var("OXIDE_CONTROL_PLANE_CA_CERTIFICATE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|path| {
+                read_required_file_at(&PathBuf::from(path), "OXIDE_CONTROL_PLANE_CA_CERTIFICATE")
+            })
+            .transpose()?;
         Ok(Self {
             id,
             bind: env::var("OXIDE_GATEWAY_BIND")
                 .unwrap_or_else(|_| "127.0.0.1:8790".into())
                 .parse()
                 .context("OXIDE_GATEWAY_BIND is invalid")?,
+            public_endpoint,
+            control_plane_url,
+            enrollment_token,
+            enrollment_signing_key: SigningKey::from_bytes(&enrollment_signing_key),
+            control_plane_ca_certificate,
             control_plane_verifying_key: VerifyingKey::from_bytes(&verifying_key)
                 .context("control-plane verifying key is invalid")?,
             sources,
             allow_environment_secrets: env::var("OXIDE_ALLOW_ENVIRONMENT_SECRETS")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
-            tls_certificate: read_required_file("OXIDE_GATEWAY_TLS_CERTIFICATE")?,
+            tls_certificate,
             tls_private_key: read_private_file(
                 &PathBuf::from(required("OXIDE_GATEWAY_TLS_PRIVATE_KEY")?),
                 "OXIDE_GATEWAY_TLS_PRIVATE_KEY",
@@ -78,9 +137,33 @@ impl GatewayConfig {
     }
 }
 
+/// SHA-256 fingerprint of the leaf X.509 certificate in DER form. Parsing the
+/// PEM before hashing avoids line-ending and wrapping differences in deployment
+/// manifests changing the registered identity.
+pub fn certificate_fingerprint(certificate: &[u8]) -> Result<String> {
+    let der = if certificate.starts_with(b"-----BEGIN") {
+        let mut reader = std::io::BufReader::new(certificate);
+        let certificates = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Gateway TLS certificate PEM is invalid")?;
+        if certificates.len() != 1 {
+            anyhow::bail!("Gateway TLS certificate must contain exactly one leaf certificate");
+        }
+        certificates[0].as_ref().to_vec()
+    } else {
+        certificate.to_vec()
+    };
+    let digest = Sha256::digest(der);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn read_required_file(name: &str) -> Result<Vec<u8>> {
     let path = PathBuf::from(required(name)?);
-    read_file(&path, name, None)
+    read_required_file_at(&path, name)
+}
+
+fn read_required_file_at(path: &Path, name: &str) -> Result<Vec<u8>> {
+    read_file(path, name, None)
 }
 
 fn read_private_file(path: &Path, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
@@ -115,6 +198,30 @@ fn read_file(path: &Path, name: &str, max_bytes: Option<u64>) -> Result<Vec<u8>>
         );
     }
     fs::read(path).with_context(|| format!("failed to read {} from {name}", path.display()))
+}
+
+fn read_private_text_file(path: &Path, name: &str, max_bytes: u64) -> Result<String> {
+    let value = String::from_utf8(read_private_file(path, name, max_bytes)?)
+        .with_context(|| format!("{name} must contain UTF-8 text"))?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        anyhow::bail!("{name} must not be empty");
+    }
+    Ok(value)
+}
+
+fn validated_https_endpoint(value: &str) -> Result<String> {
+    let endpoint = Url::parse(value.trim()).context("Gateway endpoint is invalid")?;
+    if endpoint.scheme() != "https"
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.host_str().is_none()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        anyhow::bail!("Gateway endpoint must be a credential-free HTTPS URL");
+    }
+    Ok(endpoint.as_str().trim_end_matches('/').to_string())
 }
 
 fn parse_sources(payload: &[u8]) -> Result<HashMap<Uuid, DataSourceConfig>> {
@@ -213,5 +320,23 @@ mod tests {
             Uuid::new_v4()
         );
         assert!(parse_sources(payload.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn enrollment_endpoint_rejects_non_https_or_credentialed_urls() {
+        assert!(validated_https_endpoint("http://gateway.example.test").is_err());
+        assert!(validated_https_endpoint("https://user:secret@gateway.example.test").is_err());
+        assert_eq!(
+            validated_https_endpoint("https://gateway.example.test:8790/").unwrap(),
+            "https://gateway.example.test:8790"
+        );
+    }
+
+    #[test]
+    fn certificate_fingerprint_hashes_der_bytes() {
+        assert_eq!(
+            certificate_fingerprint(b"certificate").unwrap(),
+            "03d66dd08835c1ca3f128cceacd1f31ac94163096b20f445ae84285bc0832d72"
+        );
     }
 }

@@ -1,13 +1,31 @@
 use crate::auth::AuthenticatedIdentity;
 use anyhow::{Context, Result};
-use oxide_enterprise_contracts::{
-    AccessAction, AccessGrant, AuthorizationRequest, GrantEffect, ManagedDataSourceDescriptor,
-    ManagedProject, MembershipStatus, OrganizationMembership, OrganizationSummary, PolicyEvaluator,
-    User,
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
 };
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use oxide_enterprise_contracts::{
+    gateway_enrollment_signing_message, AccessAction, AccessGrant, AuthorizationRequest,
+    GrantEffect, ManagedDataSourceDescriptor, ManagedProject, MembershipStatus,
+    OrganizationMembership, OrganizationSummary, PolicyEvaluator, User,
+};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
+
+const GATEWAY_ENROLLMENT_TTL_MINUTES: i64 = 15;
+
+/// The plaintext enrollment token is deliberately returned only at creation
+/// time. The database receives its SHA-256 digest, never the token itself.
+#[derive(Debug)]
+pub struct GatewayRegistration {
+    pub id: Uuid,
+    pub enrollment_token: String,
+    pub enrollment_expires_at: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Clone)]
 pub struct ControlPlaneStore {
@@ -98,18 +116,26 @@ impl ControlPlaneStore {
         actor_user_id: Uuid,
         display_name: &str,
         direct_endpoint: &str,
-    ) -> Result<Uuid> {
+        certificate_fingerprint: &str,
+        enrollment_public_key: &str,
+    ) -> Result<GatewayRegistration> {
         let gateway_id = Uuid::new_v4();
+        let enrollment_token = generate_enrollment_token();
+        let enrollment_token_hash = digest_enrollment_token(&enrollment_token);
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO gateways
-             (id, organization_id, display_name, direct_endpoint, status)
-             VALUES ($1, $2, $3, $4, 'pending')",
+             (id, organization_id, display_name, direct_endpoint, certificate_fingerprint,
+              enrollment_public_key, enrollment_token_hash, enrollment_expires_at, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '15 minutes', 'pending')",
         )
         .bind(gateway_id)
         .bind(organization_id)
         .bind(display_name)
         .bind(direct_endpoint)
+        .bind(certificate_fingerprint)
+        .bind(enrollment_public_key)
+        .bind(&enrollment_token_hash)
         .execute(&mut *tx)
         .await?;
         write_management_audit(
@@ -120,46 +146,105 @@ impl ControlPlaneStore {
             None,
             &["gateways".into(), gateway_id.to_string()],
             "gateway.register",
-            serde_json::json!({ "displayName": display_name, "status": "pending" }),
+            serde_json::json!({
+                "displayName": display_name,
+                "status": "pending",
+                "enrollmentExpiresInMinutes": GATEWAY_ENROLLMENT_TTL_MINUTES,
+            }),
         )
         .await?;
-        tx.commit().await?;
-        Ok(gateway_id)
-    }
-
-    pub async fn activate_gateway(
-        &self,
-        organization_id: Uuid,
-        actor_user_id: Uuid,
-        gateway_id: Uuid,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE gateways
-             SET status = 'active', last_seen_at = now()
-             WHERE id = $1 AND organization_id = $2",
+        let enrollment_expires_at = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT enrollment_expires_at FROM gateways WHERE id = $1",
         )
         .bind(gateway_id)
-        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(GatewayRegistration {
+            id: gateway_id,
+            enrollment_token,
+            enrollment_expires_at,
+        })
+    }
+
+    pub async fn activate_gateway_enrollment(
+        &self,
+        gateway_id: Uuid,
+        direct_endpoint: &str,
+        certificate_fingerprint: &str,
+        enrollment_token: Option<&str>,
+        enrollment_signature: &str,
+    ) -> Result<Uuid> {
+        let mut tx = self.pool.begin().await?;
+        let gateway = sqlx::query(
+            "SELECT organization_id, direct_endpoint, certificate_fingerprint, enrollment_public_key,
+                    enrollment_token_hash, enrollment_expires_at, status
+             FROM gateways
+             WHERE id = $1
+             FOR UPDATE",
+        )
+        .bind(gateway_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Gateway enrollment is not available")?;
+        let organization_id: Uuid = gateway.try_get("organization_id")?;
+        let stored_endpoint: String = gateway.try_get("direct_endpoint")?;
+        let stored_fingerprint: Option<String> = gateway.try_get("certificate_fingerprint")?;
+        let enrollment_public_key: Option<String> = gateway.try_get("enrollment_public_key")?;
+        let stored_token_hash: Option<String> = gateway.try_get("enrollment_token_hash")?;
+        let expires_at: Option<chrono::DateTime<chrono::Utc>> =
+            gateway.try_get("enrollment_expires_at")?;
+        let status: String = gateway.try_get("status")?;
+        let enrollment_token = enrollment_token.unwrap_or_default();
+        let identity_proof_valid = verify_enrollment_signature(
+            enrollment_public_key.as_deref(),
+            enrollment_signature,
+            gateway_id,
+            direct_endpoint,
+            certificate_fingerprint,
+            enrollment_token,
+        );
+        if !matches!(status.as_str(), "pending" | "active")
+            || stored_endpoint != direct_endpoint
+            || stored_fingerprint.as_deref() != Some(certificate_fingerprint)
+            || !identity_proof_valid
+        {
+            anyhow::bail!("Gateway enrollment proof was rejected");
+        }
+        if status == "active" {
+            sqlx::query("UPDATE gateways SET last_seen_at = now() WHERE id = $1")
+                .bind(gateway_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(organization_id);
+        }
+        if expires_at.is_none_or(|value| value <= chrono::Utc::now())
+            || !stored_token_hash.is_some_and(|expected| {
+                constant_time_equals(
+                    expected.as_bytes(),
+                    digest_enrollment_token(enrollment_token).as_bytes(),
+                )
+            })
+        {
+            anyhow::bail!("Gateway enrollment token was rejected");
+        }
+        let updated = sqlx::query(
+            "UPDATE gateways
+             SET status = 'active', last_seen_at = now(), activated_at = now(),
+                 enrollment_token_hash = NULL, enrollment_expires_at = NULL
+             WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(gateway_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
         if updated != 1 {
-            anyhow::bail!("Gateway is not available");
+            anyhow::bail!("Gateway enrollment is no longer available");
         }
-        write_management_audit(
-            &mut tx,
-            organization_id,
-            actor_user_id,
-            None,
-            None,
-            &["gateways".into(), gateway_id.to_string()],
-            "gateway.activate",
-            serde_json::json!({ "status": "active" }),
-        )
-        .await?;
+        write_gateway_enrollment_audit(&mut tx, organization_id, gateway_id).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(organization_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1001,6 +1086,130 @@ impl ControlPlaneStore {
     }
 }
 
+fn generate_enrollment_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn digest_enrollment_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn verify_enrollment_signature(
+    public_key: Option<&str>,
+    signature: &str,
+    gateway_id: Uuid,
+    direct_endpoint: &str,
+    certificate_fingerprint: &str,
+    enrollment_token: &str,
+) -> bool {
+    let Some(public_key) = public_key else {
+        return false;
+    };
+    let Ok(public_key) = STANDARD.decode(public_key) else {
+        return false;
+    };
+    let Ok(public_key) = <[u8; 32]>::try_from(public_key.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key) else {
+        return false;
+    };
+    let Ok(signature) = STANDARD.decode(signature) else {
+        return false;
+    };
+    let Ok(signature) = Signature::try_from(signature.as_slice()) else {
+        return false;
+    };
+    verifying_key
+        .verify(
+            &gateway_enrollment_signing_message(
+                gateway_id,
+                direct_endpoint,
+                certificate_fingerprint,
+                enrollment_token,
+            ),
+            &signature,
+        )
+        .is_ok()
+}
+
+#[cfg(test)]
+mod enrollment_tests {
+    use super::*;
+
+    #[test]
+    fn enrollment_tokens_are_opaque_and_only_the_digest_is_stable() {
+        let token = generate_enrollment_token();
+        assert!(token.len() >= 43);
+        assert_eq!(digest_enrollment_token(&token).len(), 64);
+        assert_ne!(digest_enrollment_token(&token), token);
+        assert!(constant_time_equals(
+            digest_enrollment_token(&token).as_bytes(),
+            digest_enrollment_token(&token).as_bytes()
+        ));
+        assert!(!constant_time_equals(b"expected", b"different"));
+    }
+
+    #[test]
+    fn enrollment_requires_a_signature_from_the_registered_key() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let gateway_id = Uuid::new_v4();
+        let endpoint = "https://gateway.example.test";
+        let fingerprint = "a".repeat(64);
+        let token = "enrollment-token";
+        let signature = signing_key.sign(&gateway_enrollment_signing_message(
+            gateway_id,
+            endpoint,
+            &fingerprint,
+            token,
+        ));
+        assert!(verify_enrollment_signature(
+            Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
+            &STANDARD.encode(signature.to_bytes()),
+            gateway_id,
+            endpoint,
+            &fingerprint,
+            token,
+        ));
+        assert!(!verify_enrollment_signature(
+            Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
+            &STANDARD.encode(signature.to_bytes()),
+            gateway_id,
+            "https://other.example.test",
+            &fingerprint,
+            token,
+        ));
+        let restart_signature = signing_key.sign(&gateway_enrollment_signing_message(
+            gateway_id,
+            endpoint,
+            &fingerprint,
+            "",
+        ));
+        assert!(verify_enrollment_signature(
+            Some(&STANDARD.encode(signing_key.verifying_key().as_bytes())),
+            &STANDARD.encode(restart_signature.to_bytes()),
+            gateway_id,
+            endpoint,
+            &fingerprint,
+            "",
+        ));
+    }
+}
+
 async fn write_management_audit(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
@@ -1026,6 +1235,26 @@ async fn write_management_audit(
     .bind(action)
     .bind(Uuid::new_v4())
     .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn write_gateway_enrollment_audit(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    gateway_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO audit_events
+         (id, organization_id, resource_path, action, decision, reason_code, request_id, source, metadata)
+         VALUES ($1, $2, $3, 'gateway.enrollment.activate', 'allow', 'GATEWAY_PROOF_ACCEPTED', $4, 'gateway', $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(organization_id)
+    .bind(serde_json::json!(["gateways", gateway_id.to_string()]))
+    .bind(Uuid::new_v4())
+    .bind(serde_json::json!({ "status": "active", "proof": "certificate-and-one-time-token" }))
     .execute(&mut **tx)
     .await?;
     Ok(())
