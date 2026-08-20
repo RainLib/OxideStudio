@@ -5,7 +5,7 @@ use oxide_enterprise_contracts::{
     ManagedProject, MembershipStatus, OrganizationMembership, OrganizationSummary, PolicyEvaluator,
     User,
 };
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
@@ -45,6 +45,17 @@ impl ControlPlaneStore {
         .bind(owner_user_id)
         .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            owner_user_id,
+            None,
+            None,
+            &["organizations".into(), organization_id.to_string()],
+            "organization.create",
+            serde_json::json!({ "slug": slug }),
+        )
+        .await?;
         tx.commit().await?;
         Ok(organization_id)
     }
@@ -52,9 +63,11 @@ impl ControlPlaneStore {
     pub async fn create_managed_project(
         &self,
         organization_id: Uuid,
+        actor_user_id: Uuid,
         display_name: &str,
     ) -> Result<Uuid> {
         let project_id = Uuid::new_v4();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO managed_projects (id, organization_id, display_name)
              VALUES ($1, $2, $3)",
@@ -62,18 +75,32 @@ impl ControlPlaneStore {
         .bind(project_id)
         .bind(organization_id)
         .bind(display_name)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            Some(project_id),
+            None,
+            &["managed-projects".into(), project_id.to_string()],
+            "managed-project.create",
+            serde_json::json!({ "displayName": display_name }),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(project_id)
     }
 
     pub async fn register_gateway(
         &self,
         organization_id: Uuid,
+        actor_user_id: Uuid,
         display_name: &str,
         direct_endpoint: &str,
     ) -> Result<Uuid> {
         let gateway_id = Uuid::new_v4();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO gateways
              (id, organization_id, display_name, direct_endpoint, status)
@@ -83,12 +110,30 @@ impl ControlPlaneStore {
         .bind(organization_id)
         .bind(display_name)
         .bind(direct_endpoint)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["gateways".into(), gateway_id.to_string()],
+            "gateway.register",
+            serde_json::json!({ "displayName": display_name, "status": "pending" }),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(gateway_id)
     }
 
-    pub async fn activate_gateway(&self, organization_id: Uuid, gateway_id: Uuid) -> Result<()> {
+    pub async fn activate_gateway(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        gateway_id: Uuid,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         let updated = sqlx::query(
             "UPDATE gateways
              SET status = 'active', last_seen_at = now()
@@ -96,12 +141,24 @@ impl ControlPlaneStore {
         )
         .bind(gateway_id)
         .bind(organization_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         if updated != 1 {
             anyhow::bail!("Gateway is not available");
         }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["gateways".into(), gateway_id.to_string()],
+            "gateway.activate",
+            serde_json::json!({ "status": "active" }),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -109,12 +166,14 @@ impl ControlPlaneStore {
     pub async fn register_data_source(
         &self,
         organization_id: Uuid,
+        actor_user_id: Uuid,
         project_id: Uuid,
         gateway_id: Uuid,
         driver: &str,
         display_name: &str,
         capabilities: &BTreeSet<AccessAction>,
     ) -> Result<Uuid> {
+        let mut tx = self.pool.begin().await?;
         let valid_scope: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                SELECT 1
@@ -126,7 +185,7 @@ impl ControlPlaneStore {
         .bind(project_id)
         .bind(organization_id)
         .bind(gateway_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
         if !valid_scope {
             anyhow::bail!("managed project and Gateway must belong to this organization");
@@ -148,8 +207,20 @@ impl ControlPlaneStore {
         .bind(driver)
         .bind(display_name)
         .bind(serde_json::to_value(capabilities)?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            Some(project_id),
+            Some(data_source_id),
+            &["data-sources".into(), data_source_id.to_string()],
+            "data-source.register",
+            serde_json::json!({ "driver": driver, "displayName": display_name }),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(data_source_id)
     }
 
@@ -455,6 +526,7 @@ impl ControlPlaneStore {
         role: &str,
     ) -> Result<Uuid> {
         let invitation_id = Uuid::new_v4();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO organization_invitations
              (id, organization_id, invited_email, organization_role, invited_by, expires_at)
@@ -469,18 +541,32 @@ impl ControlPlaneStore {
         .bind(email)
         .bind(role)
         .bind(invited_by)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            invited_by,
+            None,
+            None,
+            &["invitations".into(), invitation_id.to_string()],
+            "member.invite",
+            serde_json::json!({ "role": role }),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(invitation_id)
     }
 
     pub async fn assign_project(
         &self,
         organization_id: Uuid,
+        actor_user_id: Uuid,
         project_id: Uuid,
         principal_kind: &str,
         principal_id: Uuid,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         let project_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                SELECT 1 FROM managed_projects
@@ -489,7 +575,7 @@ impl ControlPlaneStore {
         )
         .bind(project_id)
         .bind(organization_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
         if !project_exists {
             anyhow::bail!("managed project is not available");
@@ -503,8 +589,24 @@ impl ControlPlaneStore {
         .bind(project_id)
         .bind(principal_kind)
         .bind(principal_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            Some(project_id),
+            None,
+            &[
+                "project-assignments".into(),
+                principal_kind.into(),
+                principal_id.to_string(),
+            ],
+            "project.assignment.create",
+            serde_json::json!({}),
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -512,6 +614,7 @@ impl ControlPlaneStore {
     pub async fn create_access_grant(
         &self,
         organization_id: Uuid,
+        actor_user_id: Uuid,
         project_id: Uuid,
         principal_kind: &str,
         principal_id: Uuid,
@@ -568,7 +671,7 @@ impl ControlPlaneStore {
         .bind(principal_id)
         .bind(data_source_id)
         .bind(serde_json::to_value(resource_path)?)
-        .bind(serde_json::to_value(actions)?)
+        .bind(serde_json::to_value(&actions)?)
         .bind(match effect {
             GrantEffect::Permit => "permit",
             GrantEffect::Forbid => "forbid",
@@ -601,6 +704,22 @@ impl ControlPlaneStore {
             .bind(organization_id)
             .execute(&mut *tx)
             .await?;
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            Some(project_id),
+            data_source_id,
+            &["access-grants".into(), id.to_string()],
+            "access-grant.create",
+            serde_json::json!({
+                "principalKind": principal_kind,
+                "principalId": principal_id,
+                "effect": match effect { GrantEffect::Permit => "permit", GrantEffect::Forbid => "forbid" },
+                "actions": actions,
+            }),
+        )
+        .await?;
         tx.commit().await?;
         Ok(id)
     }
@@ -846,6 +965,36 @@ impl ControlPlaneStore {
         .await?;
         Ok(())
     }
+}
+
+async fn write_management_audit(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+    project_id: Option<Uuid>,
+    data_source_id: Option<Uuid>,
+    resource_path: &[String],
+    action: &str,
+    metadata: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO audit_events
+         (id, organization_id, user_id, project_id, data_source_id,
+          resource_path, action, decision, reason_code, request_id, source, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'allow', 'ADMIN_MUTATION', $8, 'control-plane.admin', $9)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(project_id)
+    .bind(data_source_id)
+    .bind(serde_json::to_value(resource_path)?)
+    .bind(action)
+    .bind(Uuid::new_v4())
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn parse_membership_status(value: String) -> Result<MembershipStatus> {

@@ -34,7 +34,7 @@
 | 设备身份绑定 | ticket 只有客户端提交的 `device_id`；Gateway mTLS 未把客户端证书指纹绑定到 ticket | 被窃取的短期 ticket 在有效期内缺乏设备证明 | 增加设备注册/撤销记录，在 ticket 中写入证书指纹，Gateway 从 TLS peer certificate 计算并比较。 |
 | Gateway 注册与激活证明 | 管理员可将 pending Gateway 标为 active；没有 registration token 或 Gateway proof | 端点/证书配置错误可能被激活 | 加入一次性注册 token、Gateway challenge/proof、证书 serial/fingerprint 校验和 last-seen health gate。 |
 | 票据撤销 | 数据库有 `revoked_access_nonces`，但 control plane/Gateway 未使用 | 60 秒 TTL 内无法紧急撤销已签发票据 | 实现按 nonce、设备、用户、gateway 的撤销分发；数据面要有低延迟 deny cache。 |
-| 管理操作审计 | access-session issuance 会审计；组织、项目、Gateway、grant、member 管理操作未形成事务性 audit/outbox | 权限变更和数据源分发不可追责 | 管理 mutation 与 append-only audit outbox 置于同一数据库事务，并投递到 SIEM。 |
+| 管理操作审计 | 组织、项目、Gateway、数据源、grant、成员邀请和项目分配已与 `audit_events` 同一数据库事务落库；尚未有 outbox/SIEM 投递或数据库级 append-only 权限 | 本地可追责，但无法证明外部留存与不可篡改 | 增加 append-only DB role、transactional outbox、SIEM 投递与失败重试。 |
 | 生产部署保护 | compose 明确为开发配置；没有生产 Helm/secret policy/NetworkPolicy | 运维人员可能把环境变量 secret 或 HTTP compose 用于生产 | 提供生产 deployment 模板、admission checks、secret provider allowlist、egress/ingress NetworkPolicy。 |
 
 ### P1：规模化与可运维性

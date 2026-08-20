@@ -364,7 +364,7 @@ async fn create_managed_project(
     require_admin(&state, user.id, organization_id).await?;
     let project_id = state
         .store
-        .create_managed_project(organization_id, &display_name)
+        .create_managed_project(organization_id, user.id, &display_name)
         .await?;
     Ok(Json(serde_json::json!({
         "id": project_id,
@@ -385,7 +385,7 @@ async fn register_gateway(
     require_admin(&state, user.id, organization_id).await?;
     let gateway_id = state
         .store
-        .register_gateway(organization_id, &display_name, &endpoint)
+        .register_gateway(organization_id, user.id, &display_name, &endpoint)
         .await?;
     Ok(Json(serde_json::json!({
         "id": gateway_id,
@@ -420,6 +420,7 @@ async fn register_data_source(
         .store
         .register_data_source(
             organization_id,
+            user.id,
             input.project_id,
             input.gateway_id,
             &driver,
@@ -444,7 +445,7 @@ async fn activate_gateway(
     require_admin(&state, user.id, organization_id).await?;
     state
         .store
-        .activate_gateway(organization_id, gateway_id)
+        .activate_gateway(organization_id, user.id, gateway_id)
         .await?;
     Ok(Json(serde_json::json!({
         "id": gateway_id,
@@ -537,6 +538,7 @@ async fn assign_project(
         .store
         .assign_project(
             organization_id,
+            user.id,
             input.project_id,
             &input.principal_kind,
             input.principal_id,
@@ -576,6 +578,7 @@ async fn create_access_grant(
         .store
         .create_access_grant(
             organization_id,
+            user.id,
             input.project_id,
             &input.principal_kind,
             input.principal_id,
