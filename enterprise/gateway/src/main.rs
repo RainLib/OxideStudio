@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         config.sources,
         secret_provider,
         revocations,
+        config.allow_insecure_database_transport,
     );
     tracing::info!(gateway_id = %config.id, %address, "Oxide enterprise gateway enrollment accepted; listening");
     Server::builder()

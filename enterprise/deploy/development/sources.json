@@ -4,6 +4,7 @@
     "driver": "postgres",
     "secretRef": "env:OXIDE_SECRET_DEV_DATABASE",
     "connectionTemplate": null,
+    "allowInsecureTransport": true,
     "capabilities": ["resource.discover", "metadata.read", "query.read"]
   }
 ]

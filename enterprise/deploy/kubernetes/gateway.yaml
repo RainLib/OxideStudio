@@ -8,7 +8,7 @@ data:
   # This file is intentionally credential-free. Replace the UUID and the
   # Vault/Kubernetes secret reference during deployment.
   sources.json: |
-    [{"id":"00000000-0000-0000-0000-000000000000","driver":"postgres","secretRef":"vault:database/creds/oxide-readonly","connectionTemplate":"postgres://{username}:{password}@postgres.example.invalid/oxide","capabilities":["resource.discover","metadata.read","query.read"]}]
+    [{"id":"00000000-0000-0000-0000-000000000000","driver":"postgres","secretRef":"vault:database/creds/oxide-readonly","connectionTemplate":"postgres://{username}:{password}@postgres.example.invalid/oxide?sslmode=verify-full","capabilities":["resource.discover","metadata.read","query.read"]}]
 ---
 apiVersion: apps/v1
 kind: Deployment

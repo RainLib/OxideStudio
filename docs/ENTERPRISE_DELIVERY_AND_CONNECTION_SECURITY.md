@@ -9,7 +9,7 @@
 | 桌面端 → 控制面 | OIDC Authorization Code + PKCE、HTTPS-only 配置、加密本地缓存与系统密钥环 refresh token | 桌面端不保存 managed datasource 的数据库凭据。 |
 | 控制面 → 桌面端 | secret-free project descriptor；拒绝 URL、password、secret、private key 等凭据特征 | 项目同步不能把数据库连接串带回客户端。 |
 | 桌面端 → Gateway | mTLS 证书/私钥/CA 三件套同时配置；短时 Ed25519 签名 access ticket | Gateway 在客户网络内，控制面不保存数据库 secret。 |
-| Gateway → 数据库 | Gateway-local secret provider、按 source 连接池、只读 SQL 解析、路径授权、行数/字节数上限 | 用户票据和 policy scope 会在数据面再次校验。 |
+| Gateway → 数据库 | Gateway-local secret provider、按 source 连接池、只读 SQL 解析、路径授权、行数/字节数上限；PostgreSQL 强制 `sslmode=verify-full`、MySQL 强制 `ssl-mode=VERIFY_IDENTITY` | 用户票据和 policy scope 会在数据面再次校验，Gateway 不会默认接受未校验证书或明文数据库传输。 |
 | 本地连接与 managed 连接 | local driver 与 managed Gateway driver 分离；managed driver 不提供 mutation、DDL、export、transaction 等桌面能力 | 禁止 managed project 静默回落为本地直连。 |
 | 桌面/驱动分发 | Tauri updater 签名、GitHub Release、可选 Aliyun OSS immutable release index；独立 driver 包使用 Minisign | 应用和独立驱动的更新完整性有独立验证链。 |
 
@@ -63,6 +63,7 @@
 4. 管理员注册 Gateway 时必须提供实际 TLS 叶证书的 SHA-256 DER 指纹及专用 Ed25519 公钥。返回的一次性 enrollment token 和匹配的 Ed25519 私钥只能写入 Gateway 的私有挂载文件；Gateway 回连签名证明成功后才会变为 active。激活后可移除 token 文件，但必须保留 Ed25519 私钥以完成重启身份证明。管理员没有手工激活入口。
 5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
 6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
+7. Gateway 到 PostgreSQL/MySQL 的数据库 URL 默认必须验证服务端 TLS 身份。仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
 
 ## 验收与延后验证
 

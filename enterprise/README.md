@@ -103,11 +103,21 @@ OXIDE_VAULT_NAMESPACE=optional-enterprise-namespace
 
 Use `secretRef: "vault:database/creds/oxide-readonly"` for Vault database
 dynamic credentials and place a Gateway-local template such as
-`postgres://{username}:{password}@database.internal/app` in
+`postgres://{username}:{password}@database.internal/app?sslmode=verify-full` in
 `connectionTemplate`. The token file must be a regular file and, on Unix,
 must not be group/world readable. Lease duration is honored: cached drivers
 are closed and recreated before the dynamic credential expires. Vault KV
 payloads may instead supply a complete `connection_url`.
+
+Gateway database URLs are independently validated after secret resolution. In
+production, PostgreSQL requires `sslmode=verify-full`; MySQL requires
+`ssl-mode=VERIFY_IDENTITY`. This applies both
+to `connectionTemplate` and a complete URL returned by Vault or Kubernetes.
+Plaintext or certificate-unverified transport is rejected by default. Local
+development may opt in only when **both** the source has
+`"allowInsecureTransport": true` and the Gateway process has
+`OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`; this is not a production
+deployment option.
 
 Mounted Kubernetes Secrets are also supported without granting the Gateway
 Kubernetes API credentials:

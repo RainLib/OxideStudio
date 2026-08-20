@@ -1,5 +1,5 @@
 use crate::{
-    config::DataSourceConfig,
+    config::{allows_insecure_transport, validate_connection_transport, DataSourceConfig},
     proto::{
         data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse, QueryChunk,
         QueryRequest, RequestScope, ResourceItem, ResourceRequest, ResourceResponse,
@@ -39,6 +39,7 @@ pub struct DataPlaneService {
     sources: HashMap<Uuid, DataSourceConfig>,
     secrets: Arc<dyn SecretProvider>,
     revocations: Arc<RevocationState>,
+    allow_insecure_database_transport: bool,
     drivers: Mutex<HashMap<Uuid, CachedDriver>>,
 }
 
@@ -55,6 +56,7 @@ impl DataPlaneService {
         sources: HashMap<Uuid, DataSourceConfig>,
         secrets: Arc<dyn SecretProvider>,
         revocations: Arc<RevocationState>,
+        allow_insecure_database_transport: bool,
     ) -> Self {
         Self {
             gateway_id,
@@ -62,6 +64,7 @@ impl DataPlaneService {
             sources,
             secrets,
             revocations,
+            allow_insecure_database_transport,
             drivers: Mutex::new(HashMap::new()),
         }
     }
@@ -159,6 +162,22 @@ impl DataPlaneService {
             };
             Instant::now() + duration.saturating_sub(safety_window)
         });
+        validate_connection_transport(
+            &source.driver,
+            secret.connection_url(),
+            allows_insecure_transport(source, self.allow_insecure_database_transport),
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                data_source_id = %source_id,
+                driver = %source.driver,
+                error = %error,
+                "gateway rejected a database connection without verified transport"
+            );
+            Status::failed_precondition(
+                "managed data source requires a verified database TLS connection",
+            )
+        })?;
         let driver = connect_driver(&source.driver, secret.connection_url())
             .await
             .map_err(|error| {

@@ -24,6 +24,11 @@ pub struct DataSourceConfig {
     /// Optional Gateway-local URL template used with dynamic credentials.
     /// It must contain `{username}` and `{password}` placeholders.
     pub connection_template: Option<String>,
+    /// Development-only escape hatch for databases which cannot provide a
+    /// verified TLS endpoint. This is effective only when the Gateway process
+    /// also opts in with `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`.
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
@@ -44,6 +49,9 @@ pub struct GatewayConfig {
     pub control_plane_verifying_key: VerifyingKey,
     pub sources: HashMap<Uuid, DataSourceConfig>,
     pub allow_environment_secrets: bool,
+    /// Process-wide development opt-in. A source must additionally opt in, so
+    /// a production configuration cannot accidentally inherit insecure mode.
+    pub allow_insecure_database_transport: bool,
     pub tls_certificate: Vec<u8>,
     pub tls_private_key: Vec<u8>,
     pub client_ca_certificate: Vec<u8>,
@@ -62,12 +70,17 @@ impl GatewayConfig {
                 "OXIDE_CONTROL_PLANE_VERIFYING_KEY_BASE64 must decode to exactly 32 bytes"
             )
         })?;
+        let allow_insecure_database_transport = env::var("OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
         let source_path = PathBuf::from(required("OXIDE_GATEWAY_SOURCES_FILE")?);
-        let sources = parse_sources(&read_private_file(
-            &source_path,
-            "OXIDE_GATEWAY_SOURCES_FILE",
-            MAX_SOURCES_FILE_BYTES,
-        )?)?;
+        let sources = parse_sources(
+            &read_private_file(
+                &source_path,
+                "OXIDE_GATEWAY_SOURCES_FILE",
+                MAX_SOURCES_FILE_BYTES,
+            )?,
+            allow_insecure_database_transport,
+        )?;
         let tls_certificate = read_required_file("OXIDE_GATEWAY_TLS_CERTIFICATE")?;
         let public_endpoint =
             validated_https_endpoint(&required("OXIDE_GATEWAY_PUBLIC_ENDPOINT")?)?;
@@ -126,6 +139,7 @@ impl GatewayConfig {
             sources,
             allow_environment_secrets: env::var("OXIDE_ALLOW_ENVIRONMENT_SECRETS")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
+            allow_insecure_database_transport,
             tls_certificate,
             tls_private_key: read_private_file(
                 &PathBuf::from(required("OXIDE_GATEWAY_TLS_PRIVATE_KEY")?),
@@ -224,12 +238,15 @@ fn validated_https_endpoint(value: &str) -> Result<String> {
     Ok(endpoint.as_str().trim_end_matches('/').to_string())
 }
 
-fn parse_sources(payload: &[u8]) -> Result<HashMap<Uuid, DataSourceConfig>> {
+fn parse_sources(
+    payload: &[u8],
+    allow_insecure_database_transport: bool,
+) -> Result<HashMap<Uuid, DataSourceConfig>> {
     let sources: Vec<DataSourceConfig> =
         serde_json::from_slice(payload).context("gateway source file is invalid")?;
     let mut parsed = HashMap::with_capacity(sources.len());
     for source in sources {
-        validate_source(&source)?;
+        validate_source(&source, allow_insecure_database_transport)?;
         match parsed.entry(source.id) {
             Entry::Vacant(entry) => {
                 entry.insert(source);
@@ -242,7 +259,10 @@ fn parse_sources(payload: &[u8]) -> Result<HashMap<Uuid, DataSourceConfig>> {
     Ok(parsed)
 }
 
-fn validate_source(source: &DataSourceConfig) -> Result<()> {
+fn validate_source(
+    source: &DataSourceConfig,
+    allow_insecure_database_transport: bool,
+) -> Result<()> {
     if !matches!(
         source.driver.trim().to_ascii_lowercase().as_str(),
         "postgres" | "postgresql" | "mysql"
@@ -258,6 +278,12 @@ fn validate_source(source: &DataSourceConfig) -> Result<()> {
             source.id
         );
     }
+    if source.allow_insecure_transport && !allow_insecure_database_transport {
+        anyhow::bail!(
+            "gateway source {} requests insecure database transport without the Gateway development opt-in",
+            source.id
+        );
+    }
     if let Some(template) = &source.connection_template {
         if template.trim().is_empty()
             || template.len() > 8_192
@@ -269,6 +295,14 @@ fn validate_source(source: &DataSourceConfig) -> Result<()> {
                 source.id
             );
         }
+        let template_url = template
+            .replace("{username}", "placeholder")
+            .replace("{password}", "placeholder");
+        validate_connection_transport(
+            &source.driver,
+            &template_url,
+            allows_insecure_transport(source, allow_insecure_database_transport),
+        )?;
     }
     if source.capabilities.is_empty()
         || source.capabilities.iter().any(|capability| {
@@ -281,6 +315,60 @@ fn validate_source(source: &DataSourceConfig) -> Result<()> {
         anyhow::bail!("gateway source {} has unsupported capabilities", source.id);
     }
     Ok(())
+}
+
+pub(crate) fn allows_insecure_transport(
+    source: &DataSourceConfig,
+    allow_insecure_database_transport: bool,
+) -> bool {
+    source.allow_insecure_transport && allow_insecure_database_transport
+}
+
+/// Validate that a Gateway-only database URL uses the protocol expected by the
+/// configured source and, by default, verifies the server identity over TLS.
+/// Callers must not include the URL in an error because it can contain secrets.
+pub(crate) fn validate_connection_transport(
+    driver: &str,
+    connection_url: &str,
+    allow_insecure_transport: bool,
+) -> Result<()> {
+    let url = Url::parse(connection_url)
+        .map_err(|_| anyhow::anyhow!("Gateway database URL is invalid"))?;
+    if url.host_str().is_none() {
+        anyhow::bail!("Gateway database URL must include a host");
+    }
+    let normalized_driver = driver.trim().to_ascii_lowercase();
+    let scheme_matches = match normalized_driver.as_str() {
+        "postgres" | "postgresql" => matches!(url.scheme(), "postgres" | "postgresql"),
+        "mysql" => url.scheme() == "mysql",
+        _ => false,
+    };
+    if !scheme_matches {
+        anyhow::bail!("Gateway database URL does not match the configured driver");
+    }
+    if allow_insecure_transport {
+        return Ok(());
+    }
+    let parameter = match normalized_driver.as_str() {
+        "postgres" | "postgresql" => query_value(&url, &["sslmode"])
+            .is_some_and(|value| value.eq_ignore_ascii_case("verify-full")),
+        // SQLx accepts `ssl-mode` for MySQL. Do not accept a similar
+        // unrecognized spelling here: it would fall back to the driver's
+        // insecure `PREFERRED` default while this validator claimed success.
+        "mysql" => query_value(&url, &["ssl-mode"])
+            .is_some_and(|value| value.eq_ignore_ascii_case("verify_identity")),
+        _ => false,
+    };
+    if !parameter {
+        anyhow::bail!("Gateway database URL must require verified TLS server identity");
+    }
+    Ok(())
+}
+
+fn query_value(url: &Url, names: &[&str]) -> Option<String> {
+    url.query_pairs()
+        .find(|(key, _)| names.iter().any(|name| key.eq_ignore_ascii_case(name)))
+        .map(|(_, value)| value.into_owned())
 }
 
 fn required(name: &str) -> Result<String> {
@@ -304,13 +392,13 @@ mod tests {
     fn source_file_rejects_duplicate_ids() {
         let id = Uuid::new_v4();
         let payload = format!("[{},{}]", source(id), source(id));
-        assert!(parse_sources(payload.as_bytes()).is_err());
+        assert!(parse_sources(payload.as_bytes(), false).is_err());
     }
 
     #[test]
     fn source_file_rejects_write_capabilities() {
         let payload = source(Uuid::new_v4()).replace("query.read", "data.write");
-        assert!(parse_sources(format!("[{payload}]").as_bytes()).is_err());
+        assert!(parse_sources(format!("[{payload}]").as_bytes(), false).is_err());
     }
 
     #[test]
@@ -319,7 +407,78 @@ mod tests {
             r#"[{{"id":"{}","driver":"mysql","secretRef":"vault:database/analytics","connectionTemplate":"mysql://localhost/analytics","capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
         );
-        assert!(parse_sources(payload.as_bytes()).is_err());
+        assert!(parse_sources(payload.as_bytes(), false).is_err());
+    }
+
+    #[test]
+    fn verified_database_transport_requires_server_identity_validation() {
+        assert!(validate_connection_transport(
+            "postgres",
+            "postgres://reader:secret@db.example.test/analytics?sslmode=verify-full",
+            false,
+        )
+        .is_ok());
+        assert!(validate_connection_transport(
+            "postgres",
+            "postgres://reader:secret@db.example.test/analytics?sslmode=require",
+            false,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "mysql",
+            "mysql://reader:secret@db.example.test/analytics?ssl-mode=VERIFY_IDENTITY",
+            false,
+        )
+        .is_ok());
+        assert!(validate_connection_transport(
+            "mysql",
+            "mysql://reader:secret@db.example.test/analytics?ssl-mode=REQUIRED",
+            false,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "mysql",
+            "mysql://reader:secret@db.example.test/analytics?ssl_mode=VERIFY_IDENTITY",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn database_transport_rejects_driver_mismatch_even_in_development() {
+        assert!(validate_connection_transport(
+            "mysql",
+            "postgres://reader:secret@db.example.test/analytics?sslmode=disable",
+            true,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "postgres",
+            "postgres://reader:secret@db.example.test/analytics?sslmode=disable",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn source_insecure_transport_needs_two_explicit_development_opt_ins() {
+        let payload = format!(
+            r#"[{{"id":"{}","driver":"postgres","secretRef":"env:OXIDE_SECRET_DEV_DATABASE","allowInsecureTransport":true,"capabilities":["query.read"]}}]"#,
+            Uuid::new_v4()
+        );
+        assert!(parse_sources(payload.as_bytes(), false).is_err());
+        assert!(parse_sources(payload.as_bytes(), true).is_ok());
+    }
+
+    #[test]
+    fn source_template_is_checked_for_verified_transport_before_startup() {
+        let id = Uuid::new_v4();
+        let insecure = format!(
+            r#"[{{"id":"{id}","driver":"postgres","secretRef":"vault:database/analytics","connectionTemplate":"postgres://{{username}}:{{password}}@db.example.test/analytics?sslmode=require","capabilities":["query.read"]}}]"#,
+        );
+        assert!(parse_sources(insecure.as_bytes(), false).is_err());
+        let verified = insecure.replace("sslmode=require", "sslmode=verify-full");
+        assert!(parse_sources(verified.as_bytes(), false).is_ok());
     }
 
     #[test]

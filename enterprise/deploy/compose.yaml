@@ -69,6 +69,7 @@ services:
       OXIDE_GATEWAY_CLIENT_CA_CERTIFICATE: /etc/oxide/tls/client-ca.crt
       OXIDE_SECRET_PROVIDER: environment
       OXIDE_ALLOW_ENVIRONMENT_SECRETS: "true"
+      OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT: "true"
       OXIDE_SECRET_DEV_DATABASE: ${OXIDE_GATEWAY_DATA_SOURCE_URL:?required}
     volumes:
       - ./development/sources.json:/etc/oxide/sources.json:ro
