@@ -45,6 +45,14 @@ private key, and client CA. The environment secret provider is disabled unless
 Production deployments must provide a Vault/cloud/Kubernetes
 `SecretProvider`.
 
+The control plane also accepts `DATABASE_URL_FILE` and
+`OXIDE_TICKET_SIGNING_KEY_BASE64_FILE`. Each points to one private, regular
+mounted file (Unix permissions must exclude group/other reads); it is an error
+to set either file variable and its inline secret variable together. This is
+the production path for Kubernetes Secret, Vault Agent, or equivalent mounted
+secret delivery. The inline variables remain available only for the local
+reference topology.
+
 Vault is implemented as the first production provider. It reads its token from
 a private mounted file rather than an environment variable:
 

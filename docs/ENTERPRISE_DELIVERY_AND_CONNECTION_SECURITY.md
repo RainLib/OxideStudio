@@ -52,9 +52,10 @@
 
 1. control plane、OIDC issuer 和 Gateway endpoint 必须为 HTTPS，Gateway endpoint 不得含凭据。
 2. 数据库 secret 只能在客户网络 Gateway 的 Vault/Kubernetes provider 内解析；`OXIDE_ALLOW_ENVIRONMENT_SECRETS=true` 仅可用于受控开发环境。
-3. 管理员创建 source 后应先通过 Gateway registration proof 再激活；在该机制完成前，生产变更必须走人工双人复核。
-4. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
-5. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
+3. control plane 的数据库 URL 与 ticket signing seed 在生产环境应通过私有挂载文件的 `*_FILE` 变量提供；同名内联环境变量与文件变量同时存在会拒绝启动。
+4. 管理员创建 source 后应先通过 Gateway registration proof 再激活；在该机制完成前，生产变更必须走人工双人复核。
+5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
+6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
 
 ## 验收与延后验证
 
