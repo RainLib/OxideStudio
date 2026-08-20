@@ -8,6 +8,7 @@ mod enrollment;
 mod model;
 #[cfg(feature = "policy")]
 mod policy;
+mod redis;
 #[cfg(feature = "ticket")]
 mod ticket;
 
@@ -15,6 +16,7 @@ pub use enrollment::*;
 pub use model::*;
 #[cfg(feature = "policy")]
 pub use policy::*;
+pub use redis::*;
 #[cfg(feature = "ticket")]
 pub use ticket::*;
 

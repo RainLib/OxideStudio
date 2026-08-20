@@ -31,6 +31,19 @@ cargo test --manifest-path enterprise/Cargo.toml --workspace
 npm run enterprise:admin:build
 ```
 
+## Release distribution
+
+Every desktop release tag (`v<desktop-version>`) also publishes the
+Control Plane, Gateway, and Admin Web images to GitHub Container Registry.
+Each image has two immutable references: the desktop version tag and the
+commit-SHA tag. The release workflow emits a GitHub build-provenance
+attestation and an SBOM for the resulting digest.
+
+Production Kubernetes manifests must use the exact digest shown in that job's
+summary, after verifying its attestation. Do not deploy the mutable version
+tag directly and do not automatically rewrite a production overlay during a
+desktop release; rollout approval remains an organization operation.
+
 Copy `deploy/.env.example` to `deploy/.env`, configure a Keycloak realm and
 clients, then start the control-plane reference environment:
 

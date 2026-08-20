@@ -10,8 +10,8 @@ use crate::{
 };
 use ed25519_dalek::VerifyingKey;
 use oxide_enterprise_contracts::{
-    certificate_fingerprint, verify_ticket, AccessAction, AccessSessionTicket,
-    AuthorizationRequest, ENTERPRISE_CONTRACT_VERSION,
+    certificate_fingerprint, tokenize_native_redis_command, verify_ticket, AccessAction,
+    AccessSessionTicket, AuthorizationRequest, ENTERPRISE_CONTRACT_VERSION,
 };
 use oxide_studio_lib::{
     core::{driver::DatabaseDriver, protocol::QueryResult, statement::validate_read_only_sql},
@@ -605,7 +605,8 @@ fn validate_redis_native_read_only(
         .map(validate_redis_database)
         .transpose()?
         .ok_or_else(|| Status::invalid_argument("Redis database context is required"))?;
-    let tokens = tokenize_native_redis(payload)?;
+    let tokens = tokenize_native_redis_command(payload)
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
     let command = tokens
         .first()
         .map(|value| value.to_ascii_uppercase())
@@ -663,57 +664,6 @@ fn validate_redis_key(value: &str) -> Result<String, Status> {
         return Err(Status::invalid_argument("Redis key is invalid"));
     }
     Ok(value.to_string())
-}
-
-fn tokenize_native_redis(payload: &str) -> Result<Vec<String>, Status> {
-    if payload.contains(['\n', '\r', ';']) {
-        return Err(Status::invalid_argument(
-            "managed Redis accepts exactly one command",
-        ));
-    }
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for character in payload.trim().chars() {
-        if escaped {
-            current.push(match character {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if let Some(end) = quote {
-            if character == end {
-                quote = None;
-            } else {
-                current.push(character);
-            }
-        } else if matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if character.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(character);
-        }
-    }
-    if quote.is_some() {
-        return Err(Status::invalid_argument(
-            "Redis command has an unterminated quoted argument",
-        ));
-    }
-    if escaped {
-        current.push('\\');
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    Ok(tokens)
 }
 
 fn validate_mongodb_native_read_only(

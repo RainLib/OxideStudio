@@ -21,8 +21,11 @@ committed to source control.
 
 ## Required production changes
 
-1. Pin every image by immutable digest and verify its release signature before
-   updating `kustomization.yaml`.
+1. Pin every image by immutable digest and verify the GitHub build-provenance
+   attestation emitted by the matching `v<desktop-version>` release before
+   updating `kustomization.yaml`. The image workflow publishes both a version
+   tag and a commit-SHA tag for discovery only; neither mutable tag is a
+   deployment reference.
 2. Replace all `example.invalid` values and the NetworkPolicy selectors with
    the real control-plane, database, Vault, IdP, SIEM, and ingress identities.
 3. Use an mTLS-capable L4 load balancer or TLS-passthrough ingress for the

@@ -8,7 +8,8 @@ use crate::core::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use oxide_enterprise_contracts::{
-    AccessAction, ManagedDataSourceDescriptor, ENTERPRISE_CONTRACT_VERSION,
+    tokenize_native_redis_command, AccessAction, ManagedDataSourceDescriptor,
+    ENTERPRISE_CONTRACT_VERSION,
 };
 use serde_json::Value;
 use sqlparser::{
@@ -397,7 +398,7 @@ fn redis_native_target(payload: &str, context: Option<&str>) -> Result<NativeQue
         .map(validate_redis_target_database)
         .transpose()?
         .ok_or_else(|| anyhow!("select a Redis database before running a managed query"))?;
-    let tokens = payload.split_whitespace().collect::<Vec<_>>();
+    let tokens = tokenize_native_redis_command(payload).map_err(|error| anyhow!(error))?;
     let key = tokens
         .get(1)
         .ok_or_else(|| anyhow!("managed Redis query must name one key"))?;
@@ -410,7 +411,7 @@ fn redis_native_target(payload: &str, context: Option<&str>) -> Result<NativeQue
     }
     Ok(NativeQueryTarget {
         context: database.clone(),
-        resource_path: vec![database, (*key).to_string()],
+        resource_path: vec![database, key.clone()],
     })
 }
 
@@ -973,6 +974,10 @@ mod tests {
         let target = native_query_target("redis", "GET user:42", None, Some("2")).unwrap();
         assert_eq!(target.context, "2");
         assert_eq!(target.resource_path, ["2", "user:42"]);
+        let quoted =
+            native_query_target("redis", r#"HGET "user profile:42" name"#, None, Some("2"))
+                .unwrap();
+        assert_eq!(quoted.resource_path, ["2", "user profile:42"]);
         assert!(native_query_target("redis", "GET user:42", None, None).is_err());
     }
 }
