@@ -1377,7 +1377,7 @@ export function QueryEditor({
               namespace: elasticsearchMetadataNamespace,
               kind: "collections",
             });
-            const indices = await loadDocumentMetadata(cacheKey, () =>
+            const collections = await loadDocumentMetadata(cacheKey, () =>
               schemaService
                 .getCollections(
                   effectiveConnectionId,
@@ -1385,8 +1385,11 @@ export function QueryEditor({
                 )
                 .then((collections) =>
                   collections
-                    .map((collection) => collection.name.trim())
-                    .filter(Boolean),
+                    .map((collection) => ({
+                      name: collection.name.trim(),
+                      type: collection.type || "index",
+                    }))
+                    .filter((collection) => Boolean(collection.name)),
                 )
                 .catch((error) => {
                   console.debug(
@@ -1397,10 +1400,10 @@ export function QueryEditor({
                 }),
             );
             fieldCompletions = elasticsearchSchemaCompletionsForContext(
-              indices.map((name) => ({
-                label: name,
-                detail: `Elasticsearch Index: ${name}`,
-                insertText: name,
+              collections.map((collection) => ({
+                label: collection.name,
+                detail: `Elasticsearch ${collection.type}: ${collection.name}`,
+                insertText: collection.name,
               })),
               completionContext,
               preferredElasticsearchIndex,

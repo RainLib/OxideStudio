@@ -301,7 +301,18 @@ impl DatabaseDriver for ElasticsearchDriver {
         self.ensure_connected().await?;
         let (status, body) = self.send_request_response(&request).await?;
         let collections = if status.is_success() {
-            elasticsearch_indices_to_collections(body)
+            let indices = elasticsearch_indices_to_collections(body);
+            // `_cat/indices` has useful document counts but does not list
+            // aliases or data streams. Add their typed descriptors when the
+            // least-privilege metadata endpoint is available; a failure here
+            // must not hide the index catalog that was already authorized.
+            match self.list_collections_via_index_metadata().await {
+                Ok(metadata) => merge_elasticsearch_collections(indices, metadata),
+                Err(error) => {
+                    tracing::debug!(error = %error, "Elasticsearch alias/data-stream metadata is unavailable");
+                    indices
+                }
+            }
         } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             self.list_collections_via_index_metadata().await?
         } else {
@@ -365,7 +376,16 @@ impl ElasticsearchDriver {
         if status.is_success() {
             return Ok(elasticsearch_resolve_to_collections(&body));
         }
-        if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        // `_resolve` is unavailable on older Elasticsearch releases. Keep the
+        // compatibility alias endpoint for both insufficient privileges and
+        // a server which does not expose `_resolve` yet.
+        if !matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::NOT_FOUND
+                | StatusCode::METHOD_NOT_ALLOWED
+        ) {
             return Err(elasticsearch_response_error(status, &body));
         }
 
@@ -1026,15 +1046,22 @@ fn normalize_elasticsearch_collection_name(name: String) -> Option<String> {
 }
 
 fn elasticsearch_resolve_to_collections(value: &Value) -> Vec<CollectionInfo> {
-    let names = value
-        .get("indices")
-        .into_iter()
-        .chain(value.get("data_streams"))
-        .filter_map(Value::as_array)
-        .flat_map(|items| items.iter())
-        .filter_map(|item| item.get("name").and_then(Value::as_str))
-        .map(str::to_string);
-    elasticsearch_collection_names(names)
+    let mut collections = Vec::new();
+    for (field, collection_type) in [
+        ("indices", "index"),
+        ("aliases", "alias"),
+        ("data_streams", "data_stream"),
+    ] {
+        let names = value
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("name").and_then(Value::as_str))
+            .map(str::to_string);
+        collections.extend(elasticsearch_collection_names(names, collection_type));
+    }
+    sort_and_deduplicate_elasticsearch_collections(collections)
 }
 
 fn elasticsearch_alias_to_collections(value: &Value) -> Vec<CollectionInfo> {
@@ -1043,10 +1070,14 @@ fn elasticsearch_alias_to_collections(value: &Value) -> Vec<CollectionInfo> {
             .as_object()
             .into_iter()
             .flat_map(|objects| objects.keys().cloned()),
+        "alias",
     )
 }
 
-fn elasticsearch_collection_names(names: impl IntoIterator<Item = String>) -> Vec<CollectionInfo> {
+fn elasticsearch_collection_names(
+    names: impl IntoIterator<Item = String>,
+    collection_type: &str,
+) -> Vec<CollectionInfo> {
     let mut names = names
         .into_iter()
         .filter_map(normalize_elasticsearch_collection_name)
@@ -1058,10 +1089,38 @@ fn elasticsearch_collection_names(names: impl IntoIterator<Item = String>) -> Ve
         .map(|name| CollectionInfo {
             name,
             namespace: Some("default".to_string()),
-            collection_type: Some("index".to_string()),
+            collection_type: Some(collection_type.to_string()),
             document_count: None,
         })
         .collect()
+}
+
+fn merge_elasticsearch_collections(
+    collections: Vec<CollectionInfo>,
+    additional: Vec<CollectionInfo>,
+) -> Vec<CollectionInfo> {
+    sort_and_deduplicate_elasticsearch_collections(
+        collections.into_iter().chain(additional).collect(),
+    )
+}
+
+fn sort_and_deduplicate_elasticsearch_collections(
+    mut collections: Vec<CollectionInfo>,
+) -> Vec<CollectionInfo> {
+    collections.sort_by(|left, right| {
+        (left.name.as_str(), left.collection_type.as_deref())
+            .cmp(&(right.name.as_str(), right.collection_type.as_deref()))
+    });
+    collections.dedup_by(|left, right| {
+        if left.name != right.name || left.collection_type != right.collection_type {
+            return false;
+        }
+        if left.document_count.is_none() {
+            left.document_count = right.document_count;
+        }
+        true
+    });
+    collections
 }
 
 fn group_elasticsearch_collections(
@@ -1071,12 +1130,19 @@ fn group_elasticsearch_collections(
     let Some(pattern) = pattern else {
         return collections;
     };
-    let mut groups = BTreeMap::<String, CollectionInfo>::new();
+    let mut groups = BTreeMap::<(String, Option<String>), CollectionInfo>::new();
     for mut collection in collections {
+        if collection.collection_type.as_deref() != Some("index") {
+            groups.insert(
+                (collection.name.clone(), collection.collection_type.clone()),
+                collection,
+            );
+            continue;
+        }
         let grouped_name = pattern.replace(&collection.name, "${1}*").into_owned();
         collection.name = grouped_name.clone();
         groups
-            .entry(grouped_name)
+            .entry((grouped_name, collection.collection_type.clone()))
             .and_modify(|existing| {
                 existing.document_count = match (existing.document_count, collection.document_count)
                 {
@@ -1224,6 +1290,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["logs-2026.08.11", "metrics-prod"]
         );
+        assert_eq!(
+            collections
+                .iter()
+                .map(|collection| collection.collection_type.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("index"), Some("data_stream")]
+        );
 
         let aliases = elasticsearch_alias_to_collections(&json!({
             ".security": {},
@@ -1236,6 +1309,80 @@ mod tests {
                 .map(|collection| collection.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["logs-2026.08.11", "orders"]
+        );
+        assert!(aliases
+            .iter()
+            .all(|collection| collection.collection_type.as_deref() == Some("alias")));
+    }
+
+    #[test]
+    fn merges_index_counts_with_typed_alias_and_data_stream_descriptors() {
+        let merged = merge_elasticsearch_collections(
+            elasticsearch_indices_to_collections(json!([
+                { "index": "orders", "docs.count": "42" }
+            ])),
+            elasticsearch_resolve_to_collections(&json!({
+                "indices": [{ "name": "orders" }],
+                "aliases": [{ "name": "orders-read" }],
+                "data_streams": [{ "name": "logs-prod" }]
+            })),
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .map(|collection| (
+                    collection.name.as_str(),
+                    collection.collection_type.as_deref(),
+                    collection.document_count,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("logs-prod", Some("data_stream"), None),
+                ("orders", Some("index"), Some(42)),
+                ("orders-read", Some("alias"), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouping_patterns_do_not_rewrite_aliases_or_data_streams() {
+        let pattern = Regex::new(r"-\d{4}\.\d{2}\.\d{2}$").unwrap();
+        let grouped = group_elasticsearch_collections(
+            vec![
+                CollectionInfo {
+                    name: "logs-2026.08.11".to_string(),
+                    namespace: Some("default".to_string()),
+                    collection_type: Some("index".to_string()),
+                    document_count: Some(5),
+                },
+                CollectionInfo {
+                    name: "logs-read".to_string(),
+                    namespace: Some("default".to_string()),
+                    collection_type: Some("alias".to_string()),
+                    document_count: None,
+                },
+                CollectionInfo {
+                    name: "logs-stream".to_string(),
+                    namespace: Some("default".to_string()),
+                    collection_type: Some("data_stream".to_string()),
+                    document_count: None,
+                },
+            ],
+            Some(&pattern),
+        );
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|collection| (
+                    collection.name.as_str(),
+                    collection.collection_type.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("logs*", Some("index")),
+                ("logs-read", Some("alias")),
+                ("logs-stream", Some("data_stream")),
+            ]
         );
     }
 

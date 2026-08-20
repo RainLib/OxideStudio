@@ -18,6 +18,7 @@
 | Elasticsearch 索引目录 | `QueryEditor.vue:3332`；`connectionStore.ts:6974` | 本地 Console 擅长 DSL，但路径索引主要依赖 LSP 目录；LSP 离线或迟到时没有稳定的 Explorer 元数据回退 | Elasticsearch Console provider 在 path 上通过 `getCollections` 读取 index 名称；index 与 mapping 都使用连接/命名空间 single-flight 缓存，并保留同一文档版本/取消保护 |
 | ES provider 职责收口 | DBX Console provider 自己拥有 method/path/json | 通用 LSP provider 仍可能同时返回 ES path 条目，易与 live metadata 混入或重复 | Console provider 统一拥有 ES method、path、DSL、index、mapping-field 位置；LSP 仅作为该 provider 内的失败回退 |
 | 文档目录缓存生命周期 | `connectionStore.ts` 按 connection 保存 completion metadata | Mongo collection、ES index 与 mapping 的 single-flight 过去仅存在于一个 `QueryEditor` 实例，切换标签会重新探测 | 新增 `documentMetadataCache`：连接/driver/namespace/object 精确分区、跨标签共享、2 分钟 TTL、过期时 stale-while-revalidate、失败保留短期 last-known 目录、256 项 LRU 上限；metadata revision 时按连接/driver 主动失效 |
+| Elasticsearch alias/data stream | DBX 将 document-store 路由交给特定连接树 | `_cat/indices` 只有物理 index，原先的 fallback 会把 alias/data stream 都误写成 index，编辑器也固定展示 `Elasticsearch Index` | driver 合并 `_cat/indices` 的 document count 与 `_resolve/index/*` 的 typed index/alias/data stream descriptor；`_resolve` 无权访问时保留已授权 index，`_alias` fallback 标记为 alias。Console path 候选显示实际对象类型，滚动索引 grouping 不再改写 alias/data stream |
 
 ## 保持而不倒迁的 Oxide 能力
 
@@ -38,9 +39,9 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
    但不引入不可执行 shell helper。
 2. **Mongo 采样覆盖（P1）**：dotted path 已按对象和数组对象采样、深度限制为 4；仍需
    在 MongoDB 4.4–7 的真实数据上验证稀疏字段、多类型和深层数组的 metadata 成本。
-3. **ES mapping 与 aliases/data streams（P1）**：索引候选当前来自 collection
-   API；后续需以驱动能力明确标注 alias/data stream，而不能把它们一律当普通
-   index。
+3. **ES alias/data stream 真实集群验证（P1）**：逻辑已保留 typed descriptor；仍需在
+   6.8/7/8、权限受限以及 rollover/data stream 环境验证 `_resolve`/`_alias` 的响应差异，
+   再决定是否在 Explorer 增加独立图标或过滤器。
 4. **元数据刷新体验（P1）**：共享 cache 已有 TTL、single-flight 和有界淘汰；下一步是
    在 Explorer refresh 后主动重新触发当前 Monaco completion，而非等待用户下一次输入。
 
