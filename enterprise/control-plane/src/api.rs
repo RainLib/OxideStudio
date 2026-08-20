@@ -572,7 +572,10 @@ async fn register_data_source(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let display_name = validate_display_name(&input.display_name)?;
     let driver = input.driver.trim().to_ascii_lowercase();
-    if !matches!(driver.as_str(), "postgres" | "postgresql" | "mysql")
+    if !matches!(
+        driver.as_str(),
+        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic"
+    )
         || input.capabilities.is_empty()
         || !input
             .capabilities
@@ -580,7 +583,7 @@ async fn register_data_source(
             .all(|action| action.is_stage_one_managed_action())
     {
         return Err(ApiError::bad_request(
-            "stage-one managed data sources support PostgreSQL and MySQL with read-only Gateway capabilities only",
+            "managed data sources support PostgreSQL, MySQL, MongoDB, and Elasticsearch with read-only Gateway capabilities only",
         ));
     }
     let identity = state.verifier.authenticate(&headers).await?;

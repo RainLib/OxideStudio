@@ -265,7 +265,7 @@ fn validate_source(
 ) -> Result<()> {
     if !matches!(
         source.driver.trim().to_ascii_lowercase().as_str(),
-        "postgres" | "postgresql" | "mysql"
+        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic"
     ) {
         anyhow::bail!("gateway source {} has an unsupported driver", source.id);
     }
@@ -341,6 +341,10 @@ pub(crate) fn validate_connection_transport(
     let scheme_matches = match normalized_driver.as_str() {
         "postgres" | "postgresql" => matches!(url.scheme(), "postgres" | "postgresql"),
         "mysql" => url.scheme() == "mysql",
+        "mongodb" | "mongo" => matches!(url.scheme(), "mongodb" | "mongodb+srv"),
+        "elasticsearch" | "elastic" => {
+            matches!(url.scheme(), "http" | "https" | "elasticsearch" | "elastic")
+        }
         _ => false,
     };
     if !scheme_matches {
@@ -357,6 +361,15 @@ pub(crate) fn validate_connection_transport(
         // insecure `PREFERRED` default while this validator claimed success.
         "mysql" => query_value(&url, &["ssl-mode"])
             .is_some_and(|value| value.eq_ignore_ascii_case("verify_identity")),
+        // MongoDB's driver accepts either spelling. Require an explicit TLS
+        // setting even for mongodb+srv so the Gateway configuration itself is
+        // unambiguous and cannot silently inherit a driver default.
+        "mongodb" | "mongo" => query_value(&url, &["tls", "ssl"])
+            .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "1")),
+        // The Elasticsearch driver normalizes elastic/elasticsearch URLs, but
+        // an enterprise source must still state HTTPS at the configuration
+        // boundary. Its HTTP client verifies the server certificate normally.
+        "elasticsearch" | "elastic" => url.scheme() == "https",
         _ => false,
     };
     if !parameter {
@@ -402,6 +415,22 @@ mod tests {
     }
 
     #[test]
+    fn source_file_accepts_only_supported_native_read_only_engines() {
+        let mongo = format!(
+            r#"[{{"id":"{}","driver":"mongodb","secretRef":"vault:database/documents","capabilities":["query.read"]}}]"#,
+            Uuid::new_v4()
+        );
+        let elastic = format!(
+            r#"[{{"id":"{}","driver":"elasticsearch","secretRef":"vault:database/search","capabilities":["query.read"]}}]"#,
+            Uuid::new_v4()
+        );
+        assert!(parse_sources(mongo.as_bytes(), false).is_ok());
+        assert!(parse_sources(elastic.as_bytes(), false).is_ok());
+        let redis = mongo.replace("mongodb", "redis");
+        assert!(parse_sources(redis.as_bytes(), false).is_err());
+    }
+
+    #[test]
     fn source_file_requires_dynamic_credential_placeholders() {
         let payload = format!(
             r#"[{{"id":"{}","driver":"mysql","secretRef":"vault:database/analytics","connectionTemplate":"mysql://localhost/analytics","capabilities":["query.read"]}}]"#,
@@ -433,6 +462,30 @@ mod tests {
         assert!(validate_connection_transport(
             "mysql",
             "mysql://reader:secret@db.example.test/analytics?ssl-mode=REQUIRED",
+            false,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "mongodb",
+            "mongodb://reader:secret@db.example.test/analytics?tls=true",
+            false,
+        )
+        .is_ok());
+        assert!(validate_connection_transport(
+            "mongodb",
+            "mongodb://reader:secret@db.example.test/analytics",
+            false,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "elasticsearch",
+            "https://reader:secret@search.example.test:9200",
+            false,
+        )
+        .is_ok());
+        assert!(validate_connection_transport(
+            "elasticsearch",
+            "http://reader:secret@search.example.test:9200",
             false,
         )
         .is_err());

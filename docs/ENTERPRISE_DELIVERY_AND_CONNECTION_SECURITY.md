@@ -9,19 +9,23 @@
 | 桌面端 → 控制面 | OIDC Authorization Code + PKCE、HTTPS-only 配置、加密本地缓存与系统密钥环 refresh token | 桌面端不保存 managed datasource 的数据库凭据。 |
 | 控制面 → 桌面端 | secret-free project descriptor；拒绝 URL、password、secret、private key 等凭据特征 | 项目同步不能把数据库连接串带回客户端。 |
 | 桌面端 → Gateway | mTLS 证书/私钥/CA 三件套同时配置；短时 Ed25519 签名 access ticket | Gateway 在客户网络内，控制面不保存数据库 secret。 |
-| Gateway → 数据库 | Gateway-local secret provider、按 source 连接池、只读 SQL 解析、路径授权、行数/字节数上限；PostgreSQL 强制 `sslmode=verify-full`、MySQL 强制 `ssl-mode=VERIFY_IDENTITY` | 用户票据和 policy scope 会在数据面再次校验，Gateway 不会默认接受未校验证书或明文数据库传输。 |
+| Gateway → 数据库 | Gateway-local secret provider、按 source 连接池、SQL 或原生只读语法解析、路径授权、行数/字节数上限；PostgreSQL 强制 `sslmode=verify-full`、MySQL 强制 `ssl-mode=VERIFY_IDENTITY`、MongoDB 强制显式 `tls=true`/`ssl=true`、Elasticsearch 强制 HTTPS | 用户票据和 policy scope 会在数据面再次校验，Gateway 不会默认接受未校验证书或明文数据库传输。 |
 | 本地连接与 managed 连接 | local driver 与 managed Gateway driver 分离；managed driver 不提供 mutation、DDL、export、transaction 等桌面能力 | 禁止 managed project 静默回落为本地直连。 |
 | 桌面/驱动分发 | Tauri updater 签名、GitHub Release、可选 Aliyun OSS immutable release index；独立 driver 包使用 Minisign | 应用和独立驱动的更新完整性有独立验证链。 |
 
 ## 已落地的阶段一能力收敛
 
-当前 Gateway RPC 只实现资源发现、元数据读取和只读 SQL 查询。为防止控制面管理界面、grant 或 descriptor 比数据面承诺得更多，当前版本统一实施以下限制：
+当前 Gateway RPC 实现资源发现、元数据读取、只读 SQL 查询，以及 MongoDB/Elasticsearch 的受限原生只读查询。为防止控制面管理界面、grant 或 descriptor 比数据面承诺得更多，当前版本统一实施以下限制：
 
 1. `AccessAction::is_stage_one_managed_action` 只允许 `resource.discover`、`metadata.read`、`query.read`。
 2. 控制面拒绝为 `data.write`、`schema.ddl`、`data.export`、`ai.use` 或 `mcp.use` 注册 managed source、创建 grant 或签发 access ticket。
 3. project descriptor 只会下发当前 Gateway 实际可执⾏的三种能力，即使旧数据库中遗留了更宽的 grant。
-4. Gateway source 配置拒绝重复 source ID、非 PostgreSQL/MySQL driver、空/控制字符 secret reference、缺少动态凭据占位符的 connection template，以及任何非只读能力。
+4. Gateway source 配置拒绝重复 source ID、非 PostgreSQL/MySQL/MongoDB/Elasticsearch driver、空/控制字符 secret reference、缺少动态凭据占位符的 connection template，以及任何非只读能力。
 5. Gateway 的 source 配置和 TLS 私钥必须是普通文件；敏感文件大小受限。在 Unix 上它们还必须禁止 group/other 读取。
+
+MongoDB 仅允许单集合 `find`、`aggregate` 和 `countDocuments`；聚合中禁止 `$out`、`$merge`、`$lookup`、`$unionWith`、服务端 JavaScript 与 change stream。Elasticsearch 仅允许单个具体 index 的 `GET`/`POST /<index>/_search`；禁止 wildcard/multi-index、脚本和 runtime mappings。两者都使用独立 RPC 及精确 collection/index ticket scope，绝不经过 SQL parser。
+
+该原生 RPC 将 enterprise contract 升级为 v2；MongoDB/Elasticsearch 的 managed desktop 与 Gateway 必须成对升级，旧 SQL-only Gateway 会在能力协商阶段被拒绝，而不会静默降级执行。
 
 这条能力收敛是安全边界，不是永久功能限制。实现 managed write/DDL/export 前，必须先新增专用 Gateway RPC、单次审批/回执、事务边界、审计和故障恢复模型；不能只开放一个 `AccessAction`。
 
@@ -55,7 +59,7 @@ Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动
 | 身份生命周期 | 增加 SCIM/JIT、group sync、停用传播及审计；目前 principal kind 已预留 user/group，但没有企业目录同步。 |
 | 数据面 HA | 控制面 policy revision heartbeat、Gateway health、负载均衡和故障域策略。 |
 | 数据治理 | 行/列级 policy、字段掩码、分类标签、查询指纹与 SIEM 事件。 |
-| managed engine 覆盖 | MongoDB、Elasticsearch、Redis 的受限 Gateway adapter 需分别实现协议级范围校验；不可复用 SQL parser 假装支持。 |
+| managed engine 覆盖 | MongoDB/Elasticsearch 已有独立受限原生 adapter 与 collection/index scope；Redis 仍需单独定义命令 allowlist、key-pattern scope 和响应上限。不可复用 SQL parser 假装支持。 |
 | 分发运营 | 企业私有 channel、设备/版本合规报告、强制最低版本、回滚策略和更新签名 key rotation drill。 |
 
 ## 生产运行约束
@@ -66,11 +70,11 @@ Gateway 每五秒使用登记的签名身份拉取本组织撤销快照，启动
 4. 管理员注册 Gateway 时必须提供实际 TLS 叶证书的 SHA-256 DER 指纹及专用 Ed25519 公钥。返回的一次性 enrollment token 和匹配的 Ed25519 私钥只能写入 Gateway 的私有挂载文件；Gateway 回连签名证明成功后才会变为 active。激活后可移除 token 文件，但必须保留 Ed25519 私钥以完成重启身份证明。管理员没有手工激活入口。
 5. 未分类/生产数据库上的 AI mutation 保持禁用；企业 managed Gateway 当前更严格，仅支持只读能力。
 6. 发布不可覆盖既有 version 目录；应用更新和 driver release 均应使用专用、最小权限的签名与 OSS 凭据。
-7. Gateway 到 PostgreSQL/MySQL 的数据库 URL 默认必须验证服务端 TLS 身份。仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
+7. Gateway 到 PostgreSQL/MySQL/MongoDB/Elasticsearch 的数据库 URL 默认必须验证服务端 TLS 身份。MongoDB source 必须显式写入 `tls=true`（或 `ssl=true`），Elasticsearch source 必须使用 `https://`；仅受控本地开发可同时在 source 配置 `allowInsecureTransport: true` 和 Gateway 环境 `OXIDE_ALLOW_INSECURE_DATABASE_TRANSPORT=true`；任何一个缺失都会拒绝未校验连接。
 8. Gateway TLS 轮换时，管理员只通过控制面取得一次性 token；将 token 写入私有 `OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE`，并以新 TLS 证书、原有 `OXIDE_GATEWAY_ENROLLMENT_SIGNING_KEY_FILE` 重启 Gateway。新实例成功接管后立即删除 token 文件；不得通过控制面、日志或共享配置传输私钥。
 
 ## 验收与延后验证
 
 当前可本地验证：contracts/Gateway 单元测试、control plane API 输入拒绝、release manifest/签名检查、desktop managed driver 不暴露写入能力。
 
-必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换/rollback 与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询以及未来 MongoDB/Elasticsearch Gateway adapter。真实数据库验证不会在控制逻辑完成前提前执行。
+必须在企业环境后置验证：真实 OIDC/JWKS rotation、Vault/Kubernetes secret provider、mTLS 证书轮换/rollback 与设备撤销、NetworkPolicy、SIEM/outbox、PostgreSQL/MySQL 受限查询，以及 MongoDB/Elasticsearch 受限原生查询与 TLS 端点。真实数据库验证不会在控制逻辑完成前提前执行。

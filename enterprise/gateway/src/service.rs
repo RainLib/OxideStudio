@@ -1,8 +1,9 @@
 use crate::{
     config::{allows_insecure_transport, validate_connection_transport, DataSourceConfig},
     proto::{
-        data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse, QueryChunk,
-        QueryRequest, RequestScope, ResourceItem, ResourceRequest, ResourceResponse,
+        data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse,
+        NativeQueryRequest, QueryChunk, QueryRequest, RequestScope, ResourceItem, ResourceRequest,
+        ResourceResponse,
     },
     revocation::RevocationState,
     secret::SecretProvider,
@@ -13,9 +14,10 @@ use oxide_enterprise_contracts::{
     AuthorizationRequest, ENTERPRISE_CONTRACT_VERSION,
 };
 use oxide_studio_lib::{
-    core::{driver::DatabaseDriver, statement::validate_read_only_sql},
+    core::{driver::DatabaseDriver, protocol::QueryResult, statement::validate_read_only_sql},
     drivers::connect_driver,
 };
+use serde_json::Value;
 use sqlparser::{
     ast::{ObjectName, Visit, Visitor},
     dialect::{MsSqlDialect, MySqlDialect, PostgreSqlDialect},
@@ -349,6 +351,8 @@ impl DataPlane for DataPlaneService {
 
     type ExecuteReadOnlyStream =
         Pin<Box<dyn Stream<Item = Result<QueryChunk, Status>> + Send + 'static>>;
+    type ExecuteNativeReadOnlyStream =
+        Pin<Box<dyn Stream<Item = Result<QueryChunk, Status>> + Send + 'static>>;
 
     async fn execute_read_only(
         &self,
@@ -404,27 +408,7 @@ impl DataPlane for DataPlaneService {
             Status::internal("managed query failed")
         })?;
 
-        let mut remaining = claims.max_rows as usize;
-        let mut returned_rows = 0_u64;
-        let mut truncated = false;
-        for result in &mut results {
-            if result.rows.len() > remaining {
-                result.rows.truncate(remaining);
-                truncated = true;
-            }
-            remaining = remaining.saturating_sub(result.rows.len());
-            returned_rows += result.rows.len() as u64;
-            if remaining == 0 {
-                truncated = true;
-            }
-        }
-        let payload = serde_json::to_vec(&results)
-            .map_err(|_| Status::internal("failed to encode managed query result"))?;
-        if payload.len() as u64 > claims.max_result_bytes {
-            return Err(Status::resource_exhausted(
-                "managed query result exceeds the assigned response-size limit",
-            ));
-        }
+        let (payload, returned_rows, truncated) = encode_bounded_results(&mut results, &claims)?;
         let chunks = vec![Ok(QueryChunk {
             encoding: crate::proto::query_chunk::Encoding::Json as i32,
             payload,
@@ -437,6 +421,495 @@ impl DataPlane for DataPlaneService {
             Box::pin(stream::iter(chunks)) as Self::ExecuteReadOnlyStream
         ))
     }
+
+    async fn execute_native_read_only(
+        &self,
+        request: Request<NativeQueryRequest>,
+    ) -> Result<Response<Self::ExecuteReadOnlyStream>, Status> {
+        let peer_certificate_fingerprint = Self::peer_certificate_fingerprint(&request)?;
+        let request = request.into_inner();
+        if request.payload.len() > 200_000 || request.payload.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "native query must contain between 1 and 200000 bytes",
+            ));
+        }
+        let (claims, authorization) = self.authorize(
+            &request.access_ticket,
+            request.scope.as_ref(),
+            AccessAction::QueryRead,
+            &peer_certificate_fingerprint,
+        )?;
+        let source = self.require_source(authorization.data_source_id)?;
+        let provider = canonical_native_provider(&request.provider)?;
+        if canonical_native_provider(&source.driver)? != provider {
+            return Err(Status::failed_precondition(
+                "native query provider does not match the managed data source",
+            ));
+        }
+        let target =
+            validate_native_read_only(provider, &request.payload, request.context.as_deref())?;
+        authorize_native_resource(
+            &authorization.resource_path,
+            &target.resource_path,
+            &claims.allowed_resource_paths,
+            &claims.forbidden_resource_paths,
+        )?;
+        let driver = self.driver(authorization.data_source_id).await?;
+        let mut results = driver
+            .query_with_context(&request.payload, &target.context)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    data_source_id = %authorization.data_source_id,
+                    provider,
+                    error = %oxide_studio_lib::core::redaction::redact_connection_url(&error.to_string()),
+                    "managed native read-only query failed"
+                );
+                Status::internal("managed native query failed")
+            })?;
+        let (payload, returned_rows, truncated) = encode_bounded_results(&mut results, &claims)?;
+        let chunks = vec![Ok(QueryChunk {
+            encoding: crate::proto::query_chunk::Encoding::Json as i32,
+            payload,
+            sequence: 0,
+            final_chunk: true,
+            returned_rows,
+            truncated,
+        })];
+        Ok(Response::new(
+            Box::pin(stream::iter(chunks)) as Self::ExecuteReadOnlyStream
+        ))
+    }
+}
+
+struct NativeReadTarget {
+    context: String,
+    resource_path: Vec<String>,
+}
+
+fn encode_bounded_results(
+    results: &mut [QueryResult],
+    claims: &oxide_enterprise_contracts::AccessSessionClaims,
+) -> Result<(Vec<u8>, u64, bool), Status> {
+    let mut remaining = claims.max_rows as usize;
+    let mut returned_rows = 0_u64;
+    let mut truncated = false;
+    for result in &mut *results {
+        if result.rows.len() > remaining {
+            result.rows.truncate(remaining);
+            truncated = true;
+        }
+        remaining = remaining.saturating_sub(result.rows.len());
+        returned_rows += result.rows.len() as u64;
+        if remaining == 0 {
+            truncated = true;
+        }
+    }
+    let payload = serde_json::to_vec(results)
+        .map_err(|_| Status::internal("failed to encode managed query result"))?;
+    if payload.len() as u64 > claims.max_result_bytes {
+        return Err(Status::resource_exhausted(
+            "managed query result exceeds the assigned response-size limit",
+        ));
+    }
+    Ok((payload, returned_rows, truncated))
+}
+
+fn canonical_native_provider(value: &str) -> Result<&'static str, Status> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mongodb" | "mongo" => Ok("mongodb"),
+        "elasticsearch" | "elastic" => Ok("elasticsearch"),
+        _ => Err(Status::failed_precondition(
+            "managed data source does not support native read-only queries",
+        )),
+    }
+}
+
+fn validate_native_read_only(
+    provider: &str,
+    payload: &str,
+    context: Option<&str>,
+) -> Result<NativeReadTarget, Status> {
+    match provider {
+        "mongodb" => validate_mongodb_native_read_only(payload, context),
+        "elasticsearch" => validate_elasticsearch_native_read_only(payload, context),
+        _ => Err(Status::failed_precondition(
+            "managed data source does not support native read-only queries",
+        )),
+    }
+}
+
+fn validate_mongodb_native_read_only(
+    payload: &str,
+    context: Option<&str>,
+) -> Result<NativeReadTarget, Status> {
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|_| Status::invalid_argument("MongoDB native query must be one JSON object"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Status::invalid_argument("MongoDB native query must be one JSON object"))?;
+    let allowed_fields = [
+        "database",
+        "collection",
+        "find",
+        "aggregate",
+        "count",
+        "countDocuments",
+        "filter",
+        "pipeline",
+        "query",
+        "cursor",
+        "limit",
+        "skip",
+        "sort",
+        "projection",
+    ];
+    if object
+        .keys()
+        .any(|key| !allowed_fields.contains(&key.as_str()))
+    {
+        return Err(Status::permission_denied(
+            "MongoDB managed queries only allow find, aggregate, and countDocuments",
+        ));
+    }
+    reject_forbidden_mongodb_operators(&value)?;
+
+    let payload_database = match object.get("database") {
+        Some(Value::String(database)) => Some(validate_mongodb_name(database)?),
+        Some(_) => {
+            return Err(Status::invalid_argument(
+                "MongoDB database must be a string",
+            ))
+        }
+        None => None,
+    };
+    let request_database = context
+        .map(validate_mongodb_name)
+        .transpose()?
+        .or(payload_database.clone())
+        .ok_or_else(|| Status::invalid_argument("MongoDB database context is required"))?;
+    if let Some(database) = payload_database {
+        if !database.eq_ignore_ascii_case(&request_database) {
+            return Err(Status::permission_denied(
+                "MongoDB query database does not match the selected database context",
+            ));
+        }
+    }
+
+    let operation_keys = ["find", "aggregate", "count", "countDocuments"];
+    let operations = operation_keys
+        .iter()
+        .filter(|&&key| object.contains_key(key))
+        .copied()
+        .collect::<Vec<_>>();
+    if operations.len() != 1 {
+        return Err(Status::permission_denied(
+            "MongoDB managed query must contain exactly one read-only operation",
+        ));
+    }
+    let operation = operations[0];
+    let collection_from_field = object.get("collection").and_then(Value::as_str);
+    let collection_from_command = match operation {
+        "find" | "aggregate" | "count" => object.get(operation).and_then(Value::as_str),
+        "countDocuments" => None,
+        _ => None,
+    };
+    let collection = match (collection_from_field, collection_from_command) {
+        (Some(field), Some(command)) if !field.eq_ignore_ascii_case(command) => {
+            return Err(Status::permission_denied(
+                "MongoDB query collection conflicts with the native command target",
+            ));
+        }
+        (Some(field), _) | (_, Some(field)) => validate_mongodb_name(field)?,
+        (None, None) => {
+            return Err(Status::invalid_argument(
+                "MongoDB collection is required for managed native queries",
+            ));
+        }
+    };
+    if object.contains_key("collection") && collection_from_field.is_none() {
+        return Err(Status::invalid_argument(
+            "MongoDB collection must be a string",
+        ));
+    }
+    validate_mongodb_operation_shape(object, operation)?;
+    Ok(NativeReadTarget {
+        context: request_database.clone(),
+        resource_path: vec![request_database, collection],
+    })
+}
+
+fn validate_mongodb_operation_shape(
+    object: &serde_json::Map<String, Value>,
+    operation: &str,
+) -> Result<(), Status> {
+    let is_object = |name: &str| object.get(name).is_none_or(Value::is_object);
+    match operation {
+        "find" => {
+            if let Some(value) = object.get("find") {
+                if !value.is_object() && !value.is_string() {
+                    return Err(Status::invalid_argument(
+                        "MongoDB find must be an object or collection name",
+                    ));
+                }
+            }
+            if !is_object("filter") || !is_object("sort") || !is_object("projection") {
+                return Err(Status::invalid_argument(
+                    "MongoDB find options must be JSON objects",
+                ));
+            }
+            if object
+                .get("limit")
+                .is_some_and(|value| !value.is_i64() && !value.is_u64())
+                || object
+                    .get("skip")
+                    .is_some_and(|value| !value.is_i64() && !value.is_u64())
+            {
+                return Err(Status::invalid_argument(
+                    "MongoDB find limit and skip must be integers",
+                ));
+            }
+        }
+        "aggregate" => {
+            let pipeline = if object.get("aggregate").is_some_and(Value::is_string) {
+                object.get("pipeline")
+            } else {
+                object.get("aggregate")
+            };
+            if !pipeline.is_some_and(Value::is_array) {
+                return Err(Status::invalid_argument(
+                    "MongoDB aggregate pipeline must be a JSON array",
+                ));
+            }
+            if object.get("cursor").is_some_and(|value| !value.is_object()) {
+                return Err(Status::invalid_argument(
+                    "MongoDB aggregate cursor must be a JSON object",
+                ));
+            }
+        }
+        "count" | "countDocuments" => {
+            let filter = if operation == "count" {
+                object.get("query")
+            } else {
+                object.get("countDocuments")
+            };
+            if filter.is_some_and(|value| !value.is_object()) {
+                return Err(Status::invalid_argument(
+                    "MongoDB count filter must be a JSON object",
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn reject_forbidden_mongodb_operators(value: &Value) -> Result<(), Status> {
+    const FORBIDDEN: &[&str] = &[
+        "$accumulator",
+        "$changeStream",
+        "$function",
+        "$graphLookup",
+        "$lookup",
+        "$merge",
+        "$out",
+        "$unionWith",
+        "$where",
+    ];
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if FORBIDDEN
+                    .iter()
+                    .any(|forbidden| key.eq_ignore_ascii_case(forbidden))
+                {
+                    return Err(Status::permission_denied(
+                        "MongoDB managed query contains a disallowed server-side or cross-collection operator",
+                    ));
+                }
+                reject_forbidden_mongodb_operators(value)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                reject_forbidden_mongodb_operators(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_mongodb_name(value: &str) -> Result<String, Status> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value.chars().any(|character| {
+            matches!(character, '/' | '\\' | '.' | '"' | '$' | '\0') || character.is_control()
+        })
+    {
+        return Err(Status::invalid_argument(
+            "MongoDB database or collection name is invalid",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_elasticsearch_native_read_only(
+    payload: &str,
+    context: Option<&str>,
+) -> Result<NativeReadTarget, Status> {
+    let context = context.map(validate_elasticsearch_index).transpose()?;
+    let trimmed = payload.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        let body: Value = serde_json::from_str(trimmed)
+            .map_err(|_| Status::invalid_argument("Elasticsearch search body must be JSON"))?;
+        reject_expensive_elasticsearch_constructs(&body)?;
+        let index = context.ok_or_else(|| {
+            Status::invalid_argument("Elasticsearch JSON search requires an index context")
+        })?;
+        return Ok(NativeReadTarget {
+            context: index.clone(),
+            resource_path: vec![index],
+        });
+    }
+
+    let mut lines = trimmed.lines().filter(|line| !line.trim().is_empty());
+    let first = lines
+        .next()
+        .ok_or_else(|| Status::invalid_argument("Elasticsearch search request is required"))?
+        .trim();
+    let mut parts = first.splitn(3, char::is_whitespace);
+    let method = parts.next().unwrap_or("").to_ascii_uppercase();
+    let path = parts
+        .next()
+        .ok_or_else(|| Status::invalid_argument("Elasticsearch search request path is required"))?;
+    let inline_body = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if !matches!(method.as_str(), "GET" | "POST") {
+        return Err(Status::permission_denied(
+            "managed Elasticsearch queries only allow GET or POST search requests",
+        ));
+    }
+    if path.contains('?') || path.contains('%') || !path.starts_with('/') {
+        return Err(Status::permission_denied(
+            "managed Elasticsearch search paths must be a plain index/_search path",
+        ));
+    }
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let [index, endpoint] = segments.as_slice() else {
+        return Err(Status::permission_denied(
+            "managed Elasticsearch queries only allow one concrete index _search endpoint",
+        ));
+    };
+    if *endpoint != "_search" {
+        return Err(Status::permission_denied(
+            "managed Elasticsearch queries only allow the _search endpoint",
+        ));
+    }
+    let index = validate_elasticsearch_index(index)?;
+    if let Some(context) = context {
+        if !context.eq_ignore_ascii_case(&index) {
+            return Err(Status::permission_denied(
+                "Elasticsearch search index does not match the selected index context",
+            ));
+        }
+    }
+    let body = std::iter::once(inline_body)
+        .flatten()
+        .chain(lines.map(str::trim))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !body.trim().is_empty() {
+        let body: Value = serde_json::from_str(&body)
+            .map_err(|_| Status::invalid_argument("Elasticsearch search body must be JSON"))?;
+        reject_expensive_elasticsearch_constructs(&body)?;
+    }
+    Ok(NativeReadTarget {
+        context: index.clone(),
+        resource_path: vec![index],
+    })
+}
+
+fn validate_elasticsearch_index(value: &str) -> Result<String, Status> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value.starts_with('_')
+        || value.contains(',')
+        || value.contains('*')
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0') || character.is_control())
+    {
+        return Err(Status::invalid_argument(
+            "Elasticsearch index must be one concrete index name",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn reject_expensive_elasticsearch_constructs(value: &Value) -> Result<(), Status> {
+    const FORBIDDEN: &[&str] = &["script", "runtime_mappings"];
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if FORBIDDEN
+                    .iter()
+                    .any(|forbidden| key.eq_ignore_ascii_case(forbidden))
+                {
+                    return Err(Status::permission_denied(
+                        "managed Elasticsearch search does not allow scripts or runtime mappings",
+                    ));
+                }
+                reject_expensive_elasticsearch_constructs(value)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                reject_expensive_elasticsearch_constructs(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn authorize_native_resource(
+    requested_path: &[String],
+    actual_path: &[String],
+    allowed_scopes: &[Vec<String>],
+    forbidden_scopes: &[Vec<String>],
+) -> Result<(), Status> {
+    if requested_path.len() != actual_path.len()
+        || !requested_path
+            .iter()
+            .zip(actual_path)
+            .all(|(requested, actual)| requested.eq_ignore_ascii_case(actual))
+    {
+        return Err(Status::permission_denied(
+            "native query target does not match the ticket resource scope",
+        ));
+    }
+    if !allowed_scopes
+        .iter()
+        .any(|allowed| path_is_within(actual_path, allowed))
+    {
+        return Err(Status::permission_denied(
+            "native query references an object outside the effective enterprise grants",
+        ));
+    }
+    if forbidden_scopes
+        .iter()
+        .any(|forbidden| path_is_within(actual_path, forbidden))
+    {
+        return Err(Status::permission_denied(
+            "native query references an explicitly excluded enterprise object",
+        ));
+    }
+    Ok(())
 }
 
 fn metadata_error(error: anyhow::Error) -> Status {
@@ -695,6 +1168,73 @@ mod tests {
             Some("public"),
             &[vec!["app".into(), "public".into()]],
             &[vec!["app".into(), "public".into(), "private_orders".into(),]],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_mongodb_read_only_targets_one_collection_and_rejects_writes() {
+        let target = validate_mongodb_native_read_only(
+            r#"{"database":"app","find":"orders","filter":{"state":"open"},"limit":25}"#,
+            Some("app"),
+        )
+        .unwrap();
+        assert_eq!(target.context, "app");
+        assert_eq!(target.resource_path, ["app", "orders"]);
+        assert!(validate_mongodb_native_read_only(
+            r#"{"database":"app","collection":"orders","deleteMany":{}}"#,
+            Some("app"),
+        )
+        .is_err());
+        assert!(validate_mongodb_native_read_only(
+            r#"{"database":"app","aggregate":"orders","pipeline":[{"$lookup":{"from":"users"}}]}"#,
+            Some("app"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_elasticsearch_requires_one_concrete_index_search() {
+        let target = validate_elasticsearch_native_read_only(
+            "POST /logs-2026/_search\n{\"query\":{\"match_all\":{}}}",
+            Some("logs-2026"),
+        )
+        .unwrap();
+        assert_eq!(target.resource_path, ["logs-2026"]);
+        assert!(
+            validate_elasticsearch_native_read_only("POST /logs-*/_search\n{}", None,).is_err()
+        );
+        assert!(validate_elasticsearch_native_read_only(
+            "POST /logs-2026/_delete_by_query\n{}",
+            None,
+        )
+        .is_err());
+        assert!(validate_elasticsearch_native_read_only(
+            r#"{"script":{"source":"return true"}}"#,
+            Some("logs-2026"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_scope_must_bind_exact_target_and_honor_exclusions() {
+        let actual = vec!["app".to_string(), "orders".to_string()];
+        assert!(authorize_native_resource(
+            &["app".into(), "orders".into()],
+            &actual,
+            &[vec!["app".into()]],
+            &[],
+        )
+        .is_ok());
+        assert!(
+            authorize_native_resource(&["app".into()], &actual, &[vec!["app".into()]], &[],)
+                .is_err()
+        );
+        assert!(authorize_native_resource(
+            &["app".into(), "orders".into()],
+            &actual,
+            &[vec!["app".into()]],
+            &[vec!["app".into(), "orders".into()]],
         )
         .is_err());
     }

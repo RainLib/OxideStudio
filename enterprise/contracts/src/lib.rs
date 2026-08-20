@@ -18,4 +18,8 @@ pub use policy::*;
 #[cfg(feature = "ticket")]
 pub use ticket::*;
 
-pub const ENTERPRISE_CONTRACT_VERSION: u16 = 1;
+// Version 2 adds the provider-specific native read-only data-plane RPC.
+// Keeping this tied to tickets/capability negotiation prevents a desktop from
+// treating an older SQL-only Gateway as a managed MongoDB or Elasticsearch
+// endpoint.
+pub const ENTERPRISE_CONTRACT_VERSION: u16 = 2;

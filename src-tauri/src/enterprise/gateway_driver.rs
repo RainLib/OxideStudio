@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use oxide_enterprise_contracts::{
     AccessAction, ManagedDataSourceDescriptor, ENTERPRISE_CONTRACT_VERSION,
 };
+use serde_json::Value;
 use sqlparser::{
     ast::{ObjectName, Visit, Visitor},
     dialect::{MsSqlDialect, MySqlDialect, PostgreSqlDialect},
@@ -25,8 +26,8 @@ pub mod proto {
 }
 
 use proto::{
-    data_plane_client::DataPlaneClient, CapabilitiesRequest, CapabilitiesResponse, QueryRequest,
-    RequestScope, ResourceRequest,
+    data_plane_client::DataPlaneClient, CapabilitiesRequest, CapabilitiesResponse,
+    NativeQueryRequest, QueryRequest, RequestScope, ResourceRequest,
 };
 
 const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
@@ -281,6 +282,11 @@ impl ManagedGatewayDriver {
         database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<QueryResult>> {
+        if let Some(provider) = self.native_provider() {
+            return self
+                .execute_native_query(provider, sql, database, schema)
+                .await;
+        }
         let resource_path = self.query_resource_path(sql, database, schema)?;
         let (mut client, session, scope) = self
             .open_client(AccessAction::QueryRead, resource_path)
@@ -311,6 +317,199 @@ impl ManagedGatewayDriver {
         }
         Ok(results)
     }
+
+    fn native_provider(&self) -> Option<&'static str> {
+        match self.descriptor.driver.trim().to_ascii_lowercase().as_str() {
+            "mongodb" | "mongo" => Some("mongodb"),
+            "elasticsearch" | "elastic" => Some("elasticsearch"),
+            _ => None,
+        }
+    }
+
+    async fn execute_native_query(
+        &self,
+        provider: &str,
+        payload: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<QueryResult>> {
+        let target = native_query_target(provider, payload, database, schema)?;
+        let (mut client, session, scope) = self
+            .open_client(AccessAction::QueryRead, target.resource_path)
+            .await?;
+        let mut stream = client
+            .execute_native_read_only(NativeQueryRequest {
+                access_ticket: session.ticket,
+                scope: Some(scope),
+                provider: provider.to_string(),
+                payload: payload.to_string(),
+                context: Some(target.context),
+            })
+            .await
+            .context("managed native read-only query was rejected")?
+            .into_inner();
+        let mut results = Vec::new();
+        while let Some(chunk) = stream
+            .message()
+            .await
+            .context("managed native query stream failed")?
+        {
+            if chunk.encoding != proto::query_chunk::Encoding::Json as i32 {
+                return Err(anyhow!("managed Gateway returned an unsupported encoding"));
+            }
+            let mut chunk_results: Vec<QueryResult> = serde_json::from_slice(&chunk.payload)
+                .context("managed Gateway returned an invalid query result")?;
+            results.append(&mut chunk_results);
+        }
+        Ok(results)
+    }
+}
+
+struct NativeQueryTarget {
+    context: String,
+    resource_path: Vec<String>,
+}
+
+fn native_query_target(
+    provider: &str,
+    payload: &str,
+    database: Option<&str>,
+    schema: Option<&str>,
+) -> Result<NativeQueryTarget> {
+    match provider {
+        "mongodb" => mongodb_native_target(payload, database.or(schema)),
+        "elasticsearch" => elasticsearch_native_target(payload, schema.or(database)),
+        _ => Err(anyhow!("managed native provider is unsupported")),
+    }
+}
+
+fn mongodb_native_target(payload: &str, context: Option<&str>) -> Result<NativeQueryTarget> {
+    let value: Value = serde_json::from_str(payload)
+        .context("managed MongoDB query must be one JSON command object")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("managed MongoDB query must be one JSON command object"))?;
+    let payload_database = match object.get("database") {
+        Some(Value::String(database)) => Some(validate_mongodb_target_name(database)?),
+        Some(_) => return Err(anyhow!("MongoDB database must be a string")),
+        None => None,
+    };
+    let database = context
+        .map(validate_mongodb_target_name)
+        .transpose()?
+        .or(payload_database.clone())
+        .ok_or_else(|| anyhow!("select a MongoDB database before running a managed query"))?;
+    if let Some(payload_database) = payload_database {
+        if !payload_database.eq_ignore_ascii_case(&database) {
+            return Err(anyhow!(
+                "managed MongoDB command database does not match the selected database"
+            ));
+        }
+    }
+    let collection = object
+        .get("collection")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            ["find", "aggregate", "count"]
+                .iter()
+                .find_map(|operation| object.get(*operation).and_then(Value::as_str))
+        })
+        .ok_or_else(|| anyhow!("managed MongoDB query must name one collection"))?;
+    let collection = validate_mongodb_target_name(collection)?;
+    Ok(NativeQueryTarget {
+        context: database.clone(),
+        resource_path: vec![database, collection],
+    })
+}
+
+fn elasticsearch_native_target(payload: &str, context: Option<&str>) -> Result<NativeQueryTarget> {
+    let payload = payload.trim();
+    if payload.starts_with('{') || payload.starts_with('[') {
+        serde_json::from_str::<Value>(payload)
+            .context("managed Elasticsearch search body must be JSON")?;
+        let index = context
+            .map(validate_elasticsearch_target_index)
+            .transpose()?
+            .ok_or_else(|| {
+                anyhow!("select one Elasticsearch index before running a JSON search")
+            })?;
+        return Ok(NativeQueryTarget {
+            context: index.clone(),
+            resource_path: vec![index],
+        });
+    }
+    let line = payload
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("managed Elasticsearch search request is required"))?;
+    let mut parts = line.splitn(3, char::is_whitespace);
+    let method = parts.next().unwrap_or("").to_ascii_uppercase();
+    let path = parts
+        .next()
+        .ok_or_else(|| anyhow!("managed Elasticsearch search path is required"))?;
+    if !matches!(method.as_str(), "GET" | "POST") || path.contains('?') {
+        return Err(anyhow!(
+            "managed Elasticsearch supports only GET or POST /<index>/_search"
+        ));
+    }
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let [index, endpoint] = segments.as_slice() else {
+        return Err(anyhow!(
+            "managed Elasticsearch supports only one concrete index _search endpoint"
+        ));
+    };
+    if *endpoint != "_search" {
+        return Err(anyhow!(
+            "managed Elasticsearch supports only one concrete index _search endpoint"
+        ));
+    }
+    let index = validate_elasticsearch_target_index(index)?;
+    if let Some(context) = context
+        .map(validate_elasticsearch_target_index)
+        .transpose()?
+    {
+        if !context.eq_ignore_ascii_case(&index) {
+            return Err(anyhow!(
+                "managed Elasticsearch request index does not match the selected index"
+            ));
+        }
+    }
+    Ok(NativeQueryTarget {
+        context: index.clone(),
+        resource_path: vec![index],
+    })
+}
+
+fn validate_mongodb_target_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value.chars().any(|character| {
+            matches!(character, '/' | '\\' | '.' | '"' | '$' | '\0') || character.is_control()
+        })
+    {
+        return Err(anyhow!("MongoDB database or collection name is invalid"));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_elasticsearch_target_index(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value.starts_with('_')
+        || value.contains(',')
+        || value.contains('*')
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0') || character.is_control())
+    {
+        return Err(anyhow!(
+            "Elasticsearch index must be one concrete index name"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 #[async_trait]
@@ -673,5 +872,36 @@ mod tests {
         let mut missing = valid;
         missing.capabilities = vec![AccessAction::ResourceDiscover.as_str().to_string()];
         assert!(validate_gateway_capabilities(&descriptor, "policy-8", &missing).is_err());
+    }
+
+    #[test]
+    fn derives_native_query_scopes_without_using_sql_relation_scanning() {
+        let mongo = native_query_target(
+            "mongodb",
+            r#"{"find":"orders","filter":{}}"#,
+            Some("app"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(mongo.context, "app");
+        assert_eq!(mongo.resource_path, ["app", "orders"]);
+
+        let elastic =
+            native_query_target("elasticsearch", "POST /logs-2026/_search\n{}", None, None)
+                .unwrap();
+        assert_eq!(elastic.context, "logs-2026");
+        assert_eq!(elastic.resource_path, ["logs-2026"]);
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_cross_context_native_targets() {
+        assert!(native_query_target("mongodb", r#"{"find":"orders"}"#, None, None).is_err());
+        assert!(native_query_target(
+            "elasticsearch",
+            "POST /logs-2026/_search\n{}",
+            None,
+            Some("audit-2026"),
+        )
+        .is_err());
     }
 }

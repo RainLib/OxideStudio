@@ -6,6 +6,10 @@ service DataPlane {
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
   rpc ListResources(ResourceRequest) returns (ResourceResponse);
   rpc ExecuteReadOnly(QueryRequest) returns (stream QueryChunk);
+  // Native document/search consoles do not have a SQL grammar. They use a
+  // separate, provider-specific read-only allowlist at the Gateway rather
+  // than being passed through the SQL parser.
+  rpc ExecuteNativeReadOnly(NativeQueryRequest) returns (stream QueryChunk);
 }
 
 message CapabilitiesRequest {
@@ -35,6 +39,19 @@ message QueryRequest {
   string sql = 3;
   optional string database = 4;
   optional string schema = 5;
+}
+
+message NativeQueryRequest {
+  string access_ticket = 1;
+  RequestScope scope = 2;
+  // Canonical provider name, currently mongodb or elasticsearch.
+  string provider = 3;
+  // Bounded native console text. The Gateway parses and authorizes this
+  // independently; it must never be treated as SQL.
+  string payload = 4;
+  // MongoDB database or Elasticsearch index context, when the console did
+  // not name the target directly.
+  optional string context = 5;
 }
 
 message ResourceRequest {
