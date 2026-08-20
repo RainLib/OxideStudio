@@ -329,6 +329,7 @@ impl ManagedGatewayDriver {
         match self.descriptor.driver.trim().to_ascii_lowercase().as_str() {
             "mongodb" | "mongo" => Some("mongodb"),
             "elasticsearch" | "elastic" => Some("elasticsearch"),
+            "redis" => Some("redis"),
             _ => None,
         }
     }
@@ -386,8 +387,39 @@ fn native_query_target(
     match provider {
         "mongodb" => mongodb_native_target(payload, database.or(schema)),
         "elasticsearch" => elasticsearch_native_target(payload, schema.or(database)),
+        "redis" => redis_native_target(payload, schema.or(database)),
         _ => Err(anyhow!("managed native provider is unsupported")),
     }
+}
+
+fn redis_native_target(payload: &str, context: Option<&str>) -> Result<NativeQueryTarget> {
+    let database = context
+        .map(validate_redis_target_database)
+        .transpose()?
+        .ok_or_else(|| anyhow!("select a Redis database before running a managed query"))?;
+    let tokens = payload.split_whitespace().collect::<Vec<_>>();
+    let key = tokens
+        .get(1)
+        .ok_or_else(|| anyhow!("managed Redis query must name one key"))?;
+    if payload.contains(['\n', '\r', ';'])
+        || key.is_empty()
+        || key.len() > 512
+        || key.chars().any(char::is_control)
+    {
+        return Err(anyhow!("managed Redis query must contain one valid key"));
+    }
+    Ok(NativeQueryTarget {
+        context: database.clone(),
+        resource_path: vec![database, (*key).to_string()],
+    })
+}
+
+fn validate_redis_target_database(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(anyhow!("Redis database index must be numeric"));
+    }
+    Ok(value.to_string())
 }
 
 fn mongodb_native_target(payload: &str, context: Option<&str>) -> Result<NativeQueryTarget> {
@@ -934,5 +966,13 @@ mod tests {
             Some("audit-2026"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn derives_a_redis_key_scope_from_the_selected_database() {
+        let target = native_query_target("redis", "GET user:42", None, Some("2")).unwrap();
+        assert_eq!(target.context, "2");
+        assert_eq!(target.resource_path, ["2", "user:42"]);
+        assert!(native_query_target("redis", "GET user:42", None, None).is_err());
     }
 }

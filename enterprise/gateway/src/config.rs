@@ -265,7 +265,14 @@ fn validate_source(
 ) -> Result<()> {
     if !matches!(
         source.driver.trim().to_ascii_lowercase().as_str(),
-        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic"
+        "postgres"
+            | "postgresql"
+            | "mysql"
+            | "mongodb"
+            | "mongo"
+            | "elasticsearch"
+            | "elastic"
+            | "redis"
     ) {
         anyhow::bail!("gateway source {} has an unsupported driver", source.id);
     }
@@ -345,6 +352,7 @@ pub(crate) fn validate_connection_transport(
         "elasticsearch" | "elastic" => {
             matches!(url.scheme(), "http" | "https" | "elasticsearch" | "elastic")
         }
+        "redis" => matches!(url.scheme(), "redis" | "rediss"),
         _ => false,
     };
     if !scheme_matches {
@@ -370,6 +378,10 @@ pub(crate) fn validate_connection_transport(
         // an enterprise source must still state HTTPS at the configuration
         // boundary. Its HTTP client verifies the server certificate normally.
         "elasticsearch" | "elastic" => url.scheme() == "https",
+        // Redis has no URL query flag equivalent to PostgreSQL sslmode.
+        // Require the TLS scheme explicitly; the Rust client then verifies
+        // the server certificate rather than accepting plaintext Redis.
+        "redis" => url.scheme() == "rediss",
         _ => false,
     };
     if !parameter {
@@ -415,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn source_file_accepts_only_supported_native_read_only_engines() {
+    fn source_file_accepts_supported_native_read_only_engines() {
         let mongo = format!(
             r#"[{{"id":"{}","driver":"mongodb","secretRef":"vault:database/documents","capabilities":["query.read"]}}]"#,
             Uuid::new_v4()
@@ -427,7 +439,9 @@ mod tests {
         assert!(parse_sources(mongo.as_bytes(), false).is_ok());
         assert!(parse_sources(elastic.as_bytes(), false).is_ok());
         let redis = mongo.replace("mongodb", "redis");
-        assert!(parse_sources(redis.as_bytes(), false).is_err());
+        assert!(parse_sources(redis.as_bytes(), false).is_ok());
+        let unsupported = mongo.replace("mongodb", "cassandra");
+        assert!(parse_sources(unsupported.as_bytes(), false).is_err());
     }
 
     #[test]
@@ -486,6 +500,18 @@ mod tests {
         assert!(validate_connection_transport(
             "elasticsearch",
             "http://reader:secret@search.example.test:9200",
+            false,
+        )
+        .is_err());
+        assert!(validate_connection_transport(
+            "redis",
+            "rediss://reader:secret@cache.example.test:6380/2",
+            false,
+        )
+        .is_ok());
+        assert!(validate_connection_transport(
+            "redis",
+            "redis://reader:secret@cache.example.test:6379/2",
             false,
         )
         .is_err());

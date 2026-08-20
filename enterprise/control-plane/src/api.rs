@@ -574,7 +574,7 @@ async fn register_data_source(
     let driver = input.driver.trim().to_ascii_lowercase();
     if !matches!(
         driver.as_str(),
-        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic"
+        "postgres" | "postgresql" | "mysql" | "mongodb" | "mongo" | "elasticsearch" | "elastic" | "redis"
     )
         || input.capabilities.is_empty()
         || !input
@@ -583,7 +583,7 @@ async fn register_data_source(
             .all(|action| action.is_stage_one_managed_action())
     {
         return Err(ApiError::bad_request(
-            "managed data sources support PostgreSQL, MySQL, MongoDB, and Elasticsearch with read-only Gateway capabilities only",
+            "managed data sources support PostgreSQL, MySQL, MongoDB, Elasticsearch, and Redis with read-only Gateway capabilities only",
         ));
     }
     let identity = state.verifier.authenticate(&headers).await?;

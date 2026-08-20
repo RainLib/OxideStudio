@@ -542,6 +542,7 @@ fn canonical_native_provider(value: &str) -> Result<&'static str, Status> {
     match value.trim().to_ascii_lowercase().as_str() {
         "mongodb" | "mongo" => Ok("mongodb"),
         "elasticsearch" | "elastic" => Ok("elasticsearch"),
+        "redis" => Ok("redis"),
         _ => Err(Status::failed_precondition(
             "managed data source does not support native read-only queries",
         )),
@@ -556,10 +557,130 @@ fn validate_native_read_only(
     match provider {
         "mongodb" => validate_mongodb_native_read_only(payload, context),
         "elasticsearch" => validate_elasticsearch_native_read_only(payload, context),
+        "redis" => validate_redis_native_read_only(payload, context),
         _ => Err(Status::failed_precondition(
             "managed data source does not support native read-only queries",
         )),
     }
+}
+
+fn validate_redis_native_read_only(
+    payload: &str,
+    context: Option<&str>,
+) -> Result<NativeReadTarget, Status> {
+    let database = context
+        .map(validate_redis_database)
+        .transpose()?
+        .ok_or_else(|| Status::invalid_argument("Redis database context is required"))?;
+    let tokens = tokenize_native_redis(payload)?;
+    let command = tokens
+        .first()
+        .map(|value| value.to_ascii_uppercase())
+        .ok_or_else(|| Status::invalid_argument("Redis command is required"))?;
+    const READ_ONLY: &[&str] = &[
+        "GET",
+        "TYPE",
+        "TTL",
+        "PTTL",
+        "STRLEN",
+        "HGET",
+        "HGETALL",
+        "HLEN",
+        "HEXISTS",
+        "HKEYS",
+        "HVALS",
+        "LRANGE",
+        "LLEN",
+        "SCARD",
+        "SMEMBERS",
+        "SISMEMBER",
+        "ZRANGE",
+        "ZRANGEBYSCORE",
+        "ZSCORE",
+        "ZCARD",
+        "XRANGE",
+        "XREVRANGE",
+        "XLEN",
+    ];
+    if !READ_ONLY.contains(&command.as_str()) || tokens.len() < 2 {
+        return Err(Status::permission_denied(
+            "managed Redis accepts one single-key read-only command",
+        ));
+    }
+    let key = validate_redis_key(&tokens[1])?;
+    Ok(NativeReadTarget {
+        context: database.clone(),
+        resource_path: vec![database, key],
+    })
+}
+
+fn validate_redis_database(value: &str) -> Result<String, Status> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(Status::invalid_argument(
+            "Redis database index must be numeric",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_redis_key(value: &str) -> Result<String, Status> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(Status::invalid_argument("Redis key is invalid"));
+    }
+    Ok(value.to_string())
+}
+
+fn tokenize_native_redis(payload: &str) -> Result<Vec<String>, Status> {
+    if payload.contains(['\n', '\r', ';']) {
+        return Err(Status::invalid_argument(
+            "managed Redis accepts exactly one command",
+        ));
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in payload.trim().chars() {
+        if escaped {
+            current.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if let Some(end) = quote {
+            if character == end {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if quote.is_some() {
+        return Err(Status::invalid_argument(
+            "Redis command has an unterminated quoted argument",
+        ));
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
 }
 
 fn validate_mongodb_native_read_only(
@@ -1264,6 +1385,15 @@ mod tests {
             Some("logs-2026"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn native_redis_allows_only_one_scoped_read_command() {
+        let target = validate_redis_native_read_only(r#"HGET "user:42" name"#, Some("2")).unwrap();
+        assert_eq!(target.resource_path, ["2", "user:42"]);
+        assert!(validate_redis_native_read_only("SET user:42 Ada", Some("2")).is_err());
+        assert!(validate_redis_native_read_only("GET user:42; DEL user:42", Some("2")).is_err());
+        assert!(validate_redis_native_read_only("GET user:42", None).is_err());
     }
 
     #[test]
