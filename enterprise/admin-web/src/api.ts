@@ -182,6 +182,11 @@ export const adminApi = {
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}/suspend`,
       { method: "POST" },
     ),
+  activateMember: (organizationId: string, memberId: string) =>
+    request(
+      `/v1/admin/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}/activate`,
+      { method: "POST" },
+    ),
   revokeGateway: (organizationId: string, gatewayId: string) =>
     request(
       `/v1/admin/organizations/${encodeURIComponent(organizationId)}/gateways/${encodeURIComponent(gatewayId)}/revoke`,

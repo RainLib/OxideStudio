@@ -635,6 +635,40 @@ impl ControlPlaneStore {
         Ok(())
     }
 
+    pub async fn activate_member(
+        &self,
+        organization_id: Uuid,
+        actor_user_id: Uuid,
+        member_id: Uuid,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE organization_memberships
+             SET status = 'active'
+             WHERE organization_id = $1 AND user_id = $2 AND status = 'suspended'",
+        )
+        .bind(organization_id)
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("organization member is not suspended");
+        }
+        write_management_audit(
+            &mut tx,
+            organization_id,
+            actor_user_id,
+            None,
+            None,
+            &["members".into(), member_id.to_string()],
+            "member.activate",
+            serde_json::json!({ "principalId": member_id }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn accept_verified_invitations(
         &self,
         user_id: Uuid,

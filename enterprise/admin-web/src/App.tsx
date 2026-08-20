@@ -202,6 +202,22 @@ export function App() {
     }
   };
 
+  const activateMember = async (memberId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await adminApi.activateMember(organizationId, memberId);
+      await refresh();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : String(requestError),
+      );
+      setLoading(false);
+    }
+  };
+
   const revokeGateway = async (gatewayId: string) => {
     setLoading(true);
     setError(null);
@@ -768,17 +784,23 @@ export function App() {
                       className="quiet-button danger-button"
                       disabled={
                         loading ||
-                        member.status !== "active" ||
-                        member.role === "owner"
+                        member.status === "invited" ||
+                        (member.status === "active" && member.role === "owner")
                       }
                       title={
                         member.role === "owner"
                           ? "Transfer ownership before suspending an owner."
-                          : undefined
+                          : member.status === "invited"
+                            ? "An invited member must complete sign-in before it can be managed."
+                            : undefined
                       }
-                      onClick={() => void suspendMember(member.id)}
+                      onClick={() =>
+                        void (member.status === "active"
+                          ? suspendMember(member.id)
+                          : activateMember(member.id))
+                      }
                     >
-                      Suspend
+                      {member.status === "active" ? "Suspend" : "Reactivate"}
                     </button>
                   </div>
                 ))}
