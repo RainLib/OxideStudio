@@ -24,6 +24,7 @@ import {
   connectionService,
   databaseService,
   queryService,
+  schemaService,
   type DatabaseCapabilities,
 } from "@/services/tauri";
 import { useLspClient } from "@/hooks/useLspClient";
@@ -144,6 +145,10 @@ import {
   registerElasticsearchConsoleLanguage,
   validateElasticsearchConsole,
 } from "@/lib/elasticsearchConsole";
+import {
+  buildMongoDbConsoleCompletions,
+  mongodbConsoleCompletionContext,
+} from "@/lib/mongodbCompletion";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
 import {
@@ -364,6 +369,7 @@ export function QueryEditor({
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const schemaTables = useSchemaStore((state) => state.tables);
+  const schemaCollections = useSchemaStore((state) => state.collections);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
   const loadSchemas = useSchemaStore((state) => state.loadSchemas);
   const loadTables = useSchemaStore((state) => state.loadTables);
@@ -423,7 +429,16 @@ export function QueryEditor({
   const elasticsearchDecorationIdsRef = useRef<string[]>([]);
   const elasticsearchRequestLinesRef = useRef<Set<number>>(new Set());
   const elasticsearchFieldCacheRef = useRef<
-    Map<string, Array<{ name: string; dataType: string }>>
+    Map<string, Promise<Array<{ name: string; dataType: string }>>>
+  >(new Map());
+  const elasticsearchIndexCacheRef = useRef<Map<string, Promise<string[]>>>(
+    new Map(),
+  );
+  const mongodbCollectionCacheRef = useRef<Map<string, Promise<string[]>>>(
+    new Map(),
+  );
+  const mongodbFieldCacheRef = useRef<
+    Map<string, Promise<Array<{ name: string; dataType: string }>>>
   >(new Map());
   const pendingElasticsearchSqlRef = useRef<{
     tabId: string;
@@ -1123,7 +1138,170 @@ export function QueryEditor({
 
   useEffect(() => {
     elasticsearchFieldCacheRef.current.clear();
+    elasticsearchIndexCacheRef.current.clear();
   }, [effectiveConnectionId, metadataVersion]);
+
+  useEffect(() => {
+    mongodbCollectionCacheRef.current.clear();
+    mongodbFieldCacheRef.current.clear();
+  }, [effectiveConnectionId, metadataVersion]);
+
+  // MongoDB uses the native JSON command contract rather than the SQL LSP.
+  // Register a document-gated provider so Mongo semantic candidates neither
+  // leak into ordinary JSON files nor wait for an LSP that intentionally has
+  // no SQL builtins for this document driver.
+  useEffect(() => {
+    if (
+      !isActivePane ||
+      !monaco ||
+      !isMongoDbConsole ||
+      !effectiveConnectionId
+    ) {
+      return;
+    }
+
+    const collectionNamespace =
+      activeTab?.targetSchema ||
+      currentSchema ||
+      activeConnection?.database ||
+      "";
+    const collectionCacheKey = [
+      activeProjectId || "local",
+      effectiveConnectionId,
+      collectionNamespace,
+    ].join("\u0000");
+    const loadCollections = () => {
+      const cached = mongodbCollectionCacheRef.current.get(collectionCacheKey);
+      if (cached) return cached;
+      const knownCollections = schemaCollections
+        .filter(
+          (collection) =>
+            !collectionNamespace ||
+            !collection.namespace ||
+            collection.namespace === collectionNamespace,
+        )
+        .map((collection) => collection.name)
+        .filter(Boolean);
+      const request = knownCollections.length > 0
+        ? Promise.resolve(knownCollections)
+        : schemaService
+            .getCollections(effectiveConnectionId, collectionNamespace)
+            .then((collections) => collections.map((collection) => collection.name));
+      const normalized = request
+        .then((collections) => [...new Set(collections.map((name) => name.trim()).filter(Boolean))])
+        .catch((error) => {
+          console.debug("[MongoDB Console] Collections unavailable", error);
+          return [];
+        });
+      mongodbCollectionCacheRef.current.set(collectionCacheKey, normalized);
+      return normalized;
+    };
+    const loadFields = (collection: string) => {
+      const cacheKey = `${collectionCacheKey}\u0000${collection}`;
+      const cached = mongodbFieldCacheRef.current.get(cacheKey);
+      if (cached) return cached;
+      const request = loadTableMetadata({
+        projectId: activeProjectId || undefined,
+        connectionId: effectiveConnectionId,
+        driver: "mongodb",
+        schema: collectionNamespace,
+        table: collection,
+        includeIndexes: false,
+        includeConstraints: false,
+      })
+        .then((metadata) =>
+          metadata.columns.map((column) => ({
+            name: column.name,
+            dataType: column.data_type || "field",
+          })),
+        )
+        .catch((error) => {
+          console.debug(
+            `[MongoDB Console] Fields unavailable for ${collection}`,
+            error,
+          );
+          return [];
+        });
+      mongodbFieldCacheRef.current.set(cacheKey, request);
+      return request;
+    };
+
+    const disposable = monaco.languages.registerCompletionItemProvider("json", {
+      triggerCharacters: ['"', "{", "[", ",", ":", "$"],
+      provideCompletionItems: async (
+        model: any,
+        position: any,
+        _providerContext: any,
+        token: { isCancellationRequested?: boolean },
+      ) => {
+        const identity = extractLspDocumentIdentity(model.uri.toString());
+        if (identity?.tabId !== effectiveTabId || identity.driver !== "mongodb") {
+          return { suggestions: [] };
+        }
+        const source = model.getValue();
+        const offset = model.getOffsetAt(position);
+        const initialVersion = model.getVersionId();
+        const context = mongodbConsoleCompletionContext(source, offset);
+        const needsCollections = context.area === "collection";
+        const needsFields = context.area === "field";
+        const [collections, fields] = await Promise.all([
+          needsCollections ? loadCollections() : Promise.resolve([]),
+          needsFields && context.collection
+            ? loadFields(context.collection)
+            : Promise.resolve([]),
+        ]);
+        if (
+          token?.isCancellationRequested ||
+          model.getVersionId() !== initialVersion
+        ) {
+          return { suggestions: [] };
+        }
+        const { items } = buildMongoDbConsoleCompletions(source, offset, {
+          collections,
+          fields,
+        });
+        const range = mongodbJsonStringCompletionRange(monaco, model, position);
+        const kindMap = {
+          property: monaco.languages.CompletionItemKind.Property,
+          field: monaco.languages.CompletionItemKind.Field,
+          operator: monaco.languages.CompletionItemKind.Operator,
+          snippet: monaco.languages.CompletionItemKind.Snippet,
+          value: monaco.languages.CompletionItemKind.Value,
+        };
+        return {
+          incomplete: Boolean(needsCollections || needsFields),
+          suggestions: items.map((item, index) => ({
+            label: item.label,
+            kind: kindMap[item.kind],
+            detail: item.detail,
+            documentation: item.documentation
+              ? { value: item.documentation }
+              : undefined,
+            insertText: item.insertText,
+            insertTextRules:
+              item.kind === "snippet"
+                ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                : undefined,
+            filterText: item.label,
+            sortText: item.sortText || String(index).padStart(3, "0"),
+            range,
+          })),
+        };
+      },
+    });
+    return () => disposable.dispose();
+  }, [
+    activeConnection?.database,
+    activeProjectId,
+    activeTab?.targetSchema,
+    currentSchema,
+    effectiveConnectionId,
+    effectiveTabId,
+    isActivePane,
+    isMongoDbConsole,
+    monaco,
+    schemaCollections,
+  ]);
 
   // Mapping fields must remain available even while the full LSP catalog is
   // still synchronizing. Load only the index under the cursor and reuse the
@@ -1165,7 +1343,8 @@ export function QueryEditor({
           );
           const expectsMappingField =
             elasticsearchCompletionExpectsMappingField(completionContext);
-          if (!expectsMappingField) {
+          const isIndexPath = completionContext.area === "path";
+          if (!expectsMappingField && !isIndexPath) {
             return { suggestions: [] };
           }
 
@@ -1175,7 +1354,7 @@ export function QueryEditor({
             preferredElasticsearchIndex,
           );
           const indexName = requestContext.index?.trim();
-          if (!indexName) {
+          if (expectsMappingField && !indexName) {
             return { suggestions: [] };
           }
 
@@ -1183,43 +1362,91 @@ export function QueryEditor({
             activeProjectId || "local",
             effectiveConnectionId,
             elasticsearchMetadataNamespace,
-            indexName,
+            isIndexPath ? "__indices__" : indexName!,
           ].join("\u0000");
           const modelVersion = model.getVersionId();
-          let fields = elasticsearchFieldCacheRef.current.get(cacheKey);
-          if (!fields) {
-            try {
-              const metadataOptions = {
-                projectId: activeProjectId || undefined,
-                connectionId: effectiveConnectionId,
-                driver: "elasticsearch" as const,
-                schema: elasticsearchMetadataNamespace,
-                table: indexName,
-                includeIndexes: false,
-                includeConstraints: false,
-              };
-              let metadata = await loadTableMetadata(metadataOptions);
-              // A previous offline catalog sync may have persisted an empty
-              // placeholder. Refresh that one object once instead of treating
-              // the placeholder as an authoritative mapping forever.
-              if (metadata.columns.length === 0) {
-                metadata = await loadTableMetadata({
-                  ...metadataOptions,
-                  force: true,
+          let fieldCompletions: Array<{
+            label: string;
+            detail?: string;
+            insertText?: string;
+            sortText?: string;
+          }> = [];
+          if (isIndexPath) {
+            let indexRequest = elasticsearchIndexCacheRef.current.get(cacheKey);
+            if (!indexRequest) {
+              indexRequest = schemaService
+                .getCollections(
+                  effectiveConnectionId,
+                  elasticsearchMetadataNamespace,
+                )
+                .then((collections) =>
+                  collections
+                    .map((collection) => collection.name.trim())
+                    .filter(Boolean),
+                )
+                .catch((error) => {
+                  console.debug(
+                    "[Elasticsearch Console] Indices unavailable",
+                    error,
+                  );
+                  return [];
                 });
-              }
-              fields = metadata.columns.map((column) => ({
-                name: column.name,
-                dataType: column.data_type || "field",
-              }));
-              elasticsearchFieldCacheRef.current.set(cacheKey, fields);
-            } catch (error) {
-              console.debug(
-                `[Elasticsearch Console] Mapping fields unavailable for ${indexName}`,
-                error,
-              );
-              fields = [];
+              elasticsearchIndexCacheRef.current.set(cacheKey, indexRequest);
             }
+            const indices = await indexRequest;
+            fieldCompletions = elasticsearchSchemaCompletionsForContext(
+              indices.map((name) => ({
+                label: name,
+                detail: `Elasticsearch Index: ${name}`,
+                insertText: name,
+              })),
+              completionContext,
+              preferredElasticsearchIndex,
+            );
+          } else {
+            let fieldsRequest = elasticsearchFieldCacheRef.current.get(cacheKey);
+            if (!fieldsRequest) {
+              fieldsRequest = (async () => {
+                try {
+                  const metadataOptions = {
+                    projectId: activeProjectId || undefined,
+                    connectionId: effectiveConnectionId,
+                    driver: "elasticsearch" as const,
+                    schema: elasticsearchMetadataNamespace,
+                    table: indexName!,
+                    includeIndexes: false,
+                    includeConstraints: false,
+                  };
+                  let metadata = await loadTableMetadata(metadataOptions);
+                  // A previous offline catalog sync may have persisted an empty
+                  // placeholder. Refresh that one object once instead of treating
+                  // the placeholder as an authoritative mapping forever.
+                  if (metadata.columns.length === 0) {
+                    metadata = await loadTableMetadata({
+                      ...metadataOptions,
+                      force: true,
+                    });
+                  }
+                  return metadata.columns.map((column) => ({
+                    name: column.name,
+                    dataType: column.data_type || "field",
+                  }));
+                } catch (error) {
+                  console.debug(
+                    `[Elasticsearch Console] Mapping fields unavailable for ${indexName}`,
+                    error,
+                  );
+                  return [];
+                }
+              })();
+              elasticsearchFieldCacheRef.current.set(cacheKey, fieldsRequest);
+            }
+            const fields = await fieldsRequest;
+            fieldCompletions = elasticsearchMappingFieldCompletions(
+              fields,
+              completionContext,
+              indexName!,
+            );
           }
 
           if (
@@ -1234,16 +1461,10 @@ export function QueryEditor({
             model,
             position,
           );
-          let fieldCompletions = elasticsearchMappingFieldCompletions(
-            fields,
-            completionContext,
-            indexName,
-          );
-
-          // Keep the already-synchronized LSP catalog as a fallback when the
-          // live Mapping request is unavailable (for example during a brief
-          // reconnect). This provider owns field positions, so results remain
-          // deduplicated instead of being emitted by two Monaco providers.
+          // Keep the already-synchronized LSP catalog as a fallback when live
+          // index/mapping metadata is unavailable (for example during a brief
+          // reconnect). This provider owns Console path and field positions,
+          // so results do not race a second provider with a stale catalog.
           if (fieldCompletions.length === 0 && lspReady && canUseLsp) {
             try {
               const uri = model.uri.toString();
@@ -1679,15 +1900,19 @@ export function QueryEditor({
                   preferredElasticsearchIndex,
                 )
               : null;
-            if (
-              elasticsearchContext &&
-              elasticsearchContext.area !== "path"
-            ) {
-              // Console syntax owns methods, REST operations, and Query DSL
-              // keys. Mapping fields are supplied by the current-index
-              // provider below, which does not have to wait for a full LSP
-              // catalog sync and cannot leak fields from another index.
+            if (elasticsearchContext) {
+              // The Console provider owns methods, REST operations, DSL keys,
+              // live index names, and mapping fields. Keeping all of these in
+              // one provider prevents a late generic-LSP catalog from mixing
+              // a previous connection's indices into the active request.
               return result([], "empty", "consoleSyntaxOwned");
+            }
+            if (isMongoDbDocument) {
+              // MongoDB JSON commands intentionally have no SQL-LSP builtin
+              // catalog. Its document-gated Console provider owns semantic
+              // suggestions, avoiding an empty JSON LSP round trip on every
+              // automatic trigger.
+              return result([], "empty", "mongoConsoleOwned");
             }
             if (!lspReady) {
               const suggestions = await fallbackSuggestions();
