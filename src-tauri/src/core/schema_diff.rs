@@ -3131,6 +3131,8 @@ fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
     source.data_type != target.data_type
         || source.is_nullable != target.is_nullable
         || source.is_auto_increment != target.is_auto_increment
+        || source.is_generated != target.is_generated
+        || source.is_hidden != target.is_hidden
         || source.default_value != target.default_value
         || source.comment != target.comment
 }

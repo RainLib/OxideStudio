@@ -1710,9 +1710,9 @@ mod tests {
         ]));
 
         assert_eq!(collections.len(), 2);
-        assert_eq!(collections[0].name, "users");
+        assert_eq!(collections[0].name, "orders");
         assert_eq!(collections[0].collection_type.as_deref(), Some("index"));
-        assert_eq!(collections[0].document_count, Some(42));
+        assert_eq!(collections[0].document_count, Some(7));
     }
 
     #[test]

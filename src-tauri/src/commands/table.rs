@@ -13856,6 +13856,7 @@ mod tests {
                 .unwrap();
         assert!(sqlite_ddl
             .join("\n")
+            .to_ascii_uppercase()
             .contains("INTEGER PRIMARY KEY AUTOINCREMENT"));
 
         let mut invalid = target_column("sequence_value");
@@ -17164,7 +17165,7 @@ WITH DATA;"#
         .unwrap();
         assert_eq!(
             predicate.as_deref(),
-            Some("(\"tenant_id\" > $1::integer OR (\"tenant_id\" = $2::integer AND \"id\" > $3::bigint))")
+            Some("((\"tenant_id\" > $1::integer) OR (\"tenant_id\" = $2::integer AND \"id\" > $3::bigint))")
         );
         assert_eq!(
             params

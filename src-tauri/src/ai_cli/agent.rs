@@ -577,14 +577,14 @@ pub fn classify_cli_error(provider: CliProviderKind, message: &str) -> CliAgentE
         || lower.contains("login required")
     {
         ("cli_authentication_required", false)
+    } else if lower.contains("mcp") || lower.contains("oxide-agent") {
+        ("cli_mcp_startup_failed", true)
     } else if lower.contains("not installed")
         || lower.contains("not available on path")
         || lower.contains("failed to start")
         || lower.contains("was not found")
     {
         ("cli_not_installed", false)
-    } else if lower.contains("mcp") || lower.contains("oxide-agent") {
-        ("cli_mcp_startup_failed", true)
     } else if lower.contains("jsonl") || lower.contains("protocol") {
         ("cli_protocol_error", true)
     } else {
