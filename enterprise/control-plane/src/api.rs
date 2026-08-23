@@ -1232,6 +1232,15 @@ async fn admin_audit_events(
     Ok(Json(state.store.audit_events(organization_id, 200).await?))
 }
 
+fn validate_ownership_transfer(actor_user_id: Uuid, target_user_id: Uuid) -> Result<(), ApiError> {
+    if actor_user_id == target_user_id {
+        return Err(ApiError::bad_request(
+            "select another active member to receive organization ownership",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1340,13 +1349,4 @@ mod tests {
         .is_ok());
         assert!(normalize_enrollment_public_key(&STANDARD.encode([7; 31])).is_err());
     }
-}
-
-fn validate_ownership_transfer(actor_user_id: Uuid, target_user_id: Uuid) -> Result<(), ApiError> {
-    if actor_user_id == target_user_id {
-        return Err(ApiError::bad_request(
-            "select another active member to receive organization ownership",
-        ));
-    }
-    Ok(())
 }

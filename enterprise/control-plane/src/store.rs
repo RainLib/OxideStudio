@@ -1988,6 +1988,9 @@ fn rotated_device_certificate<'a>(
 }
 
 #[cfg(test)]
+// Enrollment tests intentionally remain next to their signing helpers; the
+// rest of this file contains unrelated persistence helpers.
+#[allow(clippy::items_after_test_module)]
 mod enrollment_tests {
     use super::*;
 
