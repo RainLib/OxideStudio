@@ -2103,6 +2103,9 @@ mod enrollment_tests {
     }
 }
 
+// The event fields are intentionally explicit at administrative call sites so
+// each audit record's target and action remain visible during review.
+#[allow(clippy::too_many_arguments)]
 async fn write_management_audit(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
