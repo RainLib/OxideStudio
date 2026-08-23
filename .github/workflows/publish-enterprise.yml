@@ -71,7 +71,7 @@ jobs:
           cache: npm
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.91.1
         with:
           components: rustfmt, clippy
 

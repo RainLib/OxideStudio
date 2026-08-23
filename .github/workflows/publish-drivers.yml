@@ -84,7 +84,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.1
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri/crates/oxide-driver-${{ matrix.driver }} -> target
