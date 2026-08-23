@@ -165,6 +165,9 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
     steps:
       - name: Checkout repository
@@ -190,6 +193,7 @@ jobs:
       - name: Cache Rust builds
         uses: swatinem/rust-cache@v2
         with:
+          cache-targets: false
           workspaces: |
             ./src-tauri -> target
             ./enterprise -> target
@@ -202,11 +206,14 @@ jobs:
       - name: Run Clippy
         run: |
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo clean --manifest-path src-tauri/Cargo.toml
           cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clean --manifest-path enterprise/Cargo.toml
 
       - name: Test Rust workspaces
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo clean --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path enterprise/Cargo.toml --workspace
 
   build:
