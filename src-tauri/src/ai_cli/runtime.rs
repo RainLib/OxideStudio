@@ -489,6 +489,7 @@ where
     Ok(bytes)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_jsonl_process<F>(
     spec: &CliCommandSpec,
     args: &[String],

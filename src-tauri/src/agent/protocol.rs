@@ -89,18 +89,13 @@ pub struct ProviderCapabilities {
     pub max_output_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentProviderKind {
+    #[default]
     OpenaiCompatible,
     CodexCli,
     CodebuddyCli,
-}
-
-impl Default for AgentProviderKind {
-    fn default() -> Self {
-        Self::OpenaiCompatible
-    }
 }
 
 #[derive(Clone, Deserialize)]

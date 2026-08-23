@@ -3323,7 +3323,7 @@ fn order_postgres_views(
             .find(|view| {
                 requirements
                     .get(*view)
-                    .map_or(true, |dependencies| dependencies.is_disjoint(&remaining))
+                    .is_none_or(|dependencies| dependencies.is_disjoint(&remaining))
             })
             .cloned();
         let Some(next) = next else {
@@ -9611,6 +9611,7 @@ pub async fn export_table_data(
 /// `pg_dump` replacement: non-relation objects remain excluded until their
 /// source/ownership semantics have a reviewed per-product contract.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_database_sql(
     app: AppHandle,
     manager: State<'_, ConnectionManager>,

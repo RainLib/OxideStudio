@@ -287,6 +287,7 @@ fn cli_capability_cache_key(
     meta_store.opaque_cache_key(CLI_CAPABILITY_CACHE_NAMESPACE, components)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn load_cached_cli_capability<T, F, Fut>(
     meta_store: &MetaStore,
     config: &CliProviderConfig,

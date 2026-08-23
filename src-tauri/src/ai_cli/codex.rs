@@ -123,7 +123,7 @@ async fn cached_models(
     environment: &BTreeMap<String, String>,
     force_refresh: bool,
 ) -> Result<Vec<CliModelInfo>> {
-    let key = model_cache_key(&command, environment);
+    let key = model_cache_key(command, environment);
     get_or_discover_models_by_key(key, force_refresh, || async {
         discover_models(command, environment).await
     })

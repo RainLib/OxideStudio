@@ -889,6 +889,7 @@ impl AgentHostInner {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_cli_turn(
         self: Arc<Self>,
         key: TurnKey,
