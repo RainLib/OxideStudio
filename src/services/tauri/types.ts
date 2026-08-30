@@ -1338,6 +1338,35 @@ export interface DocumentPage {
   total?: number | null;
 }
 
+export interface MongoDocumentCloneRequest {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+  /** Omit for the initial Host-owned source load. */
+  draftDocument?: Record<string, unknown> | null;
+}
+
+export interface MongoDocumentClonePlan {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+  /** Canonical Extended JSON including the source `_id`. */
+  sourceDocument: Record<string, unknown>;
+  /** Canonical Extended JSON shown in the editor; source `_id` is omitted. */
+  draftDocument: Record<string, unknown>;
+  /** Exact canonical document which will be inserted. */
+  previewDocument: Record<string, unknown>;
+  editedFields: string[];
+  sourceDigest: string;
+  confirmationToken: string;
+  serverVersion?: string | null;
+}
+
+export interface MongoDocumentCloneReceipt {
+  insertedId: unknown;
+  message: string;
+}
+
 export interface ConstraintInfo {
   name: string;
   constraint_type: string;

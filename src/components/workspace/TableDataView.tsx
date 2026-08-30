@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { confirmDiscardTableChanges, useTabStore } from "@/store/useTabStore";
 import {
   ensureConnectionReady,
@@ -72,6 +80,12 @@ import {
   type TableXlsxImportRequest,
 } from "@/lib/actionEvents";
 import { transposeQueryResult } from "@/features/data-grid";
+
+const MongoDocumentCloneDialog = lazy(() =>
+  import("@/features/data-grid/ui/MongoDocumentCloneDialog").then((module) => ({
+    default: module.MongoDocumentCloneDialog,
+  })),
+);
 
 const HOST_TABLE_EXPORT_FORMATS: readonly TableExportFormat[] = [
   "csv",
@@ -161,6 +175,10 @@ export function TableDataView() {
   const isNativeObjectPreview = Boolean(activeCapabilities.dataModel) &&
     !isRelationalDataModel(activeCapabilities);
   const isSearchObjectPreview = activeCapabilities.dataModel === "search";
+  const isMongoDocumentPreview =
+    activeCapabilities.dataModel === "document" &&
+    normalizeDatabaseDriverName(driver) === "mongodb" &&
+    !activeConnection?.driverPackageVersion;
   const isCrossDatabasePreview = Boolean(activeTab?.databaseName);
   const isReadOnlyRelation = isReadOnlyRelationObject(activeTab?.objectType);
   const isTableReadOnly = isReadOnlyRelation || isNativeObjectPreview;
@@ -226,6 +244,7 @@ export function TableDataView() {
   );
   const [gridSelectionSummary, setGridSelectionSummary] =
     useState<DataGridSelectionSummary>({ selectedRowCount: 0 });
+  const [mongoCloneSourceId, setMongoCloneSourceId] = useState<unknown>(null);
   const [transposedTabIds, setTransposedTabIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -663,6 +682,7 @@ export function TableDataView() {
     setTableDdl("");
     setDdlError(null);
     setIsDdlLoading(false);
+    setMongoCloneSourceId(null);
   }, [activeTab?.id]);
 
   useEffect(() => {
@@ -826,6 +846,18 @@ export function TableDataView() {
     void loadTablePage(activeTab.id, page, undefined, undefined, {
       discardAction: "refresh the table",
     });
+  };
+
+  const handleCloneMongoDocument = () => {
+    if (!isMongoDocumentPreview || !result || isTransposed) return;
+    const selectedRows = dataGridRef.current?.getSelectedRowIndexes() || [];
+    if (selectedRows.length !== 1) return;
+    const selectedRow = selectedRows[0];
+    if (selectedRow === undefined) return;
+    const idColumn = result.columns.findIndex((column) => column.name === "_id");
+    const sourceId = idColumn >= 0 ? result.rows[selectedRow]?.[idColumn] : undefined;
+    if (sourceId === undefined || sourceId === null) return;
+    setMongoCloneSourceId(sourceId);
   };
 
   const handlePrevious = () => {
@@ -1715,6 +1747,30 @@ export function TableDataView() {
         />
       )}
 
+      {tabConnectionId &&
+        activeTab.schemaName &&
+        activeTab.tableName &&
+        mongoCloneSourceId !== null && (
+          <Suspense fallback={null}>
+            <MongoDocumentCloneDialog
+              open
+              connectionId={tabConnectionId}
+              driver={driver}
+              database={activeTab.schemaName}
+              collection={activeTab.tableName}
+              sourceId={mongoCloneSourceId}
+              onOpenChange={(nextOpen) => {
+                if (!nextOpen) setMongoCloneSourceId(null);
+              }}
+              onCloned={async () => {
+                if (tabConnectionId && activeTab.sql.trim()) {
+                  await runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
+                }
+              }}
+            />
+          </Suspense>
+        )}
+
       <TableDataToolbar
         isExecuting={activeTab.isExecuting}
         readOnly={isTableReadOnly}
@@ -1739,6 +1795,13 @@ export function TableDataView() {
         onRefresh={handleRefresh}
         onAddRow={() => addNewRow(activeTab.id)}
         onDeleteRows={() => void dataGridRef.current?.deleteSelectedRows()}
+        onCloneDocument={
+          isMongoDocumentPreview ? handleCloneMongoDocument : undefined
+        }
+        cloneDocumentDisabled={
+          isTransposed ||
+          !result?.columns.some((column) => column.name === "_id")
+        }
         onSave={() => void commitEdits(activeTab.id)}
         onRevert={() => cancelEdits(activeTab.id)}
         onSearch={() => dataGridRef.current?.openSearch()}

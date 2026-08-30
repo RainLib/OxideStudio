@@ -26,6 +26,34 @@ pub struct DocumentPageRequest<'a> {
     pub sort: Option<&'a str>,
 }
 
+/// One reviewed clone of a native document. `source_id` is the stable
+/// database identity selected by the user; `draft_document` is omitted for
+/// the initial source load and supplied after the editor has a JSON draft.
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentCloneRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub source_id: &'a serde_json::Value,
+    pub draft_document: Option<&'a serde_json::Value>,
+}
+
+/// Driver-owned clone preparation. Native drivers keep the original document
+/// in their native value model, derive the edited-field set, and return only
+/// canonical JSON views across the desktop boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedDocumentClone {
+    pub source_digest: String,
+    pub source_document: serde_json::Value,
+    pub draft_document: serde_json::Value,
+    pub cloned_document: serde_json::Value,
+    pub edited_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentCloneReceipt {
+    pub inserted_id: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDatabaseFileReceipt {
     pub byte_len: u64,
@@ -456,6 +484,27 @@ pub trait DatabaseDriver: Send + Sync {
         Err(anyhow::anyhow!(
             "Native document pagination is not supported by this driver"
         ))
+    }
+
+    /// Prepare a native document clone while preserving values which were not
+    /// edited in the desktop. Drivers must override this explicitly; generic
+    /// JSON or relational mutation paths are not an acceptable fallback.
+    async fn prepare_document_clone(
+        &self,
+        _request: DocumentCloneRequest<'_>,
+    ) -> Result<PreparedDocumentClone> {
+        Err(unsupported_driver_feature("Native document cloning"))
+    }
+
+    /// Insert the prepared clone after re-reading the source document. The
+    /// source digest binds execution to the exact document reviewed by the
+    /// user and prevents a stale preview from silently cloning newer data.
+    async fn execute_document_clone(
+        &self,
+        _request: DocumentCloneRequest<'_>,
+        _expected_source_digest: &str,
+    ) -> Result<DocumentCloneReceipt> {
+        Err(unsupported_driver_feature("Native document cloning"))
     }
 
     /// Release resources held by a native document cursor. Stateless cursor

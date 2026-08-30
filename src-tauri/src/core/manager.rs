@@ -876,6 +876,27 @@ impl ConnectionManager {
         driver.get_document_page(request).await
     }
 
+    pub async fn prepare_document_clone(
+        &self,
+        id: &str,
+        request: super::driver::DocumentCloneRequest<'_>,
+    ) -> Result<super::driver::PreparedDocumentClone> {
+        let driver = self.get_driver(id).await?;
+        driver.prepare_document_clone(request).await
+    }
+
+    pub async fn execute_document_clone(
+        &self,
+        id: &str,
+        request: super::driver::DocumentCloneRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<super::driver::DocumentCloneReceipt> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .execute_document_clone(request, expected_source_digest)
+            .await
+    }
+
     pub async fn close_document_cursor(&self, id: &str, cursor: &str) -> Result<()> {
         let driver = self.get_driver(id).await?;
         driver.close_document_cursor(cursor).await

@@ -130,6 +130,8 @@ export interface DataGridHandle {
   openSearch: () => void;
   fitColumns: () => void;
   deleteSelectedRows: () => Promise<void>;
+  /** Source result indexes, after translating the current visual sort/filter. */
+  getSelectedRowIndexes: () => number[];
 }
 
 export interface DataGridSelectionSummary {
@@ -1547,8 +1549,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           );
         },
         deleteSelectedRows: handleDeleteSelectedRows,
+        getSelectedRowIndexes: () => [...selectedRowIndexes],
       }),
-      [columns.length, handleDeleteSelectedRows],
+      [columns.length, handleDeleteSelectedRows, selectedRowIndexes],
     );
 
     const contextCellValue = useMemo(() => {

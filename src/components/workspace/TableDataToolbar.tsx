@@ -15,6 +15,7 @@ import {
   Upload,
   Download,
   ArrowRightLeft,
+  CopyPlus,
   ChevronDown,
   FileSpreadsheet,
   Rows3,
@@ -59,6 +60,9 @@ interface TableDataToolbarProps {
   onRefresh: () => void;
   onAddRow: () => void;
   onDeleteRows: () => void;
+  /** Native document clones have their own reviewed Host mutation path. */
+  onCloneDocument?: () => void;
+  cloneDocumentDisabled?: boolean;
   onSave: () => void;
   onRevert: () => void;
   onSearch: () => void;
@@ -110,6 +114,8 @@ export function TableDataToolbar({
   onRefresh,
   onAddRow,
   onDeleteRows,
+  onCloneDocument,
+  cloneDocumentDisabled = false,
   onSave,
   onRevert,
   onSearch,
@@ -157,6 +163,24 @@ export function TableDataToolbar({
         <ToolbarButton title="Add row" onClick={onAddRow} disabled={mutationDisabled}>
           <Plus size={14} />
         </ToolbarButton>
+        {onCloneDocument && (
+          <ToolbarButton
+            title={
+              selectedRowCount === 1
+                ? "Clone selected MongoDB document"
+                : "Select one MongoDB document to clone"
+            }
+            onClick={onCloneDocument}
+            disabled={
+              isExecuting ||
+              viewOnly ||
+              cloneDocumentDisabled ||
+              selectedRowCount !== 1
+            }
+          >
+            <CopyPlus size={14} />
+          </ToolbarButton>
+        )}
         <ToolbarButton
           title={
             selectedRowCount > 0

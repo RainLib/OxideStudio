@@ -1,5 +1,5 @@
 use crate::core::{
-    driver::DatabaseDriver,
+    driver::{DatabaseDriver, DocumentCloneReceipt, DocumentCloneRequest, PreparedDocumentClone},
     protocol::{
         CollectionInfo, ColumnDef, ColumnInfo, DatabaseCreateRequest, IndexInfo, QueryResult,
     },
@@ -12,7 +12,8 @@ use mongodb::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
 use tokio::sync::Mutex;
 
 const MONGODB_DATABASE_INITIALIZATION_COLLECTION: &str = "oxide_init";
@@ -319,6 +320,67 @@ impl DatabaseDriver for MongoDbDriver {
             })
             .collect();
         self.execute_commands(commands).await
+    }
+
+    async fn prepare_document_clone(
+        &self,
+        request: DocumentCloneRequest<'_>,
+    ) -> Result<PreparedDocumentClone> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB clone source _id")?;
+        let source = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name)
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to read the MongoDB clone source")?
+            .ok_or_else(|| {
+                anyhow!(
+                    "MongoDB clone source no longer exists; refresh the collection and select it again"
+                )
+            })?;
+        prepare_mongodb_document_clone(&source, request.draft_document)
+    }
+
+    async fn execute_document_clone(
+        &self,
+        request: DocumentCloneRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<DocumentCloneReceipt> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB clone source _id")?;
+        let collection = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name);
+        let source = collection
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to re-read the MongoDB clone source")?
+            .ok_or_else(|| {
+                anyhow!(
+                    "MongoDB clone source no longer exists; refresh the collection and select it again"
+                )
+            })?;
+        let prepared = prepare_mongodb_document_clone(&source, request.draft_document)?;
+        if prepared.source_digest != expected_source_digest {
+            return Err(anyhow!(
+                "MongoDB clone source changed after preview; review the latest document before cloning"
+            ));
+        }
+        let cloned = json_to_document(&prepared.cloned_document, "MongoDB clone document")?;
+        let inserted = collection
+            .insert_one(cloned)
+            .await
+            .context("MongoDB document clone failed")?;
+        Ok(DocumentCloneReceipt {
+            inserted_id: inserted.inserted_id.into_canonical_extjson(),
+        })
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -695,6 +757,67 @@ fn json_to_document(value: &Value, label: &str) -> Result<Document> {
     }
 }
 
+fn prepare_mongodb_document_clone(
+    source: &Document,
+    requested_draft: Option<&Value>,
+) -> Result<PreparedDocumentClone> {
+    let source_document = Bson::Document(source.clone()).into_canonical_extjson();
+    let mut initial_draft = source_document
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("MongoDB clone source must be a document"))?;
+    initial_draft.remove("_id");
+    let initial_draft = Value::Object(initial_draft);
+    let draft_document = requested_draft
+        .cloned()
+        .unwrap_or_else(|| initial_draft.clone());
+    let draft = draft_document
+        .as_object()
+        .ok_or_else(|| anyhow!("MongoDB clone draft must be a JSON object"))?;
+    let original = initial_draft
+        .as_object()
+        .expect("initial MongoDB clone draft is an object");
+
+    let keys = original
+        .keys()
+        .chain(draft.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let edited_fields = keys
+        .into_iter()
+        .filter(|field| original.get(field) != draft.get(field))
+        .collect::<Vec<_>>();
+
+    // Start with the exact source BSON and touch only fields which differ in
+    // the reviewed draft. This preserves BSON values which have a friendlier
+    // or lossy browser representation without asking the renderer to infer
+    // their native type.
+    let mut cloned = source.clone();
+    cloned.remove("_id");
+    for field in &edited_fields {
+        if let Some(value) = draft.get(field) {
+            cloned.insert(
+                field,
+                json_to_bson(value, &format!("MongoDB clone field {field}"))?,
+            );
+        } else {
+            cloned.remove(field);
+        }
+    }
+    let cloned_document = Bson::Document(cloned).into_canonical_extjson();
+    let source_bytes = serde_json::to_vec(&source_document)
+        .context("Failed to fingerprint the MongoDB clone source")?;
+    let source_digest = format!("{:x}", Sha256::digest(source_bytes));
+
+    Ok(PreparedDocumentClone {
+        source_digest,
+        source_document,
+        draft_document,
+        cloned_document,
+        edited_fields,
+    })
+}
+
 fn extract_cursor_batch(result: Document) -> Result<Vec<Document>> {
     let cursor = result
         .get_document("cursor")
@@ -745,7 +868,13 @@ fn documents_result(documents: Vec<Document>) -> QueryResult {
                     document
                         .get(name)
                         .cloned()
-                        .map(bson_to_json)
+                        .map(|value| {
+                            if name == "_id" {
+                                bson_identity_to_json(value)
+                            } else {
+                                bson_to_json(value)
+                            }
+                        })
                         .unwrap_or(Value::Null)
                 })
                 .collect::<Vec<_>>()
@@ -966,6 +1095,26 @@ fn bson_to_json(value: Bson) -> Value {
     value.into_relaxed_extjson()
 }
 
+fn bson_identity_to_json(value: Bson) -> Value {
+    match value {
+        Bson::Int64(value)
+            if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value) =>
+        {
+            Bson::Int64(value).into_canonical_extjson()
+        }
+        Bson::Array(values) => {
+            Value::Array(values.into_iter().map(bson_identity_to_json).collect())
+        }
+        Bson::Document(document) => Value::Object(
+            document
+                .into_iter()
+                .map(|(key, value)| (key, bson_identity_to_json(value)))
+                .collect(),
+        ),
+        value => bson_to_json(value),
+    }
+}
+
 fn mongodb_default_database(url: &str) -> String {
     let without_query = url.split(['?', '#']).next().unwrap_or(url);
     without_query
@@ -997,6 +1146,17 @@ fn validate_mongodb_database_name(value: &str) -> Result<String> {
         .any(|ch| matches!(ch, '/' | '\\' | '.' | '"' | '$' | '\0'))
     {
         return Err(anyhow!("Invalid MongoDB database name: {value}"));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_mongodb_collection_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 255 || value.contains('\0') {
+        return Err(anyhow!("Invalid MongoDB collection name"));
+    }
+    if value.starts_with("system.") {
+        return Err(anyhow!("System MongoDB collections cannot be cloned"));
     }
     Ok(value.to_string())
 }
@@ -1089,6 +1249,76 @@ mod tests {
         assert!(validate_mongodb_database_name("app.users").is_err());
         assert!(validate_mongodb_database_name("app/users").is_err());
         assert!(validate_mongodb_database_name("$admin").is_err());
+    }
+
+    #[test]
+    fn prepares_clone_without_replaying_source_identity() {
+        let source = doc! {
+            "_id": mongodb::bson::oid::ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap(),
+            "name": "Ada",
+            "large": Bson::Int64(9_223_372_036_854_775_000),
+            "createdAt": Bson::DateTime(
+                mongodb::bson::DateTime::parse_rfc3339_str("2026-08-31T08:15:00Z").unwrap()
+            ),
+        };
+
+        let prepared = prepare_mongodb_document_clone(&source, None).unwrap();
+
+        assert!(prepared.source_document.get("_id").is_some());
+        assert!(prepared.draft_document.get("_id").is_none());
+        assert!(prepared.cloned_document.get("_id").is_none());
+        assert!(prepared.edited_fields.is_empty());
+        let cloned = json_to_document(&prepared.cloned_document, "clone").unwrap();
+        assert!(matches!(
+            cloned.get("large"),
+            Some(Bson::Int64(9_223_372_036_854_775_000))
+        ));
+        assert!(matches!(cloned.get("createdAt"), Some(Bson::DateTime(_))));
+    }
+
+    #[test]
+    fn clone_plan_changes_only_the_edited_top_level_fields() {
+        let source = doc! {
+            "_id": 7,
+            "name": "before",
+            "profile": { "role": "admin" },
+            "removed": true,
+            "large": Bson::Int64(9_223_372_036_854_775_000),
+        };
+        let draft = serde_json::json!({
+            "name": "after",
+            "profile": { "role": "admin" },
+            "large": { "$numberLong": "9223372036854775000" },
+            "added": { "$numberDecimal": "19.95" }
+        });
+
+        let prepared = prepare_mongodb_document_clone(&source, Some(&draft)).unwrap();
+
+        assert_eq!(prepared.edited_fields, ["added", "name", "removed"]);
+        let cloned = json_to_document(&prepared.cloned_document, "clone").unwrap();
+        assert_eq!(cloned.get_str("name").unwrap(), "after");
+        assert!(cloned.get("removed").is_none());
+        assert!(matches!(
+            cloned.get("large"),
+            Some(Bson::Int64(9_223_372_036_854_775_000))
+        ));
+        assert!(matches!(cloned.get("added"), Some(Bson::Decimal128(_))));
+    }
+
+    #[test]
+    fn clone_source_digest_and_collection_guard_bind_the_reviewed_source() {
+        let first =
+            prepare_mongodb_document_clone(&doc! { "_id": 1, "value": "first" }, None).unwrap();
+        let second =
+            prepare_mongodb_document_clone(&doc! { "_id": 1, "value": "second" }, None).unwrap();
+
+        assert_ne!(first.source_digest, second.source_digest);
+        assert_eq!(
+            validate_mongodb_collection_name(" users ").unwrap(),
+            "users"
+        );
+        assert!(validate_mongodb_collection_name("").is_err());
+        assert!(validate_mongodb_collection_name("system.users").is_err());
     }
 
     #[test]
@@ -1259,6 +1489,29 @@ mod tests {
         assert_eq!(result.columns[2].name, "active");
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[1][2], Value::Null);
+    }
+
+    #[test]
+    fn document_result_keeps_unsafe_integer_identity_exact_for_clone_selection() {
+        let result = documents_result(vec![doc! {
+            "_id": Bson::Int64(9_223_372_036_854_775_000),
+            "name": "Ada",
+        }]);
+
+        assert_eq!(
+            result.rows[0][0],
+            serde_json::json!({ "$numberLong": "9223372036854775000" })
+        );
+        assert_eq!(
+            bson_identity_to_json(Bson::Document(doc! {
+                "tenant": "a",
+                "sequence": Bson::Int64(9_223_372_036_854_775_000),
+            })),
+            serde_json::json!({
+                "tenant": "a",
+                "sequence": { "$numberLong": "9223372036854775000" },
+            })
+        );
     }
 
     #[test]

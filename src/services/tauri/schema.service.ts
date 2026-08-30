@@ -5,6 +5,9 @@ import type {
   CollectionInfo,
   CollectionPage,
   DocumentPage,
+  MongoDocumentClonePlan,
+  MongoDocumentCloneReceipt,
+  MongoDocumentCloneRequest,
   ColumnInfo,
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -223,6 +226,33 @@ export async function closeDocumentCursor(
     connectionId,
     cursor,
   });
+}
+
+export async function previewMongoDocumentClone(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentCloneRequest,
+): Promise<MongoDocumentClonePlan> {
+  return invokeWithInterceptors<MongoDocumentClonePlan>(
+    "preview_mongodb_document_clone",
+    { connectionId, driver, request },
+  );
+}
+
+export async function executeMongoDocumentClone(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentCloneRequest,
+  confirmationToken: string,
+): Promise<MongoDocumentCloneReceipt> {
+  return invokeWithInterceptors<MongoDocumentCloneReceipt>(
+    "execute_mongodb_document_clone",
+    {
+      connectionId,
+      driver,
+      request: { clone: request, confirmationToken },
+    },
+  );
 }
 
 export async function getGeneratedColumns(
@@ -505,6 +535,8 @@ export const schemaService = {
   getCollectionsPage,
   getDocumentPage,
   closeDocumentCursor,
+  previewMongoDocumentClone,
+  executeMongoDocumentClone,
   getColumns,
   getGeneratedColumns,
   getDatabaseColumns,
