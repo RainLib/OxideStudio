@@ -8,6 +8,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import {
+  DATABASE_ADMIN_AUTO_REFRESH_MS,
+  supportsDatabaseAdminAutoRefresh,
+  type DatabaseAdminView,
+} from "@/features/database-admin/model/databaseAdminRefresh";
 import { databaseService } from "@/services/tauri";
 import type {
   DatabaseAdminLockWait,
@@ -18,10 +23,9 @@ import type {
   DatabaseAdminUser,
   DatabaseDriver,
 } from "@/services/tauri/types";
-import { Activity, BarChart3, GitFork, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, BarChart3, Clock3, GitFork, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type AdminView = "sessions" | "metrics" | "locks" | "users" | "roles" | "privileges";
 type AccountForm = "create" | "password" | null;
 
 interface DatabaseAdministrationDialogProps {
@@ -72,7 +76,7 @@ export function DatabaseAdministrationDialog({
   driver,
   connectionName,
 }: DatabaseAdministrationDialogProps) {
-  const [view, setView] = useState<AdminView>("sessions");
+  const [view, setView] = useState<DatabaseAdminView>("sessions");
   const [sessions, setSessions] = useState<DatabaseAdminSession[]>([]);
   const [metrics, setMetrics] = useState<DatabaseAdminMetric[]>([]);
   const [lockWaits, setLockWaits] = useState<DatabaseAdminLockWait[]>([]);
@@ -88,6 +92,9 @@ export function DatabaseAdministrationDialog({
   const [host, setHost] = useState("%");
   const [password, setPassword] = useState("");
   const [canLogin, setCanLogin] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const loadInFlightKeysRef = useRef(new Set<string>());
+  const loadGenerationRef = useRef(0);
 
   const supportsAccounts = driver === "postgres" || isMysqlFamily(driver);
   const supportsLockWaits = driver === "postgres" || isMysqlFamily(driver);
@@ -102,28 +109,44 @@ export function DatabaseAdministrationDialog({
     setCanLogin(true);
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options: { background?: boolean } = {}) => {
     if (!connectionId || !supportsAccounts) return;
-    setIsLoading(true);
+    const requestKey = `${connectionId}:${driver}:${view}`;
+    if (loadInFlightKeysRef.current.has(requestKey)) return;
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    loadInFlightKeysRef.current.add(requestKey);
+    if (!options.background) setIsLoading(true);
     setError(null);
     try {
       if (view === "sessions") {
-        setSessions(await databaseService.listDatabaseAdminSessions(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminSessions(connectionId, driver);
+        if (loadGenerationRef.current === generation) setSessions(value);
       } else if (view === "metrics") {
-        setMetrics(await databaseService.listDatabaseAdminMetrics(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminMetrics(connectionId, driver);
+        if (loadGenerationRef.current === generation) setMetrics(value);
       } else if (view === "locks") {
-        setLockWaits(await databaseService.listDatabaseAdminLockWaits(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminLockWaits(connectionId, driver);
+        if (loadGenerationRef.current === generation) setLockWaits(value);
       } else if (view === "roles") {
-        setRoleMemberships(await databaseService.listDatabaseAdminRoleMemberships(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminRoleMemberships(connectionId, driver);
+        if (loadGenerationRef.current === generation) setRoleMemberships(value);
       } else if (view === "privileges") {
-        setTablePrivileges(await databaseService.listDatabaseAdminTablePrivileges(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminTablePrivileges(connectionId, driver);
+        if (loadGenerationRef.current === generation) setTablePrivileges(value);
       } else {
-        setUsers(await databaseService.listDatabaseAdminUsers(connectionId, driver));
+        const value = await databaseService.listDatabaseAdminUsers(connectionId, driver);
+        if (loadGenerationRef.current === generation) setUsers(value);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (loadGenerationRef.current === generation) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
     } finally {
-      setIsLoading(false);
+      loadInFlightKeysRef.current.delete(requestKey);
+      if (!options.background && loadGenerationRef.current === generation) {
+        setIsLoading(false);
+      }
     }
   }, [connectionId, driver, supportsAccounts, view]);
 
@@ -135,13 +158,38 @@ export function DatabaseAdministrationDialog({
     if (open) void load();
   }, [load, open]);
 
+  useEffect(() => {
+    if (
+      !open ||
+      !autoRefresh ||
+      isMutating ||
+      !supportsDatabaseAdminAutoRefresh(view)
+    ) {
+      return;
+    }
+    const refreshVisibleView = () => {
+      if (document.visibilityState === "visible") {
+        void load({ background: true });
+      }
+    };
+    const interval = window.setInterval(
+      refreshVisibleView,
+      DATABASE_ADMIN_AUTO_REFRESH_MS,
+    );
+    document.addEventListener("visibilitychange", refreshVisibleView);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisibleView);
+    };
+  }, [autoRefresh, isMutating, load, open, view]);
+
   const selectedTargetLabel = useMemo(
     () => (targetUser ? accountLabel(targetUser) : ""),
     [targetUser],
   );
 
   const runMutation = useCallback(
-    async (task: () => Promise<string>, reload: AdminView) => {
+    async (task: () => Promise<string>, reload: DatabaseAdminView) => {
       setIsMutating(true);
       setError(null);
       try {
@@ -366,6 +414,21 @@ export function DatabaseAdministrationDialog({
               {view === "users" && (
                 <button type="button" className="wb-icon-button h-6 w-6" title="Create account" onClick={openCreate}>
                   <UserPlus size={13} />
+                </button>
+              )}
+              {supportsDatabaseAdminAutoRefresh(view) && (
+                <button
+                  type="button"
+                  className={cn(
+                    "wb-toolbar-button h-6 gap-1 px-1.5 text-[10px]",
+                    autoRefresh && "wb-toolbar-button-active",
+                  )}
+                  title="Refresh this live view every 10 seconds while the window is visible"
+                  aria-pressed={autoRefresh}
+                  onClick={() => setAutoRefresh((current) => !current)}
+                  disabled={isMutating}
+                >
+                  <Clock3 size={11} /> Auto
                 </button>
               )}
               <button type="button" className="wb-icon-button h-6 w-6" title="Refresh" onClick={() => void load()} disabled={isLoading || isMutating}>
