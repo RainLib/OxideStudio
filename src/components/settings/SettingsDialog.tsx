@@ -2203,9 +2203,34 @@ function formatDriverCacheBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+function normalizeCredentialFreeHttpsRoot(value: string) {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  if (normalized.length > 512) return null;
+  try {
+    const url = new URL(normalized);
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function DriverManagementSettings() {
   const catalogUrl = useSettingsStore((state) => state.settings.drivers.catalogUrl);
   const driverStorePath = useSettingsStore((state) => state.settings.drivers.storePath);
+  const sqliteWorkerBaseUrl = useSettingsStore(
+    (state) => state.settings.drivers.sqliteWorkerBaseUrl,
+  );
   const updateSettings = useSettingsStore((state) => state.updateSettings);
   const [installations, setInstallations] = useState<
     DatabaseDriverInstallation[] | null
@@ -2220,6 +2245,8 @@ function DriverManagementSettings() {
     DatabaseDriverRuntimeSummary[] | null
   >(null);
   const [catalogUrlInput, setCatalogUrlInput] = useState(catalogUrl);
+  const [sqliteWorkerBaseUrlInput, setSqliteWorkerBaseUrlInput] =
+    useState(sqliteWorkerBaseUrl);
   const [catalogEntries, setCatalogEntries] = useState<
     DatabaseDriverCatalogEntry[] | null
   >(null);
@@ -2347,6 +2374,48 @@ function DriverManagementSettings() {
     setCatalogUrlInput(catalogUrl);
   }, [catalogUrl]);
 
+  useEffect(() => {
+    setSqliteWorkerBaseUrlInput(sqliteWorkerBaseUrl);
+  }, [sqliteWorkerBaseUrl]);
+
+  const saveSqliteWorkerSource = async () => {
+    const normalized = normalizeCredentialFreeHttpsRoot(
+      sqliteWorkerBaseUrlInput,
+    );
+    if (normalized === null) {
+      setPackageAction({
+        status: "error",
+        message:
+          "SQLite worker source must be a credential-free HTTPS URL without query parameters or fragments.",
+      });
+      return;
+    }
+    try {
+      await updateSettings({
+        drivers: {
+          catalogUrl,
+          storePath: driverStorePath,
+          sqliteWorkerBaseUrl: normalized,
+        },
+      });
+      setSqliteWorkerBaseUrlInput(normalized);
+      setPackageAction({
+        status: "success",
+        message: normalized
+          ? "Remote SQLite worker source saved."
+          : "Remote SQLite worker downloads disabled.",
+      });
+    } catch (error) {
+      setPackageAction({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unable to save the SQLite worker source.",
+      });
+    }
+  };
+
   const checkCatalog = async () => {
     const nextUrl = catalogUrlInput.trim();
     if (!nextUrl) {
@@ -2361,7 +2430,11 @@ function DriverManagementSettings() {
     try {
       const result = await databaseService.getExternalDatabaseDriverCatalog(nextUrl);
       await updateSettings({
-        drivers: { catalogUrl: result.sourceUrl, storePath: driverStorePath },
+        drivers: {
+          catalogUrl: result.sourceUrl,
+          storePath: driverStorePath,
+          sqliteWorkerBaseUrl,
+        },
       });
       setCatalogEntries(result.catalog.packages);
       setCatalogStatus({
@@ -2474,7 +2547,11 @@ function DriverManagementSettings() {
       const store = await databaseService.migrateDatabaseDriverStore(destination);
       setDriverStore(store);
       await updateSettings({
-        drivers: { catalogUrl, storePath: store.activePath },
+        drivers: {
+          catalogUrl,
+          storePath: store.activePath,
+          sqliteWorkerBaseUrl,
+        },
       });
       setPackageAction({
         status: "success",
@@ -3015,6 +3092,34 @@ function DriverManagementSettings() {
       ) : (
         <p className="text-[11px] text-[hsl(var(--wb-text-muted))]">No managed Java runtime installed.</p>
       )}
+
+      <SettingsDivider title="Remote SQLite worker" />
+      <p className="mb-2 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+        Remote SQLite uses a small signed Linux worker over a verified SSH
+        session. OxideStudio selects the x64 or ARM64 package, verifies its
+        manifest and digest, and never sends database credentials to this source.
+        Leave the field blank to use the source embedded in official builds.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          aria-label="Remote SQLite worker source URL"
+          className="h-7 min-w-0 flex-1 rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] px-2 font-mono text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+          placeholder="Official release source (leave blank)"
+          value={sqliteWorkerBaseUrlInput}
+          onChange={(event) => setSqliteWorkerBaseUrlInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void saveSqliteWorkerSource();
+          }}
+        />
+        <button
+          type="button"
+          className="h-7 shrink-0 rounded-[3px] border border-[hsl(var(--wb-border))] px-2.5 text-[11px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-50"
+          disabled={packageAction.status === "loading"}
+          onClick={() => void saveSqliteWorkerSource()}
+        >
+          Save source
+        </button>
+      </div>
 
       <SettingsDivider title="Signed package catalog" />
       <p className="mb-2 max-w-[72ch] text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">

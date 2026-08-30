@@ -20,6 +20,33 @@ pub struct SshTunnelConfig {
     pub private_key_passphrase: Option<String>,
     #[serde(default = "default_strict_host_key_checking")]
     pub strict_host_key_checking: bool,
+    /// Present only for file-hosted SQLite. Keeping it nested prevents TCP
+    /// tunnel connections from accidentally inheriting worker deployment
+    /// authority merely because SSH is enabled.
+    #[serde(default)]
+    pub remote_sqlite: Option<RemoteSqliteSshConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSqliteSshConfig {
+    #[serde(default)]
+    pub placement: SqliteWorkerPlacement,
+    #[serde(default)]
+    pub worker_path: Option<String>,
+    /// Explicit user consent to upload the exact signed worker selected by the
+    /// Host. Preplaced mode never consumes this flag.
+    #[serde(default)]
+    pub allow_worker_upload: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqliteWorkerPlacement {
+    #[default]
+    Session,
+    Persist,
+    Preplaced,
 }
 
 impl std::fmt::Debug for SshTunnelConfig {
@@ -38,6 +65,7 @@ impl std::fmt::Debug for SshTunnelConfig {
                 &self.private_key_passphrase.as_ref().map(|_| "****"),
             )
             .field("strict_host_key_checking", &self.strict_host_key_checking)
+            .field("remote_sqlite", &self.remote_sqlite)
             .finish()
     }
 }
@@ -243,6 +271,42 @@ mod tests {
         assert_eq!(config.port, 22);
         assert_eq!(config.auth_method, "password");
         assert!(config.strict_host_key_checking);
+        assert!(config.remote_sqlite.is_none());
+    }
+
+    #[test]
+    fn remote_sqlite_worker_settings_round_trip_with_safe_defaults() {
+        let config: SshTunnelConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "host": "files.example.com",
+            "username": "deploy",
+            "password": "secret",
+            "remoteSqlite": {}
+        }))
+        .unwrap();
+        let remote = config.remote_sqlite.unwrap();
+        assert_eq!(remote.placement, SqliteWorkerPlacement::Session);
+        assert!(!remote.allow_worker_upload);
+        assert!(remote.worker_path.is_none());
+
+        let config: SshTunnelConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "host": "files.example.com",
+            "username": "deploy",
+            "password": "secret",
+            "remoteSqlite": {
+                "placement": "preplaced",
+                "workerPath": "/opt/oxide/oxide-sqlite-worker",
+                "allowWorkerUpload": true
+            }
+        }))
+        .unwrap();
+        let remote = config.remote_sqlite.unwrap();
+        assert_eq!(remote.placement, SqliteWorkerPlacement::Preplaced);
+        assert_eq!(
+            remote.worker_path.as_deref(),
+            Some("/opt/oxide/oxide-sqlite-worker")
+        );
     }
 
     #[test]

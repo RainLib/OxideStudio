@@ -66,12 +66,20 @@ pub fn run() {
                 .app_data_dir()
                 .expect("failed to get application data directory")
                 .join("database-drivers");
+            let sqlite_worker_root = app
+                .path()
+                .app_data_dir()
+                .expect("failed to get application data directory")
+                .join("sqlite-workers");
             let driver_package_root =
                 config_manager.driver_package_store_path(default_driver_package_root);
             app.manage(config_manager);
             app.manage(core::driver_package::DatabaseDriverPackageRegistry::new(
                 driver_package_root,
             ));
+            app.manage(
+                core::sqlite_worker_artifact::SqliteWorkerArtifactRegistry::new(sqlite_worker_root),
+            );
 
             // Initialize cache manager (legacy JSON cache)
             let cache_manager = CacheManager::new(app.handle());
@@ -141,6 +149,8 @@ pub fn run() {
             // Connection commands
             commands::connection::connect_db,
             commands::connection::test_db_connection,
+            commands::connection::get_remote_sqlite_worker_status,
+            commands::connection::prepare_remote_sqlite_worker,
             commands::connection::disconnect_db,
             commands::connection::get_connection_server_version,
             commands::connection::import_connection_config_file,

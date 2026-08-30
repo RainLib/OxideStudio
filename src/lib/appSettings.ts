@@ -154,6 +154,8 @@ export type AppSettings = {
     catalogUrl: string;
     /** Restart-applied location of independently updateable driver packages. */
     storePath: string;
+    /** HTTPS root containing signed, platform-specific SQLite SSH workers. */
+    sqliteWorkerBaseUrl: string;
   };
   ai: {
     plannerKind: AiPlannerKind;
@@ -320,6 +322,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   drivers: {
     catalogUrl: "",
     storePath: "",
+    sqliteWorkerBaseUrl: "",
   },
   ai: {
     plannerKind: "model",
@@ -749,6 +752,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["drivers", "storePath"],
         defaults.drivers.storePath,
         4096,
+      ),
+      sqliteWorkerBaseUrl: boundedHttpsUrlAt(
+        raw,
+        ["drivers", "sqliteWorkerBaseUrl"],
+        defaults.drivers.sqliteWorkerBaseUrl,
       ),
     },
     ai: {

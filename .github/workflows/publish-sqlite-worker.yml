@@ -24,6 +24,7 @@ jobs:
     name: Validate worker release configuration
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v6
       - name: Validate immutable version and publishing secrets
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
@@ -38,6 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$WORKER_PACKAGE_VERSION" =~ ^[A-Za-z0-9._-]{1,96}$ ]]
+          CRATE_VERSION="$(sed -n 's/^version = \"\([^\"]*\)\"/\1/p' src-tauri/crates/oxide-sqlite-worker/Cargo.toml | head -n 1)"
+          test "$WORKER_PACKAGE_VERSION" = "$CRATE_VERSION"
           missing=()
           for name in ALIYUN_OSS_ACCESS_KEY_ID ALIYUN_OSS_ACCESS_KEY_SECRET ALIYUN_OSS_BUCKET ALIYUN_OSS_REGION ALIYUN_OSS_ENDPOINT ALIYUN_OSS_PREFIX DRIVER_MINISIGN_SECRET_KEY_B64 DRIVER_MINISIGN_PUBLIC_KEY_B64; do
             if [ -z "${!name:-}" ]; then missing+=("$name"); fi

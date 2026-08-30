@@ -102,9 +102,13 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          DRIVER_MINISIGN_PUBLIC_KEY_B64: ${{ secrets.DRIVER_MINISIGN_PUBLIC_KEY_B64 }}
           ALLOW_UNSIGNED_RELEASE: "true"
         run: |
           node - <<'NODE'
+          if (!process.env.DRIVER_MINISIGN_PUBLIC_KEY_B64?.trim()) {
+            throw new Error("DRIVER_MINISIGN_PUBLIC_KEY_B64 is required so release builds can verify signed driver and SQLite worker packages.");
+          }
           const ossRequired = [
             "TAURI_SIGNING_PRIVATE_KEY",
             "OXIDE_UPDATER_PUBLIC_KEY",
@@ -335,6 +339,26 @@ jobs:
             --binary "src-tauri/binaries/oxide-agent-host-${{ matrix.target }}${EXTENSION}"
           "src-tauri/binaries/oxide-agent-${{ matrix.target }}${EXTENSION}" tools list \
             | node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const tools=JSON.parse(s); if (tools.length !== 5 || tools.some(tool => !tool.readOnly || tool.destructive)) process.exit(1); });'
+
+      - name: Configure signed package trust
+        env:
+          DRIVER_MINISIGN_PUBLIC_KEY_B64: ${{ secrets.DRIVER_MINISIGN_PUBLIC_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const key = Buffer.from(process.env.DRIVER_MINISIGN_PUBLIC_KEY_B64 || "", "base64")
+            .toString("utf8")
+            .trimEnd();
+          if (!key || key.includes("\0") || key.includes("OXIDE_DRIVER_TRUST_EOF")) {
+            throw new Error("Signed package public key is invalid.");
+          }
+          fs.appendFileSync(
+            process.env.GITHUB_ENV,
+            `OXIDE_DRIVER_SIGNING_PUBLIC_KEY<<OXIDE_DRIVER_TRUST_EOF\n${key}\nOXIDE_DRIVER_TRUST_EOF\n`,
+          );
+          NODE
 
       - name: Configure Aliyun updater endpoint
         if: needs.validate.outputs.oss_enabled == 'true'

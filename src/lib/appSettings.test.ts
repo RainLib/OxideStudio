@@ -60,3 +60,30 @@ describe("SQL editor settings", () => {
     ).toMatchObject({ keywordCase: "preserve", functionCase: "lower" });
   });
 });
+
+describe("driver runtime settings", () => {
+  it("migrates old settings and accepts only credential-free HTTPS worker roots", () => {
+    expect(normalizeAppSettings({}).drivers.sqliteWorkerBaseUrl).toBe("");
+    expect(
+      normalizeAppSettings({
+        drivers: {
+          sqliteWorkerBaseUrl: "https://downloads.example.com/sqlite-workers",
+        },
+      }).drivers.sqliteWorkerBaseUrl,
+    ).toBe("https://downloads.example.com/sqlite-workers");
+    expect(
+      normalizeAppSettings({
+        drivers: {
+          sqliteWorkerBaseUrl: "http://downloads.example.com/workers",
+        },
+      }).drivers.sqliteWorkerBaseUrl,
+    ).toBe("");
+    expect(
+      normalizeAppSettings({
+        drivers: {
+          sqliteWorkerBaseUrl: "https://user:secret@example.com/workers",
+        },
+      }).drivers.sqliteWorkerBaseUrl,
+    ).toBe("");
+  });
+});

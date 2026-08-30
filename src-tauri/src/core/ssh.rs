@@ -1,20 +1,23 @@
 use crate::core::config::SshTunnelConfig;
 use crate::core::dialect::database_capabilities_for_driver;
 use anyhow::{anyhow, bail, Context, Result};
-use russh::client;
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
+use russh::{client, ChannelMsg, ChannelStream};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, timeout_at, Instant};
 use url::Url;
+use uuid::Uuid;
 
 const SSH_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const SSH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FORWARDING_CHANNELS: usize = 64;
+const MAX_SSH_CAPTURE_BYTES: u64 = 1024 * 1024;
+const MAX_SSH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct SshClientHandler {
@@ -52,6 +55,370 @@ impl client::Handler for SshClientHandler {
             )),
         }
     }
+}
+
+/// One authenticated SSH session used by file-hosted database transports.
+/// It reuses the same strict known-hosts policy as TCP forwarding, but does
+/// not expose a general renderer-controlled shell API.
+pub(crate) struct SshSession {
+    session: client::Handle<SshClientHandler>,
+    identity: String,
+}
+
+impl SshSession {
+    pub(crate) async fn connect(config: &SshTunnelConfig) -> Result<Self> {
+        validate_config(config)?;
+
+        let handler = SshClientHandler {
+            host: config.host.trim().to_string(),
+            port: config.port,
+            strict_host_key_checking: config.strict_host_key_checking,
+        };
+        let client_config = client::Config {
+            inactivity_timeout: Some(Duration::from_secs(60)),
+            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_max: 3,
+            nodelay: true,
+            ..Default::default()
+        };
+        let mut session = timeout(
+            SSH_OPERATION_TIMEOUT,
+            client::connect(
+                Arc::new(client_config),
+                (handler.host.as_str(), handler.port),
+                handler.clone(),
+            ),
+        )
+        .await
+        .context("Timed out connecting to SSH server")?
+        .with_context(|| {
+            format!(
+                "Failed to connect to SSH server {}:{}",
+                config.host.trim(),
+                config.port
+            )
+        })?;
+
+        authenticate_session(&mut session, config).await?;
+        Ok(Self {
+            session,
+            identity: format!(
+                "{}@{}:{}",
+                config.username.trim(),
+                config.host.trim().to_ascii_lowercase(),
+                config.port
+            ),
+        })
+    }
+
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub(crate) async fn capture_fixed(&self, command: &'static str) -> Result<String> {
+        self.capture(command).await
+    }
+
+    pub(crate) async fn upload_atomic_executable(
+        &self,
+        remote_path: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_SSH_UPLOAD_BYTES {
+            bail!("SQLite worker payload is empty or exceeds 64 MiB");
+        }
+        let quoted = shell_quote(remote_path)?;
+        let temporary_path = format!("{remote_path}.oxide-part-{}", Uuid::new_v4());
+        let temporary = shell_quote(&temporary_path)?;
+        let command = format!(
+            "mkdir -p \"$(dirname {quoted})\" && cat > {temporary} && chmod 700 {temporary} && mv -- {temporary} {quoted}"
+        );
+        let result = self.exec_with_input(&command, bytes).await;
+        if result.is_err() {
+            let _ = self.remove_file(&temporary_path).await;
+        }
+        result
+    }
+
+    pub(crate) async fn download_to_local_file(
+        &self,
+        remote_path: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+    ) -> Result<u64> {
+        if expected_bytes == 0 {
+            bail!("Remote SQLite transfer receipt was empty");
+        }
+        let mut channel = timeout(SSH_OPERATION_TIMEOUT, self.session.channel_open_session())
+            .await
+            .context("Timed out opening SQLite download channel")?
+            .context("Failed to open SQLite download channel")?;
+        channel
+            .exec(true, format!("cat {}", shell_quote(remote_path)?))
+            .await
+            .context("Failed to start SQLite download")?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .await
+            .context("Failed to create local SQLite transfer file")?;
+        let copied = {
+            let mut reader = channel.make_reader().take(expected_bytes.saturating_add(1));
+            tokio::io::copy(&mut reader, &mut file)
+                .await
+                .context("Failed to download SQLite file")?
+        };
+        if copied > expected_bytes {
+            let _ = channel.close().await;
+            bail!("Downloaded SQLite file exceeded its worker receipt");
+        }
+        file.flush()
+            .await
+            .context("Failed to flush downloaded SQLite file")?;
+        file.sync_all()
+            .await
+            .context("Failed to sync downloaded SQLite file")?;
+        validate_exit_status(wait_for_exit_status(&mut channel).await)?;
+        if copied != expected_bytes {
+            bail!("Downloaded SQLite file size does not match its worker receipt");
+        }
+        Ok(copied)
+    }
+
+    pub(crate) async fn upload_local_file_atomic(
+        &self,
+        source: &std::path::Path,
+        remote_path: &str,
+    ) -> Result<u64> {
+        let metadata = tokio::fs::metadata(source)
+            .await
+            .context("Cannot inspect local SQLite transfer file")?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            bail!("Local SQLite transfer source is missing or empty");
+        }
+        let quoted = shell_quote(remote_path)?;
+        let temporary_path = format!("{remote_path}.oxide-part-{}", Uuid::new_v4());
+        let temporary = shell_quote(&temporary_path)?;
+        let command = format!(
+            "mkdir -p \"$(dirname {quoted})\" && cat > {temporary} && mv -- {temporary} {quoted}"
+        );
+        let mut channel = timeout(SSH_OPERATION_TIMEOUT, self.session.channel_open_session())
+            .await
+            .context("Timed out opening SQLite upload channel")?
+            .context("Failed to open SQLite upload channel")?;
+        let upload = async {
+            channel
+                .exec(true, command)
+                .await
+                .context("Failed to start SQLite upload")?;
+            let file = tokio::fs::File::open(source)
+                .await
+                .context("Failed to open local SQLite transfer file")?;
+            channel
+                .data(file)
+                .await
+                .context("Failed to upload SQLite file")?;
+            channel
+                .eof()
+                .await
+                .context("Failed to finish SQLite upload")?;
+            validate_exit_status(wait_for_exit_status(&mut channel).await)
+        }
+        .await;
+        if let Err(error) = upload {
+            let _ = self.remove_file(&temporary_path).await;
+            return Err(error);
+        }
+        Ok(metadata.len())
+    }
+
+    pub(crate) async fn remove_file(&self, remote_path: &str) -> Result<()> {
+        let command = format!("rm -f -- {}", shell_quote(remote_path)?);
+        self.exec_with_input(&command, &[]).await
+    }
+
+    pub(crate) async fn ensure_regular_file(&self, remote_path: &str) -> Result<()> {
+        let command = format!("test -f {}", shell_quote(remote_path)?);
+        self.exec_with_input(&command, &[]).await
+    }
+
+    pub(crate) async fn sha256(&self, remote_path: &str) -> Result<String> {
+        let command = format!("sha256sum {}", shell_quote(remote_path)?);
+        let output = self.capture(&command).await?;
+        output
+            .split_whitespace()
+            .next()
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+            })
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| anyhow!("Remote host returned an invalid SHA-256 digest"))
+    }
+
+    pub(crate) async fn start_stdio(
+        &self,
+        executable_path: &str,
+    ) -> Result<ChannelStream<client::Msg>> {
+        let channel = timeout(SSH_OPERATION_TIMEOUT, self.session.channel_open_session())
+            .await
+            .context("Timed out opening SQLite worker SSH channel")?
+            .context("Failed to open SQLite worker SSH channel")?;
+        channel
+            .exec(true, format!("exec {}", shell_quote(executable_path)?))
+            .await
+            .context("Failed to start SQLite worker")?;
+        Ok(channel.into_stream())
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        if let Err(error) = self
+            .session
+            .disconnect(russh::Disconnect::ByApplication, "SSH session closed", "en")
+            .await
+        {
+            tracing::debug!("Failed to send SSH session disconnect: {error}");
+        }
+    }
+
+    async fn capture(&self, command: &str) -> Result<String> {
+        let bytes = self.capture_bytes(command, MAX_SSH_CAPTURE_BYTES).await?;
+        String::from_utf8(bytes).context("Remote command returned non-UTF-8 output")
+    }
+
+    async fn capture_bytes(&self, command: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        let mut channel = timeout(SSH_OPERATION_TIMEOUT, self.session.channel_open_session())
+            .await
+            .context("Timed out opening SSH command channel")?
+            .context("Failed to open SSH command channel")?;
+        channel
+            .exec(true, command)
+            .await
+            .context("Failed to start remote command")?;
+        let mut output = Vec::new();
+        {
+            let mut reader = channel.make_reader().take(max_bytes.saturating_add(1));
+            reader
+                .read_to_end(&mut output)
+                .await
+                .context("Failed to read remote command output")?;
+        }
+        let exit_status = wait_for_exit_status(&mut channel).await;
+        validate_exit_status(exit_status)?;
+        if output.len() as u64 > max_bytes {
+            bail!("Remote command output exceeded its configured limit");
+        }
+        Ok(output)
+    }
+
+    async fn exec_with_input(&self, command: &str, input: &[u8]) -> Result<()> {
+        let mut channel = timeout(SSH_OPERATION_TIMEOUT, self.session.channel_open_session())
+            .await
+            .context("Timed out opening SSH command channel")?
+            .context("Failed to open SSH command channel")?;
+        channel
+            .exec(true, command)
+            .await
+            .context("Failed to start remote command")?;
+        if !input.is_empty() {
+            channel
+                .data(input)
+                .await
+                .context("Failed to upload remote file")?;
+        }
+        channel
+            .eof()
+            .await
+            .context("Failed to finish remote command input")?;
+        validate_exit_status(wait_for_exit_status(&mut channel).await)
+    }
+}
+
+async fn wait_for_exit_status(channel: &mut russh::Channel<client::Msg>) -> Option<u32> {
+    let mut exit_status = None;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::ExitStatus {
+                exit_status: status,
+            }) => exit_status = Some(status),
+            Some(ChannelMsg::Close) | None => return exit_status,
+            Some(_) => {}
+        }
+    }
+}
+
+fn validate_exit_status(exit_status: Option<u32>) -> Result<()> {
+    match exit_status {
+        Some(0) => Ok(()),
+        Some(status) => bail!("Remote command exited with status {status}"),
+        None => bail!("Remote command closed without an exit status"),
+    }
+}
+
+fn shell_quote(path: &str) -> Result<String> {
+    if path.trim().is_empty() || path.contains('\0') || path.contains('\n') || path.contains('\r') {
+        bail!("Remote path is invalid");
+    }
+    Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
+}
+
+async fn authenticate_session(
+    session: &mut client::Handle<SshClientHandler>,
+    config: &SshTunnelConfig,
+) -> Result<()> {
+    let authenticated = match config.auth_method.trim() {
+        "password" => timeout(
+            SSH_OPERATION_TIMEOUT,
+            session.authenticate_password(
+                config.username.trim(),
+                config.password.as_deref().unwrap_or_default(),
+            ),
+        )
+        .await
+        .context("SSH password authentication timed out")?
+        .context("SSH password authentication failed")?,
+        "privateKey" | "private-key" => {
+            let key_path = config
+                .private_key_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .expect("SSH private key path was validated");
+            let key_path = expand_home_path(key_path);
+            let key = Arc::new(
+                load_secret_key(&key_path, config.private_key_passphrase.as_deref()).with_context(
+                    || format!("Failed to load SSH private key {}", key_path.display()),
+                )?,
+            );
+            let hash = session
+                .best_supported_rsa_hash()
+                .await
+                .context("Failed to negotiate SSH key algorithm")?
+                .flatten();
+            timeout(
+                SSH_OPERATION_TIMEOUT,
+                session.authenticate_publickey(
+                    config.username.trim(),
+                    PrivateKeyWithHashAlg::new(key, hash),
+                ),
+            )
+            .await
+            .context("SSH private-key authentication timed out")?
+            .context("SSH private-key authentication failed")?
+        }
+        method => bail!("Unsupported SSH authentication method: {method}"),
+    };
+
+    if !authenticated.success() {
+        bail!(
+            "SSH authentication was rejected for user {}",
+            config.username.trim()
+        );
+    }
+    Ok(())
 }
 
 /// Owns an authenticated SSH session and a loopback-only local forwarder.
@@ -402,11 +769,22 @@ mod tests {
             private_key_path: None,
             private_key_passphrase: None,
             strict_host_key_checking: true,
+            remote_sqlite: None,
         };
 
         assert!(validate_config(&config)
             .unwrap_err()
             .to_string()
             .contains("host"));
+    }
+
+    #[test]
+    fn remote_paths_are_single_argument_shell_quoted() {
+        assert_eq!(
+            shell_quote("/srv/data/customer's app.db").unwrap(),
+            "'/srv/data/customer'\"'\"'s app.db'"
+        );
+        assert!(shell_quote("/srv/data/app.db\nrm -rf /tmp").is_err());
+        assert!(shell_quote("").is_err());
     }
 }

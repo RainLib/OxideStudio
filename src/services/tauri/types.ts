@@ -1280,6 +1280,13 @@ export interface TableConstraintChangeResult {
  * 保存的连接配置
  */
 export type SshAuthMethod = "password" | "privateKey";
+export type SqliteWorkerPlacement = "session" | "persist" | "preplaced";
+
+export interface RemoteSqliteSshConfig {
+  placement: SqliteWorkerPlacement;
+  workerPath?: string;
+  allowWorkerUpload: boolean;
+}
 
 export interface SshTunnelConfig {
   enabled: boolean;
@@ -1291,6 +1298,8 @@ export interface SshTunnelConfig {
   privateKeyPath?: string;
   privateKeyPassphrase?: string;
   strictHostKeyChecking: boolean;
+  /** Enables the signed stdio worker path instead of TCP forwarding for SQLite. */
+  remoteSqlite?: RemoteSqliteSshConfig;
 }
 
 export interface SavedConnection {

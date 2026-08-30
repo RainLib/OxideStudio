@@ -7,3 +7,5 @@ pub mod protocol;
 pub mod runtime;
 
 pub use protocol::*;
+
+pub const SQLITE_WORKER_PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");

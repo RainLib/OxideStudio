@@ -45,6 +45,7 @@ use crate::{
             all_database_capabilities, canonical_driver_name, database_capabilities_for_driver,
             DatabaseCapabilities, DatabaseKind,
         },
+        driver::DatabaseDriver,
         driver_package::{
             is_safe_driver_package_token, DatabaseDriverPackageRegistry, DriverPackageStatus,
         },
@@ -52,6 +53,7 @@ use crate::{
         manager::ConnectionManager,
         protocol::{ExplainPlanMode, QueryResult},
         provider_secret::load_provider_secret,
+        sqlite_worker_artifact::SqliteWorkerArtifactRegistry,
         ssh::SshTunnel,
         statement::{
             execution_statement_kind, split_sql_statements, validate_read_only_sql, StatementKind,
@@ -59,7 +61,10 @@ use crate::{
         },
         store::{MetaStore, SavedConnection as StoreSavedConnection},
     },
-    drivers::{connect_agent_read_only_preferred_driver, connect_preferred_driver},
+    drivers::{
+        connect_agent_read_only_preferred_driver, connect_preferred_driver,
+        sqlite_ssh::RemoteSqliteDriver,
+    },
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{
@@ -3496,25 +3501,54 @@ impl AgentHostInner {
 
         let url = connection_url_from_config(&target.capabilities, &target.config)
             .map_err(SidecarRequestError::security)?;
-        let (connection_url, tunnel) =
-            SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
-                .await
-                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
         let registry = self
             .app
             .try_state::<DatabaseDriverPackageRegistry>()
             .ok_or_else(|| {
                 SidecarRequestError::tool("database driver package registry is unavailable")
             })?;
-        let driver = connect_agent_read_only_preferred_driver(
-            &registry,
-            &target.driver,
-            &connection_url,
-            target.id.clone(),
-            target.config.driver_package_version.as_deref(),
-        )
-        .await
-        .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let remote_sqlite = canonical_driver_name(&target.driver)
+            .is_some_and(|driver| driver.eq_ignore_ascii_case("sqlite"))
+            && target
+                .config
+                .ssh_tunnel
+                .as_ref()
+                .is_some_and(|ssh| ssh.enabled && ssh.remote_sqlite.is_some());
+        let (driver, tunnel): (Box<dyn DatabaseDriver>, Option<SshTunnel>) = if remote_sqlite {
+            if target.config.driver_package_version.is_some() {
+                return Err(SidecarRequestError::security(anyhow!(
+                    "remote SQLite cannot use an external driver package"
+                )));
+            }
+            let worker_registry = self
+                .app
+                .try_state::<SqliteWorkerArtifactRegistry>()
+                .ok_or_else(|| {
+                    SidecarRequestError::tool("SQLite worker registry is unavailable")
+                })?;
+            let ssh = target.config.ssh_tunnel.as_ref().ok_or_else(|| {
+                SidecarRequestError::security(anyhow!("remote SQLite SSH settings are unavailable"))
+            })?;
+            let driver = RemoteSqliteDriver::open(&worker_registry, &target.id, &url, ssh, true)
+                .await
+                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            (Box::new(driver), None)
+        } else {
+            let (connection_url, tunnel) =
+                SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
+                    .await
+                    .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            let driver = connect_agent_read_only_preferred_driver(
+                &registry,
+                &target.driver,
+                &connection_url,
+                target.id.clone(),
+                target.config.driver_package_version.as_deref(),
+            )
+            .await
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            (driver, tunnel)
+        };
         if let Err(error) = driver.ping().await {
             let _ = driver.disconnect().await;
             if let Some(tunnel) = tunnel {
@@ -3573,25 +3607,60 @@ impl AgentHostInner {
 
         let url = connection_url_from_config(&target.capabilities, &target.config)
             .map_err(SidecarRequestError::security)?;
-        let (connection_url, tunnel) =
-            SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
-                .await
-                .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
         let registry = self
             .app
             .try_state::<DatabaseDriverPackageRegistry>()
             .ok_or_else(|| {
                 SidecarRequestError::tool("database driver package registry is unavailable")
             })?;
-        let driver = connect_preferred_driver(
-            &registry,
-            &target.driver,
-            &connection_url,
-            format!("agent-mutation-{}", target.id),
-            target.config.driver_package_version.as_deref(),
-        )
-        .await
-        .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+        let remote_sqlite = canonical_driver_name(&target.driver)
+            .is_some_and(|driver| driver.eq_ignore_ascii_case("sqlite"))
+            && target
+                .config
+                .ssh_tunnel
+                .as_ref()
+                .is_some_and(|ssh| ssh.enabled && ssh.remote_sqlite.is_some());
+        let (driver, tunnel): (Box<dyn DatabaseDriver>, Option<SshTunnel>) = if remote_sqlite {
+            if target.config.driver_package_version.is_some() {
+                return Err(SidecarRequestError::security(anyhow!(
+                    "remote SQLite cannot use an external driver package"
+                )));
+            }
+            let worker_registry = self
+                .app
+                .try_state::<SqliteWorkerArtifactRegistry>()
+                .ok_or_else(|| {
+                    SidecarRequestError::tool("SQLite worker registry is unavailable")
+                })?;
+            let ssh = target.config.ssh_tunnel.as_ref().ok_or_else(|| {
+                SidecarRequestError::security(anyhow!("remote SQLite SSH settings are unavailable"))
+            })?;
+            let driver = RemoteSqliteDriver::open(
+                &worker_registry,
+                &format!("agent-mutation-{}", target.id),
+                &url,
+                ssh,
+                false,
+            )
+            .await
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            (Box::new(driver), None)
+        } else {
+            let (connection_url, tunnel) =
+                SshTunnel::prepare(&target.driver, &url, target.config.ssh_tunnel.as_ref())
+                    .await
+                    .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            let driver = connect_preferred_driver(
+                &registry,
+                &target.driver,
+                &connection_url,
+                format!("agent-mutation-{}", target.id),
+                target.config.driver_package_version.as_deref(),
+            )
+            .await
+            .map_err(|error| SidecarRequestError::tool(error.to_string()))?;
+            (driver, tunnel)
+        };
         if let Err(error) = driver.ping().await {
             let _ = driver.disconnect().await;
             if let Some(tunnel) = tunnel {

@@ -539,7 +539,100 @@ fn validate_single_statement(sql: &str) -> Result<&str, String> {
     if !tail_is_only_semicolons_and_comments(trimmed) {
         return Err("SQLite worker accepts exactly one statement per request".into());
     }
+    validate_remote_sql_features(trimmed)?;
     Ok(trimmed)
+}
+
+fn validate_remote_sql_features(sql: &str) -> Result<(), String> {
+    let tokens = sqlite_identifier_tokens(sql, 32);
+    if tokens
+        .first()
+        .is_some_and(|token| matches!(token.as_str(), "attach" | "detach"))
+    {
+        return Err("Remote SQLite does not support attached databases".into());
+    }
+    if tokens.iter().any(|token| token == "load_extension") {
+        return Err("Remote SQLite does not support loadable extensions".into());
+    }
+    if tokens.first().is_some_and(|token| token == "pragma")
+        && tokens
+            .iter()
+            .skip(1)
+            .any(|token| matches!(token.as_str(), "key" | "rekey") || token.starts_with("cipher_"))
+    {
+        return Err("Remote SQLite does not support SQLCipher settings".into());
+    }
+    Ok(())
+}
+
+fn sqlite_identifier_tokens(sql: &str, limit: usize) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = sql.char_indices().peekable();
+    while let Some((start, character)) = chars.next() {
+        match character {
+            '-' if chars.peek().is_some_and(|(_, next)| *next == '-') => {
+                chars.next();
+                for (_, next) in chars.by_ref() {
+                    if next == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                chars.next();
+                let mut previous = '\0';
+                for (_, next) in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            '\'' | '"' | '`' => {
+                let delimiter = character;
+                while let Some((_, next)) = chars.next() {
+                    if next == delimiter {
+                        if chars
+                            .peek()
+                            .is_some_and(|(_, escaped)| *escaped == delimiter)
+                        {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '[' => {
+                while let Some((_, next)) = chars.next() {
+                    if next == ']' {
+                        if chars.peek().is_some_and(|(_, escaped)| *escaped == ']') {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            character if character.is_ascii_alphabetic() || character == '_' => {
+                let mut end = start + character.len_utf8();
+                while let Some((index, next)) = chars.peek().copied() {
+                    if next.is_ascii_alphanumeric() || next == '_' {
+                        chars.next();
+                        end = index + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(sql[start..end].to_ascii_lowercase());
+                if tokens.len() >= limit {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    tokens
 }
 
 fn tail_is_only_semicolons_and_comments(sql: &str) -> bool {
@@ -1115,6 +1208,24 @@ mod tests {
         assert!(validate_single_statement("SELECT 1; -- done").is_ok());
         assert!(validate_single_statement("SELECT 1; /* done */").is_ok());
         assert!(validate_single_statement("SELECT 1; SELECT 2").is_err());
+    }
+
+    #[test]
+    fn rejects_remote_attach_extensions_and_sqlcipher_without_false_string_matches() {
+        for sql in [
+            "ATTACH DATABASE '/tmp/other.db' AS other",
+            "DETACH DATABASE other",
+            "SELECT load_extension('/tmp/example.so')",
+            "PRAGMA key = 'secret'",
+            "PRAGMA main.cipher_page_size = 4096",
+        ] {
+            assert!(validate_single_statement(sql).is_err(), "accepted {sql}");
+        }
+        assert!(
+            validate_single_statement("SELECT 'attach load_extension pragma key' AS harmless")
+                .is_ok()
+        );
+        assert!(validate_single_statement("/* attach */ SELECT 1 AS load_extension_name").is_ok());
     }
 
     #[test]

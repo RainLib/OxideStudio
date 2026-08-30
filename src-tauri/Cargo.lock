@@ -4507,6 +4507,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxide-sqlite-worker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oxide-studio"
 version = "0.1.16"
 dependencies = [
@@ -4534,6 +4542,7 @@ dependencies = [
  "mongodb",
  "oxide-driver-protocol",
  "oxide-enterprise-contracts",
+ "oxide-sqlite-worker",
  "parquet",
  "percent-encoding",
  "prost",

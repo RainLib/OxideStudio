@@ -51,7 +51,11 @@ async function main() {
     throw new Error(`--target must be one of: ${[...supportedTargets.keys()].join(", ")}`);
   }
   const platform = supportedTargets.get(target);
-  const version = safeVersion(option("--version") || await crateVersion());
+  const declaredVersion = await crateVersion();
+  const version = safeVersion(option("--version") || declaredVersion);
+  if (version !== declaredVersion) {
+    throw new Error(`--version must match the worker crate version ${declaredVersion}`);
+  }
   const entrypoint = "oxide-sqlite-worker";
   const binary = resolve(option("--binary") || join(workerRoot, "target", target, "release", entrypoint));
   const output = resolve(option("--out") || join(repositoryRoot, "artifacts", "workers", "sqlite", version, platform));

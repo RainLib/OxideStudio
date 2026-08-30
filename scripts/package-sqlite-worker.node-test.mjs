@@ -15,6 +15,12 @@ test("SQLite worker packaging binds protocol, platform and binary digest", async
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const binary = join(temporary, "oxide-sqlite-worker");
   const output = join(temporary, "package");
+  const cargoToml = await readFile(
+    join(repositoryRoot, "src-tauri", "crates", "oxide-sqlite-worker", "Cargo.toml"),
+    "utf8",
+  );
+  const version = cargoToml.match(/^version\s*=\s*"([^"]+)"/mu)?.[1];
+  assert.ok(version, "worker crate version is declared");
   await writeFile(binary, "sqlite-worker-fixture", "utf8");
 
   execFileSync(process.execPath, [
@@ -22,13 +28,13 @@ test("SQLite worker packaging binds protocol, platform and binary digest", async
     "--target", "x86_64-unknown-linux-musl",
     "--binary", binary,
     "--out", output,
-    "--version", "9.9.9",
+    "--version", version,
   ], { cwd: repositoryRoot, stdio: "pipe" });
 
   const manifest = JSON.parse(await readFile(join(output, "manifest.json"), "utf8"));
   assert.equal(manifest.artifactKind, "sqlite-ssh-worker");
   assert.equal(manifest.packageId, "oxide.sqlite-ssh-worker");
-  assert.equal(manifest.packageVersion, "9.9.9");
+  assert.equal(manifest.packageVersion, version);
   assert.equal(manifest.protocolVersion, 1);
   assert.equal(manifest.platform, "linux-x64");
   assert.equal(manifest.rustTarget, "x86_64-unknown-linux-musl");
@@ -53,4 +59,23 @@ test("SQLite worker packaging rejects non-musl and unsafe versions", async (t) =
     () => execFileSync(process.execPath, [script, "--target", "x86_64-unknown-linux-musl", "--binary", binary, "--version", "../bad"], { cwd: repositoryRoot, stdio: "pipe" }),
     /unsafe characters/u,
   );
+  assert.throws(
+    () => execFileSync(process.execPath, [script, "--target", "x86_64-unknown-linux-musl", "--binary", binary, "--version", "9.9.9"], { cwd: repositoryRoot, stdio: "pipe" }),
+    /must match the worker crate version/u,
+  );
+});
+
+test("release workflows preserve worker version and desktop trust binding", async () => {
+  const workerWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "publish-sqlite-worker.yml"),
+    "utf8",
+  );
+  const desktopWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+  assert.match(workerWorkflow, /actions\/checkout@v6/u);
+  assert.match(workerWorkflow, /test "\$WORKER_PACKAGE_VERSION" = "\$CRATE_VERSION"/u);
+  assert.match(desktopWorkflow, /DRIVER_MINISIGN_PUBLIC_KEY_B64 is required/u);
+  assert.match(desktopWorkflow, /OXIDE_DRIVER_SIGNING_PUBLIC_KEY<<OXIDE_DRIVER_TRUST_EOF/u);
 });

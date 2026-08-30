@@ -823,7 +823,7 @@ fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
     Ok(parent.join(file_name))
 }
 
-fn temporary_backup_path(destination: &Path) -> Result<PathBuf> {
+pub(crate) fn temporary_backup_path(destination: &Path) -> Result<PathBuf> {
     let file_name = destination
         .file_name()
         .and_then(|name| name.to_str())
@@ -834,7 +834,7 @@ fn temporary_backup_path(destination: &Path) -> Result<PathBuf> {
     )))
 }
 
-fn replace_backup_file(temporary: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn replace_backup_file(temporary: &Path, destination: &Path) -> Result<()> {
     if !destination.exists() {
         std::fs::rename(temporary, destination)?;
         return Ok(());
@@ -860,7 +860,7 @@ fn replace_backup_file(temporary: &Path, destination: &Path) -> Result<()> {
     }
 }
 
-async fn sync_file(path: &Path) -> Result<()> {
+pub(crate) async fn sync_file(path: &Path) -> Result<()> {
     tokio::fs::OpenOptions::new()
         // Windows requires a writable handle for FlushFileBuffers; a
         // read-only handle reports ERROR_ACCESS_DENIED even though the

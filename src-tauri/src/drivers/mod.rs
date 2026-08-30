@@ -13,6 +13,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod redis;
 pub mod sqlite;
+pub mod sqlite_ssh;
 
 pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseDriver>> {
     let requested_driver = driver.trim();

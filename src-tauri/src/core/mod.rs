@@ -14,6 +14,7 @@ pub mod protocol;
 pub mod provider_secret;
 pub mod redaction;
 pub mod schema_diff;
+pub mod sqlite_worker_artifact;
 pub mod ssh;
 pub mod statement;
 pub mod store;

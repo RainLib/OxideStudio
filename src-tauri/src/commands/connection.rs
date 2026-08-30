@@ -7,16 +7,92 @@ use crate::core::{
     manager::ConnectionManager,
     protocol::Response,
     redaction::redact_connection_url,
+    sqlite_worker_artifact::SqliteWorkerArtifactRegistry,
     ssh::SshTunnel,
     store::{MetaStore, SavedConnection as StoreSavedConnection},
 };
 use crate::drivers::connect_preferred_driver;
+use crate::drivers::sqlite_ssh::{detect_remote_sqlite_platform, RemoteSqliteDriver};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
 const MAX_CONNECTION_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSqliteWorkerPreparation {
+    pub platform: String,
+    pub version: String,
+    pub installed: bool,
+}
+
+#[tauri::command]
+pub async fn get_remote_sqlite_worker_status(
+    registry: State<'_, SqliteWorkerArtifactRegistry>,
+    platform: String,
+) -> Result<Response<RemoteSqliteWorkerPreparation>, String> {
+    let required = oxide_sqlite_worker::SQLITE_WORKER_PACKAGE_VERSION.to_string();
+    let installed = registry.resolve(&platform).is_ok();
+    Ok(Response::ok(RemoteSqliteWorkerPreparation {
+        platform,
+        version: required,
+        installed,
+    }))
+}
+
+#[tauri::command]
+pub async fn prepare_remote_sqlite_worker(
+    registry: State<'_, SqliteWorkerArtifactRegistry>,
+    ssh_tunnel: SshTunnelConfig,
+    download_base_url: String,
+) -> Result<Response<RemoteSqliteWorkerPreparation>, String> {
+    let result: Result<RemoteSqliteWorkerPreparation, String> = async {
+        let platform = detect_remote_sqlite_platform(&ssh_tunnel)
+            .await
+            .map_err(|error| error.to_string())?;
+        let version = oxide_sqlite_worker::SQLITE_WORKER_PACKAGE_VERSION.to_string();
+        if registry.resolve(&platform).is_err() {
+            registry
+                .install_release(&download_base_url, &platform, &version)
+                .await?;
+        }
+        registry.resolve(&platform)?;
+        Ok(RemoteSqliteWorkerPreparation {
+            platform,
+            version,
+            installed: true,
+        })
+    }
+    .await;
+    Ok(match result {
+        Ok(preparation) => Response::ok(preparation),
+        Err(error) => Response::err_with_details(
+            "SQLITE_WORKER_PREPARE_ERROR",
+            &safe_remote_sqlite_prepare_error(&error),
+            true,
+            None,
+        ),
+    })
+}
+
+fn safe_remote_sqlite_prepare_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("host key")
+        || lower.contains("authentication")
+        || lower.contains("requires")
+        || lower.contains("worker")
+        || lower.contains("download")
+        || lower.contains("https")
+        || lower.contains("platform")
+    {
+        error.chars().take(360).collect()
+    } else {
+        "Remote SQLite worker preparation failed. Check the SSH host and signed worker source."
+            .to_string()
+    }
+}
 
 /// Content read only after a native file-picker selection. Parsing remains in
 /// the UI so the preview can show every field, but passwords and driver paths
@@ -206,9 +282,13 @@ fn config_connection_from_store(
 
 /// 连接数据库
 #[tauri::command]
+// Tauri injects the three Host-owned registries separately; keeping them out
+// of renderer input is more important than collapsing this command boundary.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_db(
     manager: State<'_, ConnectionManager>,
     registry: State<'_, DatabaseDriverPackageRegistry>,
+    worker_registry: State<'_, SqliteWorkerArtifactRegistry>,
     connection_id: String,
     driver: String,
     url: String,
@@ -233,15 +313,13 @@ pub async fn connect_db(
             .map(|capabilities| capabilities.display_name)
             .unwrap_or_else(|_| driver.trim().to_string());
 
-        let (connection_url, ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
-            .await
-            .map_err(|error| error.to_string())?;
-
-        let db_driver = connect_preferred_driver(
+        let (db_driver, ssh_tunnel) = connect_driver_with_transport(
             &registry,
+            &worker_registry,
             &driver,
-            &connection_url,
-            connection_id.clone(),
+            &url,
+            &connection_id,
+            ssh_tunnel.as_ref(),
             package_version.as_deref(),
         )
         .await
@@ -287,6 +365,7 @@ pub async fn connect_db(
 #[tauri::command]
 pub async fn test_db_connection(
     registry: State<'_, DatabaseDriverPackageRegistry>,
+    worker_registry: State<'_, SqliteWorkerArtifactRegistry>,
     driver: String,
     url: String,
     ssh_tunnel: Option<SshTunnelConfig>,
@@ -303,14 +382,14 @@ pub async fn test_db_connection(
         let display_name = database_capabilities_for_driver(&driver)
             .map(|capabilities| capabilities.display_name)
             .unwrap_or_else(|_| driver.trim().to_string());
-        let (connection_url, _ssh_tunnel) = SshTunnel::prepare(&driver, &url, ssh_tunnel.as_ref())
-            .await
-            .map_err(|error| error.to_string())?;
-        let db_driver = connect_preferred_driver(
+        let test_connection_id = format!("test-{}", uuid::Uuid::new_v4());
+        let (db_driver, _ssh_tunnel) = connect_driver_with_transport(
             &registry,
+            &worker_registry,
             &driver,
-            &connection_url,
-            format!("test-{}", uuid::Uuid::new_v4()),
+            &url,
+            &test_connection_id,
+            ssh_tunnel.as_ref(),
             package_version.as_deref(),
         )
         .await
@@ -339,6 +418,41 @@ pub async fn test_db_connection(
             Some(error_context),
         )),
     }
+}
+
+pub(crate) async fn connect_driver_with_transport(
+    registry: &DatabaseDriverPackageRegistry,
+    worker_registry: &SqliteWorkerArtifactRegistry,
+    driver: &str,
+    url: &str,
+    connection_id: &str,
+    ssh_tunnel: Option<&SshTunnelConfig>,
+    package_version: Option<&str>,
+) -> anyhow::Result<(Box<dyn DatabaseDriver>, Option<SshTunnel>)> {
+    let canonical = canonical_driver_name(driver).unwrap_or_else(|| driver.trim());
+    if canonical.eq_ignore_ascii_case("sqlite")
+        && ssh_tunnel.is_some_and(|config| config.enabled && config.remote_sqlite.is_some())
+    {
+        if package_version.is_some() {
+            anyhow::bail!("Remote SQLite cannot be combined with an external driver package");
+        }
+        let config = ssh_tunnel
+            .ok_or_else(|| anyhow::anyhow!("Remote SQLite requires an enabled SSH connection"))?;
+        let remote =
+            RemoteSqliteDriver::open(worker_registry, connection_id, url, config, false).await?;
+        return Ok((Box::new(remote), None));
+    }
+
+    let (connection_url, tunnel) = SshTunnel::prepare(driver, url, ssh_tunnel).await?;
+    let connected = connect_preferred_driver(
+        registry,
+        driver,
+        &connection_url,
+        connection_id.to_string(),
+        package_version,
+    )
+    .await?;
+    Ok((connected, tunnel))
 }
 
 /// 断开数据库连接

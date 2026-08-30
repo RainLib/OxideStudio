@@ -21,6 +21,7 @@ import {
 } from "@/startup/dataSourceDisplayCache";
 import type { ManagedDataSourceDescriptor } from "@/services/tauri/enterprise.service";
 import { enterpriseService } from "@/services/tauri/enterprise.service";
+import { useSettingsStore } from "./useSettingsStore";
 
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
@@ -117,6 +118,46 @@ function connectionUrlForConfig(config: ConnectionConfig) {
 function enabledSshTunnel(config: ConnectionConfig) {
   return config.sshTunnel?.enabled ? config.sshTunnel : undefined;
 }
+
+export function usesRemoteSqliteWorker(config: ConnectionConfig) {
+  return (
+    config.driver.trim().toLowerCase() === "sqlite" &&
+    config.sshTunnel?.enabled === true &&
+    Boolean(config.sshTunnel.remoteSqlite)
+  );
+}
+
+async function prepareRemoteSqliteWorker(config: ConnectionConfig) {
+  if (!usesRemoteSqliteWorker(config) || !config.sshTunnel) return;
+  const downloadBaseUrl =
+    useSettingsStore.getState().settings.drivers.sqliteWorkerBaseUrl;
+  const key = [
+    config.sshTunnel.username.trim(),
+    config.sshTunnel.host.trim().toLowerCase(),
+    config.sshTunnel.port,
+    downloadBaseUrl,
+  ].join("|");
+  const cached = remoteSqlitePreparationCache.get(key);
+  if (cached && cached > Date.now()) return;
+  const pending = remoteSqlitePreparationFlights.get(key);
+  if (pending) return pending;
+  const preparation = connectionService
+    .prepareRemoteSqliteWorker(config.sshTunnel, downloadBaseUrl)
+    .then(() => {
+      // The desktop process pins one worker package version. A short cache
+      // avoids a second SSH platform probe when Test is immediately followed
+      // by Connect, while still revalidating a changed host during long runs.
+      remoteSqlitePreparationCache.set(key, Date.now() + 5 * 60_000);
+    })
+    .finally(() => {
+      remoteSqlitePreparationFlights.delete(key);
+    });
+  remoteSqlitePreparationFlights.set(key, preparation);
+  return preparation;
+}
+
+const remoteSqlitePreparationCache = new Map<string, number>();
+const remoteSqlitePreparationFlights = new Map<string, Promise<void>>();
 
 let latestConnectAttempt = 0;
 
@@ -482,6 +523,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     try {
       const connectionUrl = connectionUrlForConfig(config);
       const sshTunnel = enabledSshTunnel(config);
+      await prepareRemoteSqliteWorker(config);
       if (config.driverPackageVersion) {
         await connectionService.testConnection(
           config.driver,
@@ -640,6 +682,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       try {
         const connectionUrl = connectionUrlForConfig(scopedConfig);
         const sshTunnel = enabledSshTunnel(scopedConfig);
+        await prepareRemoteSqliteWorker(scopedConfig);
         if (scopedConfig.driverPackageVersion) {
           await connectionService.connect(
             scopedConfig.id,
@@ -875,6 +918,7 @@ export async function ensureConnectionReadyInBackground(
     try {
       const connectionUrl = connectionUrlForConfig(initialConnection);
       const sshTunnel = enabledSshTunnel(initialConnection);
+      await prepareRemoteSqliteWorker(initialConnection);
       await connectionService.connect(
         initialConnection.id,
         initialConnection.driver,

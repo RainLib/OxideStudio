@@ -55,6 +55,30 @@ The static updater manifest contains these Tauri platform keys:
 Every manifest signature is the contents of the matching Tauri `.sig` file,
 not a path to the signature.
 
+## Remote SQLite worker releases
+
+The remote SQLite worker is released independently by
+`.github/workflows/publish-sqlite-worker.yml`. The workflow accepts only the
+exact version declared by the worker crate, builds static Linux musl binaries
+for x86_64 and aarch64, packages a manifest plus binary, signs the manifest
+with the driver Minisign key, and uploads immutable objects to:
+
+```text
+<OSS prefix>/workers/sqlite/<worker version>/<platform>/package.tar.gz
+```
+
+Use the crate version shown in
+`src-tauri/crates/oxide-sqlite-worker/Cargo.toml` when manually dispatching the
+workflow. Do not reuse the desktop tag as an assumed worker version.
+
+Official desktop builds require `DRIVER_MINISIGN_PUBLIC_KEY_B64`; the release
+workflow decodes that public key into the build environment so the installed
+application can verify both external driver packages and remote SQLite worker
+manifests. When the connection-level source is blank, official builds derive
+the worker URL from `OXIDE_RELEASE_BASE_URL` and `ALIYUN_OSS_PREFIX`. A custom
+source must be credential-free HTTPS and cannot contain query credentials or a
+fragment.
+
 ## One-time Tauri signing setup
 
 Generate the updater key pair on a trusted machine:

@@ -49,6 +49,7 @@ import {
   type DataSourceDriverAvailability,
 } from "@/features/database-drivers";
 import {
+  connectionService,
   databaseService,
   type DatabaseCapabilities,
   type DatabaseDriverCatalogEntry,
@@ -318,6 +319,8 @@ export function ConnectionForm({
   const [isCatalogInstallSetupOpen, setIsCatalogInstallSetupOpen] =
     useState(false);
   const [catalogUrlInput, setCatalogUrlInput] = useState("");
+  const [sqliteWorkerBaseUrlInput, setSqliteWorkerBaseUrlInput] = useState("");
+  const [isPreparingSqliteWorker, setIsPreparingSqliteWorker] = useState(false);
   const [driverPackages, setDriverPackages] = useState<
     DatabaseDriverInstallation[]
   >([]);
@@ -340,6 +343,9 @@ export function ConnectionForm({
   );
   const driverStorePath = useSettingsStore(
     (state) => state.settings.drivers.storePath,
+  );
+  const sqliteWorkerBaseUrl = useSettingsStore(
+    (state) => state.settings.drivers.sqliteWorkerBaseUrl,
   );
   const updateSettings = useSettingsStore((state) => state.updateSettings);
   const showConnectionNotes = useSettingsStore(
@@ -430,6 +436,10 @@ export function ConnectionForm({
     setCatalogUrlInput(driverCatalogUrl);
   }, [driverCatalogUrl]);
 
+  useEffect(() => {
+    setSqliteWorkerBaseUrlInput(sqliteWorkerBaseUrl);
+  }, [sqliteWorkerBaseUrl]);
+
   const dataSources = useMemo(
     () => uniqueConnections(connections, selectedConnection),
     [connections, selectedConnection],
@@ -461,11 +471,14 @@ export function ConnectionForm({
   const supportsConnectionDatabase =
     capabilities.supportsConnectionDatabase !== false;
   const fileDriver = selectedConnection.driver.toLowerCase();
+  const isRemoteSqlite = fileDriver === "sqlite";
   const fileExtension =
     fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
   const formSections: ReadonlyArray<readonly [FormSection, string]> =
     isFileBased
-      ? [["general", "General"], ["advanced", "Advanced"]]
+      ? isRemoteSqlite
+        ? [["general", "General"], ["ssl", "Remote"], ["advanced", "Advanced"]]
+        : [["general", "General"], ["advanced", "Advanced"]]
       : [
           ["general", "General"],
           ["ssl", "SSH/SSL"],
@@ -519,6 +532,12 @@ export function ConnectionForm({
     strictHostKeyChecking: true,
     ...selectedConnection.sshTunnel,
   };
+  const remoteSqlite = {
+    placement: "session" as const,
+    workerPath: "",
+    allowWorkerUpload: false,
+    ...sshTunnel.remoteSqlite,
+  };
 
   const updateField = (
     field: keyof ConnectionConfig,
@@ -535,13 +554,39 @@ export function ConnectionForm({
   const updateSshTunnel = (
     updates: Partial<NonNullable<ConnectionConfig["sshTunnel"]>>,
   ) => {
+    const targetChanged = ["host", "port", "username"].some((field) =>
+      Object.prototype.hasOwnProperty.call(updates, field),
+    );
     updateConnectionConfig({
       sshTunnel: {
         ...sshTunnel,
         ...updates,
+        ...(targetChanged && sshTunnel.remoteSqlite
+          ? {
+              remoteSqlite: {
+                ...sshTunnel.remoteSqlite,
+                allowWorkerUpload: false,
+              },
+            }
+          : {}),
       },
     });
     setStatus(null);
+  };
+
+  const updateRemoteSqlite = (
+    updates: Partial<NonNullable<typeof sshTunnel.remoteSqlite>>,
+  ) => {
+    const destinationChanged = ["placement", "workerPath"].some((field) =>
+      Object.prototype.hasOwnProperty.call(updates, field),
+    );
+    updateSshTunnel({
+      remoteSqlite: {
+        ...remoteSqlite,
+        ...updates,
+        ...(destinationChanged ? { allowWorkerUpload: false } : {}),
+      },
+    });
   };
 
   const changeDriver = (driver: DatabaseDriver) => {
@@ -710,7 +755,11 @@ export function ConnectionForm({
         );
       }
       await updateSettings({
-        drivers: { catalogUrl: result.sourceUrl, storePath: driverStorePath },
+        drivers: {
+          catalogUrl: result.sourceUrl,
+          storePath: driverStorePath,
+          sqliteWorkerBaseUrl,
+        },
       });
       setCatalogRelease(release);
       setStatus({ type: "loading", message: "Downloading and verifying signed driver package..." });
@@ -787,6 +836,84 @@ export function ConnectionForm({
           ? { type: "error", message: error }
           : { type: "success", message: "Connection successful" },
       );
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const handlePrepareSqliteWorker = async () => {
+    if (!sshTunnel.enabled || !sshTunnel.remoteSqlite) {
+      setStatus({
+        type: "error",
+        message: "Enable the remote SQLite connection before preparing its worker.",
+      });
+      return;
+    }
+    setIsPreparingSqliteWorker(true);
+    setStatus({
+      type: "loading",
+      message: "Checking the SSH host and signed SQLite worker…",
+    });
+    try {
+      const rawSource = sqliteWorkerBaseUrlInput.trim();
+      const normalizedSource = rawSource
+        ? normalizeSignedCatalogUrl(rawSource)
+        : "";
+      if (rawSource && !normalizedSource) {
+        throw new Error(
+          "Worker source must be a credential-free HTTPS URL without query parameters or fragments.",
+        );
+      }
+      if (normalizedSource !== sqliteWorkerBaseUrl) {
+        await updateSettings({
+          drivers: {
+            catalogUrl: driverCatalogUrl,
+            storePath: driverStorePath,
+            sqliteWorkerBaseUrl: normalizedSource || "",
+          },
+        });
+      }
+      const result = await connectionService.prepareRemoteSqliteWorker(
+        sshTunnel,
+        normalizedSource || "",
+      );
+      setStatus({
+        type: "success",
+        message: `SQLite worker ${result.version} is ready for ${result.platform}.`,
+      });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsPreparingSqliteWorker(false);
+    }
+  };
+
+  const saveSqliteWorkerBaseUrl = async () => {
+    const raw = sqliteWorkerBaseUrlInput.trim();
+    const normalized = raw ? normalizeSignedCatalogUrl(raw) : "";
+    if (raw && !normalized) {
+      setStatus({
+        type: "error",
+        message:
+          "Worker source must be a credential-free HTTPS URL without query parameters or fragments.",
+      });
+      return;
+    }
+    try {
+      await updateSettings({
+        drivers: {
+          catalogUrl: driverCatalogUrl,
+          storePath: driverStorePath,
+          sqliteWorkerBaseUrl: normalized || "",
+        },
+      });
+      setSqliteWorkerBaseUrlInput(normalized || "");
     } catch (error) {
       setStatus({
         type: "error",
@@ -1271,7 +1398,9 @@ export function ConnectionForm({
               )}
               {isFileBased && (
                 <p className="col-start-2 text-[10px] wb-muted">
-                  Use a local {capabilities.displayName} file path or <code>:memory:</code>. SSH and SSL are not used for local files.
+                  {isRemoteSqlite
+                    ? "Use a local SQLite path by default, or open the Remote tab for a file hosted on Linux over SSH."
+                    : `Use a local ${capabilities.displayName} file path or :memory:. SSH and SSL are not used for local files.`}
                 </p>
               )}
 
@@ -1319,35 +1448,57 @@ export function ConnectionForm({
 
           {section === "ssl" && (
             <div className="mx-auto grid w-full max-w-[720px] grid-cols-[132px_minmax(0,1fr)] gap-y-2 px-6 py-5">
-              <span className={labelClass}>SSL mode</span>
-              <Select
-                value={selectedConnection.sslMode || "disable"}
-                onValueChange={(value) => updateField("sslMode", value, true)}
-              >
-                <SelectTrigger className={fieldClass}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
-                  <SelectItem value="disable">Disable</SelectItem>
-                  <SelectItem value="prefer">Prefer</SelectItem>
-                  <SelectItem value="require">Require</SelectItem>
-                  <SelectItem value="verify-ca">Verify CA</SelectItem>
-                  <SelectItem value="verify-full">Verify full</SelectItem>
-                </SelectContent>
-              </Select>
+              {!isRemoteSqlite && (
+                <>
+                  <span className={labelClass}>SSL mode</span>
+                  <Select
+                    value={selectedConnection.sslMode || "disable"}
+                    onValueChange={(value) => updateField("sslMode", value, true)}
+                  >
+                    <SelectTrigger className={fieldClass}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                      <SelectItem value="disable">Disable</SelectItem>
+                      <SelectItem value="prefer">Prefer</SelectItem>
+                      <SelectItem value="require">Require</SelectItem>
+                      <SelectItem value="verify-ca">Verify CA</SelectItem>
+                      <SelectItem value="verify-full">Verify full</SelectItem>
+                    </SelectContent>
+                  </Select>
 
-              <div className="col-span-2 my-2 border-t border-[hsl(var(--wb-border-subtle))]" />
+                  <div className="col-span-2 my-2 border-t border-[hsl(var(--wb-border-subtle))]" />
+                </>
+              )}
 
-              <span className={labelClass}>SSH tunnel</span>
+              <span className={labelClass}>
+                {isRemoteSqlite ? "Remote file" : "SSH tunnel"}
+              </span>
               <div className="flex h-7 items-center gap-2">
                 <Switch
                   checked={sshTunnel.enabled}
-                  onCheckedChange={(enabled) => updateSshTunnel({ enabled })}
+                  onCheckedChange={(enabled) =>
+                    updateSshTunnel({
+                      enabled,
+                      ...(isRemoteSqlite && enabled
+                        ? {
+                            strictHostKeyChecking: true,
+                            remoteSqlite,
+                          }
+                        : {}),
+                    })
+                  }
                   className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
-                  aria-label="Enable SSH tunnel"
+                  aria-label={
+                    isRemoteSqlite
+                      ? "Open SQLite through SSH"
+                      : "Enable SSH tunnel"
+                  }
                 />
                 <span className="text-[11px] wb-muted">
-                  Forward the database connection through an SSH server
+                  {isRemoteSqlite
+                    ? "Open a SQLite file on a verified Linux SSH host"
+                    : "Forward the database connection through an SSH server"}
                 </span>
               </div>
 
@@ -1522,6 +1673,7 @@ export function ConnectionForm({
                       onCheckedChange={(strictHostKeyChecking) =>
                         updateSshTunnel({ strictHostKeyChecking })
                       }
+                      disabled={isRemoteSqlite}
                       className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
                       aria-label="Verify SSH host key"
                     />
@@ -1534,10 +1686,120 @@ export function ConnectionForm({
                       )}
                     >
                       {sshTunnel.strictHostKeyChecking
-                        ? "Verify against ~/.ssh/known_hosts"
+                        ? isRemoteSqlite
+                          ? "Required · verify against ~/.ssh/known_hosts"
+                          : "Verify against ~/.ssh/known_hosts"
                         : "Warning: SSH host identity will not be verified"}
                     </span>
                   </div>
+
+                  {isRemoteSqlite && (
+                    <>
+                      <div className="col-span-2 my-2 border-t border-[hsl(var(--wb-border-subtle))]" />
+
+                      <span className={labelClass}>Worker placement</span>
+                      <Select
+                        value={remoteSqlite.placement}
+                        onValueChange={(placement) =>
+                          updateRemoteSqlite({
+                            placement: placement as typeof remoteSqlite.placement,
+                          })
+                        }
+                      >
+                        <SelectTrigger className={fieldClass}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                          <SelectItem value="session">Session only · remove on disconnect</SelectItem>
+                          <SelectItem value="persist">Persistent · reuse the verified version</SelectItem>
+                          <SelectItem value="preplaced">Preplaced · never upload</SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      {remoteSqlite.placement !== "session" && (
+                        <>
+                          <label className={labelClass} htmlFor="sqlite-worker-path">
+                            Worker path
+                          </label>
+                          <input
+                            id="sqlite-worker-path"
+                            value={remoteSqlite.workerPath || ""}
+                            onChange={(event) =>
+                              updateRemoteSqlite({ workerPath: event.target.value })
+                            }
+                            className={cn(fieldClass, "font-mono text-[11px]")}
+                            placeholder="/opt/oxide/oxide-sqlite-worker"
+                            autoComplete="off"
+                          />
+                        </>
+                      )}
+
+                      {remoteSqlite.placement !== "preplaced" && (
+                        <>
+                          <span className={labelClass}>Worker upload</span>
+                          <div className="flex min-h-7 items-center gap-2">
+                            <Switch
+                              checked={remoteSqlite.allowWorkerUpload}
+                              onCheckedChange={(allowWorkerUpload) =>
+                                updateRemoteSqlite({ allowWorkerUpload })
+                              }
+                              className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
+                              aria-label="Allow signed SQLite worker upload"
+                            />
+                            <span className="text-[11px] wb-muted">
+                              Allow only the signed worker selected by OxideStudio
+                            </span>
+                          </div>
+                        </>
+                      )}
+
+                      <label className={labelClass} htmlFor="sqlite-worker-source">
+                        Worker source
+                      </label>
+                      <div className="flex min-w-0 gap-2">
+                        <input
+                          id="sqlite-worker-source"
+                          value={sqliteWorkerBaseUrlInput}
+                          onChange={(event) =>
+                            setSqliteWorkerBaseUrlInput(event.target.value)
+                          }
+                          onBlur={() => void saveSqliteWorkerBaseUrl()}
+                          className={cn(fieldClass, "min-w-0 font-mono text-[11px]")}
+                          placeholder="Official release source (leave blank)"
+                          autoComplete="off"
+                        />
+                        <button
+                          type="button"
+                          className="wb-text-button h-7 shrink-0 border border-[hsl(var(--wb-border))] px-2 text-[11px]"
+                          disabled={
+                            isPreparingSqliteWorker ||
+                            (remoteSqlite.placement !== "preplaced" &&
+                              !remoteSqlite.allowWorkerUpload)
+                          }
+                          onClick={() => void handlePrepareSqliteWorker()}
+                        >
+                          {isPreparingSqliteWorker ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <Download size={12} />
+                          )}
+                          {isPreparingSqliteWorker ? "Preparing…" : "Prepare"}
+                        </button>
+                      </div>
+                      <div />
+                      <p className="text-[10px] leading-4 wb-muted">
+                        Leave blank to use the signed source embedded in official
+                        OxideStudio builds. Custom sources must be credential-free HTTPS.
+                      </p>
+
+                      <div className="col-start-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2.5 py-2 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+                        OxideStudio detects Linux x64 or ARM64, verifies the signed
+                        manifest and binary digest locally, then checks the same
+                        digest on the SSH host before starting the worker over stdio.
+                        Database credentials are never sent to the download source.
+                      </div>
+                    </>
+                  )}
                 </>
               )}
             </div>

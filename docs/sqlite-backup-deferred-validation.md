@@ -13,7 +13,18 @@ The local workflow is implemented and covered by native in-memory/file contract 
 - Force both restore and rollback verification to fail. Confirm the UI reports that manual verification is required and gives the exact app-data recovery path without exposing SQL or credentials.
 - Restart Oxide after a successful restore and compare schema metadata, query results, foreign keys, indexes, triggers, generated columns, page size, journal mode, and user version.
 - Validate memory-only SQLite backup and restore; confirm the one-connection pool does not deadlock and that a restored schema invalidates Explorer metadata.
-- Remote SQLite backup/restore is excluded until D13 provides the signed, version-pinned worker, confirmed SSH host key, bounded remote transfer path, and cleanup receipt.
+- Remote SQLite backup/restore now uses the D13 signed, version-pinned worker, confirmed SSH host key, bounded transfer path, cancellation and cleanup receipt. Its real-host matrix remains deferred below; this document does not claim live infrastructure validation.
+
+## Remote SQLite-over-SSH matrix
+
+- Exercise unknown, mismatched and valid `known_hosts` entries. Confirm unknown or changed host keys fail before authentication, upload or database access.
+- Test password and private-key authentication, including encrypted keys, on Linux x86_64 and aarch64 hosts. Confirm non-Linux and unsupported architectures fail with an actionable error before upload.
+- Test session, persistent and preplaced worker placement. Confirm session workers are removed on normal exit and startup failure, persistent workers are reused only after digest verification, and a mismatched preplaced worker is never replaced implicitly.
+- Publish the current signed worker, upgrade to the next worker version, and test a stale active pointer, invalid signature, manifest substitution, digest mismatch, redirect, 404 and oversized archive. Confirm only the exact desktop-compatible protocol/version becomes active.
+- Repeat online backup/restore with WAL mode, concurrent short writes, multi-gigabyte databases, low remote/local disk space and a broken SSH transport. Confirm partial local and remote files are not published as successful backups.
+- Cancel during worker backup, SSH download and restore. Confirm one interrupt is issued, the operation reaches a terminal state, and retry cannot reuse an ambiguous mutation receipt.
+- Restart the app during session and persistent worker use. Confirm scheduled backup recovery does not switch the selected editor connection and no orphaned session worker remains.
+- Verify Assistant Chat/Plan stays read-only, Agent mutation still requires an Oxide approval lease, and unclassified/production targets remain write-blocked over the remote driver.
 
 ## Scheduled backup matrix
 
@@ -47,5 +58,6 @@ desktop/filesystem checks:
 - Measure a multi-gigabyte backup while editing/querying another connection. Track
   WebView frame time, Rust memory, IPC polling volume and cancellation latency.
 
-PostgreSQL/MySQL scheduled exports and remote SQLite-over-SSH remain explicitly
-outside this completed local SQLite schedule contract.
+PostgreSQL/MySQL scheduled exports remain outside this completed SQLite schedule
+contract. Remote SQLite-over-SSH logic is implemented, but the real-host matrix
+above remains intentionally unclaimed until the product-wide validation phase.

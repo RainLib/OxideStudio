@@ -9,6 +9,12 @@ import type { ConnectionImportFile, SavedConnection, SshTunnelConfig } from "./t
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
 
+export interface RemoteSqliteWorkerPreparation {
+  platform: string;
+  version: string;
+  installed: boolean;
+}
+
 function activeProjectId() {
   try {
     return localStorage.getItem(ACTIVE_PROJECT_KEY) || DEFAULT_PROJECT_ID;
@@ -55,6 +61,25 @@ export async function testConnection(
     sshTunnel,
     packageVersion,
   });
+}
+
+export async function prepareRemoteSqliteWorker(
+  sshTunnel: SshTunnelConfig,
+  downloadBaseUrl: string,
+): Promise<RemoteSqliteWorkerPreparation> {
+  return invokeWithInterceptors<RemoteSqliteWorkerPreparation>(
+    "prepare_remote_sqlite_worker",
+    { sshTunnel, downloadBaseUrl },
+  );
+}
+
+export async function getRemoteSqliteWorkerStatus(
+  platform: string,
+): Promise<RemoteSqliteWorkerPreparation> {
+  return invokeWithInterceptors<RemoteSqliteWorkerPreparation>(
+    "get_remote_sqlite_worker_status",
+    { platform },
+  );
 }
 
 /**
@@ -131,6 +156,8 @@ export async function deleteConnection(
 export const connectionService = {
   connect,
   testConnection,
+  prepareRemoteSqliteWorker,
+  getRemoteSqliteWorkerStatus,
   disconnect,
   getServerVersion,
   importConnectionConfigFile,
