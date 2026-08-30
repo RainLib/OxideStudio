@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  captureQueryExecutionSnapshot,
   useQueryExecutionController,
   type QueryExecutionEditor,
 } from "./useQueryExecutionController";
@@ -129,6 +130,24 @@ describe("useQueryExecutionController", () => {
       "SELECT 2",
       "transaction-1",
       10,
+    );
+  });
+
+  it("executes the immutable selection captured before a toolbar focus change", async () => {
+    const sql = "SELECT 1; SELECT 2;";
+    const captured = captureQueryExecutionSnapshot(editor(sql, 0, 8, 8));
+    const editorRef = { current: editor(sql, 10, 18, 18) };
+    await renderController(options({ editorRef }));
+
+    await act(async () => controller.handleRunCurrent(captured));
+
+    expect(queryMocks.resolveStatement).not.toHaveBeenCalled();
+    expect(runTabQuery).toHaveBeenCalledWith(
+      "tab-1",
+      "connection-1",
+      "SELECT 1",
+      "transaction-1",
+      0,
     );
   });
 

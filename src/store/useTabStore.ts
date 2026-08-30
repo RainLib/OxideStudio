@@ -5,6 +5,7 @@ import {
   databaseService,
   queryService,
   QueryResult,
+  schemaService,
   tableService,
 } from "@/services/tauri";
 import type {
@@ -298,6 +299,11 @@ export interface TabData {
   tableTotalRows?: number | null;
   tableFilterSql?: string | null;
   tableFilters?: TableFilter[] | null;
+  /** Opaque native document/search continuations indexed by destination page. */
+  documentPageCursors?: Array<string | null>;
+  documentHasNextCursor?: boolean;
+  documentFilter?: string | null;
+  documentSort?: string | null;
   editorSelection?: EditorSelectionState | null;
   editorViewport?: EditorViewportState;
   editorViewSelection?: EditorViewSelectionState;
@@ -398,9 +404,35 @@ function confirmDiscardTabChanges(tabs: TabData[], action: string) {
 }
 
 function tableTabAfterDiscardingDrafts(tab: TabData) {
-  return hasPendingTableChanges(tab)
+  const discarded = hasPendingTableChanges(tab)
     ? { ...tab, pendingEdits: new Map<string, any>(), newRowsCount: 0 }
     : tab;
+  return discarded.documentPageCursors?.some(Boolean)
+    ? {
+        ...discarded,
+        results: null,
+        tablePage: 0,
+        documentPageCursors: undefined,
+        documentHasNextCursor: false,
+      }
+    : discarded;
+}
+
+function releaseDocumentCursors(tabs: readonly TabData[]) {
+  const released = new Set<string>();
+  for (const tab of tabs) {
+    if (!tab.connectionId) continue;
+    const cursor = [...(tab.documentPageCursors || [])]
+      .reverse()
+      .find((value): value is string => Boolean(value));
+    if (!cursor) continue;
+    const key = `${tab.connectionId}\u0000${cursor}`;
+    if (released.has(key)) continue;
+    released.add(key);
+    void schemaService
+      .closeDocumentCursor(tab.connectionId, cursor)
+      .catch(() => undefined);
+  }
 }
 
 export function confirmDiscardTableChanges(tabId: string, action: string) {
@@ -927,6 +959,16 @@ interface TabState {
     filterSql?: string | null,
     filters?: TableFilter[] | null,
     options?: TablePageLoadOptions,
+  ) => Promise<boolean>;
+  loadDocumentPage: (
+    tabId: string,
+    page?: number,
+    options?: {
+      filter?: string | null;
+      sort?: string | null;
+      discardAction?: string;
+      discardDraftsConfirmed?: boolean;
+    },
   ) => Promise<boolean>;
 }
 
@@ -1793,12 +1835,14 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   closeTab: (id: string) => {
+    let closing: TabData[] = [];
     set((state) => {
       const tab = state.tabs.find((t) => t.id === id);
       if (!tab) return state;
       // Don't close pinned tabs with regular close
       if (tab.isPinned) return state;
       if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
+      closing = [tab];
 
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
@@ -1819,13 +1863,16 @@ export const useTabStore = create<TabState>((set, get) => ({
         ].slice(0, 20), // Keep last 20
       };
     });
+    releaseDocumentCursors(closing);
   },
 
   forceCloseTab: (id: string) => {
+    let closing: TabData[] = [];
     set((state) => {
       const tab = state.tabs.find((t) => t.id === id);
       if (!tab) return state;
       if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
+      closing = [tab];
 
       const newTabs = state.tabs.filter((t) => t.id !== id);
       let newActiveId = state.activeTabId;
@@ -1846,39 +1893,48 @@ export const useTabStore = create<TabState>((set, get) => ({
         ].slice(0, 20),
       };
     });
+    releaseDocumentCursors(closing);
   },
 
   closeOtherTabs: (id: string) => {
+    let closed: TabData[] = [];
     set((state) => {
       const closing = state.tabs.filter(
         (tab) => tab.id !== id && !tab.isPinned,
       );
       if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      closed = closing;
       return {
         tabs: state.tabs.filter((tab) => tab.id === id || tab.isPinned),
         activeTabId: id,
       };
     });
+    releaseDocumentCursors(closed);
   },
 
   closeAllTabs: () => {
+    let closed: TabData[] = [];
     set((state) => {
       const pinnedTabs = state.tabs.filter((t) => t.isPinned);
       const closing = state.tabs.filter((tab) => !tab.isPinned);
       if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      closed = closing;
       return {
         tabs: pinnedTabs,
         activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
       };
     });
+    releaseDocumentCursors(closed);
   },
 
   closeTabsToLeft: (id: string) => {
+    let closed: TabData[] = [];
     set((state) => {
       const index = state.tabs.findIndex((t) => t.id === id);
       if (index === -1) return state;
       const closing = state.tabs.slice(0, index).filter((tab) => !tab.isPinned);
       if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      closed = closing;
 
       const newTabs = [
         ...state.tabs.slice(0, index).filter((t) => t.isPinned),
@@ -1887,9 +1943,11 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       return { tabs: newTabs };
     });
+    releaseDocumentCursors(closed);
   },
 
   closeTabsToRight: (id: string) => {
+    let closed: TabData[] = [];
     set((state) => {
       const index = state.tabs.findIndex((t) => t.id === id);
       if (index === -1) return state;
@@ -1897,6 +1955,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         .slice(index + 1)
         .filter((tab) => !tab.isPinned);
       if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      closed = closing;
 
       const newTabs = [
         ...state.tabs.slice(0, index + 1),
@@ -1905,6 +1964,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       return { tabs: newTabs };
     });
+    releaseDocumentCursors(closed);
   },
 
   togglePinTab: (id: string) => {
@@ -3386,6 +3446,148 @@ export const useTabStore = create<TabState>((set, get) => ({
           t.id === tabId
             ? { ...t, isExecuting: false, error: e.message || String(e) }
             : t,
+        ),
+      }));
+      return false;
+    }
+  },
+
+  loadDocumentPage: async (tabId, page, options) => {
+    const tab = get().tabs.find((candidate) => candidate.id === tabId);
+    if (
+      !tab ||
+      tab.type !== "table" ||
+      !tab.connectionId ||
+      !tab.schemaName ||
+      !tab.tableName
+    ) {
+      return false;
+    }
+    if (
+      !options?.discardDraftsConfirmed &&
+      !confirmDiscardTabChanges(
+        [tab],
+        options?.discardAction || "load another document page",
+      )
+    ) {
+      return false;
+    }
+
+    const nextPage = Math.max(0, page ?? tab.tablePage ?? 0);
+    const pageSize = Math.min(1_000, Math.max(1, tab.tablePageSize || 100));
+    const cursor = nextPage === 0
+      ? null
+      : tab.documentPageCursors?.[nextPage] || null;
+    if (nextPage > 0 && !cursor) return false;
+
+    const nextFilter = options?.filter === undefined
+      ? tab.documentFilter || null
+      : options.filter;
+    const nextSort = options?.sort === undefined
+      ? tab.documentSort || null
+      : options.sort;
+    const previousCursor = nextPage === 0
+      ? [...(tab.documentPageCursors || [])]
+        .reverse()
+        .find((value): value is string => Boolean(value))
+      : undefined;
+    if (previousCursor) {
+      void schemaService
+        .closeDocumentCursor(tab.connectionId, previousCursor)
+        .catch(() => undefined);
+    }
+
+    const taskStore = useTaskStore.getState();
+    const taskId = taskStore.startTask({
+      kind: "table",
+      title: `Load ${tab.tableName}`,
+      detail: `Document page ${nextPage + 1}`,
+    });
+    set((state) => ({
+      tabs: state.tabs.map((candidate) =>
+        candidate.id === tabId
+          ? { ...candidate, isExecuting: true, error: null }
+          : candidate,
+      ),
+    }));
+
+    try {
+      const readiness = await ensureConnectionReady(tab.connectionId);
+      if (readiness.status === "cancelled") {
+        taskStore.cancelTask(taskId, "Workspace changed before loading began");
+        set((state) => ({
+          tabs: state.tabs.map((candidate) =>
+            candidate.id === tabId
+              ? { ...candidate, isExecuting: false }
+              : candidate,
+          ),
+        }));
+        return false;
+      }
+      if (readiness.status === "error") throw new Error(readiness.message);
+
+      const pageResult = await schemaService.getDocumentPage(
+        tab.connectionId,
+        tab.schemaName,
+        tab.tableName,
+        cursor,
+        pageSize,
+        nextFilter,
+        nextSort,
+      );
+      const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
+      if (
+        currentTab?.connectionId !== tab.connectionId ||
+        currentTab?.schemaName !== tab.schemaName ||
+        currentTab?.tableName !== tab.tableName
+      ) {
+        if (pageResult.nextCursor) {
+          void schemaService
+            .closeDocumentCursor(tab.connectionId, pageResult.nextCursor)
+            .catch(() => undefined);
+        }
+        taskStore.cancelTask(taskId, "Workspace changed while loading documents");
+        return false;
+      }
+
+      set((state) => ({
+        tabs: state.tabs.map((candidate) => {
+          if (candidate.id !== tabId) return candidate;
+          const cursors = nextPage === 0
+            ? [null]
+            : (candidate.documentPageCursors || [null]).slice(0, nextPage + 1);
+          cursors[nextPage + 1] = pageResult.nextCursor || null;
+          return {
+            ...candidate,
+            isExecuting: false,
+            results: [pageResult.result],
+            tablePage: nextPage,
+            tablePageSize: pageSize,
+            tableTotalRows: pageResult.total ?? null,
+            documentPageCursors: cursors,
+            documentHasNextCursor: Boolean(pageResult.nextCursor),
+            documentFilter: nextFilter || null,
+            documentSort: nextSort || null,
+            pendingEdits: new Map(),
+            newRowsCount: 0,
+          };
+        }),
+      }));
+      taskStore.finishTask(
+        taskId,
+        `${pageResult.result.rows.length.toLocaleString()} document${
+          pageResult.result.rows.length === 1 ? "" : "s"
+        }`,
+      );
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      taskStore.failTask(taskId, message);
+      set((state) => ({
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === tabId
+            ? { ...candidate, isExecuting: false, error: message }
+            : candidate,
         ),
       }));
       return false;

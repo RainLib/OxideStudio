@@ -116,6 +116,7 @@ export {
   type QueryTransactionState,
 } from "./hooks/useQueryTransactionController";
 export {
+  captureQueryExecutionSnapshot,
   useQueryExecutionController,
   type ParameterExecutionRequest,
   type QueryExecutionEditor,

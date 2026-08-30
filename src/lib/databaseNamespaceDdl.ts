@@ -9,6 +9,8 @@ export interface CreateNamespaceDdlOptions {
   collation?: string;
 }
 
+export const MONGODB_DATABASE_INITIALIZATION_COLLECTION = "oxide_init";
+
 function safeSqlToken(value: string | undefined) {
   const normalized = value?.trim() || "";
   return /^[a-zA-Z0-9_-]+$/.test(normalized) ? normalized : "";
@@ -34,4 +36,17 @@ export function createNamespaceDdl(options: CreateNamespaceDdlOptions) {
   }
 
   return `-- ${String(options.driver)} does not support namespace creation.`;
+}
+
+export function mongoCreateDatabasePreview(name: string) {
+  const database = name.trim();
+  if (!database) return "// Enter a database name to preview the MongoDB command.";
+  return JSON.stringify(
+    {
+      database,
+      command: { create: MONGODB_DATABASE_INITIALIZATION_COLLECTION },
+    },
+    null,
+    2,
+  );
 }

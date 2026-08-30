@@ -1514,6 +1514,7 @@ export function SchemaSidebar() {
     (state) => state.findOrCreateObjectDataTab,
   );
   const loadTablePage = useTabStore((state) => state.loadTablePage);
+  const loadDocumentPage = useTabStore((state) => state.loadDocumentPage);
   const createTableTab = useTabStore((state) => state.createTableTab);
   const openDatabaseBrowser = useTabStore((state) => state.openDatabaseBrowser);
   const createTab = useTabStore((state) => state.createTab);
@@ -1897,7 +1898,11 @@ export function SchemaSidebar() {
         collectionNamespaceForTemplate,
       ),
     );
-    void runTabQuery(tabId, activeConnectionId, previewCommand);
+    if (activeCapabilities.dataModel === "search") {
+      void loadDocumentPage(tabId, 0);
+    } else {
+      void runTabQuery(tabId, activeConnectionId, previewCommand);
+    }
   };
 
   const handleCopyCollectionPreview = async (collection: CollectionInfo) => {

@@ -1,6 +1,8 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, ColumnInfo, IndexInfo, QueryResult},
+    protocol::{
+        CollectionInfo, ColumnDef, ColumnInfo, DatabaseCreateRequest, IndexInfo, QueryResult,
+    },
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -12,6 +14,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+
+const MONGODB_DATABASE_INITIALIZATION_COLLECTION: &str = "oxide_init";
 
 pub struct MongoDbDriver {
     url: String,
@@ -411,6 +415,35 @@ impl DatabaseDriver for MongoDbDriver {
                 format!("Failed to list MongoDB indexes for {database_name}.{collection}")
             })?;
         Ok(mongodb_indexes_to_info(extract_cursor_batch(result)?))
+    }
+
+    async fn create_database(&self, request: DatabaseCreateRequest) -> Result<()> {
+        let database_name = validate_mongodb_database_name(&request.name)?;
+        if request
+            .namespace_kind
+            .as_deref()
+            .is_some_and(|kind| kind != "database")
+        {
+            return Err(anyhow!("MongoDB can only create database namespaces"));
+        }
+        if request.charset.is_some() || request.collation.is_some() || request.owner.is_some() {
+            return Err(anyhow!(
+                "MongoDB database creation does not support charset, collation, or owner options"
+            ));
+        }
+
+        // MongoDB materializes a database only after its first collection or
+        // document is created. Keep this operation semantic and bounded: the
+        // renderer cannot replace the initialization command with arbitrary
+        // database input.
+        self.client()
+            .await?
+            .database(&database_name)
+            .run_command(doc! { "create": MONGODB_DATABASE_INITIALIZATION_COLLECTION })
+            .await
+            .with_context(|| format!("Failed to create MongoDB database {database_name}"))?;
+        *self.active_database.lock().await = database_name;
+        Ok(())
     }
 
     async fn set_current_schema(&self, schema: &str) -> Result<()> {
@@ -1056,6 +1089,12 @@ mod tests {
         assert!(validate_mongodb_database_name("app.users").is_err());
         assert!(validate_mongodb_database_name("app/users").is_err());
         assert!(validate_mongodb_database_name("$admin").is_err());
+    }
+
+    #[test]
+    fn database_initialization_collection_is_stable_and_non_system() {
+        assert_eq!(MONGODB_DATABASE_INITIALIZATION_COLLECTION, "oxide_init");
+        assert!(!MONGODB_DATABASE_INITIALIZATION_COLLECTION.starts_with("system."));
     }
 
     #[tokio::test]

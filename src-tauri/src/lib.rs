@@ -230,6 +230,8 @@ pub fn run() {
             commands::schema::get_database_tables,
             commands::schema::get_collections,
             commands::schema::get_collections_page,
+            commands::schema::get_document_page,
+            commands::schema::close_document_cursor,
             commands::schema::get_columns,
             commands::schema::get_generated_columns,
             commands::schema::get_database_columns,

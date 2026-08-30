@@ -571,7 +571,7 @@ const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
     supports_schemas: true,
     supports_database_catalogs: false,
     supports_connection_database: true,
-    supports_create_database: false,
+    supports_create_database: true,
     supports_create_database_owner: false,
     supports_create_database_charset: false,
     supports_create_database_collation: false,
@@ -2095,7 +2095,7 @@ WITH NO DATA;"#
         assert!(mongodb.supports_table_indexes);
         assert!(!mongodb.supports_key_value_browsing);
         assert!(!mongodb.supports_explain_plan);
-        assert!(!mongodb.supports_create_database);
+        assert!(mongodb.supports_create_database);
         assert!(!mongodb.supports_transactions);
         assert!(all_database_capabilities()
             .iter()

@@ -1,7 +1,7 @@
 # DBX MongoDB / Elasticsearch 编辑器对齐审计
 
-审计基线：OxideStudio `feature/dbx-lsp`（2026-08-20 工作树）与
-`sources/dbx` `c030835ac`。这里的“LSP”包含编辑器语言服务、语义补全、
+审计基线：OxideStudio `feature/dbx-lsp`（2026-08-30 工作树）与
+`sources/dbx` `9190554e5`。这里的“LSP”包含编辑器语言服务、语义补全、
 元数据缓存与请求上下文；MongoDB 和 Elasticsearch 并不适合仅用 SQL LSP
 描述。
 
@@ -19,6 +19,10 @@
 | ES provider 职责收口 | DBX Console provider 自己拥有 method/path/json | 通用 LSP provider 仍可能同时返回 ES path 条目，易与 live metadata 混入或重复 | Console provider 统一拥有 ES method、path、DSL、index、mapping-field 位置；LSP 仅作为该 provider 内的失败回退 |
 | 文档目录缓存生命周期 | `connectionStore.ts` 按 connection 保存 completion metadata | Mongo collection、ES index 与 mapping 的 single-flight 过去仅存在于一个 `QueryEditor` 实例，切换标签会重新探测 | 新增 `documentMetadataCache`：连接/driver/namespace/object 精确分区、跨标签共享、2 分钟 TTL、过期时 stale-while-revalidate、失败保留短期 last-known 目录、256 项 LRU 上限；metadata revision 时按连接/driver 主动失效 |
 | Elasticsearch alias/data stream | DBX 将 document-store 路由交给特定连接树 | `_cat/indices` 只有物理 index，原先的 fallback 会把 alias/data stream 都误写成 index，编辑器也固定展示 `Elasticsearch Index` | driver 合并 `_cat/indices` 的 document count 与 `_resolve/index/*` 的 typed index/alias/data stream descriptor；`_resolve` 无权访问时保留已授权 index，`_alias` fallback 标记为 alias。Console path 候选显示实际对象类型，滚动索引 grouping 不再改写 alias/data stream |
+| Elasticsearch 深分页 | `73a7b3f4c`；`crates/dbx-core/src/db/elasticsearch_driver.rs` 的 PIT / `search_after` | Data Grid 的 Next/Previous 误走关系型 OFFSET 查询，超过 10,000 条后不可继续且没有 cursor 生命周期 | 新增 native `DocumentPage` 协议；ES 8/7 优先使用 PIT + `_shard_doc` 稳定排序和 `search_after`，ES 6/权限不足时有界回退 offset，超过 10,000 明确拒绝；关闭/切换/刷新 Tab 会释放 PIT，opaque cursor 不向前端暴露 PIT JSON |
+| Mongo aggregation expression | `mongoCompletion.ts:classifyGroup/classifyProjection/classifyPipeline` 与 `mongoCompletionTables.ts` | `$group` 输出进入 accumulator object 后退化为一般 key；projection expression 和 `"$field"` 没有 sampled-field 建议 | 严格 JSON provider 新增 accumulator、expression、field-reference 三类上下文；覆盖嵌套 lookup pipeline、`$group`、projection-shaped stage 与 dotted sampled field，并扩充当前 aggregation stage 目录 |
+| Mongo 创建数据库 | `5a11b8f14`；`mongoCollectionMutation.ts:mongoCreateDatabasePreview` | capability 隐藏入口，native driver 没有 materialize database 的语义操作 | Create Database 复用现有预览/确认 Dialog，显示可执行的严格 JSON command；后端只允许固定 `oxide_init` collection 初始化并校验 namespace/options，完成后刷新数据库树，不接受 renderer 注入任意命令 |
+| 工具栏执行选区 | `d5f4eadf7`；`QueryEditor.vue:captureExecutionSnapshot` | toolbar focus 变化可能让 current-statement 执行读取到点击后的选区/光标 | pointer-down 时冻结 immutable snapshot，click 时把相同 SQL、offset 和 cursor 交给统一 execution controller；快捷键继续读取即时编辑器状态 |
 
 ## 保持而不倒迁的 Oxide 能力
 
@@ -33,10 +37,11 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
 
 ## 仍有差距与后续顺序
 
-1. **Mongo aggregation expression 深度（P1）**：DBX 还覆盖 `$group` accumulator、
-   expression 与嵌套 pipeline 的 field reference。Oxide 已完成四个跨 collection
-   stage 的 option/field/collection 路由；下一步按原生 JSON command 扩展 expression，
-   但不引入不可执行 shell helper。
+1. **SQL completion 批量列选择（逻辑已对齐）**：DBX `bd3e58562` / `143be57d4`
+   把 checkbox 嵌入 CodeMirror popup；Monaco 没有对应公开 API，因此 Oxide 在建议列表末尾
+   提供 `Choose columns…` action，并打开独立键盘可访问的多选 surface。普通单列仍是默认
+   Enter 目标；SELECT 保持 metadata 顺序，INSERT 生成可 Tab 导航的 `VALUES` snippet，
+   不依赖 Monaco 私有 DOM。真实 WebView/IME/屏幕阅读器验证延期。
 2. **Mongo 采样覆盖（P1）**：dotted path 已按对象和数组对象采样、深度限制为 4；仍需
    在 MongoDB 4.4–7 的真实数据上验证稀疏字段、多类型和深层数组的 metadata 成本。
 3. **ES alias/data stream 真实集群验证（P1）**：逻辑已保留 typed descriptor；仍需在
@@ -52,6 +57,8 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
 - MongoDB 4.4、5、6、7：严格 JSON command、数组批量 command、采样字段、
   nested path、读写命令的执行确认；
 - Elasticsearch 6.8、7.10/7.13、8.x：版本 gated endpoint/DSL、index/alias、
-  mapping field、无权限 metadata 和断线重连；
+  mapping field、PIT/search_after、ES6 offset fallback、无权限 metadata 和断线重连；
+- MongoDB database materialization：权限不足、同名 database 竞争、`oxide_init`
+  collection 冲突与创建后 catalog 可见性；
 - 多连接、多标签并发：确认 Mongo collection / ES index / mapping 不跨连接或
   namespace 泄漏，取消后没有后台 metadata 请求影响新文档。

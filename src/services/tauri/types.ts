@@ -1175,6 +1175,12 @@ export interface IndexInfo {
   comment?: string;
 }
 
+export interface DocumentPage {
+  result: QueryResult;
+  nextCursor?: string | null;
+  total?: number | null;
+}
+
 export interface ConstraintInfo {
   name: string;
   constraint_type: string;

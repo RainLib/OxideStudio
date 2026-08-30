@@ -439,7 +439,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsCollectionBrowsing: true,
       supportsKeyValueBrowsing: false,
       supportsSchemas: true,
-      supportsCreateDatabase: false,
+      supportsCreateDatabase: true,
       supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
       supportsCreateDatabaseCollation: false,

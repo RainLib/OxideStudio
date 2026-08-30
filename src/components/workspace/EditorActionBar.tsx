@@ -75,6 +75,7 @@ interface EditorActionBarProps {
   onFormat: () => void;
   onRun: () => void;
   onRunCurrent: () => void;
+  onRunCurrentPointerDown?: () => void;
   onExplain: (mode: "estimate" | "analyze") => void;
   onCancelRun: () => void;
   onImportSqlScript?: () => void;
@@ -131,6 +132,7 @@ export function EditorActionBar({
   onFormat,
   onRun,
   onRunCurrent,
+  onRunCurrentPointerDown,
   onExplain,
   onCancelRun,
   onImportSqlScript,
@@ -193,6 +195,7 @@ export function EditorActionBar({
             isExecuting ? "text-red-400" : "text-emerald-400",
           )}
           onClick={isExecuting ? onCancelRun : onRunCurrent}
+          onPointerDown={isExecuting ? undefined : onRunCurrentPointerDown}
           disabled={!isConnected}
           title={
             isExecuting
@@ -220,7 +223,11 @@ export function EditorActionBar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className={menuClass}>
-            <DropdownMenuItem className={menuItemClass} onClick={onRunCurrent}>
+            <DropdownMenuItem
+              className={menuItemClass}
+              onPointerDown={onRunCurrentPointerDown}
+              onClick={onRunCurrent}
+            >
               <Play size={13} className="mr-2 text-emerald-400" />
               {currentExecutionLabel}
               <span className="ml-auto text-[10px] wb-muted">

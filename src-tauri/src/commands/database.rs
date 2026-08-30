@@ -1063,6 +1063,38 @@ pub async fn create_database(
         // coercing a JDBC/sidecar driver into Host-generated PostgreSQL or
         // MySQL DDL.
         if external_capabilities.is_none() {
+            if canonical_driver_name(&driver) == Some("mongodb") {
+                if charset
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || collation
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    || owner
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(
+                        "MongoDB database creation does not support charset, collation, or owner options"
+                            .to_string(),
+                    );
+                }
+                let name = validate_namespace_name(&database)?.to_string();
+                manager
+                    .create_database(
+                        &connection_id,
+                        DatabaseCreateRequest {
+                            name: name.clone(),
+                            charset: None,
+                            collation: None,
+                            owner: None,
+                            namespace_kind: Some("database".to_string()),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(format!("Database {name} created"));
+            }
             let kind = DatabaseKind::from_str(&driver).map_err(|error| error.to_string())?;
             let sql = create_database_sql(
                 kind,

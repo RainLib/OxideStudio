@@ -97,6 +97,10 @@ import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { extractSqlParameters } from "@/lib/sqlParameters";
 import { SqlParametersPanel } from "./SqlParametersPanel";
 import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
+import {
+  SqlBatchColumnDialog,
+  type SqlBatchColumnDialogSession,
+} from "./SqlBatchColumnDialog";
 import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
@@ -154,6 +158,11 @@ import {
   buildMongoDbConsoleCompletions,
   mongodbConsoleCompletionContext,
 } from "@/lib/mongodbCompletion";
+import {
+  sqlBatchColumnInsertion,
+  sqlBatchColumnMode,
+  uniqueSqlBatchColumnCandidates,
+} from "@/features/query-editor/model/sqlBatchColumnSelection";
 import type { ElasticsearchAnalysisResponse } from "@/workers/elasticsearchAnalysis.worker";
 import type { ElasticsearchServerVersion } from "@/lib/elasticsearchConsole";
 import {
@@ -204,12 +213,27 @@ import {
   useLspCoreProviderCoordinator,
   useLspHoverProviderCoordinator,
   useLspDocumentLifecycle,
+  captureQueryExecutionSnapshot,
   useQueryExecutionController,
   useQueryTransactionController,
 } from "@/features/query-editor";
 import { isCompletionRequestCurrent } from "@/features/query-editor/model/completionRequestGuard";
 
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
+const OPEN_BATCH_COLUMN_SELECTION_COMMAND = "oxide.sqlCompletion.openBatchColumns";
+
+type SqlBatchColumnRuntimeSession = SqlBatchColumnDialogSession & {
+  ownerKey: string;
+  uri: string;
+  modelVersion: number;
+  range: {
+    startLineNumber: number;
+    startColumn: number;
+    endLineNumber: number;
+    endColumn: number;
+  };
+  replacedText: string;
+};
 const MAX_QUERY_EDITOR_COMPLETION_SUGGESTIONS = 640;
 
 function createInlineCompletionRequestId() {
@@ -401,6 +425,8 @@ export function QueryEditor({
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   const [executionNotice, setExecutionNotice] = useState<string | null>(null);
+  const [batchColumnSession, setBatchColumnSession] =
+    useState<SqlBatchColumnRuntimeSession | null>(null);
   const [inlineCompletionStatus, setInlineCompletionStatus] =
     useState<InlineCompletionStatus>("off");
   const [elasticsearchServerVersion, setElasticsearchServerVersion] =
@@ -418,11 +444,17 @@ export function QueryEditor({
   const completionTriggerOriginRef = useRef<"explicit" | "chained" | null>(
     null,
   );
+  const batchColumnSessionsRef = useRef(
+    new Map<string, SqlBatchColumnRuntimeSession>(),
+  );
   const inlineCompletionCacheRef = useRef(new InlineCompletionCache());
   const inlineCompletionAbortRef = useRef<AbortController | null>(null);
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
   const runAllActionRef = useRef<() => void>(() => {});
   const runCurrentActionRef = useRef<() => void>(() => {});
+  const pendingToolbarExecutionSnapshotRef = useRef<
+    import("@/features/query-editor").QueryExecutionSnapshot | null
+  >(null);
   const formatActionRef = useRef<() => void>(() => {});
   const executionNoticeTimerRef = useRef<number | null>(null);
   const elasticsearchAnalysisWorkerRef = useRef<Worker | null>(null);
@@ -1247,7 +1279,8 @@ export function QueryEditor({
         const initialVersion = model.getVersionId();
         const context = mongodbConsoleCompletionContext(source, offset);
         const needsCollections = context.area === "collection";
-        const needsFields = context.area === "field";
+        const needsFields =
+          context.area === "field" || context.area === "field-reference";
         const [collections, fields] = await Promise.all([
           needsCollections ? loadCollections() : Promise.resolve([]),
           needsFields && context.collection
@@ -1877,14 +1910,85 @@ export function QueryEditor({
             reason?: string,
             incomplete = false,
           ) => {
+            let presentedSuggestions = suggestions;
+            const batchMode = isSqlCompletionDocument
+              ? sqlBatchColumnMode(textBeforeCursor)
+              : null;
+            if (batchMode && suggestions.length > 1) {
+              const word = model.getWordUntilPosition(position);
+              const range = new monaco.Range(
+                position.lineNumber,
+                word.startColumn,
+                position.lineNumber,
+                word.endColumn,
+              );
+              const replacedText = model.getValueInRange(range);
+              const candidates = uniqueSqlBatchColumnCandidates(
+                suggestions
+                  .filter(
+                    (suggestion) =>
+                      suggestion.kind === monaco.languages.CompletionItemKind.Field &&
+                      typeof suggestion.insertText === "string",
+                  )
+                  .map((suggestion) => {
+                    const label =
+                      typeof suggestion.label === "string"
+                        ? suggestion.label
+                        : suggestion.label?.label || String(suggestion.insertText);
+                    return {
+                      key: `${label}\u0000${suggestion.insertText}`,
+                      label,
+                      insertText: suggestion.insertText,
+                      detail: suggestion.detail,
+                    };
+                  }),
+              );
+              if (candidates.length > 1) {
+                const sessionId = `${completionOwnerKey}\u0000${initialModelVersion}\u0000${model.getOffsetAt(position)}\u0000${batchMode}`;
+                const session: SqlBatchColumnRuntimeSession = {
+                  id: sessionId,
+                  ownerKey: completionOwnerKey,
+                  uri: completionUri,
+                  modelVersion: initialModelVersion,
+                  mode: batchMode,
+                  candidates,
+                  range,
+                  replacedText,
+                };
+                batchColumnSessionsRef.current.clear();
+                batchColumnSessionsRef.current.set(sessionId, session);
+                presentedSuggestions = [
+                  {
+                    label: `Choose columns… (${candidates.length})`,
+                    kind: monaco.languages.CompletionItemKind.Snippet,
+                    detail:
+                      batchMode === "insert"
+                        ? "Build columns and matching VALUES placeholders"
+                        : "Select multiple columns in metadata order",
+                    insertText: replacedText,
+                    filterText: replacedText || undefined,
+                    // Preserve the ordinary single-column Enter target; the
+                    // batch action remains discoverable at the end of the list.
+                    sortText: "zzzz:batch-columns",
+                    range,
+                    command: {
+                      id: OPEN_BATCH_COLUMN_SELECTION_COMMAND,
+                      title: "Choose columns",
+                      arguments: [completionOwnerKey, sessionId],
+                    },
+                  },
+                  ...suggestions,
+                ];
+              }
+            }
             recordSqlCompletionTelemetry({
               scope: usageScope,
               outcome,
               durationMs: performance.now() - completionStartedAt,
-              suggestionCount: suggestions.length,
+              suggestionCount: presentedSuggestions.length,
               reason,
             });
-            return { suggestions, incomplete };
+            return { suggestions: presentedSuggestions, incomplete };
           };
           try {
             const uri = completionUri;
@@ -2201,6 +2305,79 @@ export function QueryEditor({
     usageCommandId: RECORD_COMPLETION_USAGE_COMMAND,
     usageScope,
   });
+
+  useEffect(() => {
+    if (!monaco || !isActivePane) return;
+    const disposable = monaco.editor.registerCommand(
+      OPEN_BATCH_COLUMN_SELECTION_COMMAND,
+      (_accessor: unknown, ownerKey: string, sessionId: string) => {
+        if (ownerKey !== completionOwnerKey) return;
+        const session = batchColumnSessionsRef.current.get(sessionId);
+        const model = mountedEditor?.getModel();
+        if (!session || !model || model.uri.toString() !== session.uri) return;
+        if (model.getValueInRange(session.range) !== session.replacedText) return;
+        setBatchColumnSession({
+          ...session,
+          modelVersion: model.getVersionId(),
+        });
+      },
+    );
+    return () => disposable.dispose();
+  }, [completionOwnerKey, isActivePane, monaco, mountedEditor]);
+
+  const applyBatchColumnSelection = (candidateKeys: string[]) => {
+    const session = batchColumnSession;
+    const editor = mountedEditor;
+    const model = editor?.getModel();
+    if (
+      !session ||
+      !monaco ||
+      !editor ||
+      !model ||
+      model.uri.toString() !== session.uri ||
+      model.getVersionId() !== session.modelVersion ||
+      model.getValueInRange(session.range) !== session.replacedText
+    ) {
+      setBatchColumnSession(null);
+      return;
+    }
+    const selectedKeys = new Set(candidateKeys);
+    const selected = session.candidates.filter((candidate) =>
+      selectedKeys.has(candidate.key),
+    );
+    if (selected.length === 0) return;
+    const insertion = sqlBatchColumnInsertion(
+      selected,
+      session.mode,
+      editorSettings.sqlFormatting.keywordCase === "lower" ? "lower" : "upper",
+    );
+    let endLineNumber = session.range.endLineNumber;
+    let endColumn = session.range.endColumn;
+    if (session.mode === "insert") {
+      const nextCharacter = model
+        .getLineContent(endLineNumber)
+        .slice(endColumn - 1, endColumn);
+      if (nextCharacter === ")") endColumn += 1;
+    }
+    const replacement = new monaco.Selection(
+      session.range.startLineNumber,
+      session.range.startColumn,
+      endLineNumber,
+      endColumn,
+    );
+    editor.setSelection(replacement);
+    if (insertion.snippet) {
+      editor.trigger("oxide.sql.batchColumns", "editor.action.insertSnippet", {
+        snippet: insertion.text,
+      });
+    } else {
+      editor.executeEdits("oxide.sql.batchColumns", [
+        { range: replacement, text: insertion.text, forceMoveMarkers: true },
+      ]);
+    }
+    setBatchColumnSession(null);
+    editor.focus();
+  };
 
   useLspCoreProviderCoordinator({
     activeProjectId,
@@ -3450,6 +3627,11 @@ export function QueryEditor({
         onClose={closeSqlScriptImport}
         onImport={handleConfirmSqlScriptImport}
       />
+      <SqlBatchColumnDialog
+        session={batchColumnSession}
+        onClose={() => setBatchColumnSession(null)}
+        onApply={applyBatchColumnSelection}
+      />
       {activeTab.agentFileDiffPreview ? (
         <AgentFileDiffReviewBar preview={activeTab.agentFileDiffPreview} />
       ) : activeTab.gitFileDiffPreview ? (
@@ -3526,7 +3708,15 @@ export function QueryEditor({
           onRollbackTransaction={handleRollbackTransaction}
           onFormat={handleFormat}
           onRun={handleRun}
-          onRunCurrent={handleRunCurrent}
+          onRunCurrentPointerDown={() => {
+            pendingToolbarExecutionSnapshotRef.current =
+              captureQueryExecutionSnapshot(editorRef.current);
+          }}
+          onRunCurrent={() => {
+            const snapshot = pendingToolbarExecutionSnapshotRef.current;
+            pendingToolbarExecutionSnapshotRef.current = null;
+            void handleRunCurrent(snapshot);
+          }}
           onExplain={handleExplain}
           onCancelRun={handleCancelRun}
           onImportSqlScript={

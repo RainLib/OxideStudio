@@ -4,6 +4,7 @@ import type {
   SchemaObjectInfo,
   CollectionInfo,
   CollectionPage,
+  DocumentPage,
   ColumnInfo,
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -191,6 +192,36 @@ export async function getColumns(
     connectionId,
     schema,
     table,
+  });
+}
+
+export async function getDocumentPage(
+  connectionId: string,
+  namespace: string,
+  collection: string,
+  cursor?: string | null,
+  limit = 100,
+  filter?: string | null,
+  sort?: string | null,
+): Promise<DocumentPage> {
+  return invokeWithInterceptors<DocumentPage>("get_document_page", {
+    connectionId,
+    namespace,
+    collection,
+    cursor: cursor || null,
+    limit,
+    filter: filter || null,
+    sort: sort || null,
+  });
+}
+
+export async function closeDocumentCursor(
+  connectionId: string,
+  cursor: string,
+): Promise<void> {
+  await invokeWithInterceptors<void>("close_document_cursor", {
+    connectionId,
+    cursor,
   });
 }
 
@@ -472,6 +503,8 @@ export const schemaService = {
   getDatabaseTables,
   getCollections,
   getCollectionsPage,
+  getDocumentPage,
+  closeDocumentCursor,
   getColumns,
   getGeneratedColumns,
   getDatabaseColumns,

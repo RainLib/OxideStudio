@@ -27,7 +27,10 @@ import {
   defaultDatabaseCapabilities,
   normalizeDatabaseDriverName,
 } from "@/lib/databaseDialect";
-import { createNamespaceDdl } from "@/lib/databaseNamespaceDdl";
+import {
+  createNamespaceDdl,
+  mongoCreateDatabasePreview,
+} from "@/lib/databaseNamespaceDdl";
 import { useProjectStore } from "@/store/useProjectStore";
 import { refreshPostgresDatabaseCatalog } from "@/services/postgresDatabaseCatalogCache";
 import { connectionUsesExternalDriverPackage } from "@/features/database-drivers";
@@ -96,13 +99,15 @@ export function CreateDatabaseDialog({
   // not silently degrade simply because the saved connection uses an alias.
   const isPostgres = normalizedDriver === "postgres";
   const isMysql = normalizedDriver === "mysql";
+  const isMongo = normalizedDriver === "mongodb";
   const usesExternalDriverPackage = connectionUsesExternalDriverPackage(
     driver,
     connection?.driverPackageVersion,
     driverInstallations || [],
   );
-  const hasHostGeneratedPreview =
+  const hasSqlPreview =
     (isPostgres || isMysql) && !usesExternalDriverPackage;
+  const hasMongoCommandPreview = isMongo && !usesExternalDriverPackage;
   const supportsOwner = activeCapabilities.supportsCreateDatabaseOwner === true;
   const supportsCharset = activeCapabilities.supportsCreateDatabaseCharset === true;
   const supportsCollation = activeCapabilities.supportsCreateDatabaseCollation === true;
@@ -117,7 +122,10 @@ export function CreateDatabaseDialog({
       if (!activeCapabilities.supportsCreateDatabase) {
         return `-- ${activeCapabilities.displayName} does not declare namespace creation for this connection.\n-- Install or activate a driver package that explicitly supports this operation.`;
       }
-      if (!hasHostGeneratedPreview) {
+      if (hasMongoCommandPreview) {
+        return mongoCreateDatabasePreview(databaseName);
+      }
+      if (!hasSqlPreview) {
         return databaseName.trim()
           ? `-- ${activeCapabilities.displayName} will validate and create “${databaseName.trim()}” inside its verified driver runtime.\n-- No host-generated SQL is used for this database family.`
           : "-- Enter a name to review the driver-managed creation request.";
@@ -138,7 +146,8 @@ export function CreateDatabaseDialog({
       collation,
       databaseName,
       driver,
-      hasHostGeneratedPreview,
+      hasMongoCommandPreview,
+      hasSqlPreview,
       isCapabilitiesLoading,
       isMysql,
       isPostgres,
@@ -404,12 +413,16 @@ export function CreateDatabaseDialog({
               <div className="flex h-9 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3">
                 <span className="flex items-center gap-1.5 text-[11px] font-medium">
                   <Code2 size={13} className="text-[hsl(var(--wb-accent))]" />
-                  {hasHostGeneratedPreview ? "SQL Preview" : "Driver request"}
+                  {hasSqlPreview
+                    ? "SQL Preview"
+                    : hasMongoCommandPreview
+                      ? "MongoDB command preview"
+                      : "Driver request"}
                 </span>
                 <button
                   type="button"
                   className="wb-icon-button h-6 w-6"
-                  title={hasHostGeneratedPreview ? "Copy SQL" : "Copy request preview"}
+                  title={hasSqlPreview ? "Copy SQL" : "Copy request preview"}
                   onClick={() => void navigator.clipboard.writeText(ddl)}
                 >
                   <Copy size={12} />

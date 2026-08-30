@@ -1,13 +1,24 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
-> 审计基线：2026-08-10
-> DBX 参考提交：`04580355d`
+> 审计基线：2026-08-30
+> DBX 参考提交：`9190554e5`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`cd78c0ae1` → `9190554e5`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `73a7b3f4c` | Elasticsearch 通过 PIT + `search_after` 跨越 10k result window | 已迁移为 native opaque cursor 协议；Grid 分页、fallback 与 cursor 清理逻辑完成，真实 ES 6/7/8 验证延期。 |
+| `5a11b8f14` | MongoDB 创建数据库预览和确认 | 已迁移为严格 JSON 预览与后端固定初始化 collection 的语义命令，避免执行 shell source；真实权限/竞争验证延期。 |
+| `bd3e58562`、`143be57d4` | completion popup 多选列并批量生成 SELECT/INSERT | 逻辑已对齐：Monaco 建议列表末尾提供 batch action，独立选择面板支持搜索、checkbox 与可访问焦点；SELECT 按 metadata 顺序插入，INSERT 生成可 Tab 导航的 VALUES snippet。普通单列继续作为默认 Enter 目标，不耦合 Monaco 私有 DOM。真实 WebView/IME 验证延期。 |
+| `d5f4eadf7` | 工具栏执行前冻结 SQL selection | 已对齐：pointer-down 捕获 immutable snapshot，执行目标不再受 focus transition 影响。 |
+| `7ba30ae76` | SQL 文件树创建、重命名、删除 | Oxide 已有 Project Files 创建/保存/重命名/删除与 SQL import；不是 Mongo/ES LSP 阻塞项，后续单独做文件树交互逐项验收。 |
+| `9190554e5` | SQLite SSH backup/query error 校验 | 与本轮 document LSP 无直接交集；已进入最新基线，留在 backup/driver 错误分类路线。 |
 
 ### 最新增量审计（`bd08fb630` → `cd78c0ae1`）
 

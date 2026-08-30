@@ -1,8 +1,9 @@
 /// Schema 元数据相关 commands
 use crate::core::{
+    driver::DocumentPageRequest,
     manager::ConnectionManager,
     protocol::{
-        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, DatabaseInfo,
+        CollectionInfo, CollectionPage, ColumnInfo, ConstraintInfo, DatabaseInfo, DocumentPage,
         ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, Response, SchemaObjectInfo, TableInfo,
     },
 };
@@ -153,6 +154,61 @@ pub async fn get_schema_objects(
         serde_json::json!({
             "connectionId": connection_id,
             "schema": schema,
+        }),
+    ))
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn get_document_page(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    namespace: String,
+    collection: String,
+    cursor: Option<String>,
+    limit: usize,
+    filter: Option<String>,
+    sort: Option<String>,
+) -> Result<Response<DocumentPage>, String> {
+    let bounded_limit = limit.clamp(1, 1_000);
+    let result = manager
+        .get_document_page(
+            &connection_id,
+            DocumentPageRequest {
+                namespace: &namespace,
+                collection: &collection,
+                cursor: cursor.as_deref(),
+                limit: bounded_limit,
+                filter: filter.as_deref(),
+                sort: sort.as_deref(),
+            },
+        )
+        .await;
+    Ok(schema_result(
+        result,
+        "DOCUMENT_PAGE_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "namespace": namespace,
+            "collection": collection,
+            "hasCursor": cursor.is_some(),
+            "limit": bounded_limit,
+        }),
+    ))
+}
+
+#[tauri::command]
+pub async fn close_document_cursor(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    cursor: String,
+) -> Result<Response<()>, String> {
+    let result = manager.close_document_cursor(&connection_id, &cursor).await;
+    Ok(schema_result(
+        result,
+        "DOCUMENT_CURSOR_CLOSE_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
         }),
     ))
 }

@@ -3,7 +3,10 @@ use super::protocol::{
     IndexInfo, ParameterizedStatement, QueryParameter,
 };
 use super::ssh::SshTunnel;
-use super::{dialect::DatabaseCapabilities, driver::DatabaseDriver};
+use super::{
+    dialect::DatabaseCapabilities,
+    driver::{DatabaseDriver, DocumentPageRequest},
+};
 use anyhow::{anyhow, Result};
 use oxide_driver_protocol::{
     SchemaMigrationApplyRequest, SchemaMigrationApplyResult, SchemaMigrationMode,
@@ -836,6 +839,20 @@ impl ConnectionManager {
         driver
             .get_collections_page(namespace, cursor, limit, filter)
             .await
+    }
+
+    pub async fn get_document_page(
+        &self,
+        id: &str,
+        request: DocumentPageRequest<'_>,
+    ) -> Result<super::protocol::DocumentPage> {
+        let driver = self.get_driver(id).await?;
+        driver.get_document_page(request).await
+    }
+
+    pub async fn close_document_cursor(&self, id: &str, cursor: &str) -> Result<()> {
+        let driver = self.get_driver(id).await?;
+        driver.close_document_cursor(cursor).await
     }
 
     /// Get columns

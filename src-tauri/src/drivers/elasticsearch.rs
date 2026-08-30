@@ -1,12 +1,16 @@
 use crate::core::{
-    driver::DatabaseDriver,
-    protocol::{CollectionInfo, ColumnDef, ColumnInfo, QueryResponseMeta, QueryResult},
+    driver::{DatabaseDriver, DocumentPageRequest},
+    protocol::{
+        CollectionInfo, ColumnDef, ColumnInfo, DocumentPage, QueryResponseMeta, QueryResult,
+    },
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 use reqwest::{Client, Method, StatusCode, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -34,6 +38,137 @@ struct ElasticsearchRequest {
     method: Method,
     path: String,
     body: Option<String>,
+}
+
+const ELASTICSEARCH_PIT_KEEP_ALIVE: &str = "1m";
+const ELASTICSEARCH_MAX_RESULT_WINDOW: usize = 10_000;
+const ELASTICSEARCH_DOCUMENT_CURSOR_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ElasticsearchDocumentCursor {
+    Pit {
+        pit_id: String,
+        index: String,
+        search_after: Vec<Value>,
+        sort: Vec<Value>,
+        limit: usize,
+        filter: Option<Value>,
+    },
+    Offset {
+        index: String,
+        offset: usize,
+        sort: Vec<Value>,
+        limit: usize,
+        filter: Option<Value>,
+    },
+}
+
+fn encode_elasticsearch_document_cursor(cursor: &ElasticsearchDocumentCursor) -> Result<String> {
+    let encoded = serde_json::to_vec(cursor).context("Failed to encode Elasticsearch cursor")?;
+    if encoded.len() > ELASTICSEARCH_DOCUMENT_CURSOR_MAX_BYTES {
+        return Err(anyhow!("Elasticsearch cursor exceeds the local size limit"));
+    }
+    Ok(URL_SAFE_NO_PAD.encode(encoded))
+}
+
+fn decode_elasticsearch_document_cursor(cursor: &str) -> Result<ElasticsearchDocumentCursor> {
+    if cursor.is_empty() || cursor.len() > ELASTICSEARCH_DOCUMENT_CURSOR_MAX_BYTES * 2 {
+        return Err(anyhow!("Invalid Elasticsearch cursor"));
+    }
+    let decoded = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .context("Invalid Elasticsearch cursor encoding")?;
+    if decoded.len() > ELASTICSEARCH_DOCUMENT_CURSOR_MAX_BYTES {
+        return Err(anyhow!("Elasticsearch cursor exceeds the local size limit"));
+    }
+    serde_json::from_slice(&decoded).context("Invalid Elasticsearch cursor payload")
+}
+
+fn parse_elasticsearch_document_filter(filter: Option<&str>) -> Result<Option<Value>> {
+    let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(filter).context("Elasticsearch filter must be JSON")?;
+    if !value.is_object() {
+        return Err(anyhow!("Elasticsearch filter must be a JSON object"));
+    }
+    Ok(Some(value))
+}
+
+fn parse_elasticsearch_document_sort(sort: Option<&str>, pit: bool) -> Result<Vec<Value>> {
+    let mut values = match sort.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Vec::new(),
+        Some(sort) => {
+            match serde_json::from_str::<Value>(sort).context("Elasticsearch sort must be JSON")? {
+                Value::Array(values) => values,
+                value @ Value::Object(_) => vec![value],
+                _ => return Err(anyhow!("Elasticsearch sort must be a JSON object or array")),
+            }
+        }
+    };
+    if pit {
+        if values.iter().all(|value| value.get("_shard_doc").is_none()) {
+            values.push(json!({ "_shard_doc": "asc" }));
+        }
+    } else if values.is_empty() {
+        values.push(json!({ "_doc": "asc" }));
+    }
+    Ok(values)
+}
+
+fn build_elasticsearch_document_search_body(
+    limit: usize,
+    filter: Option<&Value>,
+    sort: &[Value],
+    pit_id: Option<&str>,
+    search_after: Option<&[Value]>,
+    offset: Option<usize>,
+) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("size".to_string(), json!(limit));
+    body.insert("track_total_hits".to_string(), Value::Bool(true));
+    if let Some(filter) = filter {
+        body.insert("query".to_string(), filter.clone());
+    }
+    body.insert("sort".to_string(), Value::Array(sort.to_vec()));
+    if let Some(pit_id) = pit_id {
+        body.insert(
+            "pit".to_string(),
+            json!({ "id": pit_id, "keep_alive": ELASTICSEARCH_PIT_KEEP_ALIVE }),
+        );
+    }
+    if let Some(search_after) = search_after.filter(|values| !values.is_empty()) {
+        body.insert(
+            "search_after".to_string(),
+            Value::Array(search_after.to_vec()),
+        );
+    }
+    if let Some(offset) = offset.filter(|offset| *offset > 0) {
+        body.insert("from".to_string(), json!(offset));
+    }
+    Value::Object(body)
+}
+
+fn elasticsearch_document_total(response: &Value) -> Option<u64> {
+    let total = response.pointer("/hits/total")?;
+    total
+        .as_u64()
+        .or_else(|| total.get("value").and_then(Value::as_u64))
+}
+
+fn elasticsearch_document_hits(response: &Value) -> &[Value] {
+    response
+        .pointer("/hits/hits")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn elasticsearch_document_result(response: &Value) -> QueryResult {
+    let normalized = normalize_elasticsearch_response(response.clone());
+    elasticsearch_table_result(&normalized)
+        .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()))
 }
 
 impl ElasticsearchDriver {
@@ -229,6 +364,166 @@ impl ElasticsearchDriver {
 
         Ok((status, body))
     }
+
+    async fn open_document_pit(&self, index: &str) -> Result<String> {
+        let request = ElasticsearchRequest {
+            method: Method::POST,
+            path: format!(
+                "/{}/_pit?keep_alive={}",
+                encode_elasticsearch_path_segment(index),
+                ELASTICSEARCH_PIT_KEEP_ALIVE
+            ),
+            body: None,
+        };
+        let (_, body) = self.send_request(&request).await?;
+        body.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Elasticsearch PIT response is missing its id"))
+    }
+
+    async fn close_document_pit(&self, pit_id: &str) -> Result<()> {
+        let request = ElasticsearchRequest {
+            method: Method::DELETE,
+            path: "/_pit".to_string(),
+            body: Some(json!({ "id": pit_id }).to_string()),
+        };
+        self.send_request(&request).await.map(|_| ())
+    }
+
+    async fn run_document_search(&self, path: String, body: Value) -> Result<Value> {
+        let request = ElasticsearchRequest {
+            method: Method::POST,
+            path,
+            body: Some(body.to_string()),
+        };
+        self.send_request(&request)
+            .await
+            .map(|(_, response)| response)
+    }
+
+    async fn first_document_page(
+        &self,
+        index: &str,
+        limit: usize,
+        filter: Option<Value>,
+        requested_sort: Option<&str>,
+    ) -> Result<DocumentPage> {
+        let pit_sort = parse_elasticsearch_document_sort(requested_sort, true)?;
+        match self.open_document_pit(index).await {
+            Ok(pit_id) => {
+                let body = build_elasticsearch_document_search_body(
+                    limit,
+                    filter.as_ref(),
+                    &pit_sort,
+                    Some(&pit_id),
+                    None,
+                    None,
+                );
+                match self.run_document_search("/_search".to_string(), body).await {
+                    Ok(response) => {
+                        let hits = elasticsearch_document_hits(&response);
+                        let total = elasticsearch_document_total(&response);
+                        let response_pit_id = response
+                            .get("pit_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&pit_id)
+                            .to_string();
+                        let next_cursor = hits
+                            .last()
+                            .and_then(|hit| hit.get("sort"))
+                            .and_then(Value::as_array)
+                            .filter(|_| hits.len() == limit)
+                            .map(|search_after| {
+                                encode_elasticsearch_document_cursor(
+                                    &ElasticsearchDocumentCursor::Pit {
+                                        pit_id: response_pit_id.clone(),
+                                        index: index.to_string(),
+                                        search_after: search_after.clone(),
+                                        sort: pit_sort,
+                                        limit,
+                                        filter,
+                                    },
+                                )
+                            })
+                            .transpose()?;
+                        if next_cursor.is_none() {
+                            let _ = self.close_document_pit(&response_pit_id).await;
+                        }
+                        Ok(DocumentPage {
+                            result: elasticsearch_document_result(&response),
+                            next_cursor,
+                            total,
+                        })
+                    }
+                    Err(error) => {
+                        let _ = self.close_document_pit(&pit_id).await;
+                        Err(error)
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "Elasticsearch PIT is unavailable; using bounded offset pagination");
+                let offset_sort = parse_elasticsearch_document_sort(requested_sort, false)?;
+                self.offset_document_page(index, 0, limit, filter, offset_sort)
+                    .await
+            }
+        }
+    }
+
+    async fn offset_document_page(
+        &self,
+        index: &str,
+        offset: usize,
+        limit: usize,
+        filter: Option<Value>,
+        sort: Vec<Value>,
+    ) -> Result<DocumentPage> {
+        if offset.saturating_add(limit) > ELASTICSEARCH_MAX_RESULT_WINDOW {
+            return Err(anyhow!(
+                "Elasticsearch offset pagination reached index.max_result_window; PIT is required for deeper pages"
+            ));
+        }
+        let body = build_elasticsearch_document_search_body(
+            limit,
+            filter.as_ref(),
+            &sort,
+            None,
+            None,
+            Some(offset),
+        );
+        let response = self
+            .run_document_search(
+                format!("/{}/_search", encode_elasticsearch_path_segment(index)),
+                body,
+            )
+            .await?;
+        let hits = elasticsearch_document_hits(&response);
+        let total = elasticsearch_document_total(&response);
+        let next_offset = offset.saturating_add(hits.len());
+        let has_more = hits.len() == limit
+            && next_offset < ELASTICSEARCH_MAX_RESULT_WINDOW
+            && total
+                .map(|total| next_offset < total as usize)
+                .unwrap_or(true);
+        let next_cursor = has_more
+            .then(|| {
+                encode_elasticsearch_document_cursor(&ElasticsearchDocumentCursor::Offset {
+                    index: index.to_string(),
+                    offset: next_offset,
+                    sort,
+                    limit,
+                    filter,
+                })
+            })
+            .transpose()?;
+        Ok(DocumentPage {
+            result: elasticsearch_document_result(&response),
+            next_cursor,
+            total,
+        })
+    }
 }
 
 #[async_trait]
@@ -322,6 +617,120 @@ impl DatabaseDriver for ElasticsearchDriver {
             collections,
             self.index_grouping.as_ref(),
         ))
+    }
+
+    async fn get_document_page(&self, request: DocumentPageRequest<'_>) -> Result<DocumentPage> {
+        self.ensure_connected().await?;
+        let index = validate_elasticsearch_index_context(request.collection)?
+            .ok_or_else(|| anyhow!("Elasticsearch index is required"))?;
+        let bounded_limit = request.limit.clamp(1, 1_000);
+        let requested_filter = parse_elasticsearch_document_filter(request.filter)?;
+
+        let Some(cursor) = request.cursor else {
+            return self
+                .first_document_page(&index, bounded_limit, requested_filter, request.sort)
+                .await;
+        };
+
+        match decode_elasticsearch_document_cursor(cursor)? {
+            ElasticsearchDocumentCursor::Pit {
+                pit_id,
+                index: cursor_index,
+                search_after,
+                sort: cursor_sort,
+                limit: cursor_limit,
+                filter: cursor_filter,
+            } => {
+                if cursor_index != index {
+                    let _ = self.close_document_pit(&pit_id).await;
+                    return Err(anyhow!("Elasticsearch cursor belongs to a different index"));
+                }
+                if cursor_limit != bounded_limit || cursor_filter != requested_filter {
+                    let _ = self.close_document_pit(&pit_id).await;
+                    return Err(anyhow!(
+                        "Elasticsearch cursor no longer matches the current page or filter"
+                    ));
+                }
+                let requested_sort = parse_elasticsearch_document_sort(request.sort, true)?;
+                if requested_sort != cursor_sort {
+                    let _ = self.close_document_pit(&pit_id).await;
+                    return Err(anyhow!(
+                        "Elasticsearch cursor no longer matches the current sort"
+                    ));
+                }
+                let body = build_elasticsearch_document_search_body(
+                    cursor_limit,
+                    cursor_filter.as_ref(),
+                    &cursor_sort,
+                    Some(&pit_id),
+                    Some(&search_after),
+                    None,
+                );
+                let response = match self.run_document_search("/_search".to_string(), body).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let _ = self.close_document_pit(&pit_id).await;
+                        return Err(error);
+                    }
+                };
+                let hits = elasticsearch_document_hits(&response);
+                let total = elasticsearch_document_total(&response);
+                let response_pit_id = response
+                    .get("pit_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&pit_id)
+                    .to_string();
+                let next_cursor = hits
+                    .last()
+                    .and_then(|hit| hit.get("sort"))
+                    .and_then(Value::as_array)
+                    .filter(|_| hits.len() == cursor_limit)
+                    .map(|next_search_after| {
+                        encode_elasticsearch_document_cursor(&ElasticsearchDocumentCursor::Pit {
+                            pit_id: response_pit_id.clone(),
+                            index,
+                            search_after: next_search_after.clone(),
+                            sort: cursor_sort,
+                            limit: cursor_limit,
+                            filter: cursor_filter,
+                        })
+                    })
+                    .transpose()?;
+                Ok(DocumentPage {
+                    result: elasticsearch_document_result(&response),
+                    next_cursor,
+                    total,
+                })
+            }
+            ElasticsearchDocumentCursor::Offset {
+                index: cursor_index,
+                offset,
+                sort: cursor_sort,
+                limit: cursor_limit,
+                filter: cursor_filter,
+            } => {
+                if cursor_index != index
+                    || cursor_limit != bounded_limit
+                    || cursor_filter != requested_filter
+                    || cursor_sort != parse_elasticsearch_document_sort(request.sort, false)?
+                {
+                    return Err(anyhow!(
+                        "Elasticsearch cursor no longer matches the current index, page, filter, or sort"
+                    ));
+                }
+                self.offset_document_page(&index, offset, cursor_limit, cursor_filter, cursor_sort)
+                    .await
+            }
+        }
+    }
+
+    async fn close_document_cursor(&self, cursor: &str) -> Result<()> {
+        match decode_elasticsearch_document_cursor(cursor)? {
+            ElasticsearchDocumentCursor::Pit { pit_id, .. } => {
+                self.close_document_pit(&pit_id).await
+            }
+            ElasticsearchDocumentCursor::Offset { .. } => Ok(()),
+        }
     }
 
     async fn get_columns(&self, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
@@ -1255,6 +1664,62 @@ fn elasticsearch_mapping_type(mapping: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_cursor_round_trips_without_exposing_raw_pit_json() {
+        let cursor = ElasticsearchDocumentCursor::Pit {
+            pit_id: "pit/opaque+value".to_string(),
+            index: "orders".to_string(),
+            search_after: vec![json!(42), json!("shard")],
+            sort: vec![
+                json!({ "created_at": "desc" }),
+                json!({ "_shard_doc": "asc" }),
+            ],
+            limit: 250,
+            filter: Some(json!({ "term": { "tenant": "acme" } })),
+        };
+
+        let encoded = encode_elasticsearch_document_cursor(&cursor).unwrap();
+        assert!(!encoded.contains("pit/opaque"));
+        assert_eq!(
+            decode_elasticsearch_document_cursor(&encoded).unwrap(),
+            cursor
+        );
+    }
+
+    #[test]
+    fn pit_search_body_uses_stable_tiebreaker_and_continuation() {
+        let sort =
+            parse_elasticsearch_document_sort(Some(r#"[{"created_at":"desc"}]"#), true).unwrap();
+        assert_eq!(sort.last(), Some(&json!({ "_shard_doc": "asc" })));
+
+        let body = build_elasticsearch_document_search_body(
+            100,
+            Some(&json!({ "match_all": {} })),
+            &sort,
+            Some("pit-1"),
+            Some(&[json!("2026-08-30"), json!(7)]),
+            None,
+        );
+        assert_eq!(body["size"], 100);
+        assert_eq!(body["pit"]["id"], "pit-1");
+        assert_eq!(body["search_after"], json!(["2026-08-30", 7]));
+        assert!(body.get("from").is_none());
+    }
+
+    #[test]
+    fn document_total_accepts_legacy_and_object_shapes() {
+        assert_eq!(
+            elasticsearch_document_total(&json!({ "hits": { "total": 12, "hits": [] } })),
+            Some(12)
+        );
+        assert_eq!(
+            elasticsearch_document_total(
+                &json!({ "hits": { "total": { "value": 34, "relation": "eq" }, "hits": [] } })
+            ),
+            Some(34)
+        );
+    }
 
     #[test]
     fn groups_rolling_index_collections_and_preserves_document_counts() {

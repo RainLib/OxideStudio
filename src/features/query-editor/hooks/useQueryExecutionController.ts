@@ -83,7 +83,7 @@ type QueryExecutionControllerOptions = {
   cancelTabQuery: (tabId: string) => Promise<void>;
 };
 
-function snapshotFromEditor(
+export function captureQueryExecutionSnapshot(
   editor: QueryExecutionEditor | null,
 ): QueryExecutionSnapshot | null {
   const model = editor?.getModel();
@@ -217,7 +217,7 @@ export function useQueryExecutionController({
   const handleRun = useCallback(() => {
     if (!canExecute || !activeTab || !connectionId || !contextKey) return;
     const snapshot =
-      snapshotFromEditor(editorRef.current) ||
+      captureQueryExecutionSnapshot(editorRef.current) ||
       fallbackSnapshot(activeTab.sql);
     const sql = snapshot.fullText;
     if (!sql.trim()) return;
@@ -242,9 +242,10 @@ export function useQueryExecutionController({
     updateTabSql,
   ]);
 
-  const handleRunCurrent = useCallback(async () => {
+  const handleRunCurrent = useCallback(async (capturedSnapshot?: QueryExecutionSnapshot | null) => {
     if (!canExecute || !activeTab || !connectionId || !contextKey) return;
-    const snapshot = snapshotFromEditor(editorRef.current);
+    const snapshot =
+      capturedSnapshot || captureQueryExecutionSnapshot(editorRef.current);
     if (!snapshot) return;
 
     await runExclusive(contextKey, async () => {
@@ -335,7 +336,7 @@ export function useQueryExecutionController({
 
   const handleConfigureParameters = useCallback(() => {
     if (!activeTab) return;
-    const snapshot = snapshotFromEditor(editorRef.current);
+    const snapshot = captureQueryExecutionSnapshot(editorRef.current);
     const sql = snapshot
       ? snapshot.selectedText.trim() || snapshot.fullText
       : activeTab.sql;
@@ -363,7 +364,7 @@ export function useQueryExecutionController({
       ) {
         return;
       }
-      const snapshot = snapshotFromEditor(editorRef.current);
+      const snapshot = captureQueryExecutionSnapshot(editorRef.current);
       const sql = snapshot
         ? snapshot.selectedText.trim() || snapshot.fullText
         : activeTab.sql;

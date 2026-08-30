@@ -15,6 +15,16 @@ use oxide_driver_protocol::{
     SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
 };
 
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentPageRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub cursor: Option<&'a str>,
+    pub limit: usize,
+    pub filter: Option<&'a str>,
+    pub sort: Option<&'a str>,
+}
+
 fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
     anyhow!("{feature} is not implemented for this driver")
 }
@@ -414,6 +424,24 @@ pub trait DatabaseDriver: Send + Sync {
             next_cursor: (end < items.len()).then(|| end.to_string()),
             total: Some(total),
         })
+    }
+
+    /// Read one bounded page of documents from a native document/search
+    /// object. This is deliberately separate from relational table paging and
+    /// arbitrary query execution so a product can own its cursor semantics.
+    async fn get_document_page(
+        &self,
+        _request: DocumentPageRequest<'_>,
+    ) -> Result<crate::core::protocol::DocumentPage> {
+        Err(anyhow::anyhow!(
+            "Native document pagination is not supported by this driver"
+        ))
+    }
+
+    /// Release resources held by a native document cursor. Stateless cursor
+    /// implementations may keep the default no-op behavior.
+    async fn close_document_cursor(&self, _cursor: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Get columns for a specific table

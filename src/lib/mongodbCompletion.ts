@@ -12,6 +12,9 @@ export type MongoDbCompletionArea =
   | "query-operator"
   | "update-operator"
   | "pipeline-stage"
+  | "accumulator"
+  | "expression"
+  | "field-reference"
   | "value"
   | "unknown";
 
@@ -97,7 +100,10 @@ const STAGE_FIELD_VALUE_KEYS = new Set([
 ]);
 const QUERY_OPERATORS = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$regex", "$and", "$or", "$nor", "$not", "$elemMatch", "$size", "$all", "$type"];
 const UPDATE_OPERATORS = ["$set", "$unset", "$inc", "$mul", "$min", "$max", "$rename", "$currentDate", "$push", "$addToSet", "$pull", "$pop"];
-const PIPELINE_STAGES = ["$match", "$project", "$set", "$addFields", "$unset", "$group", "$sort", "$limit", "$skip", "$unwind", "$lookup", "$facet", "$count", "$replaceRoot"];
+const PIPELINE_STAGES = ["$match", "$project", "$group", "$sort", "$limit", "$skip", "$count", "$unwind", "$lookup", "$addFields", "$set", "$unset", "$replaceRoot", "$replaceWith", "$facet", "$sortByCount", "$bucket", "$bucketAuto", "$sample", "$unionWith", "$graphLookup", "$geoNear", "$setWindowFields", "$densify", "$fill", "$documents", "$redact", "$out", "$merge", "$collStats", "$indexStats", "$planCacheStats"];
+const ACCUMULATORS = ["$sum", "$avg", "$min", "$max", "$count", "$first", "$last", "$push", "$addToSet", "$mergeObjects", "$stdDevPop", "$stdDevSamp", "$top", "$topN", "$bottom", "$bottomN", "$firstN", "$lastN", "$maxN", "$minN", "$median", "$percentile"];
+const EXPRESSION_OPERATORS = ["$cond", "$ifNull", "$switch", "$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$cmp", "$and", "$or", "$not", "$add", "$subtract", "$multiply", "$divide", "$mod", "$abs", "$ceil", "$floor", "$round", "$trunc", "$pow", "$sqrt", "$concat", "$split", "$toLower", "$toUpper", "$trim", "$replaceOne", "$replaceAll", "$regexMatch", "$size", "$arrayElemAt", "$slice", "$in", "$concatArrays", "$filter", "$map", "$reduce", "$dateToString", "$dateFromString", "$dateAdd", "$dateSubtract", "$dateDiff", "$dateTrunc", "$year", "$month", "$dayOfMonth", "$type", "$convert", "$toString", "$toInt", "$toLong", "$toDouble", "$toDecimal", "$toBool", "$toDate", "$toObjectId", "$literal", "$getField", "$setField", "$let"];
+const EXPRESSION_STAGES = new Set(["$project", "$set", "$addFields", "$replaceRoot", "$replaceWith", "$redact", "$setWindowFields", "$fill"]);
 
 const ROOT_COMMANDS: MongoDbConsoleCompletion[] = [
   { label: "find", detail: "Find documents in a collection", documentation: 'Runs `{ "find": "collection", "filter": {} }`.', insertText: '"find": "${1:collection}",\n  "filter": {${2}}', kind: "snippet" },
@@ -200,12 +206,22 @@ export function mongodbConsoleCompletionContext(source: string, cursorOffset: nu
   const typed = scan.inString ? scan.before.slice(scan.stringStart + 1) : "";
   const activeKey = frame?.lastKey;
   const ownerKey = frame?.ownerKey;
+  const enclosingStage = [...scan.frames]
+    .reverse()
+    .map((candidate) => candidate.ownerKey)
+    .find((candidate) => Boolean(candidate && PIPELINE_STAGES.includes(candidate)));
   const isKeyPosition = Boolean(frame?.kind === "object" && frame.expectingKey);
 
   if (isKeyPosition) {
     if (ownerKey === "pipeline") return { area: "pipeline-stage", typed, activeKey, parentKey: ownerKey, collection };
     if (ownerKey && STAGE_OPTION_KEYS[ownerKey]) {
       return { area: "stage-option", typed, activeKey, parentKey: ownerKey, collection };
+    }
+    if (enclosingStage === "$group" && ownerKey !== "$group") {
+      return { area: "accumulator", typed, activeKey, parentKey: enclosingStage, collection };
+    }
+    if (enclosingStage && EXPRESSION_STAGES.has(enclosingStage) && ownerKey !== enclosingStage) {
+      return { area: "expression", typed, activeKey, parentKey: enclosingStage, collection };
     }
     if (UPDATE_OBJECT_KEYS.has(ownerKey || "")) return { area: "update-operator", typed, activeKey, parentKey: ownerKey, collection };
     if (FIELD_OBJECT_KEYS.has(ownerKey || "")) {
@@ -226,6 +242,9 @@ export function mongodbConsoleCompletionContext(source: string, cursorOffset: nu
         STAGE_FIELD_VALUE_KEYS.has(activeKey || "")))
   ) {
     return { area: "field", typed, activeKey, parentKey: ownerKey, collection };
+  }
+  if (scan.inString && typed.startsWith("$") && (enclosingStage || activeKey === "$expr")) {
+    return { area: "field-reference", typed, activeKey, parentKey: enclosingStage, collection };
   }
   return { area: "value", typed, activeKey, parentKey: ownerKey, collection };
 }
@@ -250,6 +269,23 @@ function operatorItems(values: readonly string[], typed: string, detail: string)
     insertText: `"${value}": ${value === "$exists" ? "${1:true}" : "${1}"}`,
     kind: "operator",
   }));
+}
+
+function fieldReferenceItems(
+  fields: readonly { name: string; dataType?: string }[],
+  typed: string,
+): MongoDbConsoleCompletion[] {
+  const normalizedTyped = typed.startsWith("$") ? typed.slice(1) : typed;
+  return fields
+    .filter((field) => matches(field.name, normalizedTyped))
+    .map((field) => ({
+      label: `$${field.name}`,
+      detail: field.dataType
+        ? `MongoDB field reference · ${field.dataType}`
+        : "MongoDB field reference",
+      insertText: `$${field.name}`,
+      kind: "field" as const,
+    }));
 }
 
 function stageOptionItems(stage: string | undefined, typed: string): MongoDbConsoleCompletion[] {
@@ -306,6 +342,15 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
     case "pipeline-stage":
       items = operatorItems(PIPELINE_STAGES, context.typed, "MongoDB aggregation stage");
       break;
+    case "accumulator":
+      items = operatorItems(ACCUMULATORS, context.typed, "MongoDB group accumulator");
+      break;
+    case "expression":
+      items = operatorItems(EXPRESSION_OPERATORS, context.typed, "MongoDB aggregation expression");
+      break;
+    case "field-reference":
+      items = fieldReferenceItems(fields, context.typed);
+      break;
     case "stage-option":
       items = stageOptionItems(context.parentKey, context.typed);
       break;
@@ -326,7 +371,9 @@ export function mongodbCompletionArea(source: string, cursorOffset: number): Mon
     area === "field" ||
     area === "query-operator" ||
     area === "update-operator" ||
-    area === "pipeline-stage"
+    area === "pipeline-stage" ||
+    area === "accumulator" ||
+    area === "expression"
   ) {
     return "key";
   }

@@ -96,6 +96,7 @@ export function TableDataView() {
     setSqlFilter,
     setGridSort,
     loadTablePage,
+    loadDocumentPage,
     runTabQuery,
     addNewRow,
     commitEdits,
@@ -682,7 +683,9 @@ export function TableDataView() {
       activeTab.tableName &&
       activeTab.schemaName
     ) {
-      if (isNativeObjectPreview && activeTab.sql.trim()) {
+      if (isSearchObjectPreview) {
+        void loadDocumentPage(activeTab.id, 0);
+      } else if (isNativeObjectPreview && activeTab.sql.trim()) {
         void runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
       } else {
         void loadTablePage(activeTab.id, 0);
@@ -691,6 +694,8 @@ export function TableDataView() {
   }, [
     activeTab,
     isNativeObjectPreview,
+    isSearchObjectPreview,
+    loadDocumentPage,
     loadTablePage,
     runTabQuery,
     tabConnectionId,
@@ -774,8 +779,10 @@ export function TableDataView() {
   const canPrevious = page > 0 && !activeTab.isExecuting;
   const canNext =
     !activeTab.isExecuting &&
-    visibleRows === pageSize &&
-    (totalRows == null || (page + 1) * pageSize < totalRows);
+    (isSearchObjectPreview
+      ? Boolean(activeTab.documentHasNextCursor)
+      : visibleRows === pageSize &&
+        (totalRows == null || (page + 1) * pageSize < totalRows));
   const lastPage =
     totalRows == null ? null : Math.max(0, Math.ceil(totalRows / pageSize) - 1);
   const canLast = lastPage != null && page < lastPage && !activeTab.isExecuting;
@@ -804,6 +811,12 @@ export function TableDataView() {
   );
 
   const handleRefresh = () => {
+    if (isSearchObjectPreview) {
+      void loadDocumentPage(activeTab.id, 0, {
+        discardAction: "refresh the index documents",
+      });
+      return;
+    }
     if (isNativeObjectPreview) {
       if (tabConnectionId && activeTab.sql.trim()) {
         void runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
@@ -817,25 +830,43 @@ export function TableDataView() {
 
   const handlePrevious = () => {
     if (canPrevious) {
-      void loadTablePage(activeTab.id, page - 1, undefined, undefined, {
-        discardAction: "change pages",
-      });
+      if (isSearchObjectPreview) {
+        void loadDocumentPage(activeTab.id, page - 1, {
+          discardAction: "change document pages",
+        });
+      } else {
+        void loadTablePage(activeTab.id, page - 1, undefined, undefined, {
+          discardAction: "change pages",
+        });
+      }
     }
   };
 
   const handleFirst = () => {
     if (canPrevious) {
-      void loadTablePage(activeTab.id, 0, undefined, undefined, {
-        discardAction: "change pages",
-      });
+      if (isSearchObjectPreview) {
+        void loadDocumentPage(activeTab.id, 0, {
+          discardAction: "return to the first document page",
+        });
+      } else {
+        void loadTablePage(activeTab.id, 0, undefined, undefined, {
+          discardAction: "change pages",
+        });
+      }
     }
   };
 
   const handleNext = () => {
     if (canNext) {
-      void loadTablePage(activeTab.id, page + 1, undefined, undefined, {
-        discardAction: "change pages",
-      });
+      if (isSearchObjectPreview) {
+        void loadDocumentPage(activeTab.id, page + 1, {
+          discardAction: "change document pages",
+        });
+      } else {
+        void loadTablePage(activeTab.id, page + 1, undefined, undefined, {
+          discardAction: "change pages",
+        });
+      }
     }
   };
 
@@ -2092,7 +2123,7 @@ export function TableDataView() {
             <button
               type="button"
               className="wb-icon-button"
-              disabled={!canLast}
+              disabled={isSearchObjectPreview || !canLast}
               onClick={handleLast}
               title="Last page"
             >

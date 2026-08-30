@@ -276,6 +276,18 @@ pub struct CollectionPage {
     pub total: Option<u64>,
 }
 
+/// One bounded page from a native document/search collection.
+///
+/// `next_cursor` is an opaque, driver-owned continuation. Consumers must pass
+/// it back unchanged and must not derive an OFFSET from the visible page.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentPage {
+    pub result: QueryResult,
+    pub next_cursor: Option<String>,
+    pub total: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
