@@ -29,12 +29,13 @@ use std::{
 
 const MAX_SQL_CHARS: usize = 200_000;
 const MAX_CELL_BYTES: usize = 16 * 1024;
-const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 30;
 
 pub struct ToolRuntime {
     store: HeadlessStore,
     grant: Grant,
     next_query_id: AtomicU64,
+    query_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -88,7 +89,11 @@ struct ResolvedConnection {
 }
 
 impl ToolRuntime {
-    pub async fn new(store: HeadlessStore, grant: Grant) -> Result<Self> {
+    pub async fn new(
+        store: HeadlessStore,
+        grant: Grant,
+        query_timeout_secs: Option<u64>,
+    ) -> Result<Self> {
         store.require_project(grant.project_id()).await?;
         let connections = store.connections(grant.project_id()).await?;
         if let Some(connection_id) = grant.connection_id() {
@@ -106,6 +111,7 @@ impl ToolRuntime {
             store,
             grant,
             next_query_id: AtomicU64::new(1),
+            query_timeout: resolve_query_timeout(query_timeout_secs),
         })
     }
 
@@ -409,12 +415,18 @@ impl ToolRuntime {
                     .await
             }
         };
-        let result = match tokio::time::timeout(QUERY_TIMEOUT, execute).await {
-            Ok(result) => result,
-            Err(_) => {
-                let _ = manager.cancel_query(&connection.stored.id, &query_id).await;
-                Err(anyhow!("database tool exceeded its 30 second deadline"))
-            }
+        let result = match self.query_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, execute).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let _ = manager.cancel_query(&connection.stored.id, &query_id).await;
+                    Err(anyhow!(
+                        "database tool exceeded its {} second deadline",
+                        timeout.as_secs()
+                    ))
+                }
+            },
+            None => execute.await,
         };
         let cleanup = manager.disconnect_connection(&connection.stored.id).await;
         match (result, cleanup) {
@@ -427,6 +439,14 @@ impl ToolRuntime {
     fn query_id(&self, prefix: &str) -> String {
         let sequence = self.next_query_id.fetch_add(1, Ordering::Relaxed);
         format!("oxide-agent-{prefix}-{}-{sequence}", std::process::id())
+    }
+}
+
+fn resolve_query_timeout(query_timeout_secs: Option<u64>) -> Option<Duration> {
+    match query_timeout_secs {
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => Some(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS)),
     }
 }
 
@@ -710,6 +730,19 @@ fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_timeout_resolves_default_override_and_unlimited() {
+        assert_eq!(
+            resolve_query_timeout(None),
+            Some(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            resolve_query_timeout(Some(300)),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(resolve_query_timeout(Some(0)), None);
+    }
 
     #[test]
     fn bounded_result_never_returns_unbounded_payload() {

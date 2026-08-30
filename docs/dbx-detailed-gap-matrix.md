@@ -17,7 +17,12 @@
 | `5a11b8f14` | MongoDB 创建数据库预览和确认 | 已迁移为严格 JSON 预览与后端固定初始化 collection 的语义命令，避免执行 shell source；真实权限/竞争验证延期。 |
 | `bd3e58562`、`143be57d4` | completion popup 多选列并批量生成 SELECT/INSERT | 逻辑已对齐：Monaco 建议列表末尾提供 batch action，独立选择面板支持搜索、checkbox 与可访问焦点；SELECT 按 metadata 顺序插入，INSERT 生成可 Tab 导航的 VALUES snippet。普通单列继续作为默认 Enter 目标，不耦合 Monaco 私有 DOM。真实 WebView/IME 验证延期。 |
 | `d5f4eadf7` | 工具栏执行前冻结 SQL selection | 已对齐：pointer-down 捕获 immutable snapshot，执行目标不再受 focus transition 影响。 |
-| `7ba30ae76` | SQL 文件树创建、重命名、删除 | Oxide 已有 Project Files 创建/保存/重命名/删除与 SQL import；不是 Mongo/ES LSP 阻塞项，后续单独做文件树交互逐项验收。 |
+| `e6f8b2187` | MCP 全局查询超时覆盖 | 已对齐到 Oxide 的独立公开 MCP 架构：`oxide-agent mcp stdio` 与 `tools call` 共用 `--query-timeout-secs` / `OXIDE_MCP_QUERY_TIMEOUT_SECS` 进程级策略；省略保持 30 秒，`0` 表示不自动截止。查询与 estimated EXPLAIN 共用该边界，模型不能通过工具参数扩大期限，公开 MCP 仍严格只读。 |
+| `7ba30ae76` | SQL 文件树创建、重命名、删除 | 已有等价能力：Project Files 树支持新建文件/目录、保存、重命名和带确认删除；Rust 端规范化相对路径、限制 project root、拒绝 symlink 逃逸，并在重命名/删除后同步 tab 与 LSP 虚拟文档。 |
+| `9491ab08d` | AI 生成 SQL 追加时去重 | Oxide 的生产 Assistant 不直接追加或执行消息代码块，而是创建绑定当前 editor revision 的 patch preview，用户审阅后才应用；重复点击不能绕过 revision 校验，也不会形成 DBX 的直接 append 重复路径。 |
+| `f664918e9` | Schema Diff deploy script 执行门禁 | Oxide 的 apply 不执行前端展示脚本；后端按 immutable source、target fingerprint、plan id、动态确认和风险选择重新生成/校验计划，外置 driver 还需 session/token/Host recapture。前端 `supportsSafeApply` 仅作入口收窄，不能扩大后端权限。 |
+| `469bd88c3` | HighGo 优先使用 LIMIT/OFFSET 避免 JDBC cursor 先物化全量结果 | 当前 HighGo 仍是未安装的候选产品，没有签名运行包，因此 Oxide 不会暴露 query/export 能力，也不存在伪安全 cursor。正式接入 HighGo package 时，必须在 sidecar conformance 中证明 server pagination，并禁止以 cursor 页大小冒充数据库执行上限。 |
+| `694c34427` | CLI 安装默认 rustls crypto provider | Oxide 当前依赖图只有 `ring` provider，没有 DBX 同类多 provider 歧义；`cargo tree -i rustls -e features` 已确认 MongoDB、Tonic、Updater/Reqwest 共用 ring。若后续引入 aws-lc 等第二 provider，CLI/main 必须显式安装唯一 provider 并增加启动 smoke。 |
 | `9190554e5` | SQLite SSH backup/query error 校验 | 与本轮 document LSP 无直接交集；已进入最新基线，留在 backup/driver 错误分类路线。 |
 
 ### 最新增量审计（`bd08fb630` → `cd78c0ae1`）

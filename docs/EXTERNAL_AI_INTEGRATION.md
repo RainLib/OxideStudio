@@ -103,7 +103,9 @@ printf '{}' > /tmp/oxide-input.json
         "--max-rows",
         "100",
         "--max-result-bytes",
-        "262144"
+        "262144",
+        "--query-timeout-secs",
+        "300"
       ]
     }
   }
@@ -116,10 +118,13 @@ printf '{}' > /tmp/oxide-input.json
 - `--connection` 固定可访问的连接；
 - `--max-rows` 限制单次查询可返回的最大行数；
 - `--max-result-bytes` 限制单次工具结果的序列化大小；
+- `--query-timeout-secs` 为该 MCP 进程的所有数据库查询和 EXPLAIN 设置统一超时；省略时为 30 秒，设为 `0` 表示不设置自动截止时间；
 - AI 即使在工具参数中传入其他项目或连接 ID，也会被拒绝；
 - 调用方不能通过 `approved`、`approvalLease` 或 `--approve` 自行提升权限。
 
 如果项目只有一个连接，可以不传工具级 `connectionId`。如果项目有多个连接且启动时未使用 `--connection` 固定范围，调用工具时必须显式传入 `connectionId`。
+
+也可以使用 `OXIDE_MCP_QUERY_TIMEOUT_SECS` 环境变量设置同一全局超时。命令参数优先于环境变量；该值不会进入工具 Schema，模型不能在单次调用中扩大期限。
 
 ### 3.2 MCP 协议要求
 

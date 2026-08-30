@@ -78,6 +78,9 @@ pub struct ScopeArgs {
     /// Maximum serialized bytes returned by one tool call.
     #[arg(long, default_value_t = 262_144, value_parser = parse_max_result_bytes)]
     max_result_bytes: usize,
+    /// Global database query timeout in seconds. Omit for 30 seconds; 0 disables the deadline.
+    #[arg(long, env = "OXIDE_MCP_QUERY_TIMEOUT_SECS", value_parser = parse_query_timeout_secs)]
+    query_timeout_secs: Option<u64>,
 }
 
 impl Cli {
@@ -126,7 +129,9 @@ impl ScopeArgs {
         )?;
         let data_dir = resolve_data_dir(self.data_dir)?;
         let store = HeadlessStore::open(&data_dir).await?;
-        Ok(Arc::new(ToolRuntime::new(store, grant).await?))
+        Ok(Arc::new(
+            ToolRuntime::new(store, grant, self.query_timeout_secs).await?,
+        ))
     }
 }
 
@@ -185,6 +190,12 @@ fn parse_max_result_bytes(value: &str) -> Result<usize, String> {
     parse_bounded_usize(value, 4_096, 1_048_576, "max result bytes")
 }
 
+fn parse_query_timeout_secs(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| "query timeout must be a non-negative integer".to_string())
+}
+
 fn parse_bounded_usize(value: &str, min: usize, max: usize, label: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -217,5 +228,48 @@ mod tests {
             Cli::try_parse_from(["oxide-agent", "mcp", "stdio", "--project", "p", "--approve"])
                 .unwrap_err();
         assert!(error.to_string().contains("--approve"));
+    }
+
+    #[test]
+    fn query_timeout_accepts_global_override_and_unlimited() {
+        let finite = Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "stdio",
+            "--project",
+            "p",
+            "--query-timeout-secs",
+            "300",
+        ])
+        .unwrap();
+        let unlimited = Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "stdio",
+            "--project",
+            "p",
+            "--query-timeout-secs",
+            "0",
+        ])
+        .unwrap();
+
+        let timeout = |cli: Cli| match cli.command {
+            Command::Mcp {
+                command: McpCommand::Stdio(scope),
+            } => scope.query_timeout_secs,
+            _ => panic!("expected MCP stdio command"),
+        };
+        assert_eq!(timeout(finite), Some(300));
+        assert_eq!(timeout(unlimited), Some(0));
+        assert!(Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "stdio",
+            "--project",
+            "p",
+            "--query-timeout-secs",
+            "-1",
+        ])
+        .is_err());
     }
 }
