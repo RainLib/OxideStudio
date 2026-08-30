@@ -65,6 +65,7 @@ import {
   databaseService,
   queryService,
   schemaService,
+  tableService,
 } from "@/services/tauri";
 import {
   invalidateRoutineSourceCache,
@@ -90,6 +91,7 @@ import {
   isMaterializedViewObject,
   isReadOnlyRelationObject,
   isViewObject,
+  normalizeDatabaseDriverName,
   pluralizeNamespaceLabel,
   relationObjectLabel,
   supportsTableWorkspace,
@@ -644,6 +646,7 @@ export function SchemaSidebar() {
     scopeKey: string;
     running: boolean;
     message: string;
+    cancelId?: string;
   } | null>(null);
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
@@ -2038,6 +2041,92 @@ export function SchemaSidebar() {
     }
   };
 
+  const exportSelectedTablesSql = async (options: {
+    scopeKey: string;
+    connectionId: string;
+    driver: DatabaseDriver;
+    schema: string;
+    tables: string[];
+  }) => {
+    if (options.tables.length === 0 || tableBatchAction?.running) return;
+    const exportId = tableService.createTableExportId();
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "export",
+      title: `Export ${options.tables.length} table${options.tables.length === 1 ? "" : "s"} to SQL`,
+      detail: options.schema,
+    });
+    setTableBatchAction({
+      scopeKey: options.scopeKey,
+      running: true,
+      message: "Preparing SQL export…",
+      cancelId: exportId,
+    });
+    let unlisten: (() => void) | undefined;
+    try {
+      const readinessError = await setActiveConnection(options.connectionId);
+      if (readinessError) throw new Error(readinessError);
+      unlisten = await tableService.listenTableExportProgress((progress) => {
+        if (progress.exportId !== exportId || progress.terminal) return;
+        const detail = `${progress.rowsExported.toLocaleString()} rows · ${progress.batches.toLocaleString()} batches`;
+        tasks.updateTask(taskId, { detail });
+        setTableBatchAction((current) =>
+          current?.cancelId === exportId
+            ? { ...current, message: detail }
+            : current,
+        );
+      });
+      const result = await tableService.exportDatabaseSql(
+        options.connectionId,
+        options.driver,
+        options.schema,
+        {
+          exportId,
+          includeStructure: false,
+          includeData: true,
+          tableNames: [...options.tables],
+        },
+      );
+      const message = `${result.tablesExported.toLocaleString()} tables · ${result.rowsExported.toLocaleString()} rows`;
+      tasks.finishTask(taskId, `${message} · ${result.filePath}`);
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message: `${message} exported`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/cancel/i.test(message)) {
+        tasks.cancelTask(taskId, "Export cancelled; partial file removed");
+        setTableBatchAction({
+          scopeKey: options.scopeKey,
+          running: false,
+          message: "Export cancelled",
+        });
+      } else {
+        tasks.failTask(taskId, message);
+        setTableBatchAction({
+          scopeKey: options.scopeKey,
+          running: false,
+          message: `Export failed: ${message}`,
+        });
+      }
+    } finally {
+      unlisten?.();
+    }
+  };
+
+  const cancelSelectedTableExport = async () => {
+    const exportId = tableBatchAction?.cancelId;
+    if (!exportId || !tableBatchAction.running) return;
+    setTableBatchAction((current) =>
+      current?.cancelId === exportId
+        ? { ...current, message: "Cancellation requested…" }
+        : current,
+    );
+    await tableService.cancelTableExport(exportId);
+  };
+
   const handleCopyCollectionPreview = async (collection: CollectionInfo) => {
     try {
       await navigator.clipboard.writeText(collectionPreviewSql(collection));
@@ -2955,6 +3044,7 @@ export function SchemaSidebar() {
     const objectConnection = connections.find(
       (connection) => connection.id === connectionId,
     );
+    const objectDriver = objectConnection?.driver;
     const navigationDatabaseName =
       objectConnection && supportsDatabaseCatalogTree(objectConnection.driver)
         ? connectionCatalogDatabaseName(objectConnection)
@@ -3783,6 +3873,7 @@ export function SchemaSidebar() {
               <div className="mx-1 mb-1 mt-0.5 flex min-h-7 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] border-l-2 border-l-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-panel-raised))] px-1.5 py-1 text-[10px]">
                 <Checkbox
                   className={checkboxClass}
+                  disabled={tableBatchAction?.running}
                   checked={
                     allVisibleTablesSelected
                       ? true
@@ -3836,12 +3927,38 @@ export function SchemaSidebar() {
                 >
                   Refresh
                 </button>
+                {objectDriver &&
+                  normalizeDatabaseDriverName(objectDriver) === "postgres" &&
+                  !objectConnection?.driverPackageVersion &&
+                  activeCapabilities.tableExportFormats?.includes("sql") && (
+                    <button
+                      type="button"
+                      className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                      disabled={
+                        selectedTableBatchNames.length === 0 ||
+                        tableBatchAction?.running
+                      }
+                      title="Export the selected tables as one data-only SQL file"
+                      onClick={() =>
+                        void exportSelectedTablesSql({
+                          scopeKey: groupKey,
+                          connectionId,
+                          driver: objectDriver,
+                          schema,
+                          tables: selectedTableBatchNames,
+                        })
+                      }
+                    >
+                      SQL
+                    </button>
+                  )}
                 <button
                   type="button"
                   className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
                   disabled={
                     selectedTableBatchNames.length === 0 ||
                     !objectConnection ||
+                    tableBatchAction?.running ||
                     !activeCapabilities.supportsTableDataTransfer
                   }
                   onClick={() => {
@@ -3859,10 +3976,22 @@ export function SchemaSidebar() {
                 >
                   Transfer
                 </button>
+                {tableBatchAction?.scopeKey === groupKey &&
+                  tableBatchAction.running &&
+                  tableBatchAction.cancelId && (
+                    <button
+                      type="button"
+                      className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-warning))] hover:bg-[hsl(var(--wb-hover))]"
+                      onClick={() => void cancelSelectedTableExport()}
+                    >
+                      Cancel
+                    </button>
+                  )}
                 <button
                   type="button"
                   className="flex h-5 w-5 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
                   aria-label="Exit table selection"
+                  disabled={tableBatchAction?.running}
                   onClick={() => {
                     setTableBatchSelection(null);
                     setTableBatchAction(null);
@@ -4010,6 +4139,7 @@ export function SchemaSidebar() {
                             )}
                             onClick={(event) => {
                               if (isTableBatchSelectionActive) {
+                                if (tableBatchAction?.running) return;
                                 setTableBatchSelection({
                                   scopeKey: groupKey,
                                   ...toggleTableBatchSelection(
@@ -4034,6 +4164,7 @@ export function SchemaSidebar() {
                             {isTableBatchSelectionActive && (
                               <Checkbox
                                 className={checkboxClass}
+                                disabled={tableBatchAction?.running}
                                 checked={selectedTableBatchSet.has(table.name)}
                                 aria-label={`${selectedTableBatchSet.has(table.name) ? "Deselect" : "Select"} ${table.name}`}
                                 onClick={(event) => event.stopPropagation()}

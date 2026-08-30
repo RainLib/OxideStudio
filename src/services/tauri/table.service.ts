@@ -71,6 +71,8 @@ export interface DatabaseSqlExportOptions {
   exportId?: string;
   includeStructure?: boolean;
   includeData?: boolean;
+  /** Exact base-table subset for a bounded data-only SQL export. */
+  tableNames?: string[];
   pageSize?: number;
   sqlInsertBatchSize?: number;
 }
@@ -196,6 +198,7 @@ export async function exportDatabaseSql(
     schema,
     includeStructure: options.includeStructure,
     includeData: options.includeData,
+    tableNames: options.tableNames,
     pageSize: options.pageSize,
     sqlInsertBatchSize: options.sqlInsertBatchSize,
   });

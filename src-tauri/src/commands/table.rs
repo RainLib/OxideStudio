@@ -274,6 +274,54 @@ pub struct DatabaseSqlExportResult {
     pub omitted_object_kinds: Vec<String>,
 }
 
+const MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION: usize = 200;
+
+fn select_database_sql_export_tables(
+    relations: &[TableInfo],
+    requested_names: Option<&[String]>,
+) -> Result<Vec<TableInfo>, String> {
+    let base_tables = relations
+        .iter()
+        .filter(|table| !object_type_is_view(table.table_type.as_deref()))
+        .map(|table| (table.name.as_str(), table))
+        .collect::<HashMap<_, _>>();
+    let Some(requested_names) = requested_names else {
+        return Ok(relations
+            .iter()
+            .filter(|table| !object_type_is_view(table.table_type.as_deref()))
+            .cloned()
+            .collect());
+    };
+    if requested_names.is_empty() {
+        return Err("Select at least one base table for SQL export".to_string());
+    }
+    if requested_names.len() > MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION {
+        return Err(format!(
+            "SQL export accepts at most {MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION} selected tables"
+        ));
+    }
+
+    let mut selected = Vec::with_capacity(requested_names.len());
+    let mut seen = HashSet::with_capacity(requested_names.len());
+    for name in requested_names {
+        if name.trim().is_empty() {
+            return Err("Selected SQL export table names cannot be empty".to_string());
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("Selected SQL export table is duplicated: {name}"));
+        }
+        let table = base_tables.get(name.as_str()).ok_or_else(|| {
+            if relations.iter().any(|relation| relation.name == *name) {
+                format!("Selected SQL export object is not a base table: {name}")
+            } else {
+                format!("Selected SQL export table no longer exists: {name}")
+            }
+        })?;
+        selected.push((*table).clone());
+    }
+    Ok(selected)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableExportTypeCoercion {
@@ -9622,6 +9670,7 @@ pub async fn export_database_sql(
     schema: String,
     include_structure: Option<bool>,
     include_data: Option<bool>,
+    table_names: Option<Vec<String>>,
     page_size: Option<u32>,
     sql_insert_batch_size: Option<usize>,
 ) -> Result<Response<DatabaseSqlExportResult>, String> {
@@ -9633,6 +9682,12 @@ pub async fn export_database_sql(
     let result: Result<DatabaseSqlExportResult, String> = async {
         if !include_structure && !include_data {
             return Err("Select structure, data, or both for database SQL export".to_string());
+        }
+        if table_names.is_some() && include_structure {
+            return Err(
+                "Selected-table SQL export is data-only; use whole-schema export when structure is required"
+                    .to_string(),
+            );
         }
         // A package may reuse the postgres name while changing catalog or DDL
         // semantics.  Do not widen it into this host-owned backup path.
@@ -9653,17 +9708,18 @@ pub async fn export_database_sql(
         }
         let page_size = page_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
         let insert_batch_size = sql_export_insert_batch_rows(sql_insert_batch_size)?;
+        let has_explicit_table_selection = table_names.is_some();
         let relations = manager
             .get_tables(&connection_id, schema)
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
             .collect::<Vec<_>>();
-        let tables = relations
+        let tables = select_database_sql_export_tables(&relations, table_names.as_deref())?;
+        let selected_table_names = tables
             .iter()
-            .filter(|table| !object_type_is_view(table.table_type.as_deref()))
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|table| table.name.as_str())
+            .collect::<HashSet<_>>();
         let discovered_views = relations
             .iter()
             .filter(|table| object_type_is_view(table.table_type.as_deref()))
@@ -9766,7 +9822,7 @@ pub async fn export_database_sql(
             )
             .await
             .map_err(|error| error.to_string())?;
-        let sequences = sequence_results
+        let mut sequences = sequence_results
             .into_iter()
             .next()
             .map(|result| {
@@ -9778,6 +9834,14 @@ pub async fn export_database_sql(
             })
             .transpose()?
             .unwrap_or_default();
+        if has_explicit_table_selection {
+            sequences.retain(|sequence| {
+                sequence
+                    .owner_table
+                    .as_deref()
+                    .is_some_and(|owner| selected_table_names.contains(owner))
+            });
+        }
         let routines = if include_structure {
             let routine_results = manager
                 .query(
@@ -9816,6 +9880,18 @@ pub async fn export_database_sql(
             .map_err(|error| error.to_string())?;
         writeln!(writer, "-- Relation structure: {}; relation data: {}", include_structure, include_data)
             .map_err(|error| error.to_string())?;
+        if has_explicit_table_selection {
+            writeln!(
+                writer,
+                "-- Selected base tables: {}",
+                tables
+                    .iter()
+                    .map(|table| DatabaseKind::Postgres.qualified_table(Some(schema), &table.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(|error| error.to_string())?;
+        }
         // PostgreSQL DDL and the generated INSERT statements are transactional.
         // Keep the backup atomic on restore: a failed relation, row or deferred
         // FK must not leave a partly restored schema behind.
@@ -12903,25 +12979,26 @@ mod tests {
         query_target_parameterized, read_csv_import_preview, read_json_import_preview,
         relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
-        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
-        table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
-        table_data_transfer_plan_digest, table_data_transfer_report_id,
-        transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
-        transfer_target_confirmation_token, transfer_type_mapping_assessment,
-        transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
-        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
-        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
-        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
-        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
-        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
-        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
-        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
-        TableExportWriterContext, TableExportWriterMessage, TableFilter, TableRowUpdate, TableSort,
+        select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
+        summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
+        table_data_transfer_dialect, table_data_transfer_plan_digest,
+        table_data_transfer_report_id, transfer_confirmation_token, transfer_plan_can_execute,
+        transfer_target_column_type, transfer_target_confirmation_token,
+        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
+        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
+        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
+        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
+        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
+        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataCompareResult, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
+        TableDataTransferRequest, TableDataTransferTargetColumn,
+        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
+        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
+        TableFilter, TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
         MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
         MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
@@ -12955,6 +13032,62 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         delete_rows: u64,
         rollback_error: Option<String>,
+    }
+
+    #[test]
+    fn selected_database_sql_export_preserves_exact_order_and_rejects_stale_objects() {
+        let relation = |name: &str, table_type: &str| TableInfo {
+            name: name.to_string(),
+            schema: Some("public".to_string()),
+            table_type: Some(table_type.to_string()),
+            comment: None,
+        };
+        let relations = vec![
+            relation("accounts", "TABLE"),
+            relation("orders", "BASE TABLE"),
+            relation("active_orders", "VIEW"),
+        ];
+        let requested = vec!["orders".to_string(), "accounts".to_string()];
+        let selected = select_database_sql_export_tables(&relations, Some(&requested)).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["orders", "accounts"]
+        );
+
+        assert!(select_database_sql_export_tables(
+            &relations,
+            Some(&["active_orders".to_string()]),
+        )
+        .unwrap_err()
+        .contains("not a base table"));
+        assert!(
+            select_database_sql_export_tables(&relations, Some(&["missing".to_string()]),)
+                .unwrap_err()
+                .contains("no longer exists")
+        );
+        assert!(select_database_sql_export_tables(
+            &relations,
+            Some(&["orders".to_string(), "orders".to_string()]),
+        )
+        .unwrap_err()
+        .contains("duplicated"));
+        let too_many = (0..=MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION)
+            .map(|index| format!("table_{index}"))
+            .collect::<Vec<_>>();
+        assert!(
+            select_database_sql_export_tables(&relations, Some(&too_many))
+                .unwrap_err()
+                .contains("at most 200")
+        );
+        assert_eq!(
+            select_database_sql_export_tables(&relations, None)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
