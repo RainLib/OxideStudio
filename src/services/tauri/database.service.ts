@@ -10,6 +10,10 @@ import type {
   SqliteBackupExecutionReceipt,
   SqliteBackupPlan,
   SqliteBackupPlanRequest,
+  SaveSqliteBackupScheduleRequest,
+  SqliteBackupRun,
+  SqliteBackupRunTrigger,
+  SqliteBackupSchedule,
   DatabaseAdminSession,
   DatabaseAdminMetric,
   DatabaseAdminLockWait,
@@ -361,6 +365,62 @@ export async function executeSqliteBackupPlan(
   );
 }
 
+export async function listSqliteBackupSchedules(): Promise<
+  SqliteBackupSchedule[]
+> {
+  return invokeWithInterceptors<SqliteBackupSchedule[]>(
+    "list_sqlite_backup_schedules",
+  );
+}
+
+export async function saveSqliteBackupSchedule(
+  request: SaveSqliteBackupScheduleRequest,
+): Promise<SqliteBackupSchedule> {
+  return invokeWithInterceptors<SqliteBackupSchedule>(
+    "save_sqlite_backup_schedule",
+    { request },
+  );
+}
+
+export async function deleteSqliteBackupSchedule(id: string): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("delete_sqlite_backup_schedule", {
+    request: { id },
+  });
+}
+
+export async function listSqliteBackupRuns(): Promise<SqliteBackupRun[]> {
+  return invokeWithInterceptors<SqliteBackupRun[]>("list_sqlite_backup_runs");
+}
+
+export async function runSqliteBackupSchedule(
+  scheduleId: string,
+  trigger: SqliteBackupRunTrigger = "manual",
+): Promise<SqliteBackupRun> {
+  return invokeWithInterceptors<SqliteBackupRun>("run_sqlite_backup_schedule", {
+    request: { scheduleId, trigger },
+  });
+}
+
+export async function runDueSqliteBackupSchedules(): Promise<
+  SqliteBackupRun[]
+> {
+  return invokeWithInterceptors<SqliteBackupRun[]>(
+    "run_due_sqlite_backup_schedules",
+  );
+}
+
+export async function cancelSqliteBackupRun(id: string): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("cancel_sqlite_backup_run", {
+    request: { id },
+  });
+}
+
+export async function deleteSqliteBackupRun(id: string): Promise<boolean> {
+  return invokeWithInterceptors<boolean>("delete_sqlite_backup_run", {
+    request: { id },
+  });
+}
+
 export async function listDatabaseAdminMetrics(
   connectionId: string,
   driver: DatabaseDriver,
@@ -543,6 +603,14 @@ export const databaseService = {
   executeDatabaseAdminEventMutation,
   previewSqliteBackupPlan,
   executeSqliteBackupPlan,
+  listSqliteBackupSchedules,
+  saveSqliteBackupSchedule,
+  deleteSqliteBackupSchedule,
+  listSqliteBackupRuns,
+  runSqliteBackupSchedule,
+  runDueSqliteBackupSchedules,
+  cancelSqliteBackupRun,
+  deleteSqliteBackupRun,
   listDatabaseAdminSessions,
   listDatabaseAdminMetrics,
   listDatabaseAdminLockWaits,

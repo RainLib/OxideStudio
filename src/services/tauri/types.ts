@@ -402,6 +402,67 @@ export interface SqliteBackupExecutionReceipt {
   message: string;
 }
 
+export type SqliteBackupScheduleFrequency = "hourly" | "daily" | "weekly";
+export type SqliteBackupRunStatus =
+  | "running"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+export type SqliteBackupRunTrigger = "manual" | "scheduled";
+
+export interface SaveSqliteBackupScheduleRequest {
+  id?: string;
+  name: string;
+  projectId: string;
+  connectionId: string;
+  destinationDirectory: string;
+  frequency: SqliteBackupScheduleFrequency;
+  intervalHours: number;
+  timeOfDay: string;
+  /** Sunday = 0 through Saturday = 6. */
+  weekday: number;
+  retentionCount: number;
+  enabled: boolean;
+}
+
+export interface SqliteBackupSchedule {
+  id: string;
+  name: string;
+  projectId: string;
+  connectionId: string;
+  destinationDirectory: string;
+  frequency: SqliteBackupScheduleFrequency;
+  intervalHours: number;
+  timeOfDay: string;
+  weekday: number;
+  retentionCount: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string;
+  lastRunAt?: string | null;
+  lastRunStatus?: SqliteBackupRunStatus | null;
+}
+
+export interface SqliteBackupRun {
+  id: string;
+  scheduleId: string;
+  scheduleName: string;
+  projectId: string;
+  connectionId: string;
+  destinationDirectory: string;
+  trigger: SqliteBackupRunTrigger;
+  status: SqliteBackupRunStatus;
+  startedAt: string;
+  completedAt?: string | null;
+  filePath?: string | null;
+  byteLen?: number | null;
+  integrityCheck?: string | null;
+  progressPercent: number;
+  error?: string | null;
+}
+
 export interface DatabaseAdminUser {
   name: string;
   host?: string | null;

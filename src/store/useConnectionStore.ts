@@ -825,6 +825,96 @@ export type ConnectionReadiness =
   | { status: "cancelled" }
   | { status: "error"; message: string };
 
+const pendingBackgroundConnections = new Map<
+  string,
+  Promise<ConnectionReadiness>
+>();
+
+/**
+ * Rebuild a backend session for background work without changing the selected
+ * data source or active schema. Scheduled backup must never steal editor
+ * focus merely because its timer fired.
+ */
+export async function ensureConnectionReadyInBackground(
+  connectionId: string,
+): Promise<ConnectionReadiness> {
+  const initialState = useConnectionStore.getState();
+  const initialConnection = initialState.connections.find(
+    (connection) => connection.id === connectionId,
+  );
+  if (!initialConnection) {
+    return { status: "error", message: "The scheduled data source no longer exists." };
+  }
+  if (initialState.connectedConnectionIds.includes(connectionId)) {
+    return { status: "ready", connection: initialConnection };
+  }
+  if (isManagedConnection(initialConnection)) {
+    return {
+      status: "error",
+      message: "Managed data sources cannot run local SQLite backups.",
+    };
+  }
+
+  const scopeKey = connectionScopeKey(initialConnection);
+  const foreground = pendingConnects.get(scopeKey);
+  if (foreground) {
+    await foreground.promise;
+    const nextState = useConnectionStore.getState();
+    const nextConnection = nextState.connections.find(
+      (connection) => connection.id === connectionId,
+    );
+    if (nextConnection && nextState.connectedConnectionIds.includes(connectionId)) {
+      return { status: "ready", connection: nextConnection };
+    }
+  }
+
+  const existing = pendingBackgroundConnections.get(scopeKey);
+  if (existing) return existing;
+
+  const task = (async (): Promise<ConnectionReadiness> => {
+    try {
+      const connectionUrl = connectionUrlForConfig(initialConnection);
+      const sshTunnel = enabledSshTunnel(initialConnection);
+      await connectionService.connect(
+        initialConnection.id,
+        initialConnection.driver,
+        connectionUrl,
+        sshTunnel,
+        initialConnection.driverPackageVersion,
+      );
+      const currentState = useConnectionStore.getState();
+      const currentConnection = currentState.connections.find(
+        (connection) => connection.id === connectionId,
+      );
+      if (
+        !currentConnection ||
+        connectionScopeKey(currentConnection) !== scopeKey
+      ) {
+        await connectionService.disconnect(connectionId).catch(() => undefined);
+        return { status: "cancelled" };
+      }
+      useConnectionStore.setState((state) => ({
+        connectedConnectionIds: Array.from(
+          new Set([...state.connectedConnectionIds, connectionId]),
+        ),
+        isConnected: true,
+        connectionRuntimeStates: {
+          ...state.connectionRuntimeStates,
+          [connectionId]: { status: "connected", updatedAt: Date.now() },
+        },
+      }));
+      return { status: "ready", connection: currentConnection };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { status: "error", message };
+    } finally {
+      pendingBackgroundConnections.delete(scopeKey);
+    }
+  })();
+  pendingBackgroundConnections.set(scopeKey, task);
+  return task;
+}
+
 /**
  * Ensures a cached data source has a live backend connection before a remote
  * operation starts. Project switches can replace the connection scope while

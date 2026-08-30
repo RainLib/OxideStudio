@@ -10,11 +10,19 @@ import {
   executeDatabaseMaintenance,
   executeSqliteBackupPlan,
   executeDatabaseAdminEventMutation,
+  cancelSqliteBackupRun,
+  deleteSqliteBackupRun,
+  deleteSqliteBackupSchedule,
   getDatabaseAdminServerIdentity,
   previewDatabaseMaintenance,
   previewSqliteBackupPlan,
   previewDatabaseAdminEventMutation,
   listDatabaseAdminEvents,
+  listSqliteBackupRuns,
+  listSqliteBackupSchedules,
+  runDueSqliteBackupSchedules,
+  runSqliteBackupSchedule,
+  saveSqliteBackupSchedule,
 } from "./database.service";
 
 describe("database administration service", () => {
@@ -171,5 +179,44 @@ describe("database administration service", () => {
         },
       },
     );
+  });
+
+  it("uses typed host commands for the complete SQLite schedule lifecycle", async () => {
+    const schedule = {
+      name: "Nightly app",
+      projectId: "project-1",
+      connectionId: "sqlite-1",
+      destinationDirectory: "C:/backups",
+      frequency: "daily" as const,
+      intervalHours: 24,
+      timeOfDay: "02:00",
+      weekday: 1,
+      retentionCount: 7,
+      enabled: true,
+    };
+    invokeWithInterceptors.mockResolvedValue(undefined);
+
+    await listSqliteBackupSchedules();
+    await saveSqliteBackupSchedule(schedule);
+    await listSqliteBackupRuns();
+    await runSqliteBackupSchedule("schedule-1");
+    await runDueSqliteBackupSchedules();
+    await cancelSqliteBackupRun("run-1");
+    await deleteSqliteBackupRun("run-1");
+    await deleteSqliteBackupSchedule("schedule-1");
+
+    expect(invokeWithInterceptors.mock.calls).toEqual([
+      ["list_sqlite_backup_schedules"],
+      ["save_sqlite_backup_schedule", { request: schedule }],
+      ["list_sqlite_backup_runs"],
+      [
+        "run_sqlite_backup_schedule",
+        { request: { scheduleId: "schedule-1", trigger: "manual" } },
+      ],
+      ["run_due_sqlite_backup_schedules"],
+      ["cancel_sqlite_backup_run", { request: { id: "run-1" } }],
+      ["delete_sqlite_backup_run", { request: { id: "run-1" } }],
+      ["delete_sqlite_backup_schedule", { request: { id: "schedule-1" } }],
+    ]);
   });
 });

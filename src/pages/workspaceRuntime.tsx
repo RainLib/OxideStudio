@@ -17,6 +17,7 @@ import { useSettingsStore } from "@/store/useSettingsStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import { useSqliteBackupScheduler } from "@/features/database-admin/model/useSqliteBackupScheduler";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { useShortcuts } from "@/hooks/useShortcuts";
@@ -122,6 +123,7 @@ const QueryHistorySync = lazy(() =>
 export function WorkspaceRuntime() {
   useShortcuts();
   useUnsavedChangesGuard();
+  useSqliteBackupScheduler();
   const activeTab = useTabStore(
     useShallow((state) => {
       const tab = state.tabs.find((item) => item.id === state.activeTabId);

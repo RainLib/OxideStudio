@@ -110,6 +110,10 @@ pub fn run() {
             app.manage(QueryCancellationState::default());
             app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::table::TableExportCancellationState::default());
+            app.manage(
+                commands::sqlite_backup_schedule::SqliteBackupScheduleState::load(app.handle())
+                    .map_err(std::io::Error::other)?,
+            );
             app.manage(commands::schema_diff::ExternalSchemaMigrationSessionState::default());
             app.manage(commands::ai::AiCancellationState::default());
             app.manage(enterprise::EnterpriseClient::new(app.handle()));
@@ -230,6 +234,14 @@ pub fn run() {
             commands::database_admin::events::execute_database_admin_event_mutation,
             commands::sqlite_backup::preview_sqlite_backup_plan,
             commands::sqlite_backup::execute_sqlite_backup_plan,
+            commands::sqlite_backup_schedule::list_sqlite_backup_schedules,
+            commands::sqlite_backup_schedule::list_sqlite_backup_runs,
+            commands::sqlite_backup_schedule::save_sqlite_backup_schedule,
+            commands::sqlite_backup_schedule::delete_sqlite_backup_schedule,
+            commands::sqlite_backup_schedule::run_sqlite_backup_schedule,
+            commands::sqlite_backup_schedule::run_due_sqlite_backup_schedules,
+            commands::sqlite_backup_schedule::cancel_sqlite_backup_run,
+            commands::sqlite_backup_schedule::delete_sqlite_backup_run,
             commands::database_admin::list_database_admin_sessions,
             commands::database_admin::list_database_admin_metrics,
             commands::database_admin::list_database_admin_lock_waits,

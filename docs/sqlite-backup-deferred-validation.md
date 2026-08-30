@@ -14,3 +14,38 @@ The local workflow is implemented and covered by native in-memory/file contract 
 - Restart Oxide after a successful restore and compare schema metadata, query results, foreign keys, indexes, triggers, generated columns, page size, journal mode, and user version.
 - Validate memory-only SQLite backup and restore; confirm the one-connection pool does not deadlock and that a restored schema invalidates Explorer metadata.
 - Remote SQLite backup/restore is excluded until D13 provides the signed, version-pinned worker, confirmed SSH host key, bounded remote transfer path, and cleanup receipt.
+
+## Scheduled backup matrix
+
+The application now owns schedule persistence, due-time revalidation, native
+backup progress/cancellation and retention. Unit tests do not replace these
+desktop/filesystem checks:
+
+- Run hourly, daily and weekly schedules across local-time DST gaps and repeated
+  hours. Suspend the machine across one or several due times and confirm Oxide
+  runs at most one bounded catch-up per schedule after the application is visible.
+- Switch projects while schedules exist in both projects. Confirm only the active
+  project's due work restores a session, and that background connection recovery
+  never changes the selected data source, schema or editor tab.
+- Cancel during page copy, integrity verification and publication. Confirm the run
+  reaches `cancelled`, no final or partial file is published, and the next run can
+  start without a stale active lease.
+- Terminate Oxide during a running backup. On restart, confirm the persisted run is
+  marked `interrupted`, its lease is gone, and it is never replayed automatically.
+- Change, remove or replace the destination directory after saving a schedule.
+  Confirm the Host records a bounded failed run, advances the next due time and
+  never follows a symlink or publishes outside the reviewed canonical directory.
+- Set retention to 1, 2 and 100, then generate more successful runs. Confirm only
+  old ordinary files with the Host prefix in the run's own canonical directory are
+  deleted; renamed files, symlinks and unrelated SQLite files remain untouched.
+- Delete a schedule while completed history exists, then delete an individual run.
+  Confirm the run-owned destination still permits safe file cleanup without the
+  deleted schedule record.
+- Corrupt `sqlite-schedules.json`, restart, and confirm the original bytes are
+  quarantined in app data before an empty store is initialized. Verify a persisted
+  `running` run is converted to `interrupted` atomically.
+- Measure a multi-gigabyte backup while editing/querying another connection. Track
+  WebView frame time, Rust memory, IPC polling volume and cancellation latency.
+
+PostgreSQL/MySQL scheduled exports and remote SQLite-over-SSH remain explicitly
+outside this completed local SQLite schedule contract.

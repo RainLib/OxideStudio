@@ -1,6 +1,8 @@
 import {
   useContext,
   useEffect,
+  lazy,
+  Suspense,
   useMemo,
   useRef,
   useState,
@@ -99,7 +101,14 @@ export type SettingsSection =
   | "dataEditor"
   | "databaseExplorer"
   | "drivers"
+  | "backups"
   | "ai";
+
+const SqliteBackupSettings = lazy(() =>
+  import("@/features/database-admin/ui/SqliteBackupSettings").then((module) => ({
+    default: module.SqliteBackupSettings,
+  })),
+);
 
 type SettingsTreeGroup = {
   id: string;
@@ -190,6 +199,11 @@ function createSettingsTree(t: Translate): SettingsTreeGroup[] {
         label: t("settings.section.drivers"),
         section: "drivers",
       },
+      {
+        id: "backups",
+        label: t("settings.section.backups"),
+        section: "backups",
+      },
     ],
   },
   {
@@ -254,6 +268,10 @@ function createSectionMeta(
     drivers: {
       group: t("settings.group.database"),
       title: t("settings.section.drivers"),
+    },
+    backups: {
+      group: t("settings.group.database"),
+      title: t("settings.section.backups"),
     },
     ai: {
       group: t("settings.group.tools"),
@@ -751,6 +769,17 @@ export function SettingsDialog({
                 />
               )}
               {activeSection === "drivers" && <DriverManagementSettings />}
+              {activeSection === "backups" && (
+                <Suspense
+                  fallback={
+                    <div className="py-8 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
+                      Loading backup schedules…
+                    </div>
+                  }
+                >
+                  <SqliteBackupSettings />
+                </Suspense>
+              )}
               {activeSection === "ai" && (
                 <AiSettings
                   aiEnabled={aiEnabled}

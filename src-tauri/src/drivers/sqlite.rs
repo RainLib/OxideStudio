@@ -1,4 +1,4 @@
-use crate::core::driver::{DatabaseDriver, LocalDatabaseFileReceipt};
+use crate::core::driver::{DatabaseDriver, LocalDatabaseBackupControl, LocalDatabaseFileReceipt};
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
     QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
@@ -211,6 +211,16 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     async fn backup_local_database(&self, destination: &Path) -> Result<LocalDatabaseFileReceipt> {
+        let control = LocalDatabaseBackupControl::default();
+        self.backup_local_database_controlled(destination, &control)
+            .await
+    }
+
+    async fn backup_local_database_controlled(
+        &self,
+        destination: &Path,
+        control: &LocalDatabaseBackupControl,
+    ) -> Result<LocalDatabaseFileReceipt> {
         if self.read_only {
             return Err(anyhow!(
                 "Backup is unavailable through a read-only SQLite connection"
@@ -220,6 +230,10 @@ impl DatabaseDriver for SqliteDriver {
         self.ensure_no_active_transactions().await?;
         let pool = self.pool().await?;
         prepare_backup_destination(&pool, destination).await?;
+        if control.is_cancelled() {
+            return Err(anyhow!("SQLite backup was cancelled"));
+        }
+        control.set_progress_percent(1);
 
         let temporary = temporary_backup_path(destination)?;
         let result = async {
@@ -229,11 +243,18 @@ impl DatabaseDriver for SqliteDriver {
                 .disable_statement_logging();
             let mut backup = SqliteConnection::connect_with(&options).await?;
             let mut source = pool.acquire().await?;
-            copy_sqlite_database(&mut source, &mut backup).await?;
+            copy_sqlite_database_controlled(&mut source, &mut backup, Some(control)).await?;
+            control.set_progress_percent(92);
             let integrity_check = sqlite_connection_integrity(&mut backup).await?;
+            control.set_progress_percent(96);
             backup.close().await?;
             sync_file(&temporary).await?;
+            control.set_progress_percent(99);
+            if control.is_cancelled() {
+                return Err(anyhow!("SQLite backup was cancelled"));
+            }
             replace_backup_file(&temporary, destination)?;
+            control.set_progress_percent(100);
             let byte_len = std::fs::metadata(destination)?.len();
             Ok(LocalDatabaseFileReceipt {
                 byte_len,
@@ -638,14 +659,23 @@ async fn copy_sqlite_database(
     source: &mut SqliteConnection,
     destination: &mut SqliteConnection,
 ) -> Result<()> {
+    copy_sqlite_database_controlled(source, destination, None).await
+}
+
+async fn copy_sqlite_database_controlled(
+    source: &mut SqliteConnection,
+    destination: &mut SqliteConnection,
+    control: Option<&LocalDatabaseBackupControl>,
+) -> Result<()> {
     let mut source = source.lock_handle().await?;
     let mut destination = destination.lock_handle().await?;
-    sqlite_online_backup(&mut source, &mut destination)
+    sqlite_online_backup(&mut source, &mut destination, control)
 }
 
 fn sqlite_online_backup(
     source: &mut LockedSqliteHandle<'_>,
     destination: &mut LockedSqliteHandle<'_>,
+    control: Option<&LocalDatabaseBackupControl>,
 ) -> Result<()> {
     let source_handle = source.as_raw_handle().as_ptr();
     let destination_handle = destination.as_raw_handle().as_ptr();
@@ -665,10 +695,22 @@ fn sqlite_online_backup(
     }
 
     let mut busy_retries = 0_u16;
+    let mut cancelled = false;
     let step_code = loop {
+        if control.is_some_and(LocalDatabaseBackupControl::is_cancelled) {
+            cancelled = true;
+            break libsqlite3_sys::SQLITE_INTERRUPT;
+        }
         // Copy in bounded page batches so a concurrent reader can briefly
         // yield without turning this operation into an unbounded busy loop.
         let code = unsafe { libsqlite3_sys::sqlite3_backup_step(backup, 256) };
+        if let Some(control) = control {
+            let page_count = unsafe { libsqlite3_sys::sqlite3_backup_pagecount(backup) }.max(1);
+            let remaining = unsafe { libsqlite3_sys::sqlite3_backup_remaining(backup) }.max(0);
+            let copied = page_count.saturating_sub(remaining);
+            let percent = ((i64::from(copied) * 90) / i64::from(page_count)) as u8;
+            control.set_progress_percent(percent.max(1));
+        }
         match code {
             libsqlite3_sys::SQLITE_OK => busy_retries = 0,
             libsqlite3_sys::SQLITE_DONE => break code,
@@ -680,6 +722,9 @@ fn sqlite_online_backup(
         }
     };
     let finish_code = unsafe { libsqlite3_sys::sqlite3_backup_finish(backup) };
+    if cancelled {
+        return Err(anyhow!("SQLite backup was cancelled"));
+    }
     if step_code == libsqlite3_sys::SQLITE_DONE && finish_code == libsqlite3_sys::SQLITE_OK {
         return Ok(());
     }
@@ -1071,6 +1116,29 @@ mod tests {
         restored.connect().await.unwrap();
         let rows = restored.query("SELECT value FROM entries").await.unwrap();
         assert_eq!(rows[0].rows[0][0], Value::String("snapshot".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_backup_never_publishes_a_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("cancelled.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT)")
+            .await
+            .unwrap();
+        let control = LocalDatabaseBackupControl::default();
+        control.cancel();
+
+        let error = driver
+            .backup_local_database_controlled(&backup_path, &control)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().to_ascii_lowercase().contains("cancelled"));
+        assert!(!backup_path.exists());
+        assert_eq!(control.progress_percent(), 0);
     }
 
     #[tokio::test]

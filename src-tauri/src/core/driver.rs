@@ -15,6 +15,10 @@ use oxide_driver_protocol::{
     SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
 };
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DocumentPageRequest<'a> {
@@ -104,6 +108,34 @@ pub struct LocalDatabaseFileReceipt {
     pub integrity_check: String,
 }
 
+/// Process-local control shared by a scheduled backup command and the native
+/// driver. It contains no path, SQL, or credentials and only exposes bounded
+/// progress plus cooperative cancellation.
+#[derive(Debug, Clone, Default)]
+pub struct LocalDatabaseBackupControl {
+    cancelled: Arc<AtomicBool>,
+    progress_percent: Arc<AtomicU8>,
+}
+
+impl LocalDatabaseBackupControl {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn set_progress_percent(&self, value: u8) {
+        self.progress_percent
+            .store(value.min(100), Ordering::Release);
+    }
+
+    pub fn progress_percent(&self) -> u8 {
+        self.progress_percent.load(Ordering::Acquire)
+    }
+}
+
 fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
     anyhow!("{feature} is not implemented for this driver")
 }
@@ -184,6 +216,19 @@ pub trait DatabaseDriver: Send + Sync {
     /// enables the capability by itself.
     async fn backup_local_database(&self, _destination: &Path) -> Result<LocalDatabaseFileReceipt> {
         Err(unsupported_driver_feature("Local database backup"))
+    }
+
+    async fn backup_local_database_controlled(
+        &self,
+        destination: &Path,
+        control: &LocalDatabaseBackupControl,
+    ) -> Result<LocalDatabaseFileReceipt> {
+        if control.is_cancelled() {
+            return Err(anyhow!("Local database backup was cancelled"));
+        }
+        let receipt = self.backup_local_database(destination).await?;
+        control.set_progress_percent(100);
+        Ok(receipt)
     }
 
     /// Restore a local file database through the live driver's native backup

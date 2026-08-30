@@ -5,7 +5,9 @@ use super::protocol::{
 use super::ssh::SshTunnel;
 use super::{
     dialect::DatabaseCapabilities,
-    driver::{DatabaseDriver, DocumentPageRequest, LocalDatabaseFileReceipt},
+    driver::{
+        DatabaseDriver, DocumentPageRequest, LocalDatabaseBackupControl, LocalDatabaseFileReceipt,
+    },
 };
 use anyhow::{anyhow, Result};
 use oxide_driver_protocol::{
@@ -276,6 +278,18 @@ impl ConnectionManager {
         self.get_driver(id)
             .await?
             .backup_local_database(destination)
+            .await
+    }
+
+    pub async fn backup_local_database_controlled(
+        &self,
+        id: &str,
+        destination: &Path,
+        control: &LocalDatabaseBackupControl,
+    ) -> Result<LocalDatabaseFileReceipt> {
+        self.get_driver(id)
+            .await?
+            .backup_local_database_controlled(destination, control)
             .await
     }
 
