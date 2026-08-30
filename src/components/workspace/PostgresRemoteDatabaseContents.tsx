@@ -12,6 +12,7 @@ import {
   Table,
   TableProperties,
   Upload,
+  Wrench,
 } from "lucide-react";
 import {
   ContextMenu,
@@ -59,6 +60,11 @@ interface PostgresRemoteDatabaseContentsProps {
     schema: string,
     table: string,
   ) => void;
+  onOpenTableMaintenance?: (
+    database: string,
+    schema: string,
+    table: string,
+  ) => void;
   onImportSqlScript?: (database: string, schema: string) => void;
   onOpenTable: (
     database: string,
@@ -83,6 +89,7 @@ export function PostgresRemoteDatabaseContents({
   onOpenSchemaDataTransfer,
   onOpenTableSchemaSnapshots,
   onOpenTableDataTransfer,
+  onOpenTableMaintenance,
   onImportSqlScript,
   onOpenTable,
 }: PostgresRemoteDatabaseContentsProps) {
@@ -515,6 +522,20 @@ export function PostgresRemoteDatabaseContents({
                           >
                             <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                             Transfer Table Data...
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                            disabled={isView || !onOpenTableMaintenance}
+                            onClick={() =>
+                              onOpenTableMaintenance?.(
+                                database,
+                                schema,
+                                table.name,
+                              )
+                            }
+                          >
+                            <Wrench className="mr-2 h-3.5 w-3.5" />
+                            Maintain Table...
                           </ContextMenuItem>
                           <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
                           <ContextMenuItem

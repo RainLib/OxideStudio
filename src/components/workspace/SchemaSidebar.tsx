@@ -33,6 +33,7 @@ import {
   ListChecks,
   AlertTriangle,
   ShieldCheck,
+  Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -82,6 +83,7 @@ import type {
   TableInfo,
 } from "@/services/tauri/types";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
+import type { DatabaseMaintenanceTarget } from "@/features/database-admin";
 import {
   DEFAULT_DATABASE_DRIVER,
   databaseDriverProfile,
@@ -218,6 +220,11 @@ const RedisKeyDialog = lazy(() =>
 const DatabaseAdministrationDialog = lazy(() =>
   import("@/features/database-admin").then((module) => ({
     default: module.DatabaseAdministrationDialog,
+  })),
+);
+const DatabaseMaintenanceDialog = lazy(() =>
+  import("@/features/database-admin").then((module) => ({
+    default: module.DatabaseMaintenanceDialog,
   })),
 );
 const TableDataTransferDialog = lazy(() =>
@@ -515,6 +522,8 @@ export function SchemaSidebar() {
     databaseAdministrationConnectionId,
     setDatabaseAdministrationConnectionId,
   ] = useState<string | null>(null);
+  const [databaseMaintenanceTarget, setDatabaseMaintenanceTarget] =
+    useState<DatabaseMaintenanceTarget | null>(null);
   const [connectingConnectionIds, setConnectingConnectionIds] = useState<
     string[]
   >([]);
@@ -4581,6 +4590,32 @@ export function SchemaSidebar() {
                               >
                                 Empty Table
                               </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() => {
+                                  if (!objectConnection) return;
+                                  setDatabaseMaintenanceTarget({
+                                    connectionId,
+                                    connectionName: objectConnection.name,
+                                    driver: objectConnection.driver,
+                                    database:
+                                      objectConnection.driver === "postgres"
+                                        ? navigationDatabaseName
+                                        : undefined,
+                                    schema,
+                                    table: table.name,
+                                  });
+                                }}
+                                disabled={
+                                  isReadOnlyRelation ||
+                                  !objectConnection ||
+                                  !supportsDatabaseAdministration(objectDriver) ||
+                                  Boolean(objectConnection.driverPackageVersion)
+                                }
+                              >
+                                <Wrench className="mr-2 h-3.5 w-3.5" />
+                                Maintain Table...
+                              </ContextMenuItem>
                               {isView && !isMaterializedView && (
                                 <ContextMenuItem
                                   className={menuItemClass}
@@ -5698,6 +5733,19 @@ export function SchemaSidebar() {
                                   scope: "table",
                                 })
                               }
+                              onOpenTableMaintenance={
+                                connection.driverPackageVersion
+                                  ? undefined
+                                  : (databaseName, schema, table) =>
+                                      setDatabaseMaintenanceTarget({
+                                        connectionId: connection.id,
+                                        connectionName: connection.name,
+                                        driver: connection.driver,
+                                        database: databaseName,
+                                        schema,
+                                        table,
+                                      })
+                              }
                               onImportSqlScript={(databaseName, schema) =>
                                 void handleImportSqlScript({
                                   connectionId: connection.id,
@@ -6225,6 +6273,21 @@ export function SchemaSidebar() {
                   connection.id === databaseAdministrationConnectionId,
               )?.name
             }
+          />
+        )}
+        {databaseMaintenanceTarget && (
+          <DatabaseMaintenanceDialog
+            key={[
+              databaseMaintenanceTarget.connectionId,
+              databaseMaintenanceTarget.database,
+              databaseMaintenanceTarget.schema,
+              databaseMaintenanceTarget.table,
+            ].join(":")}
+            open
+            target={databaseMaintenanceTarget}
+            onOpenChange={(open) => {
+              if (!open) setDatabaseMaintenanceTarget(null);
+            }}
           />
         )}
         {isCreateDbDialogOpen && (

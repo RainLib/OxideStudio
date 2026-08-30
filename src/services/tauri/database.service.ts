@@ -3,6 +3,9 @@ import type {
   DatabaseCapabilities,
   DatabaseDriverActivationState,
   DatabaseAdminServerIdentity,
+  DatabaseMaintenancePlan,
+  DatabaseMaintenanceRequest,
+  ExecuteDatabaseMaintenanceRequest,
   DatabaseAdminSession,
   DatabaseAdminMetric,
   DatabaseAdminLockWait,
@@ -274,6 +277,29 @@ export async function getDatabaseAdminServerIdentity(
   );
 }
 
+export async function previewDatabaseMaintenance(
+  connectionId: string,
+  driver: DatabaseDriver,
+  request: DatabaseMaintenanceRequest,
+): Promise<DatabaseMaintenancePlan> {
+  return invokeWithInterceptors<DatabaseMaintenancePlan>(
+    "preview_database_maintenance",
+    { connectionId, driver, request },
+  );
+}
+
+export async function executeDatabaseMaintenance(
+  connectionId: string,
+  driver: DatabaseDriver,
+  request: ExecuteDatabaseMaintenanceRequest,
+): Promise<string> {
+  return invokeWithInterceptors<string>("execute_database_maintenance", {
+    connectionId,
+    driver,
+    request,
+  });
+}
+
 export async function listDatabaseAdminMetrics(
   connectionId: string,
   driver: DatabaseDriver,
@@ -449,6 +475,8 @@ export const databaseService = {
   activateExternalDatabaseDriver,
   rollbackExternalDatabaseDriver,
   getDatabaseAdminServerIdentity,
+  previewDatabaseMaintenance,
+  executeDatabaseMaintenance,
   listDatabaseAdminSessions,
   listDatabaseAdminMetrics,
   listDatabaseAdminLockWaits,

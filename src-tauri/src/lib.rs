@@ -223,6 +223,8 @@ pub fn run() {
             commands::database::drop_database,
             commands::database::rename_database,
             commands::database_admin::get_database_admin_server_identity,
+            commands::database_admin::maintenance::preview_database_maintenance,
+            commands::database_admin::maintenance::execute_database_maintenance,
             commands::database_admin::list_database_admin_sessions,
             commands::database_admin::list_database_admin_metrics,
             commands::database_admin::list_database_admin_lock_waits,

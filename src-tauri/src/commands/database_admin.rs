@@ -5,6 +5,8 @@
 //! common session and account operations while retaining validation, explicit
 //! confirmation and database-specific quoting at the Rust boundary.
 
+pub mod maintenance;
+
 use crate::core::{
     dialect::DatabaseKind,
     manager::ConnectionManager,
@@ -255,6 +257,10 @@ fn postgres_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn mysql_identifier(value: &str) -> String {
+    format!("`{}`", value.replace('`', "``"))
+}
+
 fn mysql_account(name: &str, host: Option<&str>) -> Result<String, String> {
     let name = validate_text(name, "User name", 128)?;
     let host = validate_text(host.unwrap_or("%"), "Host", 255)?;
@@ -350,6 +356,10 @@ fn classify_database_admin_error(error: &str) -> DatabaseAdminErrorKind {
         "invalid ",
         "must be a positive number",
         "does not match the active connection identity",
+        "maintenance target table is no longer available",
+        "maintenance target must be a base table",
+        "maintenance plan changed",
+        "maintenance confirmation text does not match",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))
@@ -360,6 +370,8 @@ fn classify_database_admin_error(error: &str) -> DatabaseAdminErrorKind {
         "database administration is currently available",
         "unsupported database driver",
         "metadata is unavailable",
+        " is not supported for ",
+        "remote database maintenance is supported only",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))
