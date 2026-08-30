@@ -147,8 +147,10 @@ import {
   MAX_EXPLORER_TABLE_BATCH_SELECTION,
   pruneTableBatchSelection,
   settleTableBatchWork,
+  summarizeTableBatchFailures,
   toggleAllVisibleTableBatchSelection,
   toggleTableBatchSelection,
+  type TableBatchFailureDetail,
   type TableBatchSelection,
 } from "@/features/database-explorer/model/tableBatchSelection";
 import {
@@ -647,6 +649,8 @@ export function SchemaSidebar() {
     running: boolean;
     message: string;
     cancelId?: string;
+    failures?: TableBatchFailureDetail[];
+    omittedFailures?: number;
   } | null>(null);
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
@@ -1997,8 +2001,11 @@ export function SchemaSidebar() {
           }),
         6,
       );
-      const failures = results.filter((result) => result.status === "rejected");
-      const refreshed = results.length - failures.length;
+      const failureSummary = summarizeTableBatchFailures(
+        options.tables,
+        results,
+      );
+      const refreshed = results.length - failureSummary.total;
       bumpMetadataVersion();
       await settleTableBatchWork(
         options.tables,
@@ -2013,18 +2020,20 @@ export function SchemaSidebar() {
             ),
         6,
       );
-      const message = failures.length
-        ? `${refreshed} refreshed · ${failures.length} failed`
+      const message = failureSummary.total
+        ? `${refreshed} refreshed · ${failureSummary.total} failed`
         : `${refreshed} refreshed`;
       setTableBatchAction({
         scopeKey: options.scopeKey,
         running: false,
         message,
+        failures: failureSummary.failures,
+        omittedFailures: failureSummary.omitted,
       });
-      if (failures.length) {
+      if (failureSummary.total) {
         tasks.failTask(
           taskId,
-          `${failures.length} table metadata refresh${failures.length === 1 ? "" : "es"} failed`,
+          `${failureSummary.total} table metadata refresh${failureSummary.total === 1 ? "" : "es"} failed`,
           message,
         );
       } else {
@@ -3870,8 +3879,9 @@ export function SchemaSidebar() {
               </div>
             )}
             {isTableBatchSelectionActive && tableRelations.length > 0 && (
-              <div className="mx-1 mb-1 mt-0.5 flex min-h-7 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] border-l-2 border-l-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-panel-raised))] px-1.5 py-1 text-[10px]">
-                <Checkbox
+              <div className="mx-1 mb-1 mt-0.5 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] border-l-2 border-l-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-panel-raised))] text-[10px]">
+                <div className="flex min-h-7 items-center gap-1 px-1.5 py-1">
+                  <Checkbox
                   className={checkboxClass}
                   disabled={tableBatchAction?.running}
                   checked={
@@ -3987,18 +3997,47 @@ export function SchemaSidebar() {
                       Cancel
                     </button>
                   )}
-                <button
-                  type="button"
-                  className="flex h-5 w-5 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                  aria-label="Exit table selection"
-                  disabled={tableBatchAction?.running}
-                  onClick={() => {
-                    setTableBatchSelection(null);
-                    setTableBatchAction(null);
-                  }}
-                >
-                  <X size={10} />
-                </button>
+                  <button
+                    type="button"
+                    className="flex h-5 w-5 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                    aria-label="Exit table selection"
+                    disabled={tableBatchAction?.running}
+                    onClick={() => {
+                      setTableBatchSelection(null);
+                      setTableBatchAction(null);
+                    }}
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+                {tableBatchAction?.scopeKey === groupKey &&
+                  !tableBatchAction.running &&
+                  tableBatchAction.failures?.length ? (
+                    <details className="border-t border-[hsl(var(--wb-border-subtle))] px-1.5 py-1">
+                      <summary className="cursor-pointer select-none text-[hsl(var(--wb-warning))] outline-none focus-visible:underline">
+                        Show refresh failure details
+                      </summary>
+                      <ul className="mt-1 max-h-32 space-y-1 overflow-auto pl-3.5">
+                        {tableBatchAction.failures.map((failure) => (
+                          <li key={failure.name} className="list-disc">
+                            <span className="font-medium text-[hsl(var(--wb-text))]">
+                              {failure.name}
+                            </span>
+                            <span className="wb-muted">
+                              {" · "}
+                              {failure.message}
+                            </span>
+                          </li>
+                        ))}
+                        {Boolean(tableBatchAction.omittedFailures) && (
+                          <li className="list-disc wb-muted">
+                            {tableBatchAction.omittedFailures} more failures are
+                            omitted
+                          </li>
+                        )}
+                      </ul>
+                    </details>
+                  ) : null}
               </div>
             )}
             {!hasSchemaObjectContext ? (

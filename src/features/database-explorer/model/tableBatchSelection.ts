@@ -5,6 +5,55 @@ export type TableBatchSelection = {
   anchor: string | null;
 };
 
+export type TableBatchFailureDetail = {
+  name: string;
+  message: string;
+};
+
+export type TableBatchFailureSummary = {
+  failures: TableBatchFailureDetail[];
+  total: number;
+  omitted: number;
+};
+
+const MAX_TABLE_BATCH_FAILURE_DETAILS = 20;
+const MAX_TABLE_BATCH_FAILURE_MESSAGE_CHARS = 240;
+
+function boundedBatchFailureMessage(reason: unknown): string {
+  const source = reason instanceof Error ? reason.message : String(reason);
+  const normalized = source
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "Metadata refresh failed";
+  return normalized.slice(0, MAX_TABLE_BATCH_FAILURE_MESSAGE_CHARS);
+}
+
+export function summarizeTableBatchFailures<T>(
+  names: readonly string[],
+  results: readonly PromiseSettledResult<T>[],
+  maxDetails = MAX_TABLE_BATCH_FAILURE_DETAILS,
+): TableBatchFailureSummary {
+  const limit = Math.max(
+    0,
+    Math.floor(Number.isFinite(maxDetails) ? maxDetails : 0),
+  );
+  const allFailures: TableBatchFailureDetail[] = [];
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    if (result?.status !== "rejected") continue;
+    allFailures.push({
+      name: names[index] || `Object ${index + 1}`,
+      message: boundedBatchFailureMessage(result.reason),
+    });
+  }
+  return {
+    failures: allFailures.slice(0, limit),
+    total: allFailures.length,
+    omitted: Math.max(0, allFailures.length - limit),
+  };
+}
+
 function orderedSelection(
   selected: ReadonlySet<string>,
   visibleNames: readonly string[],

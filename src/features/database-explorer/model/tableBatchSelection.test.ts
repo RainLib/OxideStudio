@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   pruneTableBatchSelection,
   settleTableBatchWork,
+  summarizeTableBatchFailures,
   toggleAllVisibleTableBatchSelection,
   toggleTableBatchSelection,
 } from "./tableBatchSelection";
@@ -80,5 +81,25 @@ describe("Explorer table batch selection", () => {
       "fulfilled",
     ]);
     expect(results[3]).toEqual({ status: "fulfilled", value: "USERS" });
+  });
+
+  it("keeps bounded ordered failure details without control characters", () => {
+    const results: PromiseSettledResult<string>[] = [
+      { status: "fulfilled", value: "ok" },
+      {
+        status: "rejected",
+        reason: new Error(`permission\n denied ${"x".repeat(300)}`),
+      },
+      { status: "rejected", reason: "\u0000catalog unavailable" },
+    ];
+
+    const summary = summarizeTableBatchFailures(visible, results, 1);
+
+    expect(summary.total).toBe(2);
+    expect(summary.omitted).toBe(1);
+    expect(summary.failures).toHaveLength(1);
+    expect(summary.failures[0]?.name).toBe("orders");
+    expect(summary.failures[0]?.message).toMatch(/^permission denied/);
+    expect(summary.failures[0]?.message.length).toBeLessThanOrEqual(240);
   });
 });
