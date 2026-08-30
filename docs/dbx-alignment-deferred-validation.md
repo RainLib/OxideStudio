@@ -543,6 +543,11 @@ explicit deferred validation task rather than an implicit release check.
 - Verify UTF-8 native CSV confirmation performs the full-file preflight before
   opening a transaction. A rejected row must stop strict import, expose only
   bounded row numbers/error codes, and leave no target rows committed.
+- Verify CSV, TSV, and custom-delimited TXT sources with title rows after a
+  preamble, a later data-start row, bounded last-data row, quoted multiline
+  fields, and trim on/off. Preview counts, mapping digest, preflight row
+  numbers, and committed values must remain identical; TSV without an
+  explicit delimiter must use Tab while CSV/TXT use comma.
 
 ## SQLite rebuild review plans
 

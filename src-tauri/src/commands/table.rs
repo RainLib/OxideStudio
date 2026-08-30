@@ -448,11 +448,27 @@ pub struct TableCsvColumnMapping {
 pub struct TableCsvImportOptions {
     pub delimiter: Option<String>,
     pub first_row_header: Option<bool>,
+    /// One-based record containing source column names. Zero disables the
+    /// title row. This mirrors DBX while preserving `first_row_header` for
+    /// older saved import plans.
+    pub title_row: Option<u64>,
+    /// One-based first source record to import.
+    pub data_start_row: Option<u64>,
+    /// One-based final source record to import. Zero means unbounded.
+    pub last_data_row: Option<u64>,
     #[serde(default)]
     pub column_mapping: Vec<TableCsvColumnMapping>,
     pub empty_fields_as_null: Option<bool>,
+    pub trim_values: Option<bool>,
     #[serde(default)]
     pub encoding: Option<TableImportTextEncoding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CsvImportRowRange {
+    title_row: Option<u64>,
+    data_start_row: u64,
+    last_data_row: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -10438,7 +10454,7 @@ fn validate_import_file(path: &Path, format: TableImportFormat) -> Result<(), St
     }
 
     let accepted = match format {
-        TableImportFormat::Csv => extension == "csv",
+        TableImportFormat::Csv => matches!(extension.as_str(), "csv" | "tsv" | "txt"),
         TableImportFormat::Json => matches!(extension.as_str(), "json" | "jsonl" | "ndjson"),
         TableImportFormat::Xlsx => extension == "xlsx",
     };
@@ -11099,19 +11115,104 @@ fn csv_import_reader(
     )?);
     Ok(csv::ReaderBuilder::new()
         .has_headers(has_headers)
+        .flexible(true)
         .delimiter(delimiter)
         .from_reader(decoded))
 }
 
-fn csv_delimiter(options: Option<&TableCsvImportOptions>) -> Result<u8, String> {
+fn csv_delimiter(path: &Path, options: Option<&TableCsvImportOptions>) -> Result<u8, String> {
     let Some(delimiter) = options.and_then(|options| options.delimiter.as_deref()) else {
-        return Ok(b',');
+        return Ok(
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"))
+            {
+                b'\t'
+            } else {
+                b','
+            },
+        );
     };
     let bytes = delimiter.as_bytes();
     if bytes.len() != 1 || matches!(bytes[0], b'\"' | b'\r' | b'\n') {
         return Err("CSV delimiter must be one non-quote, non-line-break byte".to_string());
     }
     Ok(bytes[0])
+}
+
+fn resolve_csv_import_row_range(
+    first_row_header: Option<bool>,
+    options: Option<&TableCsvImportOptions>,
+) -> Result<CsvImportRowRange, String> {
+    let legacy_has_header = options
+        .and_then(|options| options.first_row_header)
+        .or(first_row_header)
+        .unwrap_or(true);
+    let title_row = match options.and_then(|options| options.title_row) {
+        Some(0) => None,
+        Some(row) => Some(row),
+        None if legacy_has_header => Some(1),
+        None => None,
+    };
+    let data_start_row = options
+        .and_then(|options| options.data_start_row)
+        .unwrap_or_else(|| title_row.map_or(1, |row| row.saturating_add(1)));
+    if data_start_row == 0 {
+        return Err("CSV data start row must be at least 1".to_string());
+    }
+    if title_row.is_some_and(|row| row >= data_start_row) {
+        return Err("CSV title row must be before the data start row".to_string());
+    }
+    let last_data_row = match options.and_then(|options| options.last_data_row) {
+        Some(0) | None => None,
+        Some(row) if row < data_start_row => {
+            return Err("CSV last data row must not be before the data start row".to_string());
+        }
+        Some(row) => Some(row),
+    };
+    Ok(CsvImportRowRange {
+        title_row,
+        data_start_row,
+        last_data_row,
+    })
+}
+
+fn csv_import_source_columns(
+    reader: &mut csv::Reader<Box<dyn Read + Send>>,
+    row_range: CsvImportRowRange,
+    ordered_columns: Vec<String>,
+) -> Result<(Vec<String>, u64), String> {
+    let Some(title_row) = row_range.title_row else {
+        return Ok((ordered_columns, 0));
+    };
+    let mut record = csv::StringRecord::new();
+    for row_number in 1..=title_row {
+        if !reader
+            .read_record(&mut record)
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "CSV title row {title_row} is outside the source file (ended at row {})",
+                row_number.saturating_sub(1)
+            ));
+        }
+    }
+    Ok((
+        record
+            .iter()
+            .map(|value| value.trim().to_string())
+            .collect(),
+        title_row,
+    ))
+}
+
+fn csv_import_row_selected(row_range: CsvImportRowRange, row_number: u64) -> bool {
+    row_number >= row_range.data_start_row
+        && match row_range.last_data_row {
+            Some(last_row) => row_number <= last_row,
+            None => true,
+        }
 }
 
 /// Resolves the exact mapping that was reviewed in the preview. An explicit
@@ -11172,6 +11273,7 @@ fn csv_record_values(
     headers: &[Option<String>],
     record: &csv::StringRecord,
     empty_fields_as_null: bool,
+    trim_values: bool,
 ) -> Result<BTreeMap<String, Value>, String> {
     if record.len() != headers.len() {
         return Err(format!(
@@ -11183,8 +11285,13 @@ fn csv_record_values(
     Ok(headers
         .iter()
         .zip(record.iter())
-        .filter_map(|(column, value)| {
+        .filter_map(|(column, source_value)| {
             column.as_ref().map(|column| {
+                let value = if trim_values {
+                    source_value.trim()
+                } else {
+                    source_value
+                };
                 (
                     column.clone(),
                     if empty_fields_as_null && value.is_empty() {
@@ -11327,29 +11434,21 @@ async fn import_csv_in_transaction(
     ordered_columns: Vec<String>,
     csv_options: Option<&TableCsvImportOptions>,
 ) -> Result<(u64, u64), String> {
-    let has_headers = csv_options
-        .and_then(|options| options.first_row_header)
-        .or(first_row_header)
-        .unwrap_or(true);
+    let row_range = resolve_csv_import_row_range(first_row_header, csv_options)?;
     let mut reader = csv_import_reader(
         path,
-        has_headers,
-        csv_delimiter(csv_options)?,
+        false,
+        csv_delimiter(path, csv_options)?,
         csv_options.and_then(|options| options.encoding),
     )?;
-    let source_columns = if has_headers {
-        reader
-            .headers()
-            .map_err(|error| error.to_string())?
-            .iter()
-            .map(|value| value.trim().to_string())
-            .collect::<Vec<_>>()
-    } else {
-        ordered_columns
-    };
+    let (source_columns, consumed_records) =
+        csv_import_source_columns(&mut reader, row_range, ordered_columns)?;
     let headers = resolve_csv_import_columns(&source_columns, columns, csv_options)?;
     let empty_fields_as_null = csv_options
         .and_then(|options| options.empty_fields_as_null)
+        .unwrap_or(false);
+    let trim_values = csv_options
+        .and_then(|options| options.trim_values)
         .unwrap_or(false);
     let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
     match database {
@@ -11375,9 +11474,21 @@ async fn import_csv_in_transaction(
         let mut rows_imported = 0_u64;
         let mut batches = 0_u64;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
-        for record in reader.records() {
+        for (index, record) in reader.records().enumerate() {
+            let row_number = consumed_records + index as u64 + 1;
+            if row_number < row_range.data_start_row {
+                continue;
+            }
+            if !csv_import_row_selected(row_range, row_number) {
+                break;
+            }
             let record = record.map_err(|error| error.to_string())?;
-            pending_rows.push(csv_record_values(&headers, &record, empty_fields_as_null)?);
+            pending_rows.push(csv_record_values(
+                &headers,
+                &record,
+                empty_fields_as_null,
+                trim_values,
+            )?);
             if pending_rows.len() == IMPORT_BATCH_SIZE {
                 rows_imported += execute_import_transaction_batch(
                     manager,
@@ -11452,48 +11563,50 @@ pub async fn preflight_table_csv_import(
     validate_import_file(&path, TableImportFormat::Csv)?;
     verify_import_file_digest(&path, expected_file_digest.as_deref())?;
     let database = database.as_deref();
-    let columns = column_lookup(
-        get_target_columns(&manager, &connection_id, database, &schema, &table)
-            .await
-            .map_err(|error| error.to_string())?,
-    );
-    let has_headers = csv_options
-        .as_ref()
-        .and_then(|options| options.first_row_header)
-        .or(first_row_header)
-        .unwrap_or(true);
+    let target_columns = get_target_columns(&manager, &connection_id, database, &schema, &table)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ordered_columns = target_columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let columns = column_lookup(target_columns);
+    let row_range = resolve_csv_import_row_range(first_row_header, csv_options.as_ref())?;
     let mut reader = csv_import_reader(
         &path,
-        has_headers,
-        csv_delimiter(csv_options.as_ref())?,
+        false,
+        csv_delimiter(&path, csv_options.as_ref())?,
         csv_options.as_ref().and_then(|options| options.encoding),
     )?;
-    let source_columns = if has_headers {
-        reader
-            .headers()
-            .map_err(|error| error.to_string())?
-            .iter()
-            .map(|value| value.trim().to_string())
-            .collect::<Vec<_>>()
-    } else {
-        columns.keys().cloned().collect::<Vec<_>>()
-    };
+    let (source_columns, consumed_records) =
+        csv_import_source_columns(&mut reader, row_range, ordered_columns)?;
     let headers = resolve_csv_import_columns(&source_columns, &columns, csv_options.as_ref())?;
     let empty_fields_as_null = csv_options
         .as_ref()
         .and_then(|options| options.empty_fields_as_null)
+        .unwrap_or(false);
+    let trim_values = csv_options
+        .as_ref()
+        .and_then(|options| options.trim_values)
         .unwrap_or(false);
     let mut total_rows = 0_u64;
     let mut accepted_rows = 0_u64;
     let mut rejected_rows = 0_u64;
     let mut issues = Vec::new();
     for (index, record) in reader.records().enumerate() {
+        let row_number = consumed_records + index as u64 + 1;
+        if row_number < row_range.data_start_row {
+            continue;
+        }
+        if !csv_import_row_selected(row_range, row_number) {
+            break;
+        }
         total_rows += 1;
-        let row_number = index as u64 + if has_headers { 2 } else { 1 };
         let valid = record
             .map_err(|_| ())
             .and_then(|record| {
-                csv_record_values(&headers, &record, empty_fields_as_null).map_err(|_| ())
+                csv_record_values(&headers, &record, empty_fields_as_null, trim_values)
+                    .map_err(|_| ())
             })
             .and_then(|row| {
                 build_insert_mutation(kind, &schema, &table, &columns, &row)
@@ -13346,15 +13459,16 @@ mod tests {
         build_sqlite_drop_index_statement, build_structured_filter_where, build_table_order_by,
         build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
         canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_import_reader,
-        csv_record_values, data_compare_key, data_compare_key_columns_are_declared_unique,
-        data_compare_keyset_continuation, data_compare_row_values,
-        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
-        ensure_sql_insert_conflict_policy, ensure_table_export_format,
-        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
-        filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        is_json_lines_path, normalized_table_data_transfer_project_id, object_label_from_type,
+        csv_import_row_selected, csv_import_source_columns, csv_record_values, data_compare_key,
+        data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
+        data_compare_row_values, delete_table_data_transfer_target_for_overwrite,
+        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
+        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
+        execute_target_parameterized_batch, filter_sql_export_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
+        normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
         postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
@@ -13365,30 +13479,30 @@ mod tests {
         postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
         query_target, query_target_parameterized, read_csv_import_preview,
         read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_csv_text_encoding, resolve_transfer_upsert_key_columns,
-        reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
-        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
-        table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
-        table_data_transfer_plan_digest, table_data_transfer_report_id,
-        transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
-        transfer_target_confirmation_token, transfer_type_mapping_assessment,
-        transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
-        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
-        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
-        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
-        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
-        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
-        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
-        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
-        TableExportWriterContext, TableExportWriterMessage, TableFilter, TableImportTextEncoding,
-        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
-        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
-        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        resolve_csv_import_row_range, resolve_csv_text_encoding,
+        resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
+        select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
+        summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
+        table_data_transfer_dialect, table_data_transfer_plan_digest,
+        table_data_transfer_report_id, transfer_confirmation_token, transfer_plan_can_execute,
+        transfer_target_column_type, transfer_target_confirmation_token,
+        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
+        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
+        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
+        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
+        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
+        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataCompareResult, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
+        TableDataTransferRequest, TableDataTransferTargetColumn,
+        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
+        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
+        TableFilter, TableImportTextEncoding, TableRowUpdate, TableSort,
+        MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
+        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -14061,6 +14175,9 @@ mod tests {
         let options = TableCsvImportOptions {
             delimiter: Some(";".to_string()),
             first_row_header: Some(true),
+            title_row: None,
+            data_start_row: None,
+            last_data_row: None,
             column_mapping: vec![
                 TableCsvColumnMapping {
                     source_index: 0,
@@ -14076,6 +14193,7 @@ mod tests {
                 },
             ],
             empty_fields_as_null: Some(true),
+            trim_values: Some(false),
             encoding: Some(TableImportTextEncoding::Utf8),
         };
         let resolved = resolve_csv_import_columns(&source, &columns, Some(&options)).unwrap();
@@ -14087,12 +14205,109 @@ mod tests {
                 None
             ]
         );
-        assert_eq!(csv_delimiter(Some(&options)).unwrap(), b';');
+        assert_eq!(
+            csv_delimiter(Path::new("source.txt"), Some(&options)).unwrap(),
+            b';'
+        );
         let record = csv::StringRecord::from(vec!["7", "", "discard"]);
-        let values = csv_record_values(&resolved, &record, true).unwrap();
+        let values = csv_record_values(&resolved, &record, true, false).unwrap();
         assert_eq!(values.get("id"), Some(&Value::String("7".to_string())));
         assert_eq!(values.get("display_name"), Some(&Value::Null));
         assert!(!values.contains_key("ignored"));
+    }
+
+    #[test]
+    fn csv_row_range_supports_preamble_footer_and_legacy_defaults() {
+        let legacy = resolve_csv_import_row_range(Some(true), None).unwrap();
+        assert_eq!(legacy.title_row, Some(1));
+        assert_eq!(legacy.data_start_row, 2);
+        assert_eq!(legacy.last_data_row, None);
+
+        let options = TableCsvImportOptions {
+            title_row: Some(3),
+            data_start_row: Some(5),
+            last_data_row: Some(7),
+            ..Default::default()
+        };
+        let range = resolve_csv_import_row_range(None, Some(&options)).unwrap();
+        assert_eq!(range.title_row, Some(3));
+        assert!(!csv_import_row_selected(range, 4));
+        assert!(csv_import_row_selected(range, 5));
+        assert!(csv_import_row_selected(range, 7));
+        assert!(!csv_import_row_selected(range, 8));
+
+        assert!(resolve_csv_import_row_range(
+            None,
+            Some(&TableCsvImportOptions {
+                title_row: Some(3),
+                data_start_row: Some(3),
+                ..Default::default()
+            })
+        )
+        .unwrap_err()
+        .contains("before the data start"));
+        assert!(resolve_csv_import_row_range(
+            None,
+            Some(&TableCsvImportOptions {
+                title_row: Some(0),
+                data_start_row: Some(4),
+                last_data_row: Some(2),
+                ..Default::default()
+            })
+        )
+        .unwrap_err()
+        .contains("last data row"));
+    }
+
+    #[test]
+    fn delimited_import_reads_a_late_title_row_and_trims_values_strictly() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-delimited-row-range-{}.tsv",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(
+            &path,
+            "generated report\tignored\nmetadata\tignored\n id \t display_name \n1\t  Ada  \n",
+        )
+        .unwrap();
+        assert_eq!(csv_delimiter(&path, None).unwrap(), b'\t');
+
+        let row_range = resolve_csv_import_row_range(
+            None,
+            Some(&TableCsvImportOptions {
+                title_row: Some(3),
+                data_start_row: Some(4),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let mut reader = csv_import_reader(
+            &path,
+            false,
+            csv_delimiter(&path, None).unwrap(),
+            Some(TableImportTextEncoding::Utf8),
+        )
+        .unwrap();
+        let (source_columns, consumed) =
+            csv_import_source_columns(&mut reader, row_range, vec!["fallback".to_string()])
+                .unwrap();
+        assert_eq!(source_columns, vec!["id", "display_name"]);
+        assert_eq!(consumed, 3);
+
+        let record = reader.records().next().unwrap().unwrap();
+        let values = csv_record_values(
+            &[Some("id".to_string()), Some("display_name".to_string())],
+            &record,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(values.get("id"), Some(&Value::String("1".to_string())));
+        assert_eq!(
+            values.get("display_name"),
+            Some(&Value::String("Ada".to_string()))
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -14277,6 +14492,9 @@ mod tests {
         let duplicate = TableCsvImportOptions {
             delimiter: None,
             first_row_header: None,
+            title_row: None,
+            data_start_row: None,
+            last_data_row: None,
             column_mapping: vec![
                 TableCsvColumnMapping {
                     source_index: 0,
@@ -14288,13 +14506,17 @@ mod tests {
                 },
             ],
             empty_fields_as_null: None,
+            trim_values: None,
             encoding: None,
         };
         assert!(resolve_csv_import_columns(&source, &columns, Some(&duplicate)).is_err());
-        assert!(csv_delimiter(Some(&TableCsvImportOptions {
-            delimiter: Some("::".to_string()),
-            ..Default::default()
-        }))
+        assert!(csv_delimiter(
+            Path::new("source.csv"),
+            Some(&TableCsvImportOptions {
+                delimiter: Some("::".to_string()),
+                ..Default::default()
+            })
+        )
         .is_err());
     }
 

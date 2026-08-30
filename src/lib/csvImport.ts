@@ -41,6 +41,13 @@ export interface CsvImportPlan {
   errorCount: number;
 }
 
+export interface CsvRowSelection {
+  hasHeader: boolean;
+  titleRow?: number;
+  dataStartRow?: number;
+  lastDataRow?: number;
+}
+
 const DELIMITER_CANDIDATES = [",", ";", "\t", "|"] as const;
 const MAX_REPORTED_ISSUES = 200;
 
@@ -190,12 +197,63 @@ export function parseCsv(
   return { records, issues };
 }
 
-export function csvSourceColumns(records: CsvRecord[], hasHeader: boolean) {
-  const maximumWidth = records.reduce(
+function resolvedCsvRowSelection(options: CsvRowSelection) {
+  const titleRow = options.hasHeader ? options.titleRow ?? 1 : 0;
+  const dataStartRow = options.dataStartRow ?? (titleRow > 0 ? titleRow + 1 : 1);
+  const lastDataRow = options.lastDataRow ?? 0;
+  return { titleRow, dataStartRow, lastDataRow };
+}
+
+export function validateCsvRowSelection(options: CsvRowSelection) {
+  const { titleRow, dataStartRow, lastDataRow } = resolvedCsvRowSelection(options);
+  if (!Number.isInteger(titleRow) || titleRow < 0) {
+    return "Title row must be zero or a positive whole number.";
+  }
+  if (!Number.isInteger(dataStartRow) || dataStartRow < 1) {
+    return "Data start row must be a positive whole number.";
+  }
+  if (titleRow > 0 && titleRow >= dataStartRow) {
+    return "Title row must be before the data start row.";
+  }
+  if (!Number.isInteger(lastDataRow) || lastDataRow < 0) {
+    return "Last data row must be zero or a positive whole number.";
+  }
+  if (lastDataRow > 0 && lastDataRow < dataStartRow) {
+    return "Last data row must not be before the data start row.";
+  }
+  return null;
+}
+
+export function selectCsvDataRecords(
+  records: CsvRecord[],
+  options: CsvRowSelection,
+) {
+  if (validateCsvRowSelection(options)) return [];
+  const { dataStartRow, lastDataRow } = resolvedCsvRowSelection(options);
+  return records.filter((_, index) => {
+    const rowNumber = index + 1;
+    return rowNumber >= dataStartRow && (lastDataRow === 0 || rowNumber <= lastDataRow);
+  });
+}
+
+export function csvSourceColumns(
+  records: CsvRecord[],
+  hasHeader: boolean,
+  titleRow = hasHeader ? 1 : 0,
+  dataStartRow = titleRow > 0 ? titleRow + 1 : 1,
+  lastDataRow = 0,
+) {
+  const selectedRecords = selectCsvDataRecords(records, {
+    hasHeader,
+    titleRow,
+    dataStartRow,
+    lastDataRow,
+  });
+  const header = hasHeader ? records[titleRow - 1]?.values || [] : [];
+  const maximumWidth = [...selectedRecords, ...(hasHeader ? [{ values: header, line: titleRow }] : [])].reduce(
     (width, record) => Math.max(width, record.values.length),
     0,
   );
-  const header = hasHeader ? records[0]?.values || [] : [];
 
   return Array.from({ length: maximumWidth }, (_, index) => {
     const name = header[index]?.trim();
@@ -235,17 +293,25 @@ export function buildCsvImportPlan(options: {
   records: CsvRecord[];
   parseIssues?: CsvImportIssue[];
   hasHeader: boolean;
+  titleRow?: number;
+  dataStartRow?: number;
+  lastDataRow?: number;
   mapping: CsvColumnMapping[];
   columns: ColumnInfo[];
   emptyAsNull: boolean;
+  trimValues?: boolean;
 }): CsvImportPlan {
   const {
     records,
     parseIssues = [],
     hasHeader,
+    titleRow,
+    dataStartRow,
+    lastDataRow,
     mapping,
     columns,
     emptyAsNull,
+    trimValues = false,
   } = options;
   const issues: CsvImportIssue[] = [];
   let errorCount = 0;
@@ -254,6 +320,9 @@ export function buildCsvImportPlan(options: {
     if (issues.length < MAX_REPORTED_ISSUES) issues.push(issue);
   };
   parseIssues.forEach(addIssue);
+  const rowSelection = { hasHeader, titleRow, dataStartRow, lastDataRow };
+  const rowSelectionError = validateCsvRowSelection(rowSelection);
+  if (rowSelectionError) addIssue({ message: rowSelectionError });
 
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const mappedTargets = new Set<string>();
@@ -294,7 +363,7 @@ export function buildCsvImportPlan(options: {
     }
   }
 
-  const dataRecords = hasHeader ? records.slice(1) : records;
+  const dataRecords = selectCsvDataRecords(records, rowSelection);
   const rows: Array<Record<string, unknown>> = [];
   for (const record of dataRecords) {
     const row: Record<string, unknown> = {};
@@ -304,7 +373,8 @@ export function buildCsvImportPlan(options: {
       if (!item.targetColumn) continue;
       const column = columnsByName.get(item.targetColumn);
       if (!column) continue;
-      const rawValue = record.values[item.sourceIndex] ?? "";
+      const sourceValue = record.values[item.sourceIndex] ?? "";
+      const rawValue = trimValues ? sourceValue.trim() : sourceValue;
       const kind = inferValueEditorKind(column.data_type, rawValue);
       const state = rawValue.length === 0
         ? emptyAsNull

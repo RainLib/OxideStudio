@@ -4669,12 +4669,12 @@ export function SchemaSidebar() {
                                 }
                               >
                                 <Upload className="mr-2 h-3.5 w-3.5" />
-                                Import CSV...
+                                Import CSV / TSV...
                               </ContextMenuItem>
                               <ContextMenuItem
                                 className={menuItemClass}
                                 disabled={!canImportRelationRows}
-                                title="Stream an auto-detected UTF-8, UTF-16, or GB18030 comma-separated CSV with a header row. Use Import CSV… when you need an explicit encoding, delimiter, or column mapping."
+                                title="Stream auto-detected UTF-8, UTF-16, or GB18030 delimited text. TSV defaults to a tab delimiter; CSV and TXT default to a comma. Use the reviewed import when you need row ranges or column mapping."
                                 onClick={() =>
                                   void runForSchema(schema, () =>
                                     importTableData(table.name, "csv"),
@@ -4682,7 +4682,7 @@ export function SchemaSidebar() {
                                 }
                               >
                                 <Upload className="mr-2 h-3.5 w-3.5" />
-                                Import CSV (streaming)...
+                                Import delimited text (streaming)...
                               </ContextMenuItem>
                               <ContextMenuItem
                                 className={menuItemClass}

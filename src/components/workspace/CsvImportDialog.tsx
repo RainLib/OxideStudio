@@ -24,6 +24,8 @@ import {
   decodeCsvBytes,
   inferCsvDelimiter,
   parseCsv,
+  selectCsvDataRecords,
+  validateCsvRowSelection,
   type CsvColumnMapping,
   type CsvEncoding,
 } from "@/lib/csvImport";
@@ -70,9 +72,13 @@ export function CsvImportDialog({
   const [encoding, setEncoding] = useState<CsvEncoding>("auto");
   const [delimiterChoice, setDelimiterChoice] = useState<DelimiterChoice>("auto");
   const [customDelimiter, setCustomDelimiter] = useState("");
-  const [hasHeader, setHasHeader] = useState(true);
+  const [titleRow, setTitleRow] = useState(1);
+  const [dataStartRow, setDataStartRow] = useState(2);
+  const [lastDataRow, setLastDataRow] = useState(0);
   const [emptyAsNull, setEmptyAsNull] = useState(true);
+  const [trimValues, setTrimValues] = useState(false);
   const [mapping, setMapping] = useState<CsvColumnMapping[]>([]);
+  const hasHeader = titleRow > 0;
 
   useEffect(() => {
     if (!open || !file) return;
@@ -83,15 +89,18 @@ export function CsvImportDialog({
     setEncoding("auto");
     setDelimiterChoice("auto");
     setCustomDelimiter("");
-    setHasHeader(true);
+    setTitleRow(1);
+    setDataStartRow(2);
+    setLastDataRow(0);
     setEmptyAsNull(true);
+    setTrimValues(false);
     setMapping([]);
 
     const readFile = async () => {
       try {
         if (file.size > MAX_IMPORT_FILE_BYTES) {
           throw new Error(
-            "CSV files larger than 32 MiB can be imported from Database Explorer → Import/Export → Import CSV (streaming)… using auto-detected UTF-8, UTF-16, or GB18030, a comma delimiter, and a header row.",
+            "Delimited text files larger than 32 MiB can be imported from Database Explorer → Import/Export → Import delimited text (streaming)….",
           );
         }
         const buffer = typeof file.arrayBuffer === "function"
@@ -144,16 +153,26 @@ export function CsvImportDialog({
   }, [customDelimiter, decoded.text, delimiterChoice]);
 
   const parsed = useMemo(
-    () => parseCsv(decoded.text, delimiter, MAX_IMPORT_ROWS + (hasHeader ? 2 : 1)),
-    [decoded.text, delimiter, hasHeader],
+    () => parseCsv(
+      decoded.text,
+      delimiter,
+      MAX_IMPORT_ROWS + Math.max(titleRow, dataStartRow) + 2,
+    ),
+    [dataStartRow, decoded.text, delimiter, titleRow],
   );
   const sourceColumns = useMemo(
-    () => csvSourceColumns(parsed.records, hasHeader),
-    [hasHeader, parsed.records],
+    () => csvSourceColumns(
+      parsed.records,
+      hasHeader,
+      titleRow,
+      dataStartRow,
+      lastDataRow,
+    ),
+    [dataStartRow, hasHeader, lastDataRow, parsed.records, titleRow],
   );
   const mappingSignature = useMemo(
-    () => `${hasHeader}:${sourceColumns.join("\u0000")}:${columns.map((column) => column.name).join("\u0000")}`,
-    [columns, hasHeader, sourceColumns],
+    () => `${titleRow}:${dataStartRow}:${lastDataRow}:${sourceColumns.join("\u0000")}:${columns.map((column) => column.name).join("\u0000")}`,
+    [columns, dataStartRow, lastDataRow, sourceColumns, titleRow],
   );
 
   useEffect(() => {
@@ -165,21 +184,27 @@ export function CsvImportDialog({
       records: parsed.records,
       parseIssues: parsed.issues,
       hasHeader,
+      titleRow,
+      dataStartRow,
+      lastDataRow,
       mapping,
       columns,
       emptyAsNull,
+      trimValues,
     }),
-    [columns, emptyAsNull, hasHeader, mapping, parsed.issues, parsed.records],
+    [columns, dataStartRow, emptyAsNull, hasHeader, lastDataRow, mapping, parsed.issues, parsed.records, titleRow, trimValues],
   );
-  const dataRecords = hasHeader ? parsed.records.slice(1) : parsed.records;
+  const rowSelection = { hasHeader, titleRow, dataStartRow, lastDataRow };
+  const rowRangeError = validateCsvRowSelection(rowSelection);
+  const dataRecords = selectCsvDataRecords(parsed.records, rowSelection);
   const previewRecords = dataRecords.slice(0, PREVIEW_ROW_LIMIT);
   const rowLimitError = dataRecords.length > MAX_IMPORT_ROWS
-    ? `CSV contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use Database Explorer → Import/Export → Import CSV (streaming)… for a larger standard CSV.`
+    ? `The selected range contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use Database Explorer → Import/Export → Import delimited text (streaming)… for a larger source.`
     : null;
   const nativePreviewError = nativePreviewTruncated
-    ? "This CSV is larger than the 32 MiB review limit. Use Import CSV (streaming)… for an auto-detected comma-delimited import, or split the file before using custom column mapping."
+    ? "This source is larger than the 32 MiB review limit. Use Import delimited text (streaming)… or split the file before using custom column mapping."
     : null;
-  const blockingError = loadError || decoded.error || rowLimitError || nativePreviewError;
+  const blockingError = loadError || decoded.error || rowRangeError || rowLimitError || nativePreviewError;
   const canImport =
     !isLoading &&
     !isSubmitting &&
@@ -195,6 +220,16 @@ export function CsvImportDialog({
     ));
   };
 
+  const updateHeaderMode = (enabled: boolean) => {
+    if (enabled) {
+      setTitleRow(1);
+      setDataStartRow((current) => Math.max(current, 2));
+    } else {
+      setTitleRow(0);
+      setDataStartRow((current) => current === 2 ? 1 : current);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}>
       <DialogContent className="h-[min(820px,calc(100vh-32px))] w-[min(1120px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
@@ -204,9 +239,9 @@ export function CsvImportDialog({
               <FileSpreadsheet size={15} />
             </span>
             <div>
-              <DialogTitle className="text-[13px] tracking-normal">Import CSV into {tableName}</DialogTitle>
+              <DialogTitle className="text-[13px] tracking-normal">Import delimited text into {tableName}</DialogTitle>
               <DialogDescription className="text-[10px] text-[hsl(var(--wb-text-muted))]">
-                {file?.name || "CSV file"} · Preview and validate before one transactional commit
+                {file?.name || "Delimited text file"} · Preview and validate before one transactional commit
               </DialogDescription>
             </div>
           </div>
@@ -254,12 +289,53 @@ export function CsvImportDialog({
               <span className="text-[10px] wb-muted">Options</span>
               <div className="space-y-2 pt-0.5 text-[10px]">
                 <label className="flex items-center gap-2">
-                  <Checkbox checked={hasHeader} onCheckedChange={(value) => setHasHeader(value === true)} />
-                  First row is header
+                  <Checkbox checked={hasHeader} onCheckedChange={(value) => updateHeaderMode(value === true)} />
+                  Source contains a title row
                 </label>
                 <label className="flex items-center gap-2">
                   <Checkbox checked={emptyAsNull} onCheckedChange={(value) => setEmptyAsNull(value === true)} />
                   Import empty fields as NULL
+                </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox checked={trimValues} onCheckedChange={(value) => setTrimValues(value === true)} />
+                  Trim leading and trailing spaces
+                </label>
+              </div>
+
+              <span className="text-[10px] wb-muted">Row range</span>
+              <div className="grid grid-cols-3 gap-1.5">
+                <label className="space-y-1 text-[9px] wb-muted">
+                  <span>Title</span>
+                  <input
+                    aria-label="Title row"
+                    className={fieldClass}
+                    type="number"
+                    min={0}
+                    value={titleRow}
+                    onChange={(event) => setTitleRow(Math.max(0, Number.parseInt(event.target.value, 10) || 0))}
+                  />
+                </label>
+                <label className="space-y-1 text-[9px] wb-muted">
+                  <span>Data start</span>
+                  <input
+                    aria-label="Data start row"
+                    className={fieldClass}
+                    type="number"
+                    min={1}
+                    value={dataStartRow}
+                    onChange={(event) => setDataStartRow(Math.max(1, Number.parseInt(event.target.value, 10) || 1))}
+                  />
+                </label>
+                <label className="space-y-1 text-[9px] wb-muted">
+                  <span>Last (0=all)</span>
+                  <input
+                    aria-label="Last data row"
+                    className={fieldClass}
+                    type="number"
+                    min={0}
+                    value={lastDataRow}
+                    onChange={(event) => setLastDataRow(Math.max(0, Number.parseInt(event.target.value, 10) || 0))}
+                  />
                 </label>
               </div>
             </section>
@@ -267,7 +343,7 @@ export function CsvImportDialog({
             <section className="flex min-h-0 flex-1 flex-col">
               <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3 text-[10px] font-medium">
                 <span>Column mapping</span>
-                <span className="wb-muted">CSV → table</span>
+                <span className="wb-muted">Source → table</span>
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-2">
                 {mapping.map((item) => (
@@ -322,7 +398,9 @@ export function CsvImportDialog({
                         <td className="border-b border-r border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 text-right wb-muted">{record.line}</td>
                         {sourceColumns.map((_, columnIndex) => (
                           <td key={columnIndex} className="max-w-80 whitespace-pre-wrap border-b border-r border-[hsl(var(--wb-border-subtle))] px-2 py-1.5 align-top">
-                            {record.values[columnIndex] ?? ""}
+                            {trimValues
+                              ? (record.values[columnIndex] ?? "").trim()
+                              : record.values[columnIndex] ?? ""}
                           </td>
                         ))}
                       </tr>
@@ -373,11 +451,15 @@ export function CsvImportDialog({
                 {
                   delimiter,
                   firstRowHeader: hasHeader,
+                  titleRow,
+                  dataStartRow,
+                  lastDataRow,
                   columnMapping: mapping.map((item) => ({
                     sourceIndex: item.sourceIndex,
                     targetColumn: item.targetColumn,
                   })),
                   emptyFieldsAsNull: emptyAsNull,
+                  trimValues,
                   encoding: decoded.encoding,
                 },
                 decoded.encoding,

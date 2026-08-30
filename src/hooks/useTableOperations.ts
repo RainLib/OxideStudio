@@ -253,7 +253,7 @@ export function useTableOperations() {
       directory: false,
       filters: [
         format === "csv"
-          ? { name: "CSV data", extensions: ["csv"] }
+          ? { name: "Delimited text", extensions: ["csv", "tsv", "txt"] }
           : { name: "JSON data", extensions: ["json", "jsonl", "ndjson"] },
       ],
     });

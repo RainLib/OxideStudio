@@ -740,8 +740,15 @@ export interface TableCsvColumnMapping {
 export interface TableCsvImportOptions {
   delimiter?: string;
   firstRowHeader?: boolean;
+  /** One-based source record containing column names; zero disables it. */
+  titleRow?: number;
+  /** One-based first source record included in the import. */
+  dataStartRow?: number;
+  /** One-based final source record; zero means unbounded. */
+  lastDataRow?: number;
   columnMapping?: TableCsvColumnMapping[];
   emptyFieldsAsNull?: boolean;
+  trimValues?: boolean;
   encoding?: "auto" | "utf-8" | "utf-16le" | "utf-16be" | "gb18030";
 }
 

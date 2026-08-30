@@ -311,7 +311,7 @@ export function TableDataToolbar({
           <DropdownMenuContent align="end" className="wb-menu-content min-w-36">
             <DropdownMenuItem className="wb-menu-item" onSelect={onImportCsv}>
               <Upload className="mr-2 h-3.5 w-3.5" />
-              Import CSV…
+              Import CSV / TSV…
             </DropdownMenuItem>
             <DropdownMenuItem className="wb-menu-item" onSelect={onImportJson}>
               <FileJson className="mr-2 h-3.5 w-3.5" />

@@ -271,14 +271,14 @@ export function TableDataView() {
     const selected = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: "CSV data", extensions: ["csv"] }],
+      filters: [{ name: "Delimited text", extensions: ["csv", "tsv", "txt"] }],
     });
     if (typeof selected !== "string") return;
 
     try {
       const preview = await tableService.previewTableCsvImport(selected);
       const bytes = new Uint8Array(preview.bytes);
-      const file = new File([bytes], preview.fileName, { type: "text/csv" });
+      const file = new File([bytes], preview.fileName, { type: "text/plain" });
       setCsvImportSource({
         file,
         nativePath: selected,
@@ -289,7 +289,7 @@ export function TableDataView() {
       const message = error instanceof Error ? error.message : String(error);
       useTabStore.setState((state) => ({
         tabs: state.tabs.map((tab) =>
-          tab.id === activeTab?.id ? { ...tab, error: `CSV preview failed: ${message}` } : tab,
+          tab.id === activeTab?.id ? { ...tab, error: `Delimited text preview failed: ${message}` } : tab,
         ),
       }));
     }
@@ -1696,7 +1696,7 @@ export function TableDataView() {
       <input
         ref={importInputRef}
         type="file"
-        accept=".csv,text/csv"
+        accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
         className="hidden"
         onChange={(event) => {
           const file = event.currentTarget.files?.[0];
