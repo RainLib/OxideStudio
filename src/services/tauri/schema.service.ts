@@ -8,6 +8,12 @@ import type {
   MongoDocumentClonePlan,
   MongoDocumentCloneReceipt,
   MongoDocumentCloneRequest,
+  MongoDocumentDeletePlan,
+  MongoDocumentDeleteReceipt,
+  MongoDocumentDeleteRequest,
+  MongoDocumentEditPlan,
+  MongoDocumentEditReceipt,
+  MongoDocumentEditRequest,
   ColumnInfo,
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -251,6 +257,57 @@ export async function executeMongoDocumentClone(
       connectionId,
       driver,
       request: { clone: request, confirmationToken },
+    },
+  );
+}
+
+export async function previewMongoDocumentEdit(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentEditRequest,
+): Promise<MongoDocumentEditPlan> {
+  return invokeWithInterceptors<MongoDocumentEditPlan>(
+    "preview_mongodb_document_edit",
+    { connectionId, driver, request },
+  );
+}
+
+export async function executeMongoDocumentEdit(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentEditRequest,
+  confirmationToken: string,
+): Promise<MongoDocumentEditReceipt> {
+  return invokeWithInterceptors<MongoDocumentEditReceipt>(
+    "execute_mongodb_document_edit",
+    { connectionId, driver, request: { edit: request, confirmationToken } },
+  );
+}
+
+export async function previewMongoDocumentDelete(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentDeleteRequest,
+): Promise<MongoDocumentDeletePlan> {
+  return invokeWithInterceptors<MongoDocumentDeletePlan>(
+    "preview_mongodb_document_delete",
+    { connectionId, driver, request },
+  );
+}
+
+export async function executeMongoDocumentDelete(
+  connectionId: string,
+  driver: string,
+  request: MongoDocumentDeleteRequest,
+  confirmationToken: string,
+  confirmationPhrase: string,
+): Promise<MongoDocumentDeleteReceipt> {
+  return invokeWithInterceptors<MongoDocumentDeleteReceipt>(
+    "execute_mongodb_document_delete",
+    {
+      connectionId,
+      driver,
+      request: { delete: request, confirmationToken, confirmationPhrase },
     },
   );
 }
@@ -537,6 +594,10 @@ export const schemaService = {
   closeDocumentCursor,
   previewMongoDocumentClone,
   executeMongoDocumentClone,
+  previewMongoDocumentEdit,
+  executeMongoDocumentEdit,
+  previewMongoDocumentDelete,
+  executeMongoDocumentDelete,
   getColumns,
   getGeneratedColumns,
   getDatabaseColumns,

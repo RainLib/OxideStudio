@@ -87,6 +87,12 @@ const MongoDocumentCloneDialog = lazy(() =>
   })),
 );
 
+const MongoDocumentMutationDialog = lazy(() =>
+  import("@/features/data-grid/ui/MongoDocumentMutationDialog").then(
+    (module) => ({ default: module.MongoDocumentMutationDialog }),
+  ),
+);
+
 const HOST_TABLE_EXPORT_FORMATS: readonly TableExportFormat[] = [
   "csv",
   "json",
@@ -244,7 +250,10 @@ export function TableDataView() {
   );
   const [gridSelectionSummary, setGridSelectionSummary] =
     useState<DataGridSelectionSummary>({ selectedRowCount: 0 });
-  const [mongoCloneSourceId, setMongoCloneSourceId] = useState<unknown>(null);
+  const [mongoDocumentAction, setMongoDocumentAction] = useState<{
+    mode: "clone" | "edit" | "delete";
+    sourceId: unknown;
+  } | null>(null);
   const [transposedTabIds, setTransposedTabIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -682,7 +691,7 @@ export function TableDataView() {
     setTableDdl("");
     setDdlError(null);
     setIsDdlLoading(false);
-    setMongoCloneSourceId(null);
+    setMongoDocumentAction(null);
   }, [activeTab?.id]);
 
   useEffect(() => {
@@ -848,16 +857,22 @@ export function TableDataView() {
     });
   };
 
-  const handleCloneMongoDocument = () => {
+  const openMongoDocumentAction = (
+    mode: "clone" | "edit" | "delete",
+    sourceRowIndex?: number,
+  ) => {
     if (!isMongoDocumentPreview || !result || isTransposed) return;
-    const selectedRows = dataGridRef.current?.getSelectedRowIndexes() || [];
+    const selectedRows =
+      sourceRowIndex === undefined
+        ? dataGridRef.current?.getSelectedRowIndexes() || []
+        : [sourceRowIndex];
     if (selectedRows.length !== 1) return;
     const selectedRow = selectedRows[0];
     if (selectedRow === undefined) return;
     const idColumn = result.columns.findIndex((column) => column.name === "_id");
     const sourceId = idColumn >= 0 ? result.rows[selectedRow]?.[idColumn] : undefined;
     if (sourceId === undefined || sourceId === null) return;
-    setMongoCloneSourceId(sourceId);
+    setMongoDocumentAction({ mode, sourceId });
   };
 
   const handlePrevious = () => {
@@ -1750,7 +1765,7 @@ export function TableDataView() {
       {tabConnectionId &&
         activeTab.schemaName &&
         activeTab.tableName &&
-        mongoCloneSourceId !== null && (
+        mongoDocumentAction?.mode === "clone" && (
           <Suspense fallback={null}>
             <MongoDocumentCloneDialog
               open
@@ -1758,11 +1773,37 @@ export function TableDataView() {
               driver={driver}
               database={activeTab.schemaName}
               collection={activeTab.tableName}
-              sourceId={mongoCloneSourceId}
+              sourceId={mongoDocumentAction.sourceId}
               onOpenChange={(nextOpen) => {
-                if (!nextOpen) setMongoCloneSourceId(null);
+                if (!nextOpen) setMongoDocumentAction(null);
               }}
               onCloned={async () => {
+                if (tabConnectionId && activeTab.sql.trim()) {
+                  await runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
+                }
+              }}
+            />
+          </Suspense>
+        )}
+
+      {tabConnectionId &&
+        activeTab.schemaName &&
+        activeTab.tableName &&
+        mongoDocumentAction &&
+        mongoDocumentAction.mode !== "clone" && (
+          <Suspense fallback={null}>
+            <MongoDocumentMutationDialog
+              open
+              mode={mongoDocumentAction.mode}
+              connectionId={tabConnectionId}
+              driver={driver}
+              database={activeTab.schemaName}
+              collection={activeTab.tableName}
+              sourceId={mongoDocumentAction.sourceId}
+              onOpenChange={(nextOpen) => {
+                if (!nextOpen) setMongoDocumentAction(null);
+              }}
+              onMutated={async () => {
                 if (tabConnectionId && activeTab.sql.trim()) {
                   await runTabQuery(activeTab.id, tabConnectionId, activeTab.sql);
                 }
@@ -1795,8 +1836,20 @@ export function TableDataView() {
         onRefresh={handleRefresh}
         onAddRow={() => addNewRow(activeTab.id)}
         onDeleteRows={() => void dataGridRef.current?.deleteSelectedRows()}
+        onEditDocument={
+          isMongoDocumentPreview
+            ? () => openMongoDocumentAction("edit")
+            : undefined
+        }
+        onDeleteDocument={
+          isMongoDocumentPreview
+            ? () => openMongoDocumentAction("delete")
+            : undefined
+        }
         onCloneDocument={
-          isMongoDocumentPreview ? handleCloneMongoDocument : undefined
+          isMongoDocumentPreview
+            ? () => openMongoDocumentAction("clone")
+            : undefined
         }
         cloneDocumentDisabled={
           isTransposed ||
@@ -2145,6 +2198,21 @@ export function TableDataView() {
             readOnly={isGridReadOnly || activeTab.isExecuting}
             resultOverride={transposedResult}
             transposed={isTransposed}
+            onEditDocument={
+              isMongoDocumentPreview && !isTransposed
+                ? (rowIndex) => openMongoDocumentAction("edit", rowIndex)
+                : undefined
+            }
+            onCloneDocument={
+              isMongoDocumentPreview && !isTransposed
+                ? (rowIndex) => openMongoDocumentAction("clone", rowIndex)
+                : undefined
+            }
+            onDeleteDocument={
+              isMongoDocumentPreview && !isTransposed
+                ? (rowIndex) => openMongoDocumentAction("delete", rowIndex)
+                : undefined
+            }
             zoomPercent={gridZoomPercent}
             onSelectionSummaryChange={setGridSelectionSummary}
             tableConstraints={tableConstraints}

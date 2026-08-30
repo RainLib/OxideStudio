@@ -897,6 +897,48 @@ impl ConnectionManager {
             .await
     }
 
+    pub async fn prepare_document_edit(
+        &self,
+        connection_id: &str,
+        request: super::driver::DocumentEditRequest<'_>,
+    ) -> Result<super::driver::PreparedDocumentEdit> {
+        let driver = self.get_driver(connection_id).await?;
+        driver.prepare_document_edit(request).await
+    }
+
+    pub async fn execute_document_edit(
+        &self,
+        connection_id: &str,
+        request: super::driver::DocumentEditRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<super::driver::DocumentEditReceipt> {
+        let driver = self.get_driver(connection_id).await?;
+        driver
+            .execute_document_edit(request, expected_source_digest)
+            .await
+    }
+
+    pub async fn prepare_document_delete(
+        &self,
+        connection_id: &str,
+        request: super::driver::DocumentDeleteRequest<'_>,
+    ) -> Result<super::driver::PreparedDocumentDelete> {
+        let driver = self.get_driver(connection_id).await?;
+        driver.prepare_document_delete(request).await
+    }
+
+    pub async fn execute_document_delete(
+        &self,
+        connection_id: &str,
+        request: super::driver::DocumentDeleteRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<super::driver::DocumentDeleteReceipt> {
+        let driver = self.get_driver(connection_id).await?;
+        driver
+            .execute_document_delete(request, expected_source_digest)
+            .await
+    }
+
     pub async fn close_document_cursor(&self, id: &str, cursor: &str) -> Result<()> {
         let driver = self.get_driver(id).await?;
         driver.close_document_cursor(cursor).await

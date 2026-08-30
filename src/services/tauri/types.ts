@@ -1367,6 +1367,55 @@ export interface MongoDocumentCloneReceipt {
   message: string;
 }
 
+export interface MongoDocumentEditRequest {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+  /** Canonical Extended JSON without the immutable `_id`. */
+  draftDocument?: Record<string, unknown> | null;
+}
+
+export interface MongoDocumentEditPlan {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+  sourceDocument: Record<string, unknown>;
+  draftDocument: Record<string, unknown>;
+  previewDocument: Record<string, unknown>;
+  editedFields: string[];
+  sourceDigest: string;
+  confirmationToken: string;
+  serverVersion?: string | null;
+}
+
+export interface MongoDocumentEditReceipt {
+  matchedCount: number;
+  modifiedCount: number;
+  message: string;
+}
+
+export interface MongoDocumentDeleteRequest {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+}
+
+export interface MongoDocumentDeletePlan {
+  database: string;
+  collection: string;
+  sourceId: unknown;
+  sourceDocument: Record<string, unknown>;
+  sourceDigest: string;
+  confirmationToken: string;
+  confirmationPhrase: string;
+  serverVersion?: string | null;
+}
+
+export interface MongoDocumentDeleteReceipt {
+  deletedCount: number;
+  message: string;
+}
+
 export interface ConstraintInfo {
   name: string;
   constraint_type: string;

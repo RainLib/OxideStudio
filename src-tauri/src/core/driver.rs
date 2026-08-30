@@ -54,6 +54,50 @@ pub struct DocumentCloneReceipt {
     pub inserted_id: serde_json::Value,
 }
 
+/// One reviewed replacement of an existing native document. The editable
+/// draft deliberately excludes `_id`; identity remains owned by the source
+/// document selected in the database.
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentEditRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub source_id: &'a serde_json::Value,
+    pub draft_document: Option<&'a serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedDocumentEdit {
+    pub source_digest: String,
+    pub source_document: serde_json::Value,
+    pub draft_document: serde_json::Value,
+    pub updated_document: serde_json::Value,
+    pub edited_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentEditReceipt {
+    pub matched_count: u64,
+    pub modified_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentDeleteRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub source_id: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedDocumentDelete {
+    pub source_digest: String,
+    pub source_document: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentDeleteReceipt {
+    pub deleted_count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDatabaseFileReceipt {
     pub byte_len: u64,
@@ -505,6 +549,42 @@ pub trait DatabaseDriver: Send + Sync {
         _expected_source_digest: &str,
     ) -> Result<DocumentCloneReceipt> {
         Err(unsupported_driver_feature("Native document cloning"))
+    }
+
+    /// Build an exact replacement preview from the source's native value
+    /// model. Generic JSON mutation is intentionally not a fallback.
+    async fn prepare_document_edit(
+        &self,
+        _request: DocumentEditRequest<'_>,
+    ) -> Result<PreparedDocumentEdit> {
+        Err(unsupported_driver_feature("Native document editing"))
+    }
+
+    /// Replace the exact source reviewed by the user. Implementations must
+    /// fail if the source changes before the atomic database mutation.
+    async fn execute_document_edit(
+        &self,
+        _request: DocumentEditRequest<'_>,
+        _expected_source_digest: &str,
+    ) -> Result<DocumentEditReceipt> {
+        Err(unsupported_driver_feature("Native document editing"))
+    }
+
+    async fn prepare_document_delete(
+        &self,
+        _request: DocumentDeleteRequest<'_>,
+    ) -> Result<PreparedDocumentDelete> {
+        Err(unsupported_driver_feature("Native document deletion"))
+    }
+
+    /// Delete only the exact source reviewed by the user. A lookup followed
+    /// by an `_id`-only delete is not sufficient because it leaves a race.
+    async fn execute_document_delete(
+        &self,
+        _request: DocumentDeleteRequest<'_>,
+        _expected_source_digest: &str,
+    ) -> Result<DocumentDeleteReceipt> {
+        Err(unsupported_driver_feature("Native document deletion"))
     }
 
     /// Release resources held by a native document cursor. Stateless cursor

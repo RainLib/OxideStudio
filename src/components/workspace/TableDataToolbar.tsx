@@ -7,6 +7,7 @@ import {
   LockKeyhole,
   LockKeyholeOpen,
   Plus,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -60,6 +61,9 @@ interface TableDataToolbarProps {
   onRefresh: () => void;
   onAddRow: () => void;
   onDeleteRows: () => void;
+  /** Native documents use reviewed Host mutations instead of grid staging. */
+  onEditDocument?: () => void;
+  onDeleteDocument?: () => void;
   /** Native document clones have their own reviewed Host mutation path. */
   onCloneDocument?: () => void;
   cloneDocumentDisabled?: boolean;
@@ -114,6 +118,8 @@ export function TableDataToolbar({
   onRefresh,
   onAddRow,
   onDeleteRows,
+  onEditDocument,
+  onDeleteDocument,
   onCloneDocument,
   cloneDocumentDisabled = false,
   onSave,
@@ -163,6 +169,19 @@ export function TableDataToolbar({
         <ToolbarButton title="Add row" onClick={onAddRow} disabled={mutationDisabled}>
           <Plus size={14} />
         </ToolbarButton>
+        {onEditDocument && (
+          <ToolbarButton
+            title={
+              selectedRowCount === 1
+                ? "Edit selected MongoDB document"
+                : "Select one MongoDB document to edit"
+            }
+            onClick={onEditDocument}
+            disabled={isExecuting || viewOnly || selectedRowCount !== 1}
+          >
+            <Pencil size={14} />
+          </ToolbarButton>
+        )}
         {onCloneDocument && (
           <ToolbarButton
             title={
@@ -184,11 +203,17 @@ export function TableDataToolbar({
         <ToolbarButton
           title={
             selectedRowCount > 0
-              ? `Delete ${selectedRowCount} selected row${selectedRowCount === 1 ? "" : "s"}`
+              ? onDeleteDocument
+                ? "Review deletion of selected MongoDB document"
+                : `Delete ${selectedRowCount} selected row${selectedRowCount === 1 ? "" : "s"}`
               : "Select rows to delete"
           }
-          onClick={onDeleteRows}
-          disabled={mutationDisabled || selectedRowCount === 0}
+          onClick={onDeleteDocument ?? onDeleteRows}
+          disabled={
+            onDeleteDocument
+              ? isExecuting || viewOnly || selectedRowCount !== 1
+              : mutationDisabled || selectedRowCount === 0
+          }
           danger
         >
           <Trash2 size={14} />

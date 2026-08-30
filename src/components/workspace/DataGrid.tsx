@@ -150,6 +150,10 @@ interface DataGridProps {
   /** Alternate presentation data. It is always inspected read-only. */
   resultOverride?: QueryResult;
   transposed?: boolean;
+  /** Reviewed native-document actions receive the authoritative source row. */
+  onEditDocument?: (sourceRowIndex: number) => void;
+  onCloneDocument?: (sourceRowIndex: number) => void;
+  onDeleteDocument?: (sourceRowIndex: number) => void;
 }
 
 function rangeIndexes(start: number, length: number) {
@@ -224,6 +228,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       referencingForeignKeys = [],
       resultOverride,
       transposed = false,
+      onEditDocument,
+      onCloneDocument,
+      onDeleteDocument,
     },
     ref,
   ) {
@@ -1588,6 +1595,17 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       visualColumnIndexToResultIndex,
     ]);
 
+    const contextSourceRowIndex = useMemo(() => {
+      if (
+        contextMenu.row === undefined ||
+        contextMenu.row < 0 ||
+        contextMenu.row >= filteredRows.length
+      ) {
+        return undefined;
+      }
+      return sortedIndices[contextMenu.row];
+    }, [contextMenu.row, filteredRows.length, sortedIndices]);
+
     const handleLocalCellFilter = useCallback(
       (
         operator:
@@ -2004,6 +2022,55 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             separatorBefore: index === 0,
             onSelect: () => void handleForeignKeyNavigation(plan),
           })),
+          ...(contextSourceRowIndex !== undefined &&
+          (onEditDocument || onCloneDocument || onDeleteDocument)
+            ? [
+                ...(onEditDocument
+                  ? [
+                      {
+                        id: "edit-native-document",
+                        label: "Edit MongoDB Document...",
+                        description: "Review field changes before saving.",
+                        icon: <SquarePen size={12} />,
+                        separatorBefore: true,
+                        onSelect: () => {
+                          closeContextMenu();
+                          onEditDocument(contextSourceRowIndex);
+                        },
+                      } satisfies DataGridContextMenuItem,
+                    ]
+                  : []),
+                ...(onCloneDocument
+                  ? [
+                      {
+                        id: "clone-native-document",
+                        label: "Clone MongoDB Document...",
+                        description: "Create a reviewed copy with a new identity.",
+                        icon: <Copy size={12} />,
+                        onSelect: () => {
+                          closeContextMenu();
+                          onCloneDocument(contextSourceRowIndex);
+                        },
+                      } satisfies DataGridContextMenuItem,
+                    ]
+                  : []),
+                ...(onDeleteDocument
+                  ? [
+                      {
+                        id: "delete-native-document",
+                        label: "Delete MongoDB Document...",
+                        description: "Review the exact document before deletion.",
+                        icon: <Trash2 size={12} />,
+                        danger: true,
+                        onSelect: () => {
+                          closeContextMenu();
+                          onDeleteDocument(contextSourceRowIndex);
+                        },
+                      } satisfies DataGridContextMenuItem,
+                    ]
+                  : []),
+              ]
+            : []),
           {
             id: "set-cell-null",
             label: "Set NULL",
@@ -2059,6 +2126,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       contextMenu.columnId,
       contextCellValue,
       contextValueLabel,
+      contextSourceRowIndex,
+      onEditDocument,
+      onCloneDocument,
+      onDeleteDocument,
+      closeContextMenu,
       contextForeignKeyPlans,
     ]);
 

@@ -1,5 +1,9 @@
 use crate::core::{
-    driver::{DatabaseDriver, DocumentCloneReceipt, DocumentCloneRequest, PreparedDocumentClone},
+    driver::{
+        DatabaseDriver, DocumentCloneReceipt, DocumentCloneRequest, DocumentDeleteReceipt,
+        DocumentDeleteRequest, DocumentEditReceipt, DocumentEditRequest, PreparedDocumentClone,
+        PreparedDocumentDelete, PreparedDocumentEdit,
+    },
     protocol::{
         CollectionInfo, ColumnDef, ColumnInfo, DatabaseCreateRequest, IndexInfo, QueryResult,
     },
@@ -380,6 +384,135 @@ impl DatabaseDriver for MongoDbDriver {
             .context("MongoDB document clone failed")?;
         Ok(DocumentCloneReceipt {
             inserted_id: inserted.inserted_id.into_canonical_extjson(),
+        })
+    }
+
+    async fn prepare_document_edit(
+        &self,
+        request: DocumentEditRequest<'_>,
+    ) -> Result<PreparedDocumentEdit> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB edit source _id")?;
+        let source = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name)
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to read the MongoDB edit source")?
+            .ok_or_else(|| {
+                anyhow!("MongoDB edit source no longer exists; refresh and select it again")
+            })?;
+        prepare_mongodb_document_edit(&source, request.draft_document)
+    }
+
+    async fn execute_document_edit(
+        &self,
+        request: DocumentEditRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<DocumentEditReceipt> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB edit source _id")?;
+        let collection = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name);
+        let source = collection
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to re-read the MongoDB edit source")?
+            .ok_or_else(|| {
+                anyhow!("MongoDB edit source no longer exists; refresh and select it again")
+            })?;
+        let prepared = prepare_mongodb_document_edit(&source, request.draft_document)?;
+        if prepared.source_digest != expected_source_digest {
+            return Err(anyhow!(
+                "MongoDB document changed after preview; review the latest document before saving"
+            ));
+        }
+        if prepared.edited_fields.is_empty() {
+            return Err(anyhow!(
+                "MongoDB document edit does not contain any changes"
+            ));
+        }
+        let replacement = json_to_document(&prepared.updated_document, "MongoDB edited document")?;
+        let result = collection
+            .replace_one(exact_source_filter(&source)?, replacement)
+            .await
+            .context("MongoDB document edit failed")?;
+        if result.matched_count != 1 {
+            return Err(anyhow!(
+                "MongoDB document changed while the edit was being saved; refresh before retrying"
+            ));
+        }
+        Ok(DocumentEditReceipt {
+            matched_count: result.matched_count,
+            modified_count: result.modified_count,
+        })
+    }
+
+    async fn prepare_document_delete(
+        &self,
+        request: DocumentDeleteRequest<'_>,
+    ) -> Result<PreparedDocumentDelete> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB delete source _id")?;
+        let source = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name)
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to read the MongoDB delete source")?
+            .ok_or_else(|| {
+                anyhow!("MongoDB delete source no longer exists; refresh and select it again")
+            })?;
+        Ok(prepare_mongodb_document_delete(&source)?)
+    }
+
+    async fn execute_document_delete(
+        &self,
+        request: DocumentDeleteRequest<'_>,
+        expected_source_digest: &str,
+    ) -> Result<DocumentDeleteReceipt> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let source_id = json_to_bson(request.source_id, "MongoDB delete source _id")?;
+        let collection = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name);
+        let source = collection
+            .find_one(doc! { "_id": source_id })
+            .await
+            .context("Failed to re-read the MongoDB delete source")?
+            .ok_or_else(|| {
+                anyhow!("MongoDB delete source no longer exists; refresh and select it again")
+            })?;
+        let prepared = prepare_mongodb_document_delete(&source)?;
+        if prepared.source_digest != expected_source_digest {
+            return Err(anyhow!(
+                "MongoDB document changed after preview; review the latest document before deleting"
+            ));
+        }
+        let result = collection
+            .delete_one(exact_source_filter(&source)?)
+            .await
+            .context("MongoDB document delete failed")?;
+        if result.deleted_count != 1 {
+            return Err(anyhow!(
+                "MongoDB document changed while it was being deleted; refresh before retrying"
+            ));
+        }
+        Ok(DocumentDeleteReceipt {
+            deleted_count: result.deleted_count,
         })
     }
 
@@ -815,6 +948,97 @@ fn prepare_mongodb_document_clone(
         draft_document,
         cloned_document,
         edited_fields,
+    })
+}
+
+fn source_document_digest(source_document: &Value) -> Result<String> {
+    let source_bytes = serde_json::to_vec(source_document)
+        .context("Failed to fingerprint the MongoDB source document")?;
+    Ok(format!("{:x}", Sha256::digest(source_bytes)))
+}
+
+fn prepare_mongodb_document_edit(
+    source: &Document,
+    requested_draft: Option<&Value>,
+) -> Result<PreparedDocumentEdit> {
+    let source_document = Bson::Document(source.clone()).into_canonical_extjson();
+    let mut editable = source_document
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("MongoDB edit source must be a document"))?;
+    editable.remove("_id");
+    let initial_draft = Value::Object(editable);
+    let draft_document = requested_draft
+        .cloned()
+        .unwrap_or_else(|| initial_draft.clone());
+    let draft = draft_document
+        .as_object()
+        .ok_or_else(|| anyhow!("MongoDB edit draft must be a JSON object"))?;
+    if draft.contains_key("_id") {
+        return Err(anyhow!(
+            "MongoDB _id is immutable; edit the document fields without adding _id"
+        ));
+    }
+    let original = initial_draft
+        .as_object()
+        .ok_or_else(|| anyhow!("MongoDB edit source must be a JSON object"))?;
+    let keys = original
+        .keys()
+        .chain(draft.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let edited_fields = keys
+        .into_iter()
+        .filter(|field| original.get(field) != draft.get(field))
+        .collect::<Vec<_>>();
+
+    let mut updated = source.clone();
+    for field in &edited_fields {
+        if let Some(value) = draft.get(field) {
+            updated.insert(
+                field,
+                json_to_bson(value, &format!("MongoDB edited field {field}"))?,
+            );
+        } else {
+            updated.remove(field);
+        }
+    }
+    let updated_document = Bson::Document(updated).into_canonical_extjson();
+    let source_digest = source_document_digest(&source_document)?;
+    Ok(PreparedDocumentEdit {
+        source_digest,
+        source_document,
+        draft_document,
+        updated_document,
+        edited_fields,
+    })
+}
+
+fn prepare_mongodb_document_delete(source: &Document) -> Result<PreparedDocumentDelete> {
+    let source_document = Bson::Document(source.clone()).into_canonical_extjson();
+    let source_digest = source_document_digest(&source_document)?;
+    Ok(PreparedDocumentDelete {
+        source_digest,
+        source_document,
+    })
+}
+
+/// Bind a mutation to the exact BSON document read during review. `_id`
+/// keeps the indexed lookup while `$expr` prevents added, removed, or changed
+/// fields from slipping through the read/mutate window.
+fn exact_source_filter(source: &Document) -> Result<Document> {
+    let source_id = source
+        .get("_id")
+        .cloned()
+        .ok_or_else(|| anyhow!("MongoDB source document does not contain _id"))?;
+    Ok(doc! {
+        "_id": source_id,
+        "$expr": {
+            "$eq": [
+                "$$ROOT",
+                { "$literal": Bson::Document(source.clone()) }
+            ]
+        }
     })
 }
 
@@ -1319,6 +1543,69 @@ mod tests {
         );
         assert!(validate_mongodb_collection_name("").is_err());
         assert!(validate_mongodb_collection_name("system.users").is_err());
+    }
+
+    #[test]
+    fn edit_plan_preserves_identity_and_untouched_bson_values() {
+        let source = doc! {
+            "_id": Bson::Int64(9_007_199_254_740_993),
+            "name": "before",
+            "large": Bson::Int64(9_223_372_036_854_775_000),
+            "removed": true,
+        };
+        let draft = serde_json::json!({
+            "name": "after",
+            "large": { "$numberLong": "9223372036854775000" },
+            "added": { "$numberDecimal": "10.50" }
+        });
+
+        let prepared = prepare_mongodb_document_edit(&source, Some(&draft)).unwrap();
+        assert_eq!(prepared.edited_fields, ["added", "name", "removed"]);
+        assert!(prepared.draft_document.get("_id").is_none());
+        let updated = json_to_document(&prepared.updated_document, "updated").unwrap();
+        assert_eq!(updated.get("_id"), source.get("_id"));
+        assert!(matches!(
+            updated.get("large"),
+            Some(Bson::Int64(9_223_372_036_854_775_000))
+        ));
+        assert_eq!(updated.get_str("name").unwrap(), "after");
+        assert!(updated.get("removed").is_none());
+        assert!(matches!(updated.get("added"), Some(Bson::Decimal128(_))));
+    }
+
+    #[test]
+    fn edit_plan_rejects_identity_changes() {
+        let source = doc! { "_id": 1, "value": "before" };
+        let draft = serde_json::json!({ "_id": 2, "value": "after" });
+
+        let error = prepare_mongodb_document_edit(&source, Some(&draft))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("_id is immutable"));
+    }
+
+    #[test]
+    fn edit_delete_fingerprint_and_atomic_filter_bind_the_entire_source() {
+        let source = doc! { "_id": 1, "value": "first", "nested": { "active": true } };
+        let changed = doc! { "_id": 1, "value": "second", "nested": { "active": true } };
+        let edit = prepare_mongodb_document_edit(&source, None).unwrap();
+        let delete = prepare_mongodb_document_delete(&source).unwrap();
+        let changed_delete = prepare_mongodb_document_delete(&changed).unwrap();
+        let filter = exact_source_filter(&source).unwrap();
+
+        assert_eq!(edit.source_digest, delete.source_digest);
+        assert_ne!(delete.source_digest, changed_delete.source_digest);
+        assert_eq!(filter.get("_id"), source.get("_id"));
+        assert!(filter.get_document("$expr").is_ok());
+        let comparison = filter
+            .get_document("$expr")
+            .unwrap()
+            .get_array("$eq")
+            .unwrap();
+        assert_eq!(
+            comparison.first(),
+            Some(&Bson::String("$$ROOT".to_string()))
+        );
     }
 
     #[test]

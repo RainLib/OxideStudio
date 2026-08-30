@@ -1,6 +1,6 @@
-# MongoDB document clone deferred validation
+# MongoDB document mutation deferred validation
 
-The clone workflow is complete at the Host, driver, service, and UI logic
+The edit, clone, and delete workflows are complete at the Host, driver, service, and UI logic
 layers. The following checks require controlled MongoDB servers or a packaged
 desktop/WebView matrix and are deliberately not represented by fake-driver
 tests.
@@ -11,8 +11,12 @@ tests.
   deployments.
 - Accounts with read/write, read-only, collection-level, and revoked-during-
   preview permissions.
-- Source deletion and source mutation between preview and execution; both must
-  fail without inserting a clone.
+- Source deletion and source mutation between preview and execution; clone,
+  edit, and delete must all fail without applying a stale mutation.
+- Source mutation in the final edit/delete read-to-write window, including an
+  added field; the atomic complete-document guard must reject it.
+- `$expr` complete-document guard compatibility and query-plan behavior across
+  the supported server matrix.
 
 ## BSON round-trip
 
@@ -23,6 +27,8 @@ tests.
   the source `_id` and let MongoDB generate a new identity.
 - Added, changed, and removed top-level fields while every untouched field is
   byte-semantically equivalent to the source BSON value.
+- Edit keeps the original `_id`; a draft containing `_id` is rejected. Delete
+  removes only the exact reviewed document after the Host phrase is entered.
 
 ## Desktop behavior
 
@@ -31,8 +37,8 @@ tests.
 - Large but bounded documents, deeply nested Extended JSON, invalid wrappers,
   rapid review clicks, collection/tab switches, reconnects, and dialog close
   during preview.
-- Refresh after a successful insert must not replay the mutation and must keep
-  the success receipt visible even if refresh fails.
+- Refresh after a successful insert/update/delete must not replay the mutation
+  and must keep the success receipt visible even if refresh fails.
 
 These checks do not expand the public MCP contract. External Agents remain
 read-only unless a separate Desktop approval lease authorizes a supported

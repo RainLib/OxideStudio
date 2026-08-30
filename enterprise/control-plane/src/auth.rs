@@ -40,6 +40,15 @@ pub struct OidcVerifier {
 impl OidcVerifier {
     pub async fn load(issuer: String, audience: String, jwks_url: &str) -> Result<Self> {
         let client = reqwest::Client::new();
+        Self::load_with_client(issuer, audience, jwks_url, client).await
+    }
+
+    async fn load_with_client(
+        issuer: String,
+        audience: String,
+        jwks_url: &str,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         let jwks = fetch_jwks(&client, jwks_url).await?;
         Ok(Self {
             issuer,
@@ -171,10 +180,18 @@ mod tests {
                 .expect("test JWKS server must run");
         });
 
-        let verifier = OidcVerifier::load(
+        // Keep loopback fixtures independent from developer or CI proxy
+        // environment variables. Production `load` still honors the normal
+        // reqwest proxy policy for real identity-provider endpoints.
+        let local_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build");
+        let verifier = OidcVerifier::load_with_client(
             "https://issuer.example".into(),
             "oxide-control-plane".into(),
             &format!("http://{address}/jwks"),
+            local_client,
         )
         .await
         .expect("initial JWKS must load");
