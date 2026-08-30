@@ -3561,6 +3561,10 @@ mod tests {
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // This fixture owns a loopback listener. Ambient HTTP_PROXY must
+            // not route the request to an external proxy and turn an offline
+            // unit test into a flaky network dependency.
+            .no_proxy()
             .build()
             .unwrap();
         download_driver_package_archive(

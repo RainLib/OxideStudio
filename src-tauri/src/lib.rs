@@ -8,6 +8,21 @@ pub mod drivers;
 pub mod enterprise;
 pub mod lsp;
 
+// `tauri-plugin-dialog` imports TaskDialogIndirect. Cargo's Windows library
+// test harness has no application manifest, so it otherwise loads comctl32 v5
+// and exits before running a test. Reference the build-script generated anchor
+// only for MSVC unit tests; application and CLI binaries retain their own
+// tauri-build manifests and cannot receive a duplicate MANIFEST resource.
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+#[link(name = "oxide_unit_test_manifest", kind = "static")]
+unsafe extern "C" {
+    fn oxide_unit_test_manifest_anchor();
+}
+
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+#[used]
+static OXIDE_UNIT_TEST_MANIFEST_ANCHOR: unsafe extern "C" fn() = oxide_unit_test_manifest_anchor;
+
 use commands::query::{ParserState, QueryCancellationState};
 use core::cache::CacheManager;
 use core::config::ConfigManager;

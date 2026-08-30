@@ -185,10 +185,20 @@ fn windows_codex_node_entrypoint(path: &Path) -> Option<CliCommandSpec> {
     let parent = path.parent()?;
     let codex_js = [
         // npm global installation layout.
-        parent.join("node_modules/@openai/codex/bin/codex.js"),
+        parent
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js"),
         // OxideStudio managed installation layout:
         // <profile>/node_modules/.bin/codex.cmd
-        parent.parent()?.join("@openai/codex/bin/codex.js"),
+        parent
+            .parent()?
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js"),
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())?;
@@ -214,12 +224,20 @@ fn windows_codebuddy_node_entrypoint(path: &Path) -> Option<CliCommandSpec> {
     let parent = path.parent()?;
     let codebuddy_entrypoint = [
         // npm global installation layout.
-        parent.join("node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"),
+        parent
+            .join("node_modules")
+            .join("@tencent-ai")
+            .join("codebuddy-code")
+            .join("bin")
+            .join("codebuddy"),
         // OxideStudio managed installation layout:
         // <profile>/node_modules/.bin/codebuddy.cmd
         parent
             .parent()?
-            .join("@tencent-ai/codebuddy-code/bin/codebuddy"),
+            .join("@tencent-ai")
+            .join("codebuddy-code")
+            .join("bin")
+            .join("codebuddy"),
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())?;
@@ -254,7 +272,11 @@ fn windows_npm_node_entrypoint(path: &Path) -> Option<CliCommandSpec> {
     }
 
     let parent = path.parent()?;
-    let npm_cli = parent.join("node_modules/npm/bin/npm-cli.js");
+    let npm_cli = parent
+        .join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join("npm-cli.js");
     if !npm_cli.is_file() {
         return None;
     }
@@ -938,7 +960,12 @@ mod tests {
         let npm_script = directory.path().join("npm");
         let npm_cmd = directory.path().join("npm.cmd");
         let node_exe = directory.path().join("node.exe");
-        let npm_cli = directory.path().join("node_modules/npm/bin/npm-cli.js");
+        let npm_cli = directory
+            .path()
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
         std::fs::create_dir_all(npm_cli.parent().unwrap()).unwrap();
         std::fs::write(&npm_script, "#!/bin/sh\n").unwrap();
         std::fs::write(&npm_cmd, "@echo off\r\n").unwrap();
@@ -970,7 +997,11 @@ mod tests {
         let codex_cmd = bin.join("codex.cmd");
         let codex_js = directory
             .path()
-            .join("node_modules/@openai/codex/bin/codex.js");
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(codex_js.parent().unwrap()).unwrap();
         std::fs::write(&codex_cmd, "@echo off\r\n").unwrap();
@@ -992,7 +1023,11 @@ mod tests {
         let codebuddy_cmd = bin.join("codebuddy.cmd");
         let codebuddy_entrypoint = directory
             .path()
-            .join("node_modules/@tencent-ai/codebuddy-code/bin/codebuddy");
+            .join("node_modules")
+            .join("@tencent-ai")
+            .join("codebuddy-code")
+            .join("bin")
+            .join("codebuddy");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(codebuddy_entrypoint.parent().unwrap()).unwrap();
         std::fs::write(&codebuddy_cmd, "@echo off\r\n").unwrap();
@@ -1089,7 +1124,10 @@ mod tests {
             Some("priority"),
             true,
             "default",
-            Duration::from_secs(5),
+            // Full-suite Windows runs several process fixtures concurrently.
+            // Keep production timeout semantics unchanged while giving this
+            // deterministic protocol fixture enough scheduler slack.
+            Duration::from_secs(15),
             receiver,
             move |value| captured.lock().unwrap().push(value),
         )

@@ -4518,6 +4518,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "calamine",
+ "cc",
  "chrono",
  "clap",
  "csv",

@@ -6,6 +6,7 @@ fn main() {
         println!("cargo:rerun-if-changed={icon}");
     }
     expose_bundled_driver_versions();
+    configure_windows_test_manifest();
 
     // Development launches the TypeScript host through the installed Node 22
     // runtime. Production builds still require and bundle the self-contained
@@ -26,6 +27,32 @@ fn main() {
     println!("cargo:rerun-if-changed=../enterprise/gateway/proto/oxide_gateway.proto");
 
     tauri_build::build()
+}
+
+fn configure_windows_test_manifest() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+    let source = std::path::Path::new(
+        &std::env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory is available"),
+    )
+    .join("windows")
+    .join("unit-test-manifest.c");
+    println!("cargo:rerun-if-changed={}", source.display());
+    // Tauri's dialog dependency imports TaskDialogIndirect. The application
+    // binary receives a Common Controls v6 manifest from tauri-build, but
+    // Cargo's lib-test harness does not inherit it. Compile the linker
+    // dependency without emitting Cargo link metadata; lib.rs references the
+    // anchor only under cfg(test), so application and CLI manifests remain
+    // owned exclusively by tauri-build.
+    cc::Build::new()
+        .cargo_metadata(false)
+        .file(source)
+        .compile("oxide_unit_test_manifest");
+    let out_dir = std::env::var("OUT_DIR").expect("Cargo build output directory is available");
+    println!("cargo:rustc-link-search=native={out_dir}");
 }
 
 fn expose_bundled_driver_versions() {
