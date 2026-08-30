@@ -321,6 +321,14 @@ export interface DatabaseAdminSession {
   durationSeconds?: number | null;
 }
 
+/** Identity confirmed by the active database session, not renderer state. */
+export interface DatabaseAdminServerIdentity {
+  driver: string;
+  database?: string | null;
+  account?: string | null;
+  serverVersion?: string | null;
+}
+
 export interface DatabaseAdminUser {
   name: string;
   host?: string | null;

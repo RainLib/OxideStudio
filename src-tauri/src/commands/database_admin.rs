@@ -9,6 +9,7 @@ use crate::core::{
     dialect::DatabaseKind,
     manager::ConnectionManager,
     protocol::{QueryParameter, QueryResult, Response},
+    redaction::redact_connection_url,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,6 +91,54 @@ pub struct DatabaseAdminLockWait {
     pub database: Option<String>,
     pub wait: Option<String>,
     pub duration_seconds: Option<u64>,
+}
+
+/// Identity read from the same live session used by the administration
+/// commands. The renderer may display a connection name, but it must not be
+/// trusted to choose a vendor SQL dialect or to describe the server targeted
+/// by a mutation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdminServerIdentity {
+    pub driver: String,
+    pub database: Option<String>,
+    pub account: Option<String>,
+    pub server_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseAdminErrorKind {
+    PermissionDenied,
+    ConnectionUnavailable,
+    Unsupported,
+    Validation,
+    QueryFailed,
+}
+
+impl DatabaseAdminErrorKind {
+    const fn code_suffix(self) -> Option<&'static str> {
+        match self {
+            Self::PermissionDenied => Some("PERMISSION_DENIED"),
+            Self::ConnectionUnavailable => Some("CONNECTION_UNAVAILABLE"),
+            Self::Unsupported => Some("UNSUPPORTED"),
+            Self::Validation => Some("VALIDATION_FAILED"),
+            Self::QueryFailed => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "permissionDenied",
+            Self::ConnectionUnavailable => "connectionUnavailable",
+            Self::Unsupported => "unsupported",
+            Self::Validation => "validation",
+            Self::QueryFailed => "queryFailed",
+        }
+    }
+
+    const fn retryable(self) -> bool {
+        matches!(self, Self::ConnectionUnavailable)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,6 +289,202 @@ async fn ensure_host_database_admin_allowed(
         .await
         .map_err(|error| error.to_string())?;
     ensure_host_database_admin_capability(capabilities.as_ref())
+}
+
+fn resolve_admin_kind(
+    requested_driver: &str,
+    connected_driver: Option<&str>,
+) -> Result<(DatabaseKind, String), String> {
+    let requested_kind = admin_kind(requested_driver)?;
+    let Some(connected_driver) = connected_driver else {
+        // A small number of unit-test/legacy manager callers predate captured
+        // connection identity. New desktop connections always provide it.
+        return Ok((requested_kind, requested_kind.as_str().to_string()));
+    };
+    let connected_kind = admin_kind(connected_driver)?;
+    if connected_kind != requested_kind {
+        return Err(
+            "Requested database driver does not match the active connection identity".to_string(),
+        );
+    }
+    Ok((connected_kind, connected_driver.trim().to_ascii_lowercase()))
+}
+
+async fn confirmed_admin_kind(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    requested_driver: &str,
+) -> Result<(DatabaseKind, String), String> {
+    ensure_host_database_admin_allowed(manager, connection_id).await?;
+    let connected_driver = manager
+        .connection_driver_id(connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    resolve_admin_kind(requested_driver, connected_driver.as_deref())
+}
+
+fn classify_database_admin_error(error: &str) -> DatabaseAdminErrorKind {
+    let normalized = error.to_ascii_lowercase();
+    if [
+        "permission denied",
+        "insufficient privilege",
+        "insufficient_privilege",
+        "must be superuser",
+        "only superuser",
+        "access denied",
+        "command denied",
+        "sqlstate 42501",
+        "sqlstate: 42501",
+        "error 1044",
+        "error 1045",
+        "error 1142",
+        "error 1227",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        DatabaseAdminErrorKind::PermissionDenied
+    } else if [
+        "explicit confirmation",
+        " is required",
+        "invalid ",
+        "must be a positive number",
+        "does not match the active connection identity",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        DatabaseAdminErrorKind::Validation
+    } else if [
+        "does not provide a verified semantic database-administration protocol",
+        "database administration is currently available",
+        "unsupported database driver",
+        "metadata is unavailable",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        DatabaseAdminErrorKind::Unsupported
+    } else if [
+        "connection not found",
+        "connection is unavailable",
+        "connection closed",
+        "connection refused",
+        "lost connection",
+        "broken pipe",
+        "server has gone away",
+        "network is unreachable",
+        "timed out",
+        "timeout",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        DatabaseAdminErrorKind::ConnectionUnavailable
+    } else {
+        DatabaseAdminErrorKind::QueryFailed
+    }
+}
+
+fn bounded_admin_validation_message(error: &str) -> String {
+    let redacted = redact_connection_url(error);
+    let normalized = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(320).collect()
+}
+
+fn database_admin_error_message(kind: DatabaseAdminErrorKind, error: &str) -> String {
+    match kind {
+        DatabaseAdminErrorKind::PermissionDenied => {
+            "The connected account does not have permission for this database administration operation."
+                .to_string()
+        }
+        DatabaseAdminErrorKind::ConnectionUnavailable => {
+            "The database connection is unavailable. Reconnect and try again.".to_string()
+        }
+        DatabaseAdminErrorKind::Unsupported => {
+            "This driver or server does not expose the required database administration capability."
+                .to_string()
+        }
+        DatabaseAdminErrorKind::Validation => bounded_admin_validation_message(error),
+        DatabaseAdminErrorKind::QueryFailed => {
+            "The database administration request failed. Review the server diagnostics and try again."
+                .to_string()
+        }
+    }
+}
+
+fn database_admin_error_response<T>(base_code: &str, error: &str) -> Response<T> {
+    let kind = classify_database_admin_error(error);
+    let code = kind.code_suffix().map_or_else(
+        || base_code.to_string(),
+        |suffix| {
+            format!(
+                "{}_{}",
+                base_code.strip_suffix("_ERROR").unwrap_or(base_code),
+                suffix
+            )
+        },
+    );
+    Response::err_with_details(
+        &code,
+        &database_admin_error_message(kind, error),
+        kind.retryable(),
+        Some(serde_json::json!({ "adminErrorKind": kind.as_str() })),
+    )
+}
+
+fn server_identity_sql(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => {
+            "SELECT current_database()::text AS database_name, current_user::text AS account_name, current_setting('server_version')::text AS server_version"
+        }
+        DatabaseKind::Mysql => {
+            "SELECT DATABASE() AS database_name, CURRENT_USER() AS account_name, VERSION() AS server_version"
+        }
+    }
+}
+
+fn server_identity_from_result(
+    result: &QueryResult,
+    driver: String,
+) -> Result<DatabaseAdminServerIdentity, String> {
+    let row = result
+        .rows
+        .first()
+        .ok_or_else(|| "Database returned no server identity row".to_string())?;
+    Ok(DatabaseAdminServerIdentity {
+        driver,
+        database: value_string(result_row(result, row, "database_name")),
+        account: value_string(result_row(result, row, "account_name")),
+        server_version: value_string(result_row(result, row, "server_version")),
+    })
+}
+
+#[tauri::command]
+pub async fn get_database_admin_server_identity(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+) -> Result<Response<DatabaseAdminServerIdentity>, String> {
+    let result: Result<DatabaseAdminServerIdentity, String> = async {
+        let (kind, connected_driver) =
+            confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        let result = primary_result(
+            manager
+                .query(&connection_id, server_identity_sql(kind), None, None, None)
+                .await
+                .map_err(|error| error.to_string())?,
+        )?;
+        server_identity_from_result(&result, connected_driver)
+    }
+    .await;
+    match result {
+        Ok(identity) => Ok(Response::ok(identity)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_SERVER_IDENTITY_ERROR",
+            &error,
+        )),
+    }
 }
 
 fn session_list_sql(kind: DatabaseKind) -> &'static str {
@@ -442,8 +687,8 @@ pub async fn list_database_admin_lock_waits(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminLockWait>>, String> {
     let result: Result<Vec<DatabaseAdminLockWait>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
-        match admin_kind(&driver)? {
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        match kind {
             DatabaseKind::Postgres => {
                 query_database_admin_lock_waits(&manager, &connection_id, POSTGRES_LOCK_WAITS_SQL).await
             }
@@ -466,7 +711,10 @@ pub async fn list_database_admin_lock_waits(
     .await;
     match result {
         Ok(waits) => Ok(Response::ok(waits)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_LOCK_WAITS_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_LOCK_WAITS_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -492,16 +740,10 @@ pub async fn list_database_admin_metrics(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminMetric>>, String> {
     let result: Result<Vec<DatabaseAdminMetric>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         let result = primary_result(
             manager
-                .query(
-                    &connection_id,
-                    metrics_sql(admin_kind(&driver)?),
-                    None,
-                    None,
-                    None,
-                )
+                .query(&connection_id, metrics_sql(kind), None, None, None)
                 .await
                 .map_err(|error| error.to_string())?,
         )?;
@@ -515,7 +757,10 @@ pub async fn list_database_admin_metrics(
     .await;
     match result {
         Ok(metrics) => Ok(Response::ok(metrics)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_METRICS_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_METRICS_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -526,8 +771,7 @@ pub async fn list_database_admin_sessions(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminSession>>, String> {
     let result: Result<Vec<DatabaseAdminSession>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
-        let kind = admin_kind(&driver)?;
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         let result = primary_result(
             manager
                 .query(&connection_id, session_list_sql(kind), None, None, None)
@@ -556,7 +800,10 @@ pub async fn list_database_admin_sessions(
     .await;
     match result {
         Ok(sessions) => Ok(Response::ok(sessions)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_SESSIONS_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_SESSIONS_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -569,9 +816,8 @@ pub async fn terminate_database_admin_session(
     confirmed: bool,
 ) -> Result<Response<String>, String> {
     let result: Result<String, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         require_confirmed(confirmed)?;
-        let kind = admin_kind(&driver)?;
         let session_id = validate_text(&session_id, "Session id", 32)?;
         let parsed_id: u64 = session_id
             .parse()
@@ -620,7 +866,7 @@ pub async fn terminate_database_admin_session(
     .await;
     match result {
         Ok(message) => Ok(Response::ok(message)),
-        Err(error) => Ok(Response::err(
+        Err(error) => Ok(database_admin_error_response(
             "DATABASE_ADMIN_TERMINATE_SESSION_ERROR",
             &error,
         )),
@@ -634,8 +880,7 @@ pub async fn list_database_admin_users(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminUser>>, String> {
     let result: Result<Vec<DatabaseAdminUser>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
-        let kind = admin_kind(&driver)?;
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         let result = primary_result(
             manager
                 .query(&connection_id, user_list_sql(kind), None, None, None)
@@ -665,7 +910,10 @@ pub async fn list_database_admin_users(
     .await;
     match result {
         Ok(users) => Ok(Response::ok(users)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_USERS_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_USERS_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -704,8 +952,8 @@ pub async fn list_database_admin_role_memberships(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminRoleMembership>>, String> {
     let result: Result<Vec<DatabaseAdminRoleMembership>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
-        match admin_kind(&driver)? {
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        match kind {
             DatabaseKind::Postgres => query_database_admin_role_memberships(
                 &manager,
                 &connection_id,
@@ -735,7 +983,7 @@ pub async fn list_database_admin_role_memberships(
     .await;
     match result {
         Ok(memberships) => Ok(Response::ok(memberships)),
-        Err(error) => Ok(Response::err(
+        Err(error) => Ok(database_admin_error_response(
             "DATABASE_ADMIN_ROLE_MEMBERSHIPS_ERROR",
             &error,
         )),
@@ -749,16 +997,10 @@ pub async fn list_database_admin_table_privileges(
     driver: String,
 ) -> Result<Response<Vec<DatabaseAdminTablePrivilege>>, String> {
     let result: Result<Vec<DatabaseAdminTablePrivilege>, String> = async {
-        ensure_host_database_admin_allowed(&manager, &connection_id).await?;
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         let result = primary_result(
             manager
-                .query(
-                    &connection_id,
-                    table_privileges_sql(admin_kind(&driver)?),
-                    None,
-                    None,
-                    None,
-                )
+                .query(&connection_id, table_privileges_sql(kind), None, None, None)
                 .await
                 .map_err(|error| error.to_string())?,
         )?;
@@ -779,7 +1021,7 @@ pub async fn list_database_admin_table_privileges(
     .await;
     match result {
         Ok(privileges) => Ok(Response::ok(privileges)),
-        Err(error) => Ok(Response::err(
+        Err(error) => Ok(database_admin_error_response(
             "DATABASE_ADMIN_TABLE_PRIVILEGES_ERROR",
             &error,
         )),
@@ -891,7 +1133,6 @@ async fn execute_admin_statement(
     connection_id: &str,
     sql: String,
 ) -> Result<String, String> {
-    ensure_host_database_admin_allowed(manager, connection_id).await?;
     manager
         .query(connection_id, &sql, None, None, None)
         .await
@@ -907,17 +1148,16 @@ pub async fn create_database_admin_user(
     request: CreateDatabaseAdminUserRequest,
 ) -> Result<Response<String>, String> {
     let result = async {
-        execute_admin_statement(
-            &manager,
-            &connection_id,
-            create_user_sql(admin_kind(&driver)?, &request)?,
-        )
-        .await
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        execute_admin_statement(&manager, &connection_id, create_user_sql(kind, &request)?).await
     }
     .await;
     match result {
         Ok(message) => Ok(Response::ok(message)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_CREATE_USER_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_CREATE_USER_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -929,17 +1169,18 @@ pub async fn update_database_admin_user_password(
     request: UpdateDatabaseAdminPasswordRequest,
 ) -> Result<Response<String>, String> {
     let result = async {
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
         execute_admin_statement(
             &manager,
             &connection_id,
-            update_password_sql(admin_kind(&driver)?, &request)?,
+            update_password_sql(kind, &request)?,
         )
         .await
     }
     .await;
     match result {
         Ok(message) => Ok(Response::ok(message)),
-        Err(error) => Ok(Response::err(
+        Err(error) => Ok(database_admin_error_response(
             "DATABASE_ADMIN_UPDATE_PASSWORD_ERROR",
             &error,
         )),
@@ -954,17 +1195,16 @@ pub async fn set_database_admin_user_login(
     request: SetDatabaseAdminLoginRequest,
 ) -> Result<Response<String>, String> {
     let result = async {
-        execute_admin_statement(
-            &manager,
-            &connection_id,
-            set_login_sql(admin_kind(&driver)?, &request)?,
-        )
-        .await
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        execute_admin_statement(&manager, &connection_id, set_login_sql(kind, &request)?).await
     }
     .await;
     match result {
         Ok(message) => Ok(Response::ok(message)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_SET_LOGIN_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_SET_LOGIN_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -976,17 +1216,16 @@ pub async fn delete_database_admin_user(
     request: DeleteDatabaseAdminUserRequest,
 ) -> Result<Response<String>, String> {
     let result = async {
-        execute_admin_statement(
-            &manager,
-            &connection_id,
-            drop_user_sql(admin_kind(&driver)?, &request)?,
-        )
-        .await
+        let (kind, _) = confirmed_admin_kind(&manager, &connection_id, &driver).await?;
+        execute_admin_statement(&manager, &connection_id, drop_user_sql(kind, &request)?).await
     }
     .await;
     match result {
         Ok(message) => Ok(Response::ok(message)),
-        Err(error) => Ok(Response::err("DATABASE_ADMIN_DELETE_USER_ERROR", &error)),
+        Err(error) => Ok(database_admin_error_response(
+            "DATABASE_ADMIN_DELETE_USER_ERROR",
+            &error,
+        )),
     }
 }
 
@@ -1041,5 +1280,77 @@ mod tests {
         };
         assert!(drop_user_sql(DatabaseKind::Postgres, &request).is_err());
         assert!(validate_text("", "User name", 128).is_err());
+    }
+
+    #[test]
+    fn confirms_the_connected_driver_family_before_selecting_admin_sql() {
+        assert_eq!(
+            resolve_admin_kind("mysql", Some("mariadb")).unwrap(),
+            (DatabaseKind::Mysql, "mariadb".to_string())
+        );
+        assert_eq!(
+            resolve_admin_kind("postgres", Some("mysql")).unwrap_err(),
+            "Requested database driver does not match the active connection identity"
+        );
+    }
+
+    #[test]
+    fn parses_server_identity_from_the_fixed_single_row_contract() {
+        let result = QueryResult::rows(
+            vec![
+                crate::core::protocol::ColumnDef {
+                    name: "database_name".to_string(),
+                    data_type: "text".to_string(),
+                },
+                crate::core::protocol::ColumnDef {
+                    name: "account_name".to_string(),
+                    data_type: "text".to_string(),
+                },
+                crate::core::protocol::ColumnDef {
+                    name: "server_version".to_string(),
+                    data_type: "text".to_string(),
+                },
+            ],
+            vec![vec![
+                Value::String("warehouse".to_string()),
+                Value::String("admin@example".to_string()),
+                Value::String("16.4".to_string()),
+            ]],
+        );
+
+        assert_eq!(
+            server_identity_from_result(&result, "postgres".to_string()).unwrap(),
+            DatabaseAdminServerIdentity {
+                driver: "postgres".to_string(),
+                database: Some("warehouse".to_string()),
+                account: Some("admin@example".to_string()),
+                server_version: Some("16.4".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_admin_failures_without_returning_secret_bearing_query_errors() {
+        assert_eq!(
+            classify_database_admin_error("SQLSTATE 42501: permission denied"),
+            DatabaseAdminErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            classify_database_admin_error("server has gone away"),
+            DatabaseAdminErrorKind::ConnectionUnavailable
+        );
+
+        let response: Response<()> = database_admin_error_response(
+            "DATABASE_ADMIN_USERS_ERROR",
+            "query failed for postgres://user:secret@localhost/db",
+        );
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "DATABASE_ADMIN_USERS_ERROR");
+        assert_eq!(error.category.as_deref(), Some("databaseAdmin"));
+        assert!(!error.message.contains("secret"));
+        assert_eq!(
+            error.context.unwrap()["adminErrorKind"],
+            Value::String("queryFailed".to_string())
+        );
     }
 }

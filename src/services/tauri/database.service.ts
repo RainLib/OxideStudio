@@ -2,6 +2,7 @@ import { invokeWithInterceptors } from "./client";
 import type {
   DatabaseCapabilities,
   DatabaseDriverActivationState,
+  DatabaseAdminServerIdentity,
   DatabaseAdminSession,
   DatabaseAdminMetric,
   DatabaseAdminLockWait,
@@ -263,6 +264,16 @@ export async function listDatabaseAdminSessions(
   );
 }
 
+export async function getDatabaseAdminServerIdentity(
+  connectionId: string,
+  driver: DatabaseDriver,
+): Promise<DatabaseAdminServerIdentity> {
+  return invokeWithInterceptors<DatabaseAdminServerIdentity>(
+    "get_database_admin_server_identity",
+    { connectionId, driver },
+  );
+}
+
 export async function listDatabaseAdminMetrics(
   connectionId: string,
   driver: DatabaseDriver,
@@ -437,6 +448,7 @@ export const databaseService = {
   installManagedJavaRuntime,
   activateExternalDatabaseDriver,
   rollbackExternalDatabaseDriver,
+  getDatabaseAdminServerIdentity,
   listDatabaseAdminSessions,
   listDatabaseAdminMetrics,
   listDatabaseAdminLockWaits,

@@ -476,7 +476,9 @@ impl<T> Response<T> {
 }
 
 fn error_category(code: &str) -> &'static str {
-    if code.contains("CONNECTION") || code == "DISCONNECT_ERROR" {
+    if code.contains("PERMISSION_DENIED") {
+        "permission"
+    } else if code.contains("CONNECTION") || code == "DISCONNECT_ERROR" {
         "connection"
     } else if code.contains("QUERY") || code.contains("EXPLAIN") || code.contains("SQL_COMPLETION")
     {
@@ -498,6 +500,8 @@ fn error_category(code: &str) -> &'static str {
         "projectFile"
     } else if code.contains("UNSUPPORTED") {
         "capability"
+    } else if code.contains("DATABASE_ADMIN") {
+        "databaseAdmin"
     } else {
         "application"
     }

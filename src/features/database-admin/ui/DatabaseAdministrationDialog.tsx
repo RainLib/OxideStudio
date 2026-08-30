@@ -13,17 +13,22 @@ import {
   supportsDatabaseAdminAutoRefresh,
   type DatabaseAdminView,
 } from "@/features/database-admin/model/databaseAdminRefresh";
+import {
+  databaseAdminErrorPresentation,
+  type DatabaseAdminErrorPresentation,
+} from "@/features/database-admin/model/databaseAdminErrors";
 import { databaseService } from "@/services/tauri";
 import type {
   DatabaseAdminLockWait,
   DatabaseAdminMetric,
   DatabaseAdminRoleMembership,
+  DatabaseAdminServerIdentity,
   DatabaseAdminTablePrivilege,
   DatabaseAdminSession,
   DatabaseAdminUser,
   DatabaseDriver,
 } from "@/services/tauri/types";
-import { Activity, BarChart3, Clock3, GitFork, Lock, RefreshCw, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
+import { Activity, BarChart3, Clock3, GitFork, Lock, RefreshCw, Server, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type AccountForm = "create" | "password" | null;
@@ -83,9 +88,12 @@ export function DatabaseAdministrationDialog({
   const [users, setUsers] = useState<DatabaseAdminUser[]>([]);
   const [roleMemberships, setRoleMemberships] = useState<DatabaseAdminRoleMembership[]>([]);
   const [tablePrivileges, setTablePrivileges] = useState<DatabaseAdminTablePrivilege[]>([]);
+  const [serverIdentity, setServerIdentity] = useState<DatabaseAdminServerIdentity | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isIdentityLoading, setIsIdentityLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DatabaseAdminErrorPresentation | null>(null);
+  const [identityError, setIdentityError] = useState<DatabaseAdminErrorPresentation | null>(null);
   const [form, setForm] = useState<AccountForm>(null);
   const [targetUser, setTargetUser] = useState<DatabaseAdminUser | null>(null);
   const [name, setName] = useState("");
@@ -95,6 +103,7 @@ export function DatabaseAdministrationDialog({
   const [autoRefresh, setAutoRefresh] = useState(false);
   const loadInFlightKeysRef = useRef(new Set<string>());
   const loadGenerationRef = useRef(0);
+  const identityGenerationRef = useRef(0);
 
   const supportsAccounts = driver === "postgres" || isMysqlFamily(driver);
   const supportsLockWaits = driver === "postgres" || isMysqlFamily(driver);
@@ -140,7 +149,7 @@ export function DatabaseAdministrationDialog({
       }
     } catch (reason) {
       if (loadGenerationRef.current === generation) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(databaseAdminErrorPresentation(reason));
       }
     } finally {
       loadInFlightKeysRef.current.delete(requestKey);
@@ -150,6 +159,33 @@ export function DatabaseAdministrationDialog({
     }
   }, [connectionId, driver, supportsAccounts, view]);
 
+  const loadServerIdentity = useCallback(async () => {
+    const generation = identityGenerationRef.current + 1;
+    identityGenerationRef.current = generation;
+    setServerIdentity(null);
+    setIdentityError(null);
+    const canLoadIdentity = Boolean(connectionId && supportsAccounts);
+    setIsIdentityLoading(canLoadIdentity);
+    if (!connectionId || !canLoadIdentity) return;
+    try {
+      const identity = await databaseService.getDatabaseAdminServerIdentity(
+        connectionId,
+        driver,
+      );
+      if (identityGenerationRef.current === generation) {
+        setServerIdentity(identity);
+      }
+    } catch (reason) {
+      if (identityGenerationRef.current === generation) {
+        setIdentityError(databaseAdminErrorPresentation(reason));
+      }
+    } finally {
+      if (identityGenerationRef.current === generation) {
+        setIsIdentityLoading(false);
+      }
+    }
+  }, [connectionId, driver, supportsAccounts]);
+
   useEffect(() => {
     if (!supportsLockWaits && view === "locks") setView("sessions");
   }, [supportsLockWaits, view]);
@@ -157,6 +193,13 @@ export function DatabaseAdministrationDialog({
   useEffect(() => {
     if (open) void load();
   }, [load, open]);
+
+  useEffect(() => {
+    if (open) void loadServerIdentity();
+    return () => {
+      identityGenerationRef.current += 1;
+    };
+  }, [loadServerIdentity, open]);
 
   useEffect(() => {
     if (
@@ -198,7 +241,7 @@ export function DatabaseAdministrationDialog({
         if (view !== reload) setView(reload);
         else await load();
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(databaseAdminErrorPresentation(reason));
       } finally {
         setIsMutating(false);
       }
@@ -294,6 +337,28 @@ export function DatabaseAdministrationDialog({
           <DialogDescription className="text-[11px] wb-muted">
             Metrics, sessions and accounts use fixed, driver-aware actions. Password values are never stored by this panel.
           </DialogDescription>
+          {isIdentityLoading ? (
+            <div className="flex items-center gap-1.5 pt-1 text-[10px] wb-muted">
+              <RefreshCw size={11} className="animate-spin" /> Confirming live server identity…
+            </div>
+          ) : serverIdentity ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-[10px] wb-muted">
+              <span className="flex items-center gap-1 text-[hsl(var(--wb-text))]">
+                <Server size={11} /> {serverIdentity.driver}
+              </span>
+              {serverIdentity.database && <span>Database: {serverIdentity.database}</span>}
+              {serverIdentity.account && <span>Account: {serverIdentity.account}</span>}
+              {serverIdentity.serverVersion && <span>Server: {serverIdentity.serverVersion}</span>}
+            </div>
+          ) : identityError ? (
+            <button
+              type="button"
+              className="flex items-center gap-1.5 pt-1 text-left text-[10px] text-amber-300"
+              onClick={() => void loadServerIdentity()}
+            >
+              <Server size={11} /> {identityError.title}. Select to check again.
+            </button>
+          ) : null}
         </DialogHeader>
 
         {!supportsAccounts || !connectionId ? (
@@ -435,7 +500,24 @@ export function DatabaseAdministrationDialog({
                 <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
               </button>
             </div>
-            {error && <div className="border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">{error}</div>}
+            {error && (
+              <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">{error.title}</div>
+                  <div className="mt-0.5 text-red-200/80">{error.message}</div>
+                  {error.guidance && <div className="mt-0.5 text-red-200/70">{error.guidance}</div>}
+                </div>
+                {error.retryable && (
+                  <button
+                    type="button"
+                    className="wb-toolbar-button h-6 shrink-0 px-2 text-[10px]"
+                    onClick={() => void load()}
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            )}
             <div className="min-h-0 flex-1 overflow-auto">
               {isLoading ? (
                 <div className="px-3 py-3 text-[11px] wb-muted">Loading…</div>
