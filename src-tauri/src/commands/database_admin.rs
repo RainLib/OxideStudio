@@ -5,6 +5,7 @@
 //! common session and account operations while retaining validation, explicit
 //! confirmation and database-specific quoting at the Rust boundary.
 
+pub mod events;
 pub mod maintenance;
 
 use crate::core::{
@@ -360,6 +361,13 @@ fn classify_database_admin_error(error: &str) -> DatabaseAdminErrorKind {
         "maintenance target must be a base table",
         "maintenance plan changed",
         "maintenance confirmation text does not match",
+        "event target no longer exists",
+        "event target already exists",
+        "event plan changed",
+        "event confirmation text does not match",
+        "event body must",
+        "event body may",
+        "invalid event",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))
@@ -372,6 +380,7 @@ fn classify_database_admin_error(error: &str) -> DatabaseAdminErrorKind {
         "metadata is unavailable",
         " is not supported for ",
         "remote database maintenance is supported only",
+        "event administration is available only",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))

@@ -7,3 +7,4 @@ export {
   SqliteBackupDialog,
   type SqliteBackupTarget,
 } from "./ui/SqliteBackupDialog";
+export { DatabaseEventAdminPanel } from "./ui/DatabaseEventAdminPanel";

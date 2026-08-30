@@ -17,6 +17,7 @@ import {
   databaseAdminErrorPresentation,
   type DatabaseAdminErrorPresentation,
 } from "@/features/database-admin/model/databaseAdminErrors";
+import { DatabaseEventAdminPanel } from "./DatabaseEventAdminPanel";
 import { databaseService } from "@/services/tauri";
 import type {
   DatabaseAdminLockWait,
@@ -28,7 +29,7 @@ import type {
   DatabaseAdminUser,
   DatabaseDriver,
 } from "@/services/tauri/types";
-import { Activity, BarChart3, Clock3, GitFork, Lock, RefreshCw, Server, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
+import { Activity, BarChart3, CalendarClock, Clock3, GitFork, Lock, RefreshCw, Server, Shield, Trash2, Unlock, UserPlus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type AccountForm = "create" | "password" | null;
@@ -107,6 +108,7 @@ export function DatabaseAdministrationDialog({
 
   const supportsAccounts = driver === "postgres" || isMysqlFamily(driver);
   const supportsLockWaits = driver === "postgres" || isMysqlFamily(driver);
+  const supportsEvents = isMysqlFamily(driver);
   const titleSuffix = connectionName ? ` — ${connectionName}` : "";
 
   const resetForm = useCallback(() => {
@@ -120,6 +122,11 @@ export function DatabaseAdministrationDialog({
 
   const load = useCallback(async (options: { background?: boolean } = {}) => {
     if (!connectionId || !supportsAccounts) return;
+    if (view === "events") {
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
     const requestKey = `${connectionId}:${driver}:${view}`;
     if (loadInFlightKeysRef.current.has(requestKey)) return;
     const generation = loadGenerationRef.current + 1;
@@ -188,7 +195,8 @@ export function DatabaseAdministrationDialog({
 
   useEffect(() => {
     if (!supportsLockWaits && view === "locks") setView("sessions");
-  }, [supportsLockWaits, view]);
+    if (!supportsEvents && view === "events") setView("sessions");
+  }, [supportsEvents, supportsLockWaits, view]);
 
   useEffect(() => {
     if (open) void load();
@@ -475,6 +483,15 @@ export function DatabaseAdministrationDialog({
               >
                 <Shield size={13} /> Privileges
               </button>
+              {supportsEvents && (
+                <button
+                  type="button"
+                  className={cn("wb-toolbar-button h-7 gap-1.5 px-2 text-[11px]", view === "events" && "wb-toolbar-button-active")}
+                  onClick={() => setView("events")}
+                >
+                  <CalendarClock size={13} /> Events
+                </button>
+              )}
               <div className="flex-1" />
               {view === "users" && (
                 <button type="button" className="wb-icon-button h-6 w-6" title="Create account" onClick={openCreate}>
@@ -496,9 +513,11 @@ export function DatabaseAdministrationDialog({
                   <Clock3 size={11} /> Auto
                 </button>
               )}
-              <button type="button" className="wb-icon-button h-6 w-6" title="Refresh" onClick={() => void load()} disabled={isLoading || isMutating}>
-                <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
-              </button>
+              {view !== "events" && (
+                <button type="button" className="wb-icon-button h-6 w-6" title="Refresh" onClick={() => void load()} disabled={isLoading || isMutating}>
+                  <RefreshCw size={13} className={cn(isLoading && "animate-spin")} />
+                </button>
+              )}
             </div>
             {error && (
               <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">
@@ -518,8 +537,14 @@ export function DatabaseAdministrationDialog({
                 )}
               </div>
             )}
-            <div className="min-h-0 flex-1 overflow-auto">
-              {isLoading ? (
+            <div className={cn("min-h-0 flex-1", view === "events" ? "flex overflow-hidden" : "overflow-auto")}>
+              {view === "events" && connectionId ? (
+                <DatabaseEventAdminPanel
+                  connectionId={connectionId}
+                  driver={driver}
+                  schema={serverIdentity?.database || ""}
+                />
+              ) : isLoading ? (
                 <div className="px-3 py-3 text-[11px] wb-muted">Loading…</div>
               ) : view === "sessions" ? (
                 sessions.length === 0 ? <EmptyState label="No other active sessions" /> : <SessionRows sessions={sessions} onTerminate={handleTerminate} disabled={isMutating} />

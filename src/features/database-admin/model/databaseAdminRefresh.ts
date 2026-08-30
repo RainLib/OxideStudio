@@ -4,7 +4,8 @@ export type DatabaseAdminView =
   | "locks"
   | "users"
   | "roles"
-  | "privileges";
+  | "privileges"
+  | "events";
 
 export const DATABASE_ADMIN_AUTO_REFRESH_MS = 10_000;
 

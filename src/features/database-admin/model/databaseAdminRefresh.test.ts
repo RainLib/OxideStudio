@@ -14,6 +14,7 @@ describe("database administration refresh policy", () => {
       "users",
       "roles",
       "privileges",
+      "events",
     ];
 
     expect(views.filter(supportsDatabaseAdminAutoRefresh)).toEqual([

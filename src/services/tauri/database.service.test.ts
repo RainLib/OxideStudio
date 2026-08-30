@@ -9,9 +9,12 @@ vi.mock("./client", () => ({ invokeWithInterceptors }));
 import {
   executeDatabaseMaintenance,
   executeSqliteBackupPlan,
+  executeDatabaseAdminEventMutation,
   getDatabaseAdminServerIdentity,
   previewDatabaseMaintenance,
   previewSqliteBackupPlan,
+  previewDatabaseAdminEventMutation,
+  listDatabaseAdminEvents,
 } from "./database.service";
 
 describe("database administration service", () => {
@@ -113,6 +116,58 @@ describe("database administration service", () => {
           plan,
           confirmationToken: "sha256:restore",
           confirmationText: "RESTORE SQLITE FROM app.sqlite",
+        },
+      },
+    );
+  });
+
+  it("keeps scheduled event mutations behind live metadata review", async () => {
+    const mutation = {
+      action: "setEnabled" as const,
+      schema: "shop",
+      name: "daily_sync",
+      enabled: false,
+    };
+    invokeWithInterceptors
+      .mockResolvedValueOnce({
+        schedulerStatus: "ON",
+        events: [{ schema: "shop", name: "daily_sync" }],
+      })
+      .mockResolvedValueOnce({ confirmationToken: "event-plan" })
+      .mockResolvedValueOnce("Event disable completed");
+
+    await listDatabaseAdminEvents("connection-1", "mysql", "shop");
+    await previewDatabaseAdminEventMutation(
+      "connection-1",
+      "mysql",
+      mutation,
+    );
+    await executeDatabaseAdminEventMutation("connection-1", "mysql", {
+      mutation,
+      confirmationToken: "event-plan",
+      confirmationText: "DISABLE EVENT shop.daily_sync",
+    });
+
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      1,
+      "list_database_admin_events",
+      { connectionId: "connection-1", driver: "mysql", schema: "shop" },
+    );
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      2,
+      "preview_database_admin_event_mutation",
+      { connectionId: "connection-1", driver: "mysql", mutation },
+    );
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      3,
+      "execute_database_admin_event_mutation",
+      {
+        connectionId: "connection-1",
+        driver: "mysql",
+        request: {
+          mutation,
+          confirmationToken: "event-plan",
+          confirmationText: "DISABLE EVENT shop.daily_sync",
         },
       },
     );

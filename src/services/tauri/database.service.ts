@@ -16,6 +16,10 @@ import type {
   DatabaseAdminUser,
   DatabaseAdminRoleMembership,
   DatabaseAdminTablePrivilege,
+  DatabaseAdminEventCatalog,
+  DatabaseAdminEventMutation,
+  DatabaseAdminEventPlan,
+  ExecuteDatabaseAdminEventMutation,
   CreateDatabaseAdminUserRequest,
   ConnectionDatabaseCapabilityContext,
   DeleteDatabaseAdminUserRequest,
@@ -304,6 +308,39 @@ export async function executeDatabaseMaintenance(
   });
 }
 
+export async function listDatabaseAdminEvents(
+  connectionId: string,
+  driver: DatabaseDriver,
+  schema: string,
+): Promise<DatabaseAdminEventCatalog> {
+  return invokeWithInterceptors<DatabaseAdminEventCatalog>(
+    "list_database_admin_events",
+    { connectionId, driver, schema },
+  );
+}
+
+export async function previewDatabaseAdminEventMutation(
+  connectionId: string,
+  driver: DatabaseDriver,
+  mutation: DatabaseAdminEventMutation,
+): Promise<DatabaseAdminEventPlan> {
+  return invokeWithInterceptors<DatabaseAdminEventPlan>(
+    "preview_database_admin_event_mutation",
+    { connectionId, driver, mutation },
+  );
+}
+
+export async function executeDatabaseAdminEventMutation(
+  connectionId: string,
+  driver: DatabaseDriver,
+  request: ExecuteDatabaseAdminEventMutation,
+): Promise<string> {
+  return invokeWithInterceptors<string>(
+    "execute_database_admin_event_mutation",
+    { connectionId, driver, request },
+  );
+}
+
 export async function previewSqliteBackupPlan(
   connectionId: string,
   request: SqliteBackupPlanRequest,
@@ -501,6 +538,9 @@ export const databaseService = {
   getDatabaseAdminServerIdentity,
   previewDatabaseMaintenance,
   executeDatabaseMaintenance,
+  listDatabaseAdminEvents,
+  previewDatabaseAdminEventMutation,
+  executeDatabaseAdminEventMutation,
   previewSqliteBackupPlan,
   executeSqliteBackupPlan,
   listDatabaseAdminSessions,

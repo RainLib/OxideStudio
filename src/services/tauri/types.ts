@@ -789,6 +789,82 @@ export interface DatabaseAdminTablePrivilege {
   privilege: string;
 }
 
+export interface DatabaseAdminEvent {
+  schema: string;
+  name: string;
+  definer?: string | null;
+  timeZone?: string | null;
+  eventType?: string | null;
+  executeAt?: string | null;
+  intervalValue?: string | null;
+  intervalField?: string | null;
+  starts?: string | null;
+  ends?: string | null;
+  status?: string | null;
+  onCompletion?: string | null;
+  comment?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  lastExecuted?: string | null;
+}
+
+export interface DatabaseAdminEventCatalog {
+  schedulerStatus?: string | null;
+  events: DatabaseAdminEvent[];
+}
+
+export type DatabaseAdminEventIntervalUnit =
+  | "second"
+  | "minute"
+  | "hour"
+  | "day"
+  | "week"
+  | "month"
+  | "quarter"
+  | "year";
+
+export type DatabaseAdminEventSchedule =
+  | { kind: "once"; executeAt: string }
+  | {
+      kind: "interval";
+      intervalValue: number;
+      intervalUnit: DatabaseAdminEventIntervalUnit;
+      starts?: string;
+      ends?: string;
+    };
+
+export interface CreateDatabaseAdminEvent {
+  schema: string;
+  name: string;
+  schedule: DatabaseAdminEventSchedule;
+  preserveAfterCompletion: boolean;
+  enabled: boolean;
+  comment?: string;
+  body: string;
+}
+
+export type DatabaseAdminEventMutation =
+  | { action: "create"; event: CreateDatabaseAdminEvent }
+  | { action: "setEnabled"; schema: string; name: string; enabled: boolean }
+  | { action: "delete"; schema: string; name: string };
+
+export interface DatabaseAdminEventPlan {
+  action: "create" | "enable" | "disable" | "delete";
+  target: string;
+  summary: string;
+  risk: "medium" | "high";
+  sqlPreview: string;
+  confirmationText: string;
+  confirmationToken: string;
+  serverVersion?: string | null;
+}
+
+export interface ExecuteDatabaseAdminEventMutation {
+  mutation: DatabaseAdminEventMutation;
+  confirmationToken: string;
+  confirmationText: string;
+}
+
 export interface DatabaseAdminMetric {
   key: string;
   label: string;
