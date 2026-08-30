@@ -29,6 +29,8 @@ const TABLE_METADATA_CACHE_KIND = "TABLE_METADATA_CACHE";
 const TABLE_METADATA_CACHE_VERSION = 3;
 const ACTIVE_PROJECT_KEY = "oxide-studio-active-project";
 const DEFAULT_PROJECT_ID = "sqls";
+const MAX_CACHED_OBJECT_SOURCE_CHARS = 5 * 1024 * 1024;
+const MAX_CACHED_OBJECT_SOURCE_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface TableMetadataIdentity {
   projectId?: string;
@@ -72,11 +74,17 @@ interface StoredTableMetadata {
   constraints?: ConstraintInfo[];
   ddl?: string | null;
   ddlObjectType?: string | null;
+  ddlCachedAt?: number | null;
   viewDefinition?: string | null;
   viewObjectType?: string | null;
+  viewDefinitionCachedAt?: number | null;
 }
 
 const metadataLoads = new Map<string, Promise<TableMetadataSnapshot>>();
+const objectSourceLoads = new Map<
+  string,
+  { force: boolean; promise: Promise<string> }
+>();
 const cacheOperations = new Map<string, Promise<unknown>>();
 const cacheGenerations = new MetadataCacheGenerationRegistry();
 const remoteMetadataLimiter = new MetadataTaskLimiter(2, 512);
@@ -155,6 +163,52 @@ function metadataLoadKey(
   return `${scopedTableCacheKey(identity)}:indexes:${
     options.includeIndexes !== false
   }:constraints:${options.includeConstraints !== false}:generation:${generation}`;
+}
+
+function objectSourceLoadKey(
+  identity: ResolvedTableMetadataIdentity,
+  kind: "ddl" | "view-definition",
+  objectType?: string | null,
+) {
+  return `${scopedTableCacheKey(identity)}:${kind}:${encodeURIComponent(
+    objectType || "",
+  )}`;
+}
+
+function isCachedObjectSourceFresh(updatedAt: number) {
+  return (
+    Number.isFinite(updatedAt) &&
+    updatedAt > 0 &&
+    Date.now() - updatedAt <= MAX_CACHED_OBJECT_SOURCE_AGE_MS
+  );
+}
+
+function runObjectSourceLoad(
+  key: string,
+  force: boolean,
+  load: () => Promise<string>,
+) {
+  const existing = objectSourceLoads.get(key);
+  if (existing && (!force || existing.force)) return existing.promise;
+
+  const entry = {
+    force,
+    promise: Promise.resolve("") as Promise<string>,
+  };
+  entry.promise = load().finally(() => {
+    if (objectSourceLoads.get(key) === entry) {
+      objectSourceLoads.delete(key);
+    }
+  });
+  objectSourceLoads.set(key, entry);
+  return entry.promise;
+}
+
+function invalidateObjectSourceLoads(identity: ResolvedTableMetadataIdentity) {
+  const prefix = `${scopedTableCacheKey(identity)}:`;
+  for (const key of objectSourceLoads.keys()) {
+    if (key.startsWith(prefix)) objectSourceLoads.delete(key);
+  }
 }
 
 export function tableMetadataParentId(identity: TableMetadataIdentity) {
@@ -372,7 +426,9 @@ async function loadTableMetadataRemote(
   if (includeConstraints) patch.constraints = constraints;
   if (options.force) {
     patch.ddl = null;
+    patch.ddlCachedAt = null;
     patch.viewDefinition = null;
+    patch.viewDefinitionCachedAt = null;
   }
 
   try {
@@ -398,6 +454,7 @@ export async function loadTableMetadata(
   options: LoadTableMetadataOptions
 ): Promise<TableMetadataSnapshot> {
   const resolvedOptions = resolveIdentity(options);
+  if (options.force) invalidateObjectSourceLoads(resolvedOptions);
   const request = options.force
     ? advanceCacheGeneration(resolvedOptions)
     : captureCacheGeneration(resolvedOptions);
@@ -443,40 +500,64 @@ export async function loadTableDdl(
   force = false
 ): Promise<string> {
   const resolvedIdentity = resolveIdentity(identity);
+  const normalizedObjectType = objectType || null;
+  const loadKey = objectSourceLoadKey(
+    resolvedIdentity,
+    "ddl",
+    normalizedObjectType,
+  );
+  const existing = objectSourceLoads.get(loadKey);
+  if (existing && (!force || existing.force)) return existing.promise;
   const request = force
     ? advanceCacheGeneration(resolvedIdentity)
     : captureCacheGeneration(resolvedIdentity);
-  const cached = await readCachedTableMetadata(resolvedIdentity);
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  const normalizedObjectType = objectType || null;
-  if (
-    !force &&
-    typeof cached?.ddl === "string" &&
-    (cached.ddlObjectType || null) === normalizedObjectType
-  ) {
-    return cached.ddl;
-  }
+  return runObjectSourceLoad(loadKey, force, async () => {
+    const cached = await readCachedTableMetadata(resolvedIdentity);
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    if (
+      !force &&
+      typeof cached?.ddl === "string" &&
+      (cached.ddlObjectType || null) === normalizedObjectType &&
+      isCachedObjectSourceFresh(cached.ddlCachedAt || cached.updatedAt)
+    ) {
+      return cached.ddl;
+    }
 
-  const ddl = await tableService.getTableDdl(
-    resolvedIdentity.connectionId,
-    resolvedIdentity.driver,
-    resolvedIdentity.schema,
-    resolvedIdentity.table,
-    objectType,
-    resolvedIdentity.databaseName
-  );
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  try {
-    await persistTableMetadata(resolvedIdentity, {
-      ddl,
-      ddlObjectType: normalizedObjectType,
-    }, request.generation);
-  } catch (error) {
-    if (isMetadataCacheSupersededError(error)) throw error;
-    console.warn("Failed to persist table DDL cache", error);
-  }
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  return ddl;
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
+
+    const ddl = await tableService.getTableDdl(
+      resolvedIdentity.connectionId,
+      resolvedIdentity.driver,
+      resolvedIdentity.schema,
+      resolvedIdentity.table,
+      objectType,
+      resolvedIdentity.databaseName,
+    );
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
+    if (ddl.length <= MAX_CACHED_OBJECT_SOURCE_CHARS) {
+      try {
+        await persistTableMetadata(
+          resolvedIdentity,
+          {
+            ddl,
+            ddlObjectType: normalizedObjectType,
+            ddlCachedAt: Date.now(),
+          },
+          request.generation,
+        );
+      } catch (error) {
+        if (isMetadataCacheSupersededError(error)) throw error;
+        console.warn("Failed to persist table DDL cache", error);
+      }
+    }
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    return ddl;
+  });
 }
 
 export async function loadViewDefinition(
@@ -485,6 +566,14 @@ export async function loadViewDefinition(
   force = false
 ): Promise<string> {
   const resolvedIdentity = resolveIdentity(identity);
+  const normalizedObjectType = objectType || null;
+  const loadKey = objectSourceLoadKey(
+    resolvedIdentity,
+    "view-definition",
+    normalizedObjectType,
+  );
+  const existing = objectSourceLoads.get(loadKey);
+  if (existing && (!force || existing.force)) return existing.promise;
   const request = force
     ? advanceCacheGeneration(resolvedIdentity)
     : captureCacheGeneration(resolvedIdentity);
@@ -494,42 +583,61 @@ export async function loadViewDefinition(
     );
   }
 
-  const cached = await readCachedTableMetadata(resolvedIdentity);
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  const normalizedObjectType = objectType || null;
-  if (
-    !force &&
-    typeof cached?.viewDefinition === "string" &&
-    (cached.viewObjectType || null) === normalizedObjectType
-  ) {
-    return cached.viewDefinition;
-  }
+  return runObjectSourceLoad(loadKey, force, async () => {
+    const cached = await readCachedTableMetadata(resolvedIdentity);
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    if (
+      !force &&
+      typeof cached?.viewDefinition === "string" &&
+      (cached.viewObjectType || null) === normalizedObjectType &&
+      isCachedObjectSourceFresh(
+        cached.viewDefinitionCachedAt || cached.updatedAt,
+      )
+    ) {
+      return cached.viewDefinition;
+    }
 
-  const definition = await tableService.getViewDefinition(
-    resolvedIdentity.connectionId,
-    resolvedIdentity.driver,
-    resolvedIdentity.schema,
-    resolvedIdentity.table,
-    objectType
-  );
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  try {
-    await persistTableMetadata(resolvedIdentity, {
-      viewDefinition: definition,
-      viewObjectType: normalizedObjectType,
-    }, request.generation);
-  } catch (error) {
-    if (isMetadataCacheSupersededError(error)) throw error;
-    console.warn("Failed to persist view definition cache", error);
-  }
-  cacheGenerations.assertCurrent(request.scope, request.generation);
-  return definition;
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
+
+    const definition = await tableService.getViewDefinition(
+      resolvedIdentity.connectionId,
+      resolvedIdentity.driver,
+      resolvedIdentity.schema,
+      resolvedIdentity.table,
+      objectType,
+    );
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    if (!isMetadataConnectionScopeCurrent(resolvedIdentity)) {
+      throw new MetadataCacheSupersededError();
+    }
+    if (definition.length <= MAX_CACHED_OBJECT_SOURCE_CHARS) {
+      try {
+        await persistTableMetadata(
+          resolvedIdentity,
+          {
+            viewDefinition: definition,
+            viewObjectType: normalizedObjectType,
+            viewDefinitionCachedAt: Date.now(),
+          },
+          request.generation,
+        );
+      } catch (error) {
+        if (isMetadataCacheSupersededError(error)) throw error;
+        console.warn("Failed to persist view definition cache", error);
+      }
+    }
+    cacheGenerations.assertCurrent(request.scope, request.generation);
+    return definition;
+  });
 }
 
 export async function invalidateTableMetadata(
   identity: TableMetadataIdentity
 ): Promise<void> {
   const resolvedIdentity = resolveIdentity(identity);
+  invalidateObjectSourceLoads(resolvedIdentity);
   const { scope } = advanceCacheGeneration(resolvedIdentity);
   const previousOperation = cacheOperations.get(scope) || Promise.resolve();
   const invalidation = previousOperation.catch(() => null).then(async () => {

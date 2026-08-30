@@ -62,10 +62,13 @@ import {
 import { useTableOperations } from "@/hooks/useTableOperations";
 import {
   databaseService,
-  getPostgresRoutineDefinitions,
   queryService,
   schemaService,
 } from "@/services/tauri";
+import {
+  invalidateRoutineSourceCache,
+  loadPostgresRoutineDefinitions,
+} from "@/services/routineSourceCache";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
@@ -460,6 +463,7 @@ export function SchemaSidebar() {
     collectionTotal,
     isFunctionsLoading,
     metadataNodeStates,
+    metadataVersion,
   } = useSchemaStore();
 
   const connectionAvailabilityKey = useMemo(
@@ -553,6 +557,7 @@ export function SchemaSidebar() {
   const postgresRemoteRequestIds = useRef<Record<string, number>>({});
   const postgresRemoteRequestCounter = useRef(0);
   const postgresRemoteContextVersion = useRef(0);
+  const routineSourceMetadataVersionRef = useRef(metadataVersion);
 
   // Context Menu State
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -658,6 +663,23 @@ export function SchemaSidebar() {
     activeConnectionId && connectedConnectionIds.includes(activeConnectionId),
   );
   const activeDriver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
+  useEffect(() => {
+    if (routineSourceMetadataVersionRef.current === metadataVersion) return;
+    routineSourceMetadataVersionRef.current = metadataVersion;
+    if (!activeConnectionId || !activeConnection) return;
+    invalidateRoutineSourceCache({
+      projectId: activeProjectId || "local",
+      connectionId: activeConnectionId,
+      driver: activeConnection.driver,
+      driverPackageVersion: activeConnection.driverPackageVersion,
+      connectionDatabaseName: activeConnection.database,
+    });
+  }, [
+    activeConnection,
+    activeConnectionId,
+    activeProjectId,
+    metadataVersion,
+  ]);
   const activeCapabilities =
     connectionCapabilities &&
     connectionCapabilities.connectionId === activeConnectionId &&
@@ -2931,11 +2953,16 @@ export function SchemaSidebar() {
                   <ContextMenuItem
                     className={menuItemClass}
                     onClick={() =>
-                      void getPostgresRoutineDefinitions(
-                        activeConnectionId,
+                      void loadPostgresRoutineDefinitions({
+                        projectId: activeProjectId || "local",
+                        connectionId: activeConnectionId,
+                        driver: activeDriver,
+                        driverPackageVersion:
+                          activeConnection?.driverPackageVersion,
+                        connectionDatabaseName: activeConnection?.database,
                         schema,
-                        routine.name,
-                      )
+                        routine: routine.name,
+                      })
                         .then((definitions) =>
                           copyText(definitions.join("\n\n")),
                         )

@@ -99,7 +99,7 @@ function cachedResource(overrides: Record<string, unknown> = {}) {
       constraints,
       ...overrides,
     },
-    last_updated: 1234,
+    last_updated: Date.now(),
   };
 }
 
