@@ -1,0 +1,174 @@
+name: Publish signed SQLite SSH worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Immutable worker version, for example 0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sqlite-worker-publish
+  cancel-in-progress: false
+
+env:
+  WORKER_PACKAGE_VERSION: ${{ inputs.package_version }}
+  DRIVER_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
+
+jobs:
+  validate:
+    name: Validate worker release configuration
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate immutable version and publishing secrets
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_PREFIX: ${{ secrets.ALIYUN_OSS_PREFIX }}
+          DRIVER_MINISIGN_SECRET_KEY_B64: ${{ secrets.DRIVER_MINISIGN_SECRET_KEY_B64 }}
+          DRIVER_MINISIGN_PUBLIC_KEY_B64: ${{ secrets.DRIVER_MINISIGN_PUBLIC_KEY_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$WORKER_PACKAGE_VERSION" =~ ^[A-Za-z0-9._-]{1,96}$ ]]
+          missing=()
+          for name in ALIYUN_OSS_ACCESS_KEY_ID ALIYUN_OSS_ACCESS_KEY_SECRET ALIYUN_OSS_BUCKET ALIYUN_OSS_REGION ALIYUN_OSS_ENDPOINT ALIYUN_OSS_PREFIX DRIVER_MINISIGN_SECRET_KEY_B64 DRIVER_MINISIGN_PUBLIC_KEY_B64; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required worker release secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build SQLite worker (${{ matrix.platform }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          workspaces: src-tauri/crates/oxide-sqlite-worker -> target
+      - name: Test and build static worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
+          cargo build --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml --release --target "${{ matrix.target }}"
+      - name: Prepare manifest-bound worker payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/package-sqlite-worker.mjs --target "${{ matrix.target }}" --version "$WORKER_PACKAGE_VERSION" --out "worker-output/$WORKER_PACKAGE_VERSION/${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-worker-${{ matrix.platform }}
+          path: worker-output/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Sign and publish immutable worker packages
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    env:
+      ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+      ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+      ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+      ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+      ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+      DRIVER_MINISIGN_SECRET_KEY_B64: ${{ secrets.DRIVER_MINISIGN_SECRET_KEY_B64 }}
+      DRIVER_MINISIGN_PUBLIC_KEY_B64: ${{ secrets.DRIVER_MINISIGN_PUBLIC_KEY_B64 }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sqlite-worker-*
+          path: worker-artifacts
+      - name: Install pinned minisign and ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINISIGN_ARCHIVE="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl --fail --location --retry 3 https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz --output "$MINISIGN_ARCHIVE"
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $MINISIGN_ARCHIVE" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/minisign"
+          tar -xzf "$MINISIGN_ARCHIVE" -C "$RUNNER_TEMP/minisign"
+          sudo install -m 0755 "$RUNNER_TEMP/minisign/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          OSSUTIL_ARCHIVE="$RUNNER_TEMP/ossutil-2.3.0-linux-amd64.zip"
+          curl --fail --location --retry 3 https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-linux-amd64.zip --output "$OSSUTIL_ARCHIVE"
+          echo "3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a  $OSSUTIL_ARCHIVE" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/ossutil"
+          unzip -q "$OSSUTIL_ARCHIVE" -d "$RUNNER_TEMP/ossutil"
+          OSSUTIL_BIN="$(find "$RUNNER_TEMP/ossutil" -type f -name ossutil -print -quit)"
+          test -n "$OSSUTIL_BIN"
+          sudo install -m 0755 "$OSSUTIL_BIN" /usr/local/bin/ossutil
+      - name: Sign, archive and upload worker packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          SECRET_KEY="$RUNNER_TEMP/oxide-worker-release.key"
+          PUBLIC_KEY="$RUNNER_TEMP/oxide-worker-release.pub"
+          printf '%s' "$DRIVER_MINISIGN_SECRET_KEY_B64" | base64 --decode > "$SECRET_KEY"
+          printf '%s' "$DRIVER_MINISIGN_PUBLIC_KEY_B64" | base64 --decode > "$PUBLIC_KEY"
+          PREFIX="${DRIVER_OSS_PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+          DESTINATION="oss://${ALIYUN_OSS_BUCKET}/${PREFIX}/workers/sqlite"
+          mkdir -p worker-release
+          while IFS= read -r -d '' MANIFEST; do
+            PACKAGE_DIR="$(dirname "$MANIFEST")"
+            readarray -t IDENTITY < <(node -e 'const m=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); console.log(m.packageVersion); console.log(m.platform)' "$MANIFEST")
+            VERSION="${IDENTITY[0]}"
+            PLATFORM="${IDENTITY[1]}"
+            case "$VERSION:$PLATFORM" in *[!A-Za-z0-9._:-]*|'') echo "Unsafe worker package identity" >&2; exit 1 ;; esac
+            minisign -Sm "$MANIFEST" -s "$SECRET_KEY" -x "$PACKAGE_DIR/manifest.json.minisig"
+            minisign -Vm "$MANIFEST" -p "$PUBLIC_KEY" -x "$PACKAGE_DIR/manifest.json.minisig"
+            ARCHIVE="worker-release/oxide-sqlite-worker-${VERSION}-${PLATFORM}.tar.gz"
+            tar -C "$PACKAGE_DIR" -czf "$ARCHIVE" -- *
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+            OBJECT_ROOT="$DESTINATION/$VERSION/$PLATFORM"
+            for OBJECT in package.tar.gz package.tar.gz.sha256; do
+              if ossutil stat "$OBJECT_ROOT/$OBJECT" >/dev/null 2>&1; then
+                echo "Worker release object already exists: $OBJECT_ROOT/$OBJECT" >&2
+                exit 1
+              fi
+            done
+            ossutil cp "$ARCHIVE" "$OBJECT_ROOT/package.tar.gz" --cache-control "public,max-age=31536000,immutable"
+            ossutil cp "$ARCHIVE.sha256" "$OBJECT_ROOT/package.tar.gz.sha256" --cache-control "public,max-age=31536000,immutable"
+            ossutil stat "$OBJECT_ROOT/package.tar.gz"
+            ossutil stat "$OBJECT_ROOT/package.tar.gz.sha256"
+          done < <(find worker-artifacts -type f -name manifest.json -print0)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-sqlite-worker-${{ inputs.package_version }}
+          path: worker-release/
+          if-no-files-found: error
+          retention-days: 90

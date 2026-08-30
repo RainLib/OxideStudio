@@ -1,0 +1,21 @@
+[package]
+name = "oxide-sqlite-worker"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Versioned short-lived SQLite worker for OxideStudio remote SSH file access"
+
+[[bin]]
+name = "oxide-sqlite-worker"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[features]
+default = ["runtime"]
+runtime = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { version = "0.32", optional = true, features = ["backup", "bundled", "column_decltype", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
