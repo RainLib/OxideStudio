@@ -65,6 +65,8 @@ export interface TableExportOptions {
   sqlInsertBatchSize?: number;
   /** Defaults to strict. Skip is accepted only for reviewed native SQL dialects. */
   sqlInsertConflictPolicy?: SqlInsertConflictPolicy;
+  /** XLSX only. Defaults to true so exported headers remain immediately filterable. */
+  xlsxAutoFilter?: boolean;
 }
 
 export interface DatabaseSqlExportOptions {
@@ -177,6 +179,7 @@ export async function exportTableData(
     maxRows,
     sqlInsertBatchSize: options.sqlInsertBatchSize,
     sqlInsertConflictPolicy: options.sqlInsertConflictPolicy,
+    xlsxAutoFilter: options.xlsxAutoFilter,
   });
 }
 

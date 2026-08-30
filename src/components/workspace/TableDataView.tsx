@@ -931,6 +931,7 @@ export function TableDataView() {
     sqlInsertBatchSize?: number,
     sqlInsertConflictPolicy: SqlInsertConflictPolicy = "strict",
     maxRows?: number,
+    xlsxAutoFilter?: boolean,
   ) => {
     if (
       !tabConnectionId ||
@@ -978,6 +979,7 @@ export function TableDataView() {
           encoding,
           sqlInsertBatchSize,
           sqlInsertConflictPolicy,
+          xlsxAutoFilter,
         },
         activeTab.tableFilterSql || undefined,
         activeTab.tableFilters || undefined,
@@ -1891,7 +1893,16 @@ export function TableDataView() {
             : undefined
         }
         onExportTsv={() => void handleExport("tsv", "utf8", undefined, "strict", exportMaxRows)}
-        onExportXlsx={() => void handleExport("xlsx", "binary", undefined, "strict", exportMaxRows)}
+        onExportXlsx={(autoFilter) =>
+          void handleExport(
+            "xlsx",
+            "binary",
+            undefined,
+            "strict",
+            exportMaxRows,
+            autoFilter,
+          )
+        }
         onExportParquet={() => void handleExport("parquet", "binary", undefined, "strict", exportMaxRows)}
         onExportArrow={() => void handleExport("arrow", "binary", undefined, "strict", exportMaxRows)}
         onCancelExport={() => void handleCancelExport()}

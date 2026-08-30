@@ -92,7 +92,7 @@ interface TableDataToolbarProps {
   /** Available only for the reviewed built-in PostgreSQL backup route. */
   onExportDatabaseSql?: (scope: "all" | "structure" | "data") => void;
   onExportTsv: () => void;
-  onExportXlsx: () => void;
+  onExportXlsx: (autoFilter: boolean) => void;
   onExportParquet: () => void;
   onExportArrow: () => void;
   onCancelExport?: () => void;
@@ -413,10 +413,30 @@ export function TableDataToolbar({
               </>
             )}
             {supportsExport("xlsx") && (
-              <DropdownMenuItem className="wb-menu-item" onSelect={onExportXlsx}>
-                <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
-                Export Excel workbook (.xlsx)
-              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className="wb-menu-item">
+                  <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+                  Export Excel workbook (.xlsx)
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent className="wb-menu-content min-w-64">
+                    <DropdownMenuItem
+                      className="wb-menu-item"
+                      onSelect={() => onExportXlsx(true)}
+                    >
+                      <Check className="mr-2 h-3.5 w-3.5" />
+                      With header filters
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="wb-menu-item"
+                      onSelect={() => onExportXlsx(false)}
+                    >
+                      <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+                      Without header filters
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
             )}
             {supportsExport("parquet") && (
               <DropdownMenuItem className="wb-menu-item" onSelect={onExportParquet}>

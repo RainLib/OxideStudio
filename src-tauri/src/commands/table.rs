@@ -24,9 +24,10 @@ use parquet::{
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{create_dir_all, metadata, remove_file, rename, File},
     io::{BufRead, BufReader, BufWriter, Read, Write},
@@ -1397,14 +1398,21 @@ fn value_to_u64(value: &serde_json::Value) -> Option<u64> {
     }
 }
 
-fn value_to_export_string(value: &Value) -> String {
+fn value_to_export_cow(value: &Value) -> Cow<'_, str> {
     match value {
-        Value::Null => String::new(),
-        Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Null => Cow::Borrowed(""),
+        Value::String(value) => Cow::Borrowed(value),
+        Value::Number(value) => Cow::Owned(value.to_string()),
+        Value::Bool(true) => Cow::Borrowed("true"),
+        Value::Bool(false) => Cow::Borrowed("false"),
+        Value::Array(_) | Value::Object(_) => {
+            Cow::Owned(serde_json::to_string(value).unwrap_or_default())
+        }
     }
+}
+
+fn value_to_export_string(value: &Value) -> String {
+    value_to_export_cow(value).into_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1527,41 +1535,100 @@ fn postgres_sequence_owner_sql(schema: &str, sequence: &PostgresExportSequence) 
 }
 
 fn csv_escape(value: &Value) -> String {
-    let value = value_to_export_string(value);
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value
-    }
+    let mut output = String::new();
+    push_csv_export_value(&mut output, value);
+    output
 }
 
 fn tsv_escape(value: &Value) -> String {
-    value_to_export_string(value)
-        .chars()
-        .map(|character| {
-            if matches!(character, '\t' | '\r' | '\n') {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
+    let mut output = String::new();
+    push_tsv_export_value(&mut output, value);
+    output
 }
 
 fn markdown_escape_text(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace("\r\n", "<br>")
-        .replace(['\r', '\n'], "<br>")
+    let mut output = String::with_capacity(value.len());
+    push_markdown_export_text(&mut output, value);
+    output
 }
 
-fn markdown_escape(value: &Value) -> String {
-    if value.is_null() {
-        "NULL".to_string()
-    } else {
-        markdown_escape_text(&value_to_export_string(value))
+fn push_csv_export_value(output: &mut String, value: &Value) {
+    let value = value_to_export_cow(value);
+    let quoted = value
+        .chars()
+        .any(|character| matches!(character, ',' | '"' | '\n' | '\r'));
+    if quoted {
+        output.push('"');
     }
+    for character in value.chars() {
+        if character == '"' {
+            output.push_str("\"\"");
+        } else {
+            output.push(character);
+        }
+    }
+    if quoted {
+        output.push('"');
+    }
+}
+
+fn push_tsv_export_value(output: &mut String, value: &Value) {
+    for character in value_to_export_cow(value).chars() {
+        output.push(if matches!(character, '\t' | '\r' | '\n') {
+            ' '
+        } else {
+            character
+        });
+    }
+}
+
+fn push_markdown_export_text(output: &mut String, value: &str) {
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '|' => output.push_str("\\|"),
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                output.push_str("<br>");
+            }
+            '\n' => output.push_str("<br>"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn push_markdown_export_value(output: &mut String, value: &Value) {
+    if value.is_null() {
+        output.push_str("NULL");
+    } else {
+        push_markdown_export_text(output, &value_to_export_cow(value));
+    }
+}
+
+fn push_delimited_export_row(output: &mut String, format: TableExportFormat, row: &[Value]) {
+    output.clear();
+    let (separator, prefix, suffix) = match format {
+        TableExportFormat::Csv => (",", "", "\n"),
+        TableExportFormat::Tsv => ("\t", "", "\n"),
+        TableExportFormat::Markdown => (" | ", "| ", " |\n"),
+        _ => unreachable!("only delimited text formats use this row encoder"),
+    };
+    output.push_str(prefix);
+    for (index, value) in row.iter().enumerate() {
+        if index > 0 {
+            output.push_str(separator);
+        }
+        match format {
+            TableExportFormat::Csv => push_csv_export_value(output, value),
+            TableExportFormat::Tsv => push_tsv_export_value(output, value),
+            TableExportFormat::Markdown => push_markdown_export_value(output, value),
+            _ => unreachable!("only delimited text formats use this row encoder"),
+        }
+    }
+    output.push_str(suffix);
 }
 
 fn sanitize_file_part(value: &str) -> String {
@@ -1658,15 +1725,17 @@ struct StreamingXlsxWriter {
     columns: usize,
     sheet_row: u64,
     sheet_started: bool,
+    auto_filter: bool,
 }
 
 impl StreamingXlsxWriter {
-    fn new(file: File) -> Self {
+    fn new(file: File, auto_filter: bool) -> Self {
         Self {
             archive: ZipWriter::new(file),
             columns: 0,
             sheet_row: 0,
             sheet_started: false,
+            auto_filter,
         }
     }
 
@@ -1807,7 +1876,7 @@ impl StreamingXlsxWriter {
         self.archive
             .write_all(b"</sheetData>")
             .map_err(|error| error.to_string())?;
-        if self.columns > 0 && self.sheet_row > 0 {
+        if self.auto_filter && self.columns > 0 && self.sheet_row > 0 {
             let last_column = xlsx_column_name(self.columns - 1)?;
             write!(
                 self.archive,
@@ -1870,6 +1939,7 @@ struct TableExportWriterContext {
     table: String,
     format: TableExportFormat,
     encoding: TableExportEncoding,
+    xlsx_auto_filter: bool,
     progress_rows: Arc<AtomicU64>,
     progress_batches: Arc<AtomicU64>,
 }
@@ -2451,6 +2521,7 @@ fn write_table_export_stream(
         table,
         format,
         encoding,
+        xlsx_auto_filter,
         progress_rows,
         progress_batches,
     } = context;
@@ -2472,8 +2543,12 @@ fn write_table_export_stream(
     } else {
         None
     };
-    let mut xlsx_writer = matches!(format, TableExportFormat::Xlsx)
-        .then(|| StreamingXlsxWriter::new(file.take().expect("XLSX export owns the output file")));
+    let mut xlsx_writer = matches!(format, TableExportFormat::Xlsx).then(|| {
+        StreamingXlsxWriter::new(
+            file.take().expect("XLSX export owns the output file"),
+            xlsx_auto_filter,
+        )
+    });
     let mut analytical_plan: Option<AnalyticalExportPlan> = None;
     let mut analytical_writer: Option<AnalyticalExportWriter> = None;
     if matches!(encoding, TableExportEncoding::Utf8Bom) {
@@ -2492,6 +2567,10 @@ fn write_table_export_stream(
     let mut wrote_xlsx_header = false;
     let mut rows_exported = 0_u64;
     let mut batches = 0_u64;
+    // Reuse one row buffer for all delimited formats. Large exports therefore
+    // retain only the largest encoded row instead of allocating a Vec<String>
+    // and a joined String for every row.
+    let mut text_row_buffer = String::new();
 
     if matches!(format, TableExportFormat::Json) {
         text_writer
@@ -2665,14 +2744,16 @@ fn write_table_export_stream(
                                 unreachable!("analytical batches are written outside the row loop")
                             }
                             TableExportFormat::Csv => {
-                                let line = row.iter().map(csv_escape).collect::<Vec<_>>().join(",");
-                                writeln!(
-                                    text_writer
-                                        .as_mut()
-                                        .expect("text writer exists for CSV exports"),
-                                    "{line}"
-                                )
-                                .map_err(|error| error.to_string())?;
+                                push_delimited_export_row(
+                                    &mut text_row_buffer,
+                                    TableExportFormat::Csv,
+                                    row,
+                                );
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for CSV exports")
+                                    .write_all(text_row_buffer.as_bytes())
+                                    .map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Json => {
                                 let writer = text_writer
@@ -2681,47 +2762,42 @@ fn write_table_export_stream(
                                 if wrote_json_row {
                                     writer.write_all(b",").map_err(|error| error.to_string())?;
                                 }
-                                let object = row_to_object(&column_names, row);
-                                serde_json::to_writer(&mut *writer, &object)
-                                    .map_err(|error| error.to_string())?;
+                                write_json_export_row(writer, &column_names, row)?;
                                 wrote_json_row = true;
                             }
                             TableExportFormat::Jsonl => {
                                 let writer = text_writer
                                     .as_mut()
                                     .expect("text writer exists for JSON Lines exports");
-                                let object = row_to_object(&column_names, row);
-                                serde_json::to_writer(&mut *writer, &object)
-                                    .map_err(|error| error.to_string())?;
+                                write_json_export_row(writer, &column_names, row)?;
                                 writer.write_all(b"\n").map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Markdown => {
-                                let line = row
-                                    .iter()
-                                    .map(markdown_escape)
-                                    .collect::<Vec<_>>()
-                                    .join(" | ");
-                                writeln!(
-                                    text_writer
-                                        .as_mut()
-                                        .expect("text writer exists for Markdown exports"),
-                                    "| {line} |"
-                                )
-                                .map_err(|error| error.to_string())?;
+                                push_delimited_export_row(
+                                    &mut text_row_buffer,
+                                    TableExportFormat::Markdown,
+                                    row,
+                                );
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for Markdown exports")
+                                    .write_all(text_row_buffer.as_bytes())
+                                    .map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Sql => {
                                 unreachable!("SQL batches are written outside the row loop")
                             }
                             TableExportFormat::Tsv => {
-                                let line =
-                                    row.iter().map(tsv_escape).collect::<Vec<_>>().join("\t");
-                                writeln!(
-                                    text_writer
-                                        .as_mut()
-                                        .expect("text writer exists for TSV exports"),
-                                    "{line}"
-                                )
-                                .map_err(|error| error.to_string())?;
+                                push_delimited_export_row(
+                                    &mut text_row_buffer,
+                                    TableExportFormat::Tsv,
+                                    row,
+                                );
+                                text_writer
+                                    .as_mut()
+                                    .expect("text writer exists for TSV exports")
+                                    .write_all(text_row_buffer.as_bytes())
+                                    .map_err(|error| error.to_string())?;
                             }
                             TableExportFormat::Xlsx => {
                                 xlsx_writer
@@ -2854,15 +2930,22 @@ fn xlsx_escape_text(value: &str) -> Result<String, String> {
     Ok(escaped)
 }
 
-fn row_to_object(columns: &[String], row: &[Value]) -> Value {
-    let mut object = Map::new();
+fn write_json_export_row<W: Write>(
+    writer: &mut W,
+    columns: &[String],
+    row: &[Value],
+) -> Result<(), String> {
+    writer.write_all(b"{").map_err(|error| error.to_string())?;
     for (index, column) in columns.iter().enumerate() {
-        object.insert(
-            column.clone(),
-            row.get(index).cloned().unwrap_or(Value::Null),
-        );
+        if index > 0 {
+            writer.write_all(b",").map_err(|error| error.to_string())?;
+        }
+        serde_json::to_writer(&mut *writer, column).map_err(|error| error.to_string())?;
+        writer.write_all(b":").map_err(|error| error.to_string())?;
+        serde_json::to_writer(&mut *writer, row.get(index).unwrap_or(&Value::Null))
+            .map_err(|error| error.to_string())?;
     }
-    Value::Object(object)
+    writer.write_all(b"}").map_err(|error| error.to_string())
 }
 
 fn sql_export_literal(dialect: SqlExportDialect, value: &Value, data_type: Option<&str>) -> String {
@@ -9182,6 +9265,7 @@ pub async fn export_table_data(
     table: String,
     format: TableExportFormat,
     encoding: Option<TableExportEncoding>,
+    xlsx_auto_filter: Option<bool>,
     filter_sql: Option<String>,
     filters: Option<Vec<TableFilter>>,
     sort: Option<TableSort>,
@@ -9211,6 +9295,11 @@ pub async fn export_table_data(
                 .to_string(),
         );
     }
+    if xlsx_auto_filter.is_some() && !matches!(format, TableExportFormat::Xlsx) {
+        cancellation.take(&export_id).await;
+        return Err("XLSX auto-filter settings are supported only for XLSX exports".to_string());
+    }
+    let xlsx_auto_filter = xlsx_auto_filter.unwrap_or(true);
     let encoding = if matches!(
         format,
         TableExportFormat::Arrow | TableExportFormat::Parquet | TableExportFormat::Xlsx
@@ -9407,6 +9496,7 @@ pub async fn export_table_data(
                         table: writer_table,
                         format,
                         encoding,
+                        xlsx_auto_filter,
                         progress_rows: writer_progress_rows,
                         progress_batches: writer_progress_batches,
                     },
@@ -12975,9 +13065,9 @@ mod tests {
         postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
         postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
         postgres_sequence_setval_sql, postgres_view_definition_query,
-        postgres_view_dependency_query, preview_metadata_required, query_target,
-        query_target_parameterized, read_csv_import_preview, read_json_import_preview,
-        relation_operation_allowed, resolve_csv_import_columns,
+        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
+        query_target, query_target_parameterized, read_csv_import_preview,
+        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
         summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
@@ -13019,6 +13109,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashSet},
         fs,
+        io::Read,
         path::{Path, PathBuf},
         sync::{atomic::AtomicU64, Arc, Mutex},
     };
@@ -15349,6 +15440,33 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
     }
 
     #[test]
+    fn reuses_one_delimited_row_buffer_without_changing_output() {
+        let mut buffer = String::with_capacity(128);
+        push_delimited_export_row(
+            &mut buffer,
+            TableExportFormat::Csv,
+            &[json!("a,b"), json!("a\"b"), Value::Null],
+        );
+        assert_eq!(buffer, "\"a,b\",\"a\"\"b\",\n");
+        let retained_capacity = buffer.capacity();
+
+        push_delimited_export_row(
+            &mut buffer,
+            TableExportFormat::Tsv,
+            &[json!("first\tsecond\nthird"), json!(true)],
+        );
+        assert_eq!(buffer, "first second third\ttrue\n");
+        assert!(buffer.capacity() >= retained_capacity);
+
+        push_delimited_export_row(
+            &mut buffer,
+            TableExportFormat::Markdown,
+            &[json!("Ada|one\r\nline"), Value::Null],
+        );
+        assert_eq!(buffer, "| Ada\\|one<br>line | NULL |\n");
+    }
+
+    #[test]
     fn names_xlsx_columns_and_rejects_invalid_cell_text() {
         assert_eq!(xlsx_column_name(0).unwrap(), "A");
         assert_eq!(xlsx_column_name(25).unwrap(), "Z");
@@ -15367,7 +15485,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("table-export.xlsx");
         let file = fs::File::create(&path).unwrap();
-        let mut writer = StreamingXlsxWriter::new(file);
+        let mut writer = StreamingXlsxWriter::new(file, true);
         writer
             .write_header(&["id".to_string(), "label".to_string(), "enabled".to_string()])
             .unwrap();
@@ -15392,6 +15510,27 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             Some(&Data::String("A&B <value>".to_string()))
         );
         assert_eq!(sheet.get((1, 2)), Some(&Data::Bool(true)));
+    }
+
+    #[test]
+    fn streaming_xlsx_can_omit_header_auto_filter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("table-export-no-filter.xlsx");
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = StreamingXlsxWriter::new(file, false);
+        writer.write_header(&["id".to_string()]).unwrap();
+        writer.write_row(&[json!(1)]).unwrap();
+        writer.finish().unwrap();
+
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut worksheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut worksheet)
+            .unwrap();
+        assert!(!worksheet.contains("<autoFilter"));
     }
 
     #[test]
@@ -16954,6 +17093,7 @@ WITH DATA;"#
             } else {
                 TableExportEncoding::Utf8
             },
+            xlsx_auto_filter: true,
             progress_rows: Arc::new(AtomicU64::new(0)),
             progress_batches: Arc::new(AtomicU64::new(0)),
         }

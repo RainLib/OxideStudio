@@ -7,7 +7,45 @@ const { invokeWithInterceptors } = vi.hoisted(() => ({
 vi.mock("./client", () => ({ invokeWithInterceptors }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { exportDatabaseSql } from "./table.service";
+import { exportDatabaseSql, exportTableData } from "./table.service";
+
+describe("exportTableData", () => {
+  beforeEach(() => {
+    invokeWithInterceptors.mockReset();
+    invokeWithInterceptors.mockResolvedValue({
+      exportId: "xlsx-export",
+      filePath: "users.xlsx",
+      rowsExported: 1,
+      batches: 1,
+      typeCoercions: [],
+    });
+  });
+
+  it("forwards the reviewed XLSX auto-filter choice to the host", async () => {
+    await exportTableData(
+      "connection-1",
+      "postgres",
+      "public",
+      "users",
+      "xlsx",
+      {
+        exportId: "xlsx-export",
+        encoding: "binary",
+        xlsxAutoFilter: false,
+      },
+    );
+
+    expect(invokeWithInterceptors).toHaveBeenCalledWith(
+      "export_table_data",
+      expect.objectContaining({
+        connectionId: "connection-1",
+        exportId: "xlsx-export",
+        format: "xlsx",
+        xlsxAutoFilter: false,
+      }),
+    );
+  });
+});
 
 describe("exportDatabaseSql", () => {
   beforeEach(() => {
