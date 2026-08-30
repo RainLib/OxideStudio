@@ -156,6 +156,7 @@ import {
 } from "@/lib/elasticsearchConsole";
 import {
   buildMongoDbConsoleCompletions,
+  mongodbCompletionUsesSnippetSyntax,
   mongodbConsoleCompletionContext,
 } from "@/lib/mongodbCompletion";
 import {
@@ -1375,7 +1376,7 @@ export function QueryEditor({
               : undefined,
             insertText: item.insertText,
             insertTextRules:
-              item.kind === "snippet"
+              mongodbCompletionUsesSnippetSyntax(item)
                 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
                 : undefined,
             filterText: item.label,

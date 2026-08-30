@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMongoDbConsoleCompletions,
+  mongodbCompletionUsesSnippetSyntax,
   mongodbConsoleCompletionContext,
+  shouldOfferMongoDbCompletions,
 } from "./mongodbCompletion";
 
 const fields = [
@@ -47,5 +49,121 @@ describe("MongoDB native JSON aggregation completion", () => {
     expect(mongodbConsoleCompletionContext(source, source.length).area).toBe(
       "pipeline-stage",
     );
+  });
+
+  it("keeps nested field predicates in query-operator mode", () => {
+    const source = '{"find":"orders","filter":{"amount":{"$g';
+    const result = completion(source);
+    expect(result.context.area).toBe("query-operator");
+    expect(result.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "$gte",
+          insertText: '"$gte": ${1}',
+        }),
+      ]),
+    );
+    expect(mongodbCompletionUsesSnippetSyntax(result.items[0]!)).toBe(true);
+  });
+
+  it("offers fields inside logical query arrays", () => {
+    const source = '{"find":"orders","filter":{"$and":[{"customer.';
+    const result = completion(source);
+    expect(result.context.area).toBe("field");
+    expect(result.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "customer.region" }),
+      ]),
+    );
+  });
+
+  it("offers push modifiers only inside a pushed field value", () => {
+    const source =
+      '{"collection":"orders","updateOne":{"filter":{},"update":{"$push":{"tags":{"$e';
+    const result = completion(source);
+    expect(result.context.area).toBe("push-modifier");
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        label: "$each",
+        insertText: '"$each": [${1}]',
+      }),
+    ]);
+  });
+
+  it("covers fixed stage options and field-reference values", () => {
+    const optionSource =
+      '{"aggregate":"orders","pipeline":[{"$unwind":{"pre';
+    const optionResult = completion(optionSource);
+    expect(optionResult.context.area).toBe("stage-option");
+    expect(optionResult.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "preserveNullAndEmptyArrays" }),
+      ]),
+    );
+
+    const fieldSource =
+      '{"aggregate":"orders","pipeline":[{"$bucket":{"groupBy":"$customer.';
+    const fieldResult = completion(fieldSource);
+    expect(fieldResult.context.area).toBe("field-reference");
+    expect(fieldResult.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "$customer.region" }),
+      ]),
+    );
+  });
+
+  it("uses executable Extended JSON values instead of shell helpers", () => {
+    const source = '{"find":"orders","filter":{"_id":O';
+    const result = completion(source);
+    expect(result.context).toMatchObject({ area: "value", quoted: false });
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        label: "ObjectId",
+        insertText: '{ "$oid": "${1:000000000000000000000000}" }',
+      }),
+    ]);
+    expect(result.items.some((item) => item.insertText.includes("ObjectId("))).toBe(
+      false,
+    );
+  });
+
+  it("does not inject value snippets into an existing JSON string", () => {
+    const source = '{"find":"orders","filter":{"status":"act';
+    const result = completion(source);
+    expect(result.context).toMatchObject({ area: "value", quoted: true });
+    expect(result.items).toEqual([]);
+    expect(shouldOfferMongoDbCompletions(source, source.length)).toBe(false);
+  });
+
+  it("keeps plain metadata values out of Monaco snippet mode", () => {
+    expect(
+      mongodbCompletionUsesSnippetSyntax({
+        insertText: "status",
+        kind: "field",
+      }),
+    ).toBe(false);
+  });
+
+  it("adds common native-command helpers without changing the JSON contract", () => {
+    const source = '{"di';
+    const result = completion(source);
+    expect(result.context.area).toBe("root");
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        label: "distinct",
+        insertText: expect.stringContaining('"command"'),
+      }),
+    ]);
+  });
+
+  it("bounds large metadata completion lists", () => {
+    const source = '{"find":"orders","filter":{"';
+    const result = buildMongoDbConsoleCompletions(source, source.length, {
+      fields: Array.from({ length: 400 }, (_, index) => ({
+        name: `field_${String(index).padStart(3, "0")}`,
+      })),
+    });
+    expect(result.context.area).toBe("field");
+    expect(result.items).toHaveLength(256);
   });
 });

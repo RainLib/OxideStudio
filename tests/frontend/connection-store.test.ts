@@ -12,6 +12,13 @@ const mocks = vi.hoisted(() => ({
   loadConnections: vi.fn(async () => []),
   saveConnections: vi.fn(async () => undefined),
   testConnection: vi.fn(async () => undefined),
+  prepareRemoteSqliteWorker: vi.fn(async () => ({
+    installed: true,
+    version: "0.1.0",
+    protocolVersion: 1,
+    platform: "linux-x86_64",
+    sha256: "a".repeat(64),
+  })),
   connectManagedSource: vi.fn(async () => undefined),
 }));
 
@@ -23,6 +30,7 @@ vi.mock("@/services/tauri", () => ({
     loadConnections: mocks.loadConnections,
     saveConnections: mocks.saveConnections,
     testConnection: mocks.testConnection,
+    prepareRemoteSqliteWorker: mocks.prepareRemoteSqliteWorker,
   },
 }));
 
@@ -75,6 +83,34 @@ function managedConnection(id: string): ConnectionConfig {
       capabilities: ["resource.discover", "metadata.read", "query.read"],
       allowedResourceSummary: ["app/public"],
       policyRevision: "policy-1",
+    },
+  });
+}
+
+function remoteSqliteConnection(host: string): ConnectionConfig {
+  return connection({
+    id: `sqlite-${host}`,
+    name: "Remote SQLite",
+    driver: "sqlite",
+    url: "",
+    host: undefined,
+    port: undefined,
+    user: undefined,
+    password: undefined,
+    database: "/srv/data/app.sqlite",
+    connectionUrl: "/srv/data/app.sqlite",
+    sshTunnel: {
+      enabled: true,
+      host,
+      port: 22,
+      username: "oxide",
+      authMethod: "password",
+      password: "secret",
+      strictHostKeyChecking: true,
+      remoteSqlite: {
+        placement: "session",
+        allowWorkerUpload: true,
+      },
     },
   });
 }
@@ -443,6 +479,37 @@ describe("connection store", () => {
       activeConnectionId: "postgres-1",
       connectedConnectionIds: ["postgres-1"],
       isConnected: true,
+    });
+  });
+
+  it("prepares a remote SQLite worker before opening its SSH session", async () => {
+    const config = remoteSqliteConnection("remote-sqlite-order");
+
+    await expect(useConnectionStore.getState().connect(config)).resolves.toBeNull();
+
+    expect(mocks.prepareRemoteSqliteWorker).toHaveBeenCalledWith(
+      config.sshTunnel,
+      "",
+    );
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.prepareRemoteSqliteWorker.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.connect.mock.invocationCallOrder[0]!);
+  });
+
+  it("does not open remote SQLite when signed worker preparation fails", async () => {
+    const config = remoteSqliteConnection("remote-sqlite-failure");
+    mocks.prepareRemoteSqliteWorker.mockRejectedValueOnce(
+      new Error("worker signature rejected"),
+    );
+
+    await expect(useConnectionStore.getState().connect(config)).resolves.toBe(
+      "worker signature rejected",
+    );
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().connectionRuntimeStates[config.id]).toMatchObject({
+      status: "error",
+      message: "worker signature rejected",
     });
   });
 

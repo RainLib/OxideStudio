@@ -344,6 +344,7 @@ describe("ConnectionForm", () => {
     expect(useSettingsStore.getState().updateSettings).toHaveBeenCalledWith({
       drivers: {
         catalogUrl: "https://drivers.example.com/catalog.json",
+        sqliteWorkerBaseUrl: "",
         storePath: initialSettingsState.settings.drivers.storePath,
       },
     });

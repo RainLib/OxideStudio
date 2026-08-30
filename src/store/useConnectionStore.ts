@@ -523,7 +523,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     try {
       const connectionUrl = connectionUrlForConfig(config);
       const sshTunnel = enabledSshTunnel(config);
-      await prepareRemoteSqliteWorker(config);
+      if (usesRemoteSqliteWorker(config)) {
+        await prepareRemoteSqliteWorker(config);
+      }
       if (config.driverPackageVersion) {
         await connectionService.testConnection(
           config.driver,
@@ -682,7 +684,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       try {
         const connectionUrl = connectionUrlForConfig(scopedConfig);
         const sshTunnel = enabledSshTunnel(scopedConfig);
-        await prepareRemoteSqliteWorker(scopedConfig);
+        if (usesRemoteSqliteWorker(scopedConfig)) {
+          await prepareRemoteSqliteWorker(scopedConfig);
+        }
         if (scopedConfig.driverPackageVersion) {
           await connectionService.connect(
             scopedConfig.id,
@@ -918,7 +922,9 @@ export async function ensureConnectionReadyInBackground(
     try {
       const connectionUrl = connectionUrlForConfig(initialConnection);
       const sshTunnel = enabledSshTunnel(initialConnection);
-      await prepareRemoteSqliteWorker(initialConnection);
+      if (usesRemoteSqliteWorker(initialConnection)) {
+        await prepareRemoteSqliteWorker(initialConnection);
+      }
       await connectionService.connect(
         initialConnection.id,
         initialConnection.driver,

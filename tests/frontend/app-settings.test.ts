@@ -266,6 +266,7 @@ describe("app settings workbench layout", () => {
       }).drivers,
     ).toEqual({
       catalogUrl: "https://drivers.example.com/catalog.json",
+      sqliteWorkerBaseUrl: "",
       storePath: "/Volumes/Workspace/OxideDrivers",
     });
   });
