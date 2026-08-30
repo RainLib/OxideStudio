@@ -50,15 +50,24 @@ export function decodeCsvBytes(
 ) {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const bomEncoding = detectBomEncoding(view);
-  const encoding = requestedEncoding === "auto"
-    ? bomEncoding || "utf-8"
-    : requestedEncoding;
-  const offset = bomLength(view, encoding);
-  const text = new TextDecoder(encoding, { fatal: false })
-    .decode(view.subarray(offset))
-    .replace(/^\uFEFF/, "");
-
-  return { text, encoding };
+  const candidates: Array<Exclude<CsvEncoding, "auto">> =
+    requestedEncoding === "auto"
+      ? [bomEncoding || "utf-8", ...(bomEncoding ? [] : ["gb18030" as const])]
+      : [requestedEncoding];
+  for (const encoding of candidates) {
+    try {
+      const offset = bomLength(view, encoding);
+      const text = new TextDecoder(encoding, { fatal: true })
+        .decode(view.subarray(offset))
+        .replace(/^\uFEFF/, "");
+      return { text, encoding };
+    } catch {
+      // Try the next reviewed automatic-detection candidate.
+    }
+  }
+  throw new Error(
+    `The CSV contains invalid bytes for ${requestedEncoding === "auto" ? "UTF-8 and GB18030" : requestedEncoding.toUpperCase()}. Select the correct encoding before importing.`,
+  );
 }
 
 export function inferCsvDelimiter(text: string) {

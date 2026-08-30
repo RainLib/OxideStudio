@@ -4674,7 +4674,7 @@ export function SchemaSidebar() {
                               <ContextMenuItem
                                 className={menuItemClass}
                                 disabled={!canImportRelationRows}
-                                title="Stream a UTF-8 comma-separated CSV with a header row. Use Import CSV… when you need encoding, delimiter, or column mapping."
+                                title="Stream an auto-detected UTF-8, UTF-16, or GB18030 comma-separated CSV with a header row. Use Import CSV… when you need an explicit encoding, delimiter, or column mapping."
                                 onClick={() =>
                                   void runForSchema(schema, () =>
                                     importTableData(table.name, "csv"),

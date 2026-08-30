@@ -30,7 +30,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{create_dir_all, metadata, remove_file, rename, File},
-    io::{BufRead, BufReader, BufWriter, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -451,6 +451,44 @@ pub struct TableCsvImportOptions {
     #[serde(default)]
     pub column_mapping: Vec<TableCsvColumnMapping>,
     pub empty_fields_as_null: Option<bool>,
+    #[serde(default)]
+    pub encoding: Option<TableImportTextEncoding>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TableImportTextEncoding {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "utf-8")]
+    Utf8,
+    #[serde(rename = "utf-16le")]
+    Utf16Le,
+    #[serde(rename = "utf-16be")]
+    Utf16Be,
+    #[serde(rename = "gb18030")]
+    Gb18030,
+}
+
+impl TableImportTextEncoding {
+    fn decoder_encoding(self) -> Option<&'static encoding_rs::Encoding> {
+        match self {
+            Self::Auto => None,
+            Self::Utf8 => Some(encoding_rs::UTF_8),
+            Self::Utf16Le => Some(encoding_rs::UTF_16LE),
+            Self::Utf16Be => Some(encoding_rs::UTF_16BE),
+            Self::Gb18030 => Some(encoding_rs::GBK),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "automatic",
+            Self::Utf8 => "UTF-8",
+            Self::Utf16Le => "UTF-16 LE",
+            Self::Utf16Be => "UTF-16 BE",
+            Self::Gb18030 => "GB18030 / GBK",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10808,6 +10846,263 @@ fn canonical_import_columns(
     Ok(canonical)
 }
 
+const IMPORT_ENCODING_READ_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Incrementally transcodes a reviewed CSV into UTF-8 for the csv parser.
+/// Malformed source bytes are rejected instead of being replaced with U+FFFD,
+/// which would silently change imported keys or text values.
+struct StrictTranscodingReader<R> {
+    reader: R,
+    decoder: encoding_rs::Decoder,
+    encoding: TableImportTextEncoding,
+    pending_input: Vec<u8>,
+    pending_output: Vec<u8>,
+    output_offset: usize,
+    reached_eof: bool,
+    finished: bool,
+}
+
+impl<R: Read> StrictTranscodingReader<R> {
+    fn new(reader: R, encoding: TableImportTextEncoding) -> Result<Self, String> {
+        let decoder = encoding
+            .decoder_encoding()
+            .ok_or_else(|| "Automatic CSV encoding must be resolved before decoding".to_string())?
+            .new_decoder_without_bom_handling();
+        Ok(Self {
+            reader,
+            decoder,
+            encoding,
+            pending_input: Vec::with_capacity(IMPORT_ENCODING_READ_CHUNK_BYTES),
+            pending_output: Vec::new(),
+            output_offset: 0,
+            reached_eof: false,
+            finished: false,
+        })
+    }
+
+    fn invalid_data_error(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Invalid byte sequence for {} encoding",
+                self.encoding.label()
+            ),
+        )
+    }
+}
+
+impl<R: Read> Read for StrictTranscodingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if self.output_offset < self.pending_output.len() {
+                let available = &self.pending_output[self.output_offset..];
+                let copied = available.len().min(buffer.len());
+                buffer[..copied].copy_from_slice(&available[..copied]);
+                self.output_offset += copied;
+                if self.output_offset == self.pending_output.len() {
+                    self.pending_output.clear();
+                    self.output_offset = 0;
+                }
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            if self.pending_input.is_empty() && !self.reached_eof {
+                let mut input = [0_u8; IMPORT_ENCODING_READ_CHUNK_BYTES];
+                let read = self.reader.read(&mut input)?;
+                if read == 0 {
+                    self.reached_eof = true;
+                } else {
+                    self.pending_input.extend_from_slice(&input[..read]);
+                }
+            }
+
+            let output_capacity = self
+                .decoder
+                .max_utf8_buffer_length_without_replacement(self.pending_input.len())
+                .unwrap_or_else(|| self.pending_input.len().saturating_mul(3).saturating_add(4))
+                .max(4);
+            self.pending_output.resize(output_capacity, 0);
+            let (result, read, written) = self.decoder.decode_to_utf8_without_replacement(
+                &self.pending_input,
+                &mut self.pending_output,
+                self.reached_eof,
+            );
+            self.pending_input.drain(..read);
+            self.pending_output.truncate(written);
+
+            match result {
+                encoding_rs::DecoderResult::Malformed(_, _) => {
+                    return Err(self.invalid_data_error())
+                }
+                encoding_rs::DecoderResult::InputEmpty if self.reached_eof => self.finished = true,
+                encoding_rs::DecoderResult::InputEmpty | encoding_rs::DecoderResult::OutputFull => {
+                }
+            }
+        }
+    }
+}
+
+fn csv_bom_encoding(bytes: &[u8]) -> Option<(TableImportTextEncoding, usize)> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        Some((TableImportTextEncoding::Utf8, 3))
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        Some((TableImportTextEncoding::Utf16Le, 2))
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        Some((TableImportTextEncoding::Utf16Be, 2))
+    } else {
+        None
+    }
+}
+
+struct EncodingValidationState {
+    decoder: encoding_rs::Decoder,
+    pending: Vec<u8>,
+    output: Vec<u8>,
+    valid: bool,
+}
+
+impl EncodingValidationState {
+    fn new(encoding: &'static encoding_rs::Encoding) -> Self {
+        Self {
+            decoder: encoding.new_decoder_without_bom_handling(),
+            pending: Vec::new(),
+            output: Vec::new(),
+            valid: true,
+        }
+    }
+
+    fn push(&mut self, input: &[u8], last: bool) {
+        if !self.valid {
+            return;
+        }
+        self.pending.extend_from_slice(input);
+        loop {
+            let output_capacity = self
+                .decoder
+                .max_utf8_buffer_length_without_replacement(self.pending.len())
+                .unwrap_or_else(|| self.pending.len().saturating_mul(3).saturating_add(4))
+                .max(4);
+            self.output.resize(output_capacity, 0);
+            let (result, read, _) = self.decoder.decode_to_utf8_without_replacement(
+                &self.pending,
+                &mut self.output,
+                last,
+            );
+            self.pending.drain(..read);
+            match result {
+                encoding_rs::DecoderResult::Malformed(_, _) => {
+                    self.valid = false;
+                    self.pending.clear();
+                    return;
+                }
+                encoding_rs::DecoderResult::InputEmpty => return,
+                // A decoder that cannot consume input or produce output would
+                // otherwise spin forever on malformed boundary state.
+                encoding_rs::DecoderResult::OutputFull if read == 0 => {
+                    self.valid = false;
+                    self.pending.clear();
+                    return;
+                }
+                encoding_rs::DecoderResult::OutputFull => {}
+            }
+        }
+    }
+}
+
+fn validate_csv_text_encoding(
+    path: &Path,
+    encoding: TableImportTextEncoding,
+    bom_len: usize,
+) -> Result<(), String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(bom_len as u64))
+        .map_err(|error| error.to_string())?;
+    let mut reader = StrictTranscodingReader::new(BufReader::new(file), encoding)?;
+    std::io::copy(&mut reader, &mut std::io::sink())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn resolve_csv_text_encoding(
+    path: &Path,
+    requested: Option<TableImportTextEncoding>,
+) -> Result<(TableImportTextEncoding, usize), String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut prefix = [0_u8; 3];
+    let prefix_len = file.read(&mut prefix).map_err(|error| error.to_string())?;
+    let bom = csv_bom_encoding(&prefix[..prefix_len]);
+    let requested = requested.unwrap_or(TableImportTextEncoding::Auto);
+
+    if requested == TableImportTextEncoding::Auto {
+        if let Some((encoding, bom_len)) = bom {
+            validate_csv_text_encoding(path, encoding, bom_len)?;
+            return Ok((encoding, bom_len));
+        }
+
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        // Validate both candidates in one bounded pass. This avoids choosing
+        // UTF-8 from an ASCII-only prefix when GB18030 bytes appear later.
+        let mut utf8 = EncodingValidationState::new(encoding_rs::UTF_8);
+        let mut gb18030 = EncodingValidationState::new(encoding_rs::GBK);
+        let mut input = [0_u8; IMPORT_ENCODING_READ_CHUNK_BYTES];
+        loop {
+            let read = file.read(&mut input).map_err(|error| error.to_string())?;
+            if read == 0 {
+                utf8.push(&[], true);
+                gb18030.push(&[], true);
+                break;
+            }
+            utf8.push(&input[..read], false);
+            gb18030.push(&input[..read], false);
+        }
+        if utf8.valid {
+            return Ok((TableImportTextEncoding::Utf8, 0));
+        }
+        if gb18030.valid {
+            return Ok((TableImportTextEncoding::Gb18030, 0));
+        }
+        return Err(
+            "Could not detect CSV encoding; select UTF-8, UTF-16, or GB18030 explicitly"
+                .to_string(),
+        );
+    }
+
+    let bom_len = bom
+        .filter(|(encoding, _)| *encoding == requested)
+        .map(|(_, length)| length)
+        .unwrap_or(0);
+    validate_csv_text_encoding(path, requested, bom_len)?;
+    Ok((requested, bom_len))
+}
+
+fn csv_import_reader(
+    path: &Path,
+    has_headers: bool,
+    delimiter: u8,
+    requested_encoding: Option<TableImportTextEncoding>,
+) -> Result<csv::Reader<Box<dyn Read + Send>>, String> {
+    let (encoding, bom_len) = resolve_csv_text_encoding(path, requested_encoding)?;
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(bom_len as u64))
+        .map_err(|error| error.to_string())?;
+    let decoded: Box<dyn Read + Send> = Box::new(StrictTranscodingReader::new(
+        BufReader::new(file),
+        encoding,
+    )?);
+    Ok(csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(delimiter)
+        .from_reader(decoded))
+}
+
 fn csv_delimiter(options: Option<&TableCsvImportOptions>) -> Result<u8, String> {
     let Some(delimiter) = options.and_then(|options| options.delimiter.as_deref()) else {
         return Ok(b',');
@@ -11036,11 +11331,12 @@ async fn import_csv_in_transaction(
         .and_then(|options| options.first_row_header)
         .or(first_row_header)
         .unwrap_or(true);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(has_headers)
-        .delimiter(csv_delimiter(csv_options)?)
-        .from_path(path)
-        .map_err(|error| error.to_string())?;
+    let mut reader = csv_import_reader(
+        path,
+        has_headers,
+        csv_delimiter(csv_options)?,
+        csv_options.and_then(|options| options.encoding),
+    )?;
     let source_columns = if has_headers {
         reader
             .headers()
@@ -11166,11 +11462,12 @@ pub async fn preflight_table_csv_import(
         .and_then(|options| options.first_row_header)
         .or(first_row_header)
         .unwrap_or(true);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(has_headers)
-        .delimiter(csv_delimiter(csv_options.as_ref())?)
-        .from_path(&path)
-        .map_err(|error| error.to_string())?;
+    let mut reader = csv_import_reader(
+        &path,
+        has_headers,
+        csv_delimiter(csv_options.as_ref())?,
+        csv_options.as_ref().and_then(|options| options.encoding),
+    )?;
     let source_columns = if has_headers {
         reader
             .headers()
@@ -13048,8 +13345,8 @@ mod tests {
         build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
         build_sqlite_drop_index_statement, build_structured_filter_where, build_table_order_by,
         build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
-        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_record_values,
-        data_compare_key, data_compare_key_columns_are_declared_unique,
+        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_import_reader,
+        csv_record_values, data_compare_key, data_compare_key_columns_are_declared_unique,
         data_compare_keyset_continuation, data_compare_row_values,
         delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
@@ -13068,27 +13365,28 @@ mod tests {
         postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
         query_target, query_target_parameterized, read_csv_import_preview,
         read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
-        select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
-        summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
-        table_data_transfer_dialect, table_data_transfer_plan_digest,
-        table_data_transfer_report_id, transfer_confirmation_token, transfer_plan_can_execute,
-        transfer_target_column_type, transfer_target_confirmation_token,
-        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
-        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
-        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
-        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
-        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
-        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
-        TableDataCompareResult, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
-        TableDataTransferRequest, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
-        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
+        resolve_csv_text_encoding, resolve_transfer_upsert_key_columns,
+        reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
+        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
+        table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
+        table_data_transfer_plan_digest, table_data_transfer_report_id,
+        transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
+        transfer_target_confirmation_token, transfer_type_mapping_assessment,
+        transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
+        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
+        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
+        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
+        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
+        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
+        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
+        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
+        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
+        TableExportWriterContext, TableExportWriterMessage, TableFilter, TableImportTextEncoding,
+        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
         MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
         MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
@@ -13778,6 +14076,7 @@ mod tests {
                 },
             ],
             empty_fields_as_null: Some(true),
+            encoding: Some(TableImportTextEncoding::Utf8),
         };
         let resolved = resolve_csv_import_columns(&source, &columns, Some(&options)).unwrap();
         assert_eq!(
@@ -13811,6 +14110,100 @@ mod tests {
         assert_eq!(preview.total_bytes, preview.bytes.len() as u64);
         assert!(!preview.truncated);
 
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_csv_reader_auto_detects_utf16_bom_and_gb18030() {
+        let utf16_path =
+            std::env::temp_dir().join(format!("oxide-csv-utf16-{}.csv", uuid::Uuid::new_v4()));
+        let mut utf16_bytes = vec![0xFF, 0xFE];
+        for unit in "name\n值\n".encode_utf16() {
+            utf16_bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&utf16_path, utf16_bytes).unwrap();
+        assert_eq!(
+            resolve_csv_text_encoding(&utf16_path, Some(TableImportTextEncoding::Auto)).unwrap(),
+            (TableImportTextEncoding::Utf16Le, 2)
+        );
+        let mut utf16_reader =
+            csv_import_reader(&utf16_path, true, b',', Some(TableImportTextEncoding::Auto))
+                .unwrap();
+        assert_eq!(utf16_reader.headers().unwrap().get(0), Some("name"));
+        assert_eq!(
+            utf16_reader.records().next().unwrap().unwrap().get(0),
+            Some("值")
+        );
+
+        let gb_path =
+            std::env::temp_dir().join(format!("oxide-csv-gb18030-{}.csv", uuid::Uuid::new_v4()));
+        fs::write(&gb_path, b"name\n\xD6\xD0\xCE\xC4\n").unwrap();
+        assert_eq!(
+            resolve_csv_text_encoding(&gb_path, Some(TableImportTextEncoding::Auto)).unwrap(),
+            (TableImportTextEncoding::Gb18030, 0)
+        );
+        let mut gb_reader =
+            csv_import_reader(&gb_path, true, b',', Some(TableImportTextEncoding::Auto)).unwrap();
+        assert_eq!(gb_reader.headers().unwrap().get(0), Some("name"));
+        assert_eq!(
+            gb_reader.records().next().unwrap().unwrap().get(0),
+            Some("中文")
+        );
+
+        let gb_four_byte_path = std::env::temp_dir().join(format!(
+            "oxide-csv-gb18030-four-byte-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        let (gb_four_byte_source, _, had_errors) = encoding_rs::GB18030.encode("name\n😀\n");
+        assert!(!had_errors);
+        fs::write(&gb_four_byte_path, gb_four_byte_source.as_ref()).unwrap();
+        let mut gb_four_byte_reader = csv_import_reader(
+            &gb_four_byte_path,
+            true,
+            b',',
+            Some(TableImportTextEncoding::Auto),
+        )
+        .unwrap();
+        assert_eq!(
+            gb_four_byte_reader
+                .records()
+                .next()
+                .unwrap()
+                .unwrap()
+                .get(0),
+            Some("😀")
+        );
+
+        let late_gb_path = std::env::temp_dir().join(format!(
+            "oxide-csv-late-gb18030-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        let mut late_gb_bytes = b"name\n".to_vec();
+        late_gb_bytes.extend(std::iter::repeat_n(b'a', 70 * 1024));
+        late_gb_bytes.extend_from_slice(b"\xD6\xD0\n");
+        fs::write(&late_gb_path, late_gb_bytes).unwrap();
+        assert_eq!(
+            resolve_csv_text_encoding(&late_gb_path, Some(TableImportTextEncoding::Auto),).unwrap(),
+            (TableImportTextEncoding::Gb18030, 0)
+        );
+
+        fs::remove_file(utf16_path).unwrap();
+        fs::remove_file(gb_path).unwrap();
+        fs::remove_file(gb_four_byte_path).unwrap();
+        fs::remove_file(late_gb_path).unwrap();
+    }
+
+    #[test]
+    fn native_csv_reader_rejects_malformed_selected_encoding() {
+        let path =
+            std::env::temp_dir().join(format!("oxide-csv-invalid-{}.csv", uuid::Uuid::new_v4()));
+        fs::write(&path, b"name\n\xFF\n").unwrap();
+        let error = match csv_import_reader(&path, true, b',', Some(TableImportTextEncoding::Utf8))
+        {
+            Ok(_) => panic!("malformed UTF-8 should be rejected before CSV parsing"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Invalid byte sequence for UTF-8 encoding"));
         fs::remove_file(path).unwrap();
     }
 
@@ -13895,6 +14288,7 @@ mod tests {
                 },
             ],
             empty_fields_as_null: None,
+            encoding: None,
         };
         assert!(resolve_csv_import_columns(&source, &columns, Some(&duplicate)).is_err());
         assert!(csv_delimiter(Some(&TableCsvImportOptions {

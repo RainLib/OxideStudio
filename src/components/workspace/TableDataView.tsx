@@ -1123,7 +1123,6 @@ export function TableDataView() {
   const handleImportCsvRows = async (
     rows: Array<Record<string, unknown>>,
     csvOptions: TableCsvImportOptions,
-    sourceEncoding: string,
   ) => {
     if (
       !tabConnectionId ||
@@ -1147,11 +1146,7 @@ export function TableDataView() {
     });
     let rowsImported = rows.length;
     try {
-      // csv::Reader streams UTF-8 only. Preserve the reviewed decoder's
-      // semantics for UTF-16/GB18030 sources by using the already typed,
-      // bounded browser rows instead of claiming the native stream accepted
-      // an encoding it cannot parse.
-      if (csvImportSource.nativePath && sourceEncoding === "utf-8") {
+      if (csvImportSource.nativePath) {
         updateTask(taskId, { detail: "Running full-file CSV preflight" });
         const preflight = await tableService.preflightTableCsvImport(
           tabConnectionId,

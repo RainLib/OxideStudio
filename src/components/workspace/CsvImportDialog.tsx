@@ -91,7 +91,7 @@ export function CsvImportDialog({
       try {
         if (file.size > MAX_IMPORT_FILE_BYTES) {
           throw new Error(
-            "CSV files larger than 32 MiB can be imported from Database Explorer → Import/Export → Import CSV (streaming)… using UTF-8, comma delimiters, and a header row.",
+            "CSV files larger than 32 MiB can be imported from Database Explorer → Import/Export → Import CSV (streaming)… using auto-detected UTF-8, UTF-16, or GB18030, a comma delimiter, and a header row.",
           );
         }
         const buffer = typeof file.arrayBuffer === "function"
@@ -177,7 +177,7 @@ export function CsvImportDialog({
     ? `CSV contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use Database Explorer → Import/Export → Import CSV (streaming)… for a larger standard CSV.`
     : null;
   const nativePreviewError = nativePreviewTruncated
-    ? "This CSV is larger than the 32 MiB review limit. Use Import CSV (streaming)… for a standard UTF-8 comma-delimited import, or split the file before using column mapping."
+    ? "This CSV is larger than the 32 MiB review limit. Use Import CSV (streaming)… for an auto-detected comma-delimited import, or split the file before using custom column mapping."
     : null;
   const blockingError = loadError || decoded.error || rowLimitError || nativePreviewError;
   const canImport =
@@ -358,8 +358,8 @@ export function CsvImportDialog({
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
           <span className="text-[10px] wb-muted">
-            {isNativeSource && decoded.encoding !== "utf-8"
-              ? "This encoding uses the bounded decoded import path; native streaming accepts UTF-8 only."
+            {isNativeSource
+              ? `${decoded.encoding.toUpperCase()} will be decoded strictly by the native streaming importer. No rows are written before full-file preflight succeeds.`
               : "No rows are written until Import is confirmed. Database errors roll back the full batch."}
           </span>
           <div className="flex gap-2">
@@ -378,6 +378,7 @@ export function CsvImportDialog({
                     targetColumn: item.targetColumn,
                   })),
                   emptyFieldsAsNull: emptyAsNull,
+                  encoding: decoded.encoding,
                 },
                 decoded.encoding,
               )}

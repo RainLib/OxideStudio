@@ -742,6 +742,7 @@ export interface TableCsvImportOptions {
   firstRowHeader?: boolean;
   columnMapping?: TableCsvColumnMapping[];
   emptyFieldsAsNull?: boolean;
+  encoding?: "auto" | "utf-8" | "utf-16le" | "utf-16be" | "gb18030";
 }
 
 export interface TableImportResult {
