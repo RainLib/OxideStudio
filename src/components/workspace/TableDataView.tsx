@@ -135,6 +135,8 @@ export function TableDataView() {
     exportId: string;
     taskId: string;
   } | null>(null);
+  const activeTableImportsRef = useRef(new Map<string, string>());
+  const [activeCsvImportId, setActiveCsvImportId] = useState<string | null>(null);
   const [activeTableExport, setActiveTableExport] = useState<{
     exportId: string;
     taskId: string;
@@ -240,6 +242,7 @@ export function TableDataView() {
   } | null>(null);
   const [isTransferDialogOpen, setIsTransferDialogOpen] = useState(false);
   const [isCsvImportSubmitting, setIsCsvImportSubmitting] = useState(false);
+  const [isCsvImportCancelling, setIsCsvImportCancelling] = useState(false);
   const [isJsonImportSubmitting, setIsJsonImportSubmitting] = useState(false);
   const [isXlsxImportSubmitting, setIsXlsxImportSubmitting] = useState(false);
   const [isEditingEnabled, setIsEditingEnabled] = useState(
@@ -362,6 +365,37 @@ export function TableDataView() {
       })
       .catch((error) => {
         console.error("Failed to listen for table export progress:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [updateTask]);
+
+  useEffect(() => {
+    if (typeof tableService.listenTableImportProgress !== "function") return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tableService
+      .listenTableImportProgress((progress) => {
+        const taskId = activeTableImportsRef.current.get(progress.importId);
+        if (!taskId) return;
+        const count = `${progress.rowsImported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches`;
+        const total = progress.totalRows != null
+          ? ` / ${progress.totalRows.toLocaleString()} total`
+          : "";
+        updateTask(taskId, {
+          detail: progress.message
+            ? `${count}${total} · ${progress.message}`
+            : `${count}${total}`,
+        });
+      })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for table import progress:", error);
       });
     return () => {
       disposed = true;
@@ -1145,6 +1179,7 @@ export function TableDataView() {
       detail: `${rows.length.toLocaleString()} rows validated; committing transaction`,
     });
     let rowsImported = rows.length;
+    let nativeImportId: string | null = null;
     try {
       if (csvImportSource.nativePath) {
         updateTask(taskId, { detail: "Running full-file CSV preflight" });
@@ -1171,6 +1206,10 @@ export function TableDataView() {
         updateTask(taskId, {
           detail: `${preflight.acceptedRows.toLocaleString()} rows preflighted; committing transaction`,
         });
+        const importId = tableService.createTableImportId();
+        nativeImportId = importId;
+        activeTableImportsRef.current.set(importId, taskId);
+        setActiveCsvImportId(importId);
         const imported = await tableService.importTableData(
           tabConnectionId,
           driver,
@@ -1182,7 +1221,7 @@ export function TableDataView() {
           activeTab.databaseName,
           csvOptions,
           csvImportSource.contentDigest,
-          { projectId: activeProjectId },
+          { projectId: activeProjectId, importId },
         );
         rowsImported = imported.rowsImported;
       } else if (activeTab.databaseName) {
@@ -1206,10 +1245,21 @@ export function TableDataView() {
         );
       }
     } catch (error) {
-      failTask(taskId, error instanceof Error ? error.message : String(error));
-      console.error("CSV import failed:", error);
+      const code = error && typeof error === "object" && "code" in error
+        ? String(error.code)
+        : "";
+      if (code === "TABLE_IMPORT_CANCELLED") {
+        cancelTask(taskId, "Import cancelled; transaction rolled back");
+      } else {
+        failTask(taskId, error instanceof Error ? error.message : String(error));
+        console.error("CSV import failed:", error);
+      }
       setIsCsvImportSubmitting(false);
       return;
+    } finally {
+      if (nativeImportId) activeTableImportsRef.current.delete(nativeImportId);
+      setActiveCsvImportId(null);
+      setIsCsvImportCancelling(false);
     }
     const importedRowCount = rowsImported.toLocaleString();
     finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1267,6 +1317,22 @@ export function TableDataView() {
     }
   };
 
+  const handleCancelCsvImport = async () => {
+    const importId = activeCsvImportId;
+    if (!importId || isCsvImportCancelling) return;
+    setIsCsvImportCancelling(true);
+    try {
+      await tableService.cancelTableImport(importId);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String(error.code)
+        : "";
+      if (code !== "TABLE_IMPORT_NOT_FOUND") {
+        console.error("Failed to cancel table import:", error);
+      }
+    }
+  };
+
   const handleImportJsonRows = async () => {
     if (
       !tabConnectionId ||
@@ -1286,6 +1352,8 @@ export function TableDataView() {
     });
     setIsJsonImportSubmitting(true);
     updateTask(taskId, { detail: "JSON preview approved; committing transaction" });
+    const importId = tableService.createTableImportId();
+    activeTableImportsRef.current.set(importId, taskId);
     try {
       const imported = await tableService.importTableData(
         tabConnectionId,
@@ -1298,7 +1366,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         jsonImportSource.preview.contentDigest,
-        { projectId: activeProjectId },
+        { projectId: activeProjectId, importId },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1321,6 +1389,7 @@ export function TableDataView() {
       failTask(taskId, error instanceof Error ? error.message : String(error));
       console.error("JSON import failed:", error);
     } finally {
+      activeTableImportsRef.current.delete(importId);
       setIsJsonImportSubmitting(false);
     }
   };
@@ -1344,6 +1413,8 @@ export function TableDataView() {
     });
     setIsXlsxImportSubmitting(true);
     updateTask(taskId, { detail: "XLSX preview approved; committing transaction" });
+    const importId = tableService.createTableImportId();
+    activeTableImportsRef.current.set(importId, taskId);
     try {
       const imported = await tableService.importTableData(
         tabConnectionId,
@@ -1356,7 +1427,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         xlsxImportSource.preview.contentDigest,
-        { projectId: activeProjectId },
+        { projectId: activeProjectId, importId },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1379,6 +1450,7 @@ export function TableDataView() {
       failTask(taskId, error instanceof Error ? error.message : String(error));
       console.error("XLSX import failed:", error);
     } finally {
+      activeTableImportsRef.current.delete(importId);
       setIsXlsxImportSubmitting(false);
     }
   };
@@ -1713,9 +1785,11 @@ export function TableDataView() {
         tableName={activeTab.tableName || "table"}
         columns={csvImportColumns}
         isSubmitting={isCsvImportSubmitting}
+        isCancelling={isCsvImportCancelling}
         isNativeSource={Boolean(csvImportSource?.nativePath)}
         nativePreviewTruncated={csvImportSource?.previewTruncated}
         onClose={() => setCsvImportSource(null)}
+        onCancelImport={activeCsvImportId ? handleCancelCsvImport : undefined}
         onImport={handleImportCsvRows}
       />
 

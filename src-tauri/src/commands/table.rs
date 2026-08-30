@@ -88,10 +88,12 @@ const MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS: usize = 1_000;
 const MAX_FULL_DATA_COMPARE_BATCH_SIZE: u32 = DEFAULT_QUERY_RESULT_ROW_LIMIT as u32;
 pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://progress";
 pub const TABLE_EXPORT_PROGRESS_EVENT: &str = "table-export://progress";
+pub const TABLE_IMPORT_PROGRESS_EVENT: &str = "table-import://progress";
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
 const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
+const TABLE_IMPORT_CANCELLED: &str = "TABLE_IMPORT_CANCELLED";
 const TABLE_EXPORT_WRITER_CLOSED: &str = "TABLE_EXPORT_WRITER_CLOSED";
 /// At most two database pages may wait for the blocking encoder/writer. This
 /// keeps memory bounded while allowing one page to be fetched as the previous
@@ -517,10 +519,114 @@ pub struct TableImportResult {
     pub report_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportProgress {
+    pub import_id: String,
+    pub rows_imported: u64,
+    pub batches: u64,
+    pub total_rows: Option<u64>,
+    pub terminal: bool,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone)]
+struct TableImportCancellationHandle {
+    sender: watch::Sender<bool>,
+}
+
+#[derive(Default)]
+pub struct TableImportCancellationState(
+    Arc<AsyncMutex<HashMap<String, TableImportCancellationHandle>>>,
+);
+
+impl TableImportCancellationState {
+    async fn register(&self, import_id: &str) -> Result<watch::Receiver<bool>, String> {
+        validate_table_import_id(import_id)?;
+        let (sender, receiver) = watch::channel(false);
+        let mut active = self.0.lock().await;
+        if active.contains_key(import_id) {
+            return Err(format!("Table import is already active: {import_id}"));
+        }
+        active.insert(
+            import_id.to_string(),
+            TableImportCancellationHandle { sender },
+        );
+        Ok(receiver)
+    }
+
+    async fn cancellation_handle(&self, import_id: &str) -> Option<TableImportCancellationHandle> {
+        self.0.lock().await.get(import_id).cloned()
+    }
+
+    async fn take(&self, import_id: &str) {
+        self.0.lock().await.remove(import_id);
+    }
+}
+
+#[derive(Clone)]
+struct TableImportExecutionContext {
+    app: AppHandle,
+    import_id: String,
+    cancel_rx: watch::Receiver<bool>,
+    total_rows: Option<u64>,
+}
+
+impl TableImportExecutionContext {
+    fn with_total_rows(&self, total_rows: Option<u64>) -> Self {
+        Self {
+            total_rows,
+            ..self.clone()
+        }
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<(), String> {
+        if *self.cancel_rx.borrow() {
+            Err(TABLE_IMPORT_CANCELLED.to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn emit(
+        &self,
+        rows_imported: u64,
+        batches: u64,
+        terminal: bool,
+        status: &str,
+        message: Option<String>,
+    ) {
+        let _ = self.app.emit(
+            TABLE_IMPORT_PROGRESS_EVENT,
+            TableImportProgress {
+                import_id: self.import_id.clone(),
+                rows_imported,
+                batches,
+                total_rows: self.total_rows,
+                terminal,
+                status: status.to_string(),
+                message,
+            },
+        );
+    }
+
+    fn emit_running(&self, rows_imported: u64, batches: u64) {
+        self.emit(
+            rows_imported,
+            batches,
+            false,
+            "running",
+            Some("Import transaction is writing validated batches".to_string()),
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TableImportReportStatus {
     Done,
+    Cancelled,
     Error,
 }
 
@@ -11348,7 +11454,9 @@ async fn import_materialized_rows_in_transaction(
     columns: &BTreeMap<String, ColumnInfo>,
     rows: Vec<BTreeMap<String, Value>>,
     database: Option<&str>,
+    context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
+    context.ensure_not_cancelled()?;
     let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
     match database {
         Some(database) => {
@@ -11374,6 +11482,7 @@ async fn import_materialized_rows_in_transaction(
         let mut batches = 0_u64;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
         for row in rows {
+            context.ensure_not_cancelled()?;
             pending_rows.push(row);
             if pending_rows.len() == IMPORT_BATCH_SIZE {
                 rows_imported += execute_import_transaction_batch(
@@ -11388,9 +11497,11 @@ async fn import_materialized_rows_in_transaction(
                 )
                 .await?;
                 batches += 1;
+                context.emit_running(rows_imported, batches);
             }
         }
         if !pending_rows.is_empty() {
+            context.ensure_not_cancelled()?;
             rows_imported += execute_import_transaction_batch(
                 manager,
                 connection_id,
@@ -11403,7 +11514,9 @@ async fn import_materialized_rows_in_transaction(
             )
             .await?;
             batches += 1;
+            context.emit_running(rows_imported, batches);
         }
+        context.ensure_not_cancelled()?;
         manager
             .commit_transaction(connection_id, &transaction_id)
             .await
@@ -11433,7 +11546,9 @@ async fn import_csv_in_transaction(
     first_row_header: Option<bool>,
     ordered_columns: Vec<String>,
     csv_options: Option<&TableCsvImportOptions>,
+    context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
+    context.ensure_not_cancelled()?;
     let row_range = resolve_csv_import_row_range(first_row_header, csv_options)?;
     let mut reader = csv_import_reader(
         path,
@@ -11475,6 +11590,7 @@ async fn import_csv_in_transaction(
         let mut batches = 0_u64;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
         for (index, record) in reader.records().enumerate() {
+            context.ensure_not_cancelled()?;
             let row_number = consumed_records + index as u64 + 1;
             if row_number < row_range.data_start_row {
                 continue;
@@ -11502,9 +11618,11 @@ async fn import_csv_in_transaction(
                 )
                 .await?;
                 batches += 1;
+                context.emit_running(rows_imported, batches);
             }
         }
         if !pending_rows.is_empty() {
+            context.ensure_not_cancelled()?;
             rows_imported += execute_import_transaction_batch(
                 manager,
                 connection_id,
@@ -11517,7 +11635,9 @@ async fn import_csv_in_transaction(
             )
             .await?;
             batches += 1;
+            context.emit_running(rows_imported, batches);
         }
+        context.ensure_not_cancelled()?;
         manager
             .commit_transaction(connection_id, &transaction_id)
             .await
@@ -11650,7 +11770,9 @@ async fn import_json_lines_in_transaction(
     columns: &BTreeMap<String, ColumnInfo>,
     path: &Path,
     database: Option<&str>,
+    context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
+    context.ensure_not_cancelled()?;
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut reader = BufReader::new(file);
     let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
@@ -11680,6 +11802,7 @@ async fn import_json_lines_in_transaction(
         let mut line = String::new();
         let mut line_number = 0_u64;
         loop {
+            context.ensure_not_cancelled()?;
             line.clear();
             if reader
                 .read_line(&mut line)
@@ -11721,9 +11844,11 @@ async fn import_json_lines_in_transaction(
                 )
                 .await?;
                 batches += 1;
+                context.emit_running(rows_imported, batches);
             }
         }
         if !pending_rows.is_empty() {
+            context.ensure_not_cancelled()?;
             rows_imported += execute_import_transaction_batch(
                 manager,
                 connection_id,
@@ -11736,7 +11861,9 @@ async fn import_json_lines_in_transaction(
             )
             .await?;
             batches += 1;
+            context.emit_running(rows_imported, batches);
         }
+        context.ensure_not_cancelled()?;
         manager
             .commit_transaction(connection_id, &transaction_id)
             .await
@@ -11791,8 +11918,10 @@ fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String>
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn import_table_data(
+    app: AppHandle,
     manager: State<'_, ConnectionManager>,
     meta_store: State<'_, MetaStore>,
+    cancellation: State<'_, TableImportCancellationState>,
     connection_id: String,
     import_id: String,
     project_id: Option<String>,
@@ -11807,9 +11936,23 @@ pub async fn import_table_data(
     expected_file_digest: Option<String>,
 ) -> Result<Response<TableImportResult>, String> {
     let import_id = validate_table_import_id(&import_id)?;
-    let started_at = current_table_timestamp_millis();
     let mapping_digest =
         table_import_mapping_digest(format, first_row_header, csv_options.as_ref())?;
+    let cancel_rx = cancellation.register(&import_id).await?;
+    let context = TableImportExecutionContext {
+        app,
+        import_id: import_id.clone(),
+        cancel_rx,
+        total_rows: None,
+    };
+    context.emit(
+        0,
+        0,
+        false,
+        "preparing",
+        Some("Import source is being revalidated before the transaction".to_string()),
+    );
+    let started_at = current_table_timestamp_millis();
     let result: Result<TableImportResult, String> = async {
         // Import uses the same bounded parameterized row-mutation path as
         // grid edits and exports. SQLite/DuckDB are deliberately supported by
@@ -11857,6 +12000,7 @@ pub async fn import_table_data(
                 first_row_header,
                 ordered_columns,
                 csv_options.as_ref(),
+                &context,
             )
             .await?;
             return Ok(TableImportResult {
@@ -11877,6 +12021,7 @@ pub async fn import_table_data(
                 &column_lookup,
                 &path,
                 database,
+                &context,
             )
             .await?;
             return Ok(TableImportResult {
@@ -11913,6 +12058,7 @@ pub async fn import_table_data(
                     .collect::<BTreeMap<_, _>>())
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let materialized_context = context.with_total_rows(Some(pending_rows.len() as u64));
         let (rows_imported, batches) = import_materialized_rows_in_transaction(
             &manager,
             &connection_id,
@@ -11922,6 +12068,7 @@ pub async fn import_table_data(
             &column_lookup,
             pending_rows,
             database,
+            &materialized_context,
         )
         .await?;
 
@@ -11935,6 +12082,35 @@ pub async fn import_table_data(
     }
     .await;
 
+    cancellation.take(&import_id).await;
+    let cancelled = result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.contains(TABLE_IMPORT_CANCELLED));
+    match &result {
+        Ok(imported) => context.with_total_rows(Some(imported.rows_imported)).emit(
+            imported.rows_imported,
+            imported.batches,
+            true,
+            "done",
+            Some("Import transaction committed".to_string()),
+        ),
+        Err(_) if cancelled => context.emit(
+            0,
+            0,
+            true,
+            "cancelled",
+            Some("Import cancelled; the transaction was rolled back".to_string()),
+        ),
+        Err(_) => context.emit(
+            0,
+            0,
+            true,
+            "error",
+            Some("Import failed; the transaction was rolled back when supported".to_string()),
+        ),
+    }
+
     let mut result = result;
     if let Some(project_id) = normalized_table_export_project_id(project_id.as_deref()) {
         let (status, rows_imported, batches, error) = match &result {
@@ -11945,12 +12121,18 @@ pub async fn import_table_data(
                 None,
             ),
             Err(_) => (
-                TableImportReportStatus::Error,
+                if cancelled {
+                    TableImportReportStatus::Cancelled
+                } else {
+                    TableImportReportStatus::Error
+                },
                 0,
                 0,
-                Some(
-                    "Import failed and the transaction was rolled back when supported.".to_string(),
-                ),
+                Some(if cancelled {
+                    "Import cancelled and the transaction was rolled back.".to_string()
+                } else {
+                    "Import failed and the transaction was rolled back when supported.".to_string()
+                }),
             ),
         };
         let report_id = table_import_report_id(&import_id);
@@ -11985,8 +12167,28 @@ pub async fn import_table_data(
 
     match result {
         Ok(imported) => Ok(Response::ok(imported)),
+        Err(_) if cancelled => Ok(Response::err(
+            TABLE_IMPORT_CANCELLED,
+            "Table import was cancelled and its transaction was rolled back.",
+        )),
         Err(error) => Ok(Response::err("IMPORT_TABLE_DATA_ERROR", &error)),
     }
+}
+
+#[tauri::command]
+pub async fn cancel_table_import(
+    cancellation: State<'_, TableImportCancellationState>,
+    import_id: String,
+) -> Result<Response<String>, String> {
+    let import_id = validate_table_import_id(&import_id)?;
+    let Some(handle) = cancellation.cancellation_handle(&import_id).await else {
+        return Ok(Response::err(
+            "TABLE_IMPORT_NOT_FOUND",
+            &format!("Table import is not active: {import_id}"),
+        ));
+    };
+    let _ = handle.sender.send(true);
+    Ok(Response::ok("Import cancellation requested".to_string()))
 }
 
 #[tauri::command]
@@ -13500,9 +13702,10 @@ mod tests {
         TableDataTransferRequest, TableDataTransferTargetColumn,
         TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
         TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableImportTextEncoding, TableRowUpdate, TableSort,
-        MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
-        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        TableFilter, TableImportCancellationState, TableImportTextEncoding, TableRowUpdate,
+        TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
+        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
+        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -14257,6 +14460,32 @@ mod tests {
         )
         .unwrap_err()
         .contains("last data row"));
+    }
+
+    #[tokio::test]
+    async fn table_import_cancellation_ids_are_single_owner_and_replay_safe() {
+        let state = TableImportCancellationState::default();
+        let receiver = state.register("table-import-test_123").await.unwrap();
+        assert!(!*receiver.borrow());
+        assert!(state
+            .register("table-import-test_123")
+            .await
+            .unwrap_err()
+            .contains("already active"));
+
+        let handle = state
+            .cancellation_handle("table-import-test_123")
+            .await
+            .unwrap();
+        handle.sender.send(true).unwrap();
+        assert!(*receiver.borrow());
+
+        state.take("table-import-test_123").await;
+        assert!(state
+            .cancellation_handle("table-import-test_123")
+            .await
+            .is_none());
+        assert!(state.register("../unsafe").await.is_err());
     }
 
     #[test]

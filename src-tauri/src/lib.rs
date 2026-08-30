@@ -118,6 +118,7 @@ pub fn run() {
             app.manage(QueryCancellationState::default());
             app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::table::TableExportCancellationState::default());
+            app.manage(commands::table::TableImportCancellationState::default());
             app.manage(
                 commands::sqlite_backup_schedule::SqliteBackupScheduleState::load(app.handle())
                     .map_err(std::io::Error::other)?,
@@ -320,6 +321,7 @@ pub fn run() {
             commands::table::preview_table_xlsx_import,
             commands::table::preflight_table_csv_import,
             commands::table::import_table_data,
+            commands::table::cancel_table_import,
             commands::table::list_table_import_reports,
             commands::table::mutate_table_rows,
             commands::table::create_table,

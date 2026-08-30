@@ -25,6 +25,7 @@ import type {
   TableXlsxImportPreview,
   TableImportResult,
   TableImportReport,
+  TableImportProgress,
   TableDataTransferPreview,
   TableDataTransferRequest,
   TableDataTransferBatchPlan,
@@ -49,6 +50,7 @@ import type {
 export const TABLE_DATA_TRANSFER_PROGRESS_EVENT =
   "table-data-transfer://progress";
 export const TABLE_EXPORT_PROGRESS_EVENT = "table-export://progress";
+export const TABLE_IMPORT_PROGRESS_EVENT = "table-import://progress";
 
 export function createTableExportId(): string {
   const randomId = globalThis.crypto?.randomUUID?.();
@@ -272,6 +274,18 @@ export async function listTableImportReports(
     connectionId,
     limit,
   });
+}
+
+export async function cancelTableImport(importId: string): Promise<string> {
+  return invokeWithInterceptors<string>("cancel_table_import", { importId });
+}
+
+export async function listenTableImportProgress(
+  listener: (progress: TableImportProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TableImportProgress>(TABLE_IMPORT_PROGRESS_EVENT, (event) =>
+    listener(event.payload),
+  );
 }
 
 export async function cancelTableExport(exportId: string): Promise<string> {
@@ -860,6 +874,8 @@ export const tableService = {
   importTableData,
   createTableImportId,
   listTableImportReports,
+  cancelTableImport,
+  listenTableImportProgress,
   mutateTableRows,
   previewCreateTable,
   createTable,

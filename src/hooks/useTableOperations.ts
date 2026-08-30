@@ -29,6 +29,7 @@ export function useTableOperations() {
     taskId: string;
     tableName: string;
   } | null>(null);
+  const activeTableImportsRef = useRef(new Map<string, string>());
   const [activeTableExport, setActiveTableExport] = useState<{
     exportId: string;
     taskId: string;
@@ -54,6 +55,33 @@ export function useTableOperations() {
       })
       .catch((error) => {
         console.error("Failed to listen for Explorer export progress:", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tableService
+      .listenTableImportProgress((progress) => {
+        const taskId = activeTableImportsRef.current.get(progress.importId);
+        if (!taskId) return;
+        const total = progress.totalRows != null
+          ? ` / ${progress.totalRows.toLocaleString()} total`
+          : "";
+        useTaskStore.getState().updateTask(taskId, {
+          detail: `${progress.rowsImported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches${total}${progress.message ? ` · ${progress.message}` : ""}`,
+        });
+      })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for Explorer import progress:", error);
       });
     return () => {
       disposed = true;
@@ -270,6 +298,8 @@ export function useTableOperations() {
       title: `Import ${tableName}`,
       detail: format.toUpperCase(),
     });
+    const importId = tableService.createTableImportId();
+    activeTableImportsRef.current.set(importId, taskId);
 
     try {
       const imported = await tableService.importTableData(
@@ -283,7 +313,7 @@ export function useTableOperations() {
         undefined,
         undefined,
         undefined,
-        { projectId: activeProjectId },
+        { projectId: activeProjectId, importId },
       );
       taskStore.finishTask(
         taskId,
@@ -298,8 +328,14 @@ export function useTableOperations() {
           false,
         );
     } catch (error: any) {
-      taskStore.failTask(taskId, error?.message || String(error));
-      throw error;
+      if (error?.code === "TABLE_IMPORT_CANCELLED") {
+        taskStore.cancelTask(taskId, "Import cancelled; transaction rolled back");
+      } else {
+        taskStore.failTask(taskId, error?.message || String(error));
+        throw error;
+      }
+    } finally {
+      activeTableImportsRef.current.delete(importId);
     }
   };
 

@@ -548,6 +548,13 @@ explicit deferred validation task rather than an implicit release check.
   fields, and trim on/off. Preview counts, mapping digest, preflight row
   numbers, and committed values must remain identical; TSV without an
   explicit delimiter must use Tab while CSV/TXT use comma.
+- Start a native import large enough to span multiple 500-row batches and
+  cancel it while writing. The stable import ID must emit monotonic batch/row
+  progress, the cancel command must be single-owner, the target transaction
+  must roll back to its original row count, and the terminal report must be
+  `cancelled` without source paths, values, SQL, or raw driver errors. Repeat
+  cancellation immediately before commit and after a successful commit to
+  verify a late request cannot relabel committed data.
 
 ## SQLite rebuild review plans
 

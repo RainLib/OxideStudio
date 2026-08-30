@@ -760,7 +760,17 @@ export interface TableImportResult {
   reportId?: string | null;
 }
 
-export type TableImportReportStatus = "done" | "error";
+export type TableImportReportStatus = "done" | "cancelled" | "error";
+
+export interface TableImportProgress {
+  importId: string;
+  rowsImported: number;
+  batches: number;
+  totalRows?: number | null;
+  terminal: boolean;
+  status: "preparing" | "running" | "done" | "cancelled" | "error";
+  message?: string | null;
+}
 
 /** No source path/digest, SQL, row values, URL, credential, or raw error is stored. */
 export interface TableImportReport {

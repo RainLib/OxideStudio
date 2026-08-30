@@ -36,9 +36,11 @@ interface CsvImportDialogProps {
   tableName: string;
   columns: ColumnInfo[];
   isSubmitting: boolean;
+  isCancelling?: boolean;
   isNativeSource?: boolean;
   nativePreviewTruncated?: boolean;
   onClose: () => void;
+  onCancelImport?: () => Promise<void> | void;
   onImport: (
     rows: Array<Record<string, unknown>>,
     options: TableCsvImportOptions,
@@ -61,9 +63,11 @@ export function CsvImportDialog({
   tableName,
   columns,
   isSubmitting,
+  isCancelling = false,
   isNativeSource = false,
   nativePreviewTruncated = false,
   onClose,
+  onCancelImport,
   onImport,
 }: CsvImportDialogProps) {
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
@@ -441,7 +445,17 @@ export function CsvImportDialog({
               : "No rows are written until Import is confirmed. Database errors roll back the full batch."}
           </span>
           <div className="flex gap-2">
-            <button type="button" className="wb-text-button h-7 px-3 text-[11px]" onClick={onClose} disabled={isSubmitting}>Cancel</button>
+            <button
+              type="button"
+              className="wb-text-button h-7 px-3 text-[11px]"
+              onClick={() => {
+                if (isSubmitting && onCancelImport) void onCancelImport();
+                else onClose();
+              }}
+              disabled={isSubmitting && (!onCancelImport || isCancelling)}
+            >
+              {isCancelling ? "Cancelling…" : isSubmitting && onCancelImport ? "Cancel import" : "Cancel"}
+            </button>
             <button
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"
