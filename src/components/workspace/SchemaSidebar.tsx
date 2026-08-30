@@ -30,6 +30,7 @@ import {
   X,
   GitCompareArrows,
   ArrowRightLeft,
+  ListChecks,
   AlertTriangle,
   ShieldCheck,
 } from "lucide-react";
@@ -141,6 +142,14 @@ import {
   routineSignature,
 } from "@/features/database-explorer/model/routinePresentation";
 import {
+  MAX_EXPLORER_TABLE_BATCH_SELECTION,
+  pruneTableBatchSelection,
+  settleTableBatchWork,
+  toggleAllVisibleTableBatchSelection,
+  toggleTableBatchSelection,
+  type TableBatchSelection,
+} from "@/features/database-explorer/model/tableBatchSelection";
+import {
   captureLiveSchemaSnapshot,
   type SchemaSnapshotIdentity,
 } from "@/services/schemaSnapshotStore";
@@ -224,6 +233,11 @@ interface ExplorerDataTransferRequest {
   sourceCapabilities: DatabaseCapabilities;
   initialSourceScope: "table" | "schema" | "database";
   sourceSchemas: string[];
+  initialSourceTables?: string[];
+}
+
+interface ExplorerTableBatchSelection extends TableBatchSelection {
+  scopeKey: string;
 }
 
 function routineMatchesFilter(routine: FunctionInfo, filter: string) {
@@ -624,6 +638,13 @@ export function SchemaSidebar() {
   >(null);
   const [dataTransferRequest, setDataTransferRequest] =
     useState<ExplorerDataTransferRequest | null>(null);
+  const [tableBatchSelection, setTableBatchSelection] =
+    useState<ExplorerTableBatchSelection | null>(null);
+  const [tableBatchAction, setTableBatchAction] = useState<{
+    scopeKey: string;
+    running: boolean;
+    message: string;
+  } | null>(null);
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
     capabilities: DatabaseCapabilities;
@@ -1586,9 +1607,10 @@ export function SchemaSidebar() {
     database?: string;
     schema?: string;
     table?: string;
+    tables?: string[];
     scope: "table" | "schema" | "database";
   }) => {
-    const { connection, database, scope, table } = options;
+    const { connection, database, scope, table, tables: requestedTables } = options;
     setNamespaceError(null);
     try {
       const connectionError = await setActiveConnection(connection.id);
@@ -1619,7 +1641,7 @@ export function SchemaSidebar() {
         throw new Error("No transferable schema was found in this database.");
       }
 
-      let sourceTable = table;
+      let sourceTable = table || requestedTables?.[0];
       if (!sourceTable) {
         const relations = database
           ? await schemaService.getDatabaseTables(
@@ -1650,6 +1672,7 @@ export function SchemaSidebar() {
         sourceCapabilities: capabilityContext.capabilities,
         initialSourceScope: scope,
         sourceSchemas: schemas,
+        initialSourceTables: requestedTables,
       });
     } catch (error) {
       setNamespaceError(
@@ -1924,6 +1947,94 @@ export function SchemaSidebar() {
       void loadDocumentPage(tabId, 0);
     } else {
       void runTabQuery(tabId, activeConnectionId, previewCommand);
+    }
+  };
+
+  const refreshSelectedTableMetadata = async (options: {
+    scopeKey: string;
+    connectionId: string;
+    driver: DatabaseDriver;
+    driverPackageVersion?: string | null;
+    connectionDatabaseName?: string | null;
+    databaseName?: string;
+    schema: string;
+    tables: string[];
+  }) => {
+    if (options.tables.length === 0 || tableBatchAction?.running) return;
+    setTableBatchAction({
+      scopeKey: options.scopeKey,
+      running: true,
+      message: `Refreshing ${options.tables.length} table${options.tables.length === 1 ? "" : "s"}…`,
+    });
+    const tasks = useTaskStore.getState();
+    const taskId = tasks.startTask({
+      kind: "introspection",
+      title: `Refresh ${options.tables.length} table${options.tables.length === 1 ? "" : "s"}`,
+      detail: options.schema,
+    });
+    try {
+      const readinessError = await setActiveConnection(options.connectionId);
+      if (readinessError) throw new Error(readinessError);
+      const results = await settleTableBatchWork(
+        options.tables,
+        (table) =>
+          loadTableMetadata({
+            projectId: activeProjectId || undefined,
+            connectionId: options.connectionId,
+            driver: options.driver,
+            driverPackageVersion: options.driverPackageVersion,
+            connectionDatabaseName: options.connectionDatabaseName,
+            databaseName: options.databaseName,
+            schema: options.schema,
+            table,
+            includeIndexes: true,
+            includeConstraints: true,
+            force: true,
+            priority: "interactive",
+          }),
+        6,
+      );
+      const failures = results.filter((result) => result.status === "rejected");
+      const refreshed = results.length - failures.length;
+      bumpMetadataVersion();
+      await settleTableBatchWork(
+        options.tables,
+        (table) =>
+          useTabStore
+            .getState()
+            .refreshTableTabs(
+              options.connectionId,
+              options.schema,
+              table,
+              false,
+            ),
+        6,
+      );
+      const message = failures.length
+        ? `${refreshed} refreshed · ${failures.length} failed`
+        : `${refreshed} refreshed`;
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message,
+      });
+      if (failures.length) {
+        tasks.failTask(
+          taskId,
+          `${failures.length} table metadata refresh${failures.length === 1 ? "" : "es"} failed`,
+          message,
+        );
+      } else {
+        tasks.finishTask(taskId, message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message: `Refresh failed: ${message}`,
+      });
+      tasks.failTask(taskId, message);
     }
   };
 
@@ -2715,6 +2826,17 @@ export function SchemaSidebar() {
 
   const renderObjectActions = () => {
     if (currentSchema && canBrowseTables) {
+      const selectionScopeKey = activeConnectionId
+        ? objectGroupKey(
+            activeConnectionId,
+            activeDriver,
+            currentSchema,
+            "objects",
+          )
+        : null;
+      const selectionModeActive =
+        selectionScopeKey !== null &&
+        tableBatchSelection?.scopeKey === selectionScopeKey;
       return (
         <div className="flex items-center gap-0.5">
           <Button
@@ -2759,6 +2881,32 @@ export function SchemaSidebar() {
               <TableProperties size={10} />
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(
+              "wb-icon-button h-5 w-5",
+              selectionModeActive && "wb-tree-row-selected",
+            )}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!selectionScopeKey) return;
+              setTableBatchAction(null);
+              setTableBatchSelection((current) =>
+                current?.scopeKey === selectionScopeKey
+                  ? null
+                  : { scopeKey: selectionScopeKey, names: [], anchor: null },
+              );
+            }}
+            title={
+              selectionModeActive
+                ? "Exit table selection"
+                : "Select tables for batch actions"
+            }
+            aria-pressed={selectionModeActive}
+          >
+            <ListChecks size={10} />
+          </Button>
         </div>
       );
     }
@@ -2815,6 +2963,7 @@ export function SchemaSidebar() {
     const tableRelations = schemaObjects.tables.filter(
       (table) => !isViewObject(table.type),
     );
+    const tableRelationNames = tableRelations.map((table) => table.name);
     const virtualViews = schemaObjects.tables.filter((table) =>
       isViewObject(table.type),
     );
@@ -2834,6 +2983,16 @@ export function SchemaSidebar() {
       : canBrowseCollections;
     const groupKey = objectGroupKey(connectionId, driver, schema, "objects");
     const isObjectGroupExpanded = expandedObjectGroupKeys.includes(groupKey);
+    const isTableBatchSelectionActive =
+      tableBatchSelection?.scopeKey === groupKey;
+    const scopedTableBatchSelection = isTableBatchSelectionActive
+      ? pruneTableBatchSelection(tableBatchSelection, tableRelationNames)
+      : { names: [], anchor: null };
+    const selectedTableBatchNames = scopedTableBatchSelection.names;
+    const selectedTableBatchSet = new Set(selectedTableBatchNames);
+    const allVisibleTablesSelected =
+      tableRelationNames.length > 0 &&
+      tableRelationNames.every((name) => selectedTableBatchSet.has(name));
     const schemaNodeState =
       metadataNodeStates[
         getSchemaMetadataNodeKey(connectionId, driver, schema)
@@ -3620,6 +3779,99 @@ export function SchemaSidebar() {
                 )}
               </div>
             )}
+            {isTableBatchSelectionActive && tableRelations.length > 0 && (
+              <div className="mx-1 mb-1 mt-0.5 flex min-h-7 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] border-l-2 border-l-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-panel-raised))] px-1.5 py-1 text-[10px]">
+                <Checkbox
+                  className={checkboxClass}
+                  checked={
+                    allVisibleTablesSelected
+                      ? true
+                      : selectedTableBatchNames.length > 0
+                        ? "indeterminate"
+                        : false
+                  }
+                  aria-label={
+                    allVisibleTablesSelected
+                      ? "Deselect all visible tables"
+                      : "Select all visible tables"
+                  }
+                  onCheckedChange={() =>
+                    setTableBatchSelection({
+                      scopeKey: groupKey,
+                      ...toggleAllVisibleTableBatchSelection(
+                        scopedTableBatchSelection,
+                        tableRelationNames,
+                      ),
+                    })
+                  }
+                />
+                <span className="min-w-0 flex-1 truncate wb-muted">
+                  {selectedTableBatchNames.length > 0
+                    ? `${selectedTableBatchNames.length} selected`
+                    : `Select up to ${MAX_EXPLORER_TABLE_BATCH_SELECTION}`}
+                  {tableBatchAction?.scopeKey === groupKey
+                    ? ` · ${tableBatchAction.message}`
+                    : ""}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    tableBatchAction?.running
+                  }
+                  onClick={() =>
+                    void refreshSelectedTableMetadata({
+                      scopeKey: groupKey,
+                      connectionId,
+                      driver: (driver || activeDriver) as DatabaseDriver,
+                      driverPackageVersion:
+                        objectConnection?.driverPackageVersion,
+                      connectionDatabaseName: objectConnection?.database,
+                      databaseName: navigationDatabaseName,
+                      schema,
+                      tables: selectedTableBatchNames,
+                    })
+                  }
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    !objectConnection ||
+                    !activeCapabilities.supportsTableDataTransfer
+                  }
+                  onClick={() => {
+                    if (!objectConnection) return;
+                    void handleOpenDataTransfer({
+                      connection: objectConnection,
+                      database: navigationDatabaseName,
+                      schema,
+                      table: selectedTableBatchNames[0],
+                      tables: selectedTableBatchNames,
+                      scope:
+                        selectedTableBatchNames.length > 1 ? "schema" : "table",
+                    });
+                  }}
+                >
+                  Transfer
+                </button>
+                <button
+                  type="button"
+                  className="flex h-5 w-5 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                  aria-label="Exit table selection"
+                  onClick={() => {
+                    setTableBatchSelection(null);
+                    setTableBatchAction(null);
+                  }}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            )}
             {!hasSchemaObjectContext ? (
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 Select a {namespaceLabel} to view objects
@@ -3751,20 +4003,52 @@ export function SchemaSidebar() {
                             aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. Double-click to open data; right-click for actions; expand for columns and indexes.`}
                             className={cn(
                               "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
-                              isSelectedTable
+                              selectedTableBatchSet.has(table.name) ||
+                                isSelectedTable
                                 ? "wb-tree-row-selected"
                                 : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                             )}
-                            onClick={() =>
+                            onClick={(event) => {
+                              if (isTableBatchSelectionActive) {
+                                setTableBatchSelection({
+                                  scopeKey: groupKey,
+                                  ...toggleTableBatchSelection(
+                                    scopedTableBatchSelection,
+                                    table.name,
+                                    tableRelationNames,
+                                    { range: event.shiftKey },
+                                  ),
+                                });
+                                return;
+                              }
                               void runForSchema(schema, () =>
                                 handleTableSelect(table.name),
-                              )
-                            }
+                              );
+                            }}
                             onDoubleClick={() =>
+                              !isTableBatchSelectionActive &&
                               void handleTableDoubleClick(table, schema)
                             }
                             title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\nDouble-click to open data · Right-click for actions · Expand for columns and indexes`}
                           >
+                            {isTableBatchSelectionActive && (
+                              <Checkbox
+                                className={checkboxClass}
+                                checked={selectedTableBatchSet.has(table.name)}
+                                aria-label={`${selectedTableBatchSet.has(table.name) ? "Deselect" : "Select"} ${table.name}`}
+                                onClick={(event) => event.stopPropagation()}
+                                onCheckedChange={() =>
+                                  setTableBatchSelection({
+                                    scopeKey: groupKey,
+                                    ...toggleTableBatchSelection(
+                                      scopedTableBatchSelection,
+                                      table.name,
+                                      tableRelationNames,
+                                    ),
+                                  })
+                                }
+                              />
+                            )}
                             <button
                               type="button"
                               className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
@@ -5694,6 +5978,7 @@ export function SchemaSidebar() {
             projectId={activeProjectId}
             source={dataTransferRequest.source}
             initialSourceScope={dataTransferRequest.initialSourceScope}
+            initialSourceTables={dataTransferRequest.initialSourceTables}
             sourceSchemas={dataTransferRequest.sourceSchemas}
             sourceCapabilities={dataTransferRequest.sourceCapabilities}
             connections={connections}

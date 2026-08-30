@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { resolveInitialTransferTableSelection } from "@/features/database-explorer/model/tableTransferSelection";
 import { ensureConnectionReady, type ConnectionConfig } from "@/store/useConnectionStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
 import type {
@@ -46,6 +47,7 @@ interface TableDataTransferDialogProps {
   projectId?: string | null;
   source: TableDataTransferEndpoint;
   initialSourceScope?: "table" | "schema" | "database";
+  initialSourceTables?: string[];
   sourceSchemas?: string[];
   sourceCapabilities?: DatabaseCapabilities | null;
   connections: ConnectionConfig[];
@@ -163,6 +165,7 @@ export function TableDataTransferDialog({
   projectId,
   source,
   initialSourceScope = "table",
+  initialSourceTables,
   sourceSchemas = [source.schema],
   sourceCapabilities,
   connections,
@@ -196,7 +199,10 @@ export function TableDataTransferDialog({
   const [sourceTables, setSourceTables] = useState<string[]>([]);
   const [activeSourceSchema, setActiveSourceSchema] = useState(source.schema);
   const [selectedSourceTables, setSelectedSourceTables] = useState<Set<string>>(
-    () => new Set([source.table]),
+    () =>
+      new Set(
+        initialSourceTables?.length ? initialSourceTables : [source.table],
+      ),
   );
   const [isTablesLoading, setIsTablesLoading] = useState(false);
   const [preview, setPreview] = useState<TableDataTransferPreview | null>(null);
@@ -282,11 +288,14 @@ export function TableDataTransferDialog({
             : names[0];
         setSourceTables(names);
         setSelectedSourceTables((current) => {
-          if (initialSourceScope !== "table") return new Set(names);
-          const selected = [...current].filter((table) => names.includes(table));
-          return new Set(
-            selected.length > 0 ? selected : initialTable ? [initialTable] : [],
-          );
+          return resolveInitialTransferTableSelection({
+            availableTables: names,
+            sourceTable: initialTable || source.table,
+            sourceSchemaMatches: activeSourceSchema === source.schema,
+            initialScope: initialSourceScope,
+            requestedTables: initialSourceTables,
+            currentSelection: current,
+          });
         });
       } catch {
         // The active source remains usable for a single-table transfer even
@@ -300,7 +309,14 @@ export function TableDataTransferDialog({
     return () => {
       cancelled = true;
     };
-  }, [activeSourceSchema, initialSourceScope, open, source, sourceSupportsTransfer]);
+  }, [
+    activeSourceSchema,
+    initialSourceScope,
+    initialSourceTables,
+    open,
+    source,
+    sourceSupportsTransfer,
+  ]);
 
   useEffect(() => {
     if (!open || !projectId || !targetConnectionId) {
@@ -463,7 +479,9 @@ export function TableDataTransferDialog({
     setTargetDistribution(null);
     setTables([]);
     setSourceTables([]);
-    setSelectedSourceTables(new Set([source.table]));
+    setSelectedSourceTables(
+      new Set(initialSourceTables?.length ? initialSourceTables : [source.table]),
+    );
     setPreview(null);
     setPreviewRequestKey("");
     setBatchPlan(null);
@@ -480,7 +498,15 @@ export function TableDataTransferDialog({
     setProgress(null);
     setPendingRetryTargetTable(null);
     setActiveSection("setup");
-  }, [eligibleTargetConnections, open, source.connectionId, source.driver, source.schema]);
+  }, [
+    eligibleTargetConnections,
+    initialSourceTables,
+    open,
+    source.connectionId,
+    source.driver,
+    source.schema,
+    source.table,
+  ]);
 
   useEffect(() => {
     if (!open) return;
