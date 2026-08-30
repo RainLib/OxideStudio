@@ -607,6 +607,88 @@ where
     })
 }
 
+struct CodexAppServerStep {
+    outbound: Vec<Value>,
+    event: Option<Value>,
+    completed_successfully: Option<bool>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn codex_app_server_step(
+    value: Value,
+    cwd: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    service_tier: Option<&str>,
+    full_access: bool,
+    collaboration_mode: &str,
+    thread_id: &mut Option<String>,
+    turn_id: &mut Option<String>,
+) -> Result<CodexAppServerStep> {
+    if let Some(error) = value.get("error") {
+        return Err(anyhow!("Codex app-server request failed: {error}"));
+    }
+
+    let mut outbound = Vec::new();
+    match value.get("id").and_then(Value::as_u64) {
+        Some(1) => {
+            outbound.push(json!({ "method": "initialized" }));
+            outbound.push(json!({
+                "id": 2,
+                "method": "thread/start",
+                "params": codex_thread_start_params(cwd, model, service_tier, full_access)
+            }));
+        }
+        Some(2) => {
+            let id = value
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Codex thread/start omitted its thread id"))?
+                .to_string();
+            *thread_id = Some(id.clone());
+            outbound.push(json!({
+                "id": 3,
+                "method": "turn/start",
+                "params": codex_turn_start_params(
+                    &id,
+                    prompt,
+                    model,
+                    effort,
+                    service_tier,
+                    collaboration_mode,
+                    full_access,
+                )
+            }));
+        }
+        Some(3) => {
+            *turn_id = value
+                .pointer("/result/turn/id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        Some(id) if value.get("method").is_some() => {
+            // Host-side command/file approvals are intentionally unavailable.
+            // Database approvals continue through the private Oxide MCP bridge.
+            outbound.push(json!({ "id": id, "result": { "decision": "decline" } }));
+        }
+        _ => {}
+    }
+
+    let method = value.get("method").and_then(Value::as_str);
+    let completed_successfully = (method == Some("turn/completed")).then(|| {
+        value
+            .pointer("/params/turn/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "completed")
+    });
+    Ok(CodexAppServerStep {
+        outbound,
+        event: method.is_some().then_some(value),
+        completed_successfully,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_codex_app_server<F>(
     spec: &CliCommandSpec,
@@ -706,72 +788,28 @@ where
                 let value = serde_json::from_str::<Value>(line.trim())
                     .context("Codex app-server emitted invalid JSONL")?;
 
-                if let Some(error) = value.get("error") {
-                    let _ = child.kill().await;
-                    return Err(anyhow!("Codex app-server request failed: {error}"));
+                let step = codex_app_server_step(
+                    value,
+                    cwd,
+                    prompt,
+                    model,
+                    effort,
+                    service_tier,
+                    full_access,
+                    collaboration_mode,
+                    &mut thread_id,
+                    &mut turn_id,
+                )?;
+                for message in step.outbound {
+                    write_json_line(&mut stdin, &message).await?;
                 }
-                match value.get("id").and_then(Value::as_u64) {
-                    Some(1) => {
-                        write_json_line(&mut stdin, &json!({ "method": "initialized" })).await?;
-                        let params = codex_thread_start_params(
-                            cwd,
-                            model,
-                            service_tier,
-                            full_access,
-                        );
-                        write_json_line(
-                            &mut stdin,
-                            &json!({ "id": 2, "method": "thread/start", "params": params }),
-                        ).await?;
-                    }
-                    Some(2) => {
-                        let id = value
-                            .pointer("/result/thread/id")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| anyhow!("Codex thread/start omitted its thread id"))?
-                            .to_string();
-                        thread_id = Some(id.clone());
-                        let params = codex_turn_start_params(
-                            &id,
-                            prompt,
-                            model,
-                            effort,
-                            service_tier,
-                            collaboration_mode,
-                            full_access,
-                        );
-                        write_json_line(
-                            &mut stdin,
-                            &json!({ "id": 3, "method": "turn/start", "params": params }),
-                        ).await?;
-                    }
-                    Some(3) => {
-                        turn_id = value
-                            .pointer("/result/turn/id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                    }
-                    Some(id) if value.get("method").is_some() => {
-                        // Host-side command/file approvals are intentionally unavailable.
-                        // Database approvals continue through the private Oxide MCP bridge.
-                        write_json_line(
-                            &mut stdin,
-                            &json!({ "id": id, "result": { "decision": "decline" } }),
-                        ).await?;
-                    }
-                    _ => {}
-                }
-
-                if let Some(method) = value.get("method").and_then(Value::as_str) {
+                if let Some(event) = step.event {
                     parsed_events += 1;
-                    on_json(value.clone());
-                    if method == "turn/completed" {
-                        completed_successfully = value
-                            .pointer("/params/turn/status")
-                            .and_then(Value::as_str)
-                            .is_some_and(|status| status == "completed");
-                        break;
-                    }
+                    on_json(event);
+                }
+                if let Some(completed) = step.completed_successfully {
+                    completed_successfully = completed;
+                    break;
                 }
             }
         }
@@ -886,6 +924,12 @@ pub fn bounded_diagnostic(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex as StdMutex};
+
+    // Windows command shims share console/process resources and become
+    // nondeterministic when the Rust harness launches all protocol fixtures
+    // at once. Serialize only these subprocess tests; production CLI turns
+    // remain fully concurrent.
+    static CLI_FIXTURE_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn rejects_command_lines_disguised_as_executable_names() {
@@ -1043,6 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_cli_streams_jsonl_and_collects_stderr() {
+        let _process_guard = CLI_FIXTURE_PROCESS_LOCK.lock().await;
         let fixture = fake_cli_fixture(false);
         let values = Arc::new(StdMutex::new(Vec::new()));
         let captured = Arc::clone(&values);
@@ -1067,6 +1112,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_cli_timeout_terminates_the_process() {
+        let _process_guard = CLI_FIXTURE_PROCESS_LOCK.lock().await;
         let fixture = fake_cli_fixture(true);
         let (_cancellation, receiver) = watch::channel(false);
         let error = run_jsonl_process(
@@ -1086,6 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_cli_cancellation_terminates_the_process() {
+        let _process_guard = CLI_FIXTURE_PROCESS_LOCK.lock().await;
         let fixture = fake_cli_fixture(true);
         let (cancellation, receiver) = watch::channel(false);
         tokio::spawn(async move {
@@ -1107,41 +1154,92 @@ mod tests {
         assert!(error.to_string().contains("cancelled"));
     }
 
-    #[tokio::test]
-    async fn fake_codex_app_server_runs_thread_and_turn_protocol() {
-        let fixture = fake_codex_app_server_fixture();
-        let values = Arc::new(StdMutex::new(Vec::new()));
-        let captured = Arc::clone(&values);
-        let (_cancellation, receiver) = watch::channel(false);
-        let output = run_codex_app_server(
-            &fixture.spec,
-            &[],
-            &BTreeMap::new(),
-            fixture.directory.path(),
-            b"inspect the active SQL",
+    #[test]
+    fn codex_app_server_state_machine_runs_thread_and_turn_protocol() {
+        let mut thread_id = None;
+        let mut turn_id = None;
+        let cwd = Path::new("workspace");
+        let initialize = codex_app_server_step(
+            json!({ "id": 1, "result": {} }),
+            cwd,
+            "inspect the active SQL",
             Some("gpt-test"),
             Some("ultra"),
             Some("priority"),
             true,
             "default",
-            // Full-suite Windows runs several process fixtures concurrently.
-            // Keep production timeout semantics unchanged while giving this
-            // deterministic protocol fixture enough scheduler slack.
-            Duration::from_secs(15),
-            receiver,
-            move |value| captured.lock().unwrap().push(value),
+            &mut thread_id,
+            &mut turn_id,
         )
-        .await
         .unwrap();
-        assert!(output.success);
-        assert!(output.parsed_events >= 2);
-        let values = values.lock().unwrap();
-        assert!(values.iter().any(|value| {
-            value.get("method").and_then(Value::as_str) == Some("item/agentMessage/delta")
-        }));
-        assert!(values.iter().any(|value| {
-            value.get("method").and_then(Value::as_str) == Some("turn/completed")
-        }));
+        assert_eq!(initialize.outbound[0], json!({ "method": "initialized" }));
+        assert_eq!(initialize.outbound[1]["method"], json!("thread/start"));
+        assert_eq!(
+            initialize.outbound[1]["params"]["serviceTier"],
+            json!("priority")
+        );
+
+        let thread = codex_app_server_step(
+            json!({ "id": 2, "result": { "thread": { "id": "thread-1" } } }),
+            cwd,
+            "inspect the active SQL",
+            Some("gpt-test"),
+            Some("ultra"),
+            Some("priority"),
+            true,
+            "default",
+            &mut thread_id,
+            &mut turn_id,
+        )
+        .unwrap();
+        assert_eq!(thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(thread.outbound[0]["method"], json!("turn/start"));
+        assert_eq!(thread.outbound[0]["params"]["effort"], json!("ultra"));
+
+        let turn = codex_app_server_step(
+            json!({ "id": 3, "result": { "turn": { "id": "turn-1" } } }),
+            cwd,
+            "inspect the active SQL",
+            Some("gpt-test"),
+            Some("ultra"),
+            Some("priority"),
+            true,
+            "default",
+            &mut thread_id,
+            &mut turn_id,
+        )
+        .unwrap();
+        assert!(turn.outbound.is_empty());
+        assert_eq!(turn_id.as_deref(), Some("turn-1"));
+
+        let completed = codex_app_server_step(
+            json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": { "id": "turn-1", "status": "completed" }
+                }
+            }),
+            cwd,
+            "inspect the active SQL",
+            Some("gpt-test"),
+            Some("ultra"),
+            Some("priority"),
+            true,
+            "default",
+            &mut thread_id,
+            &mut turn_id,
+        )
+        .unwrap();
+        assert_eq!(completed.completed_successfully, Some(true));
+        assert_eq!(
+            completed
+                .event
+                .as_ref()
+                .and_then(|value| value.get("method"))
+                .and_then(Value::as_str),
+            Some("turn/completed")
+        );
     }
 
     struct FakeCliFixture {
@@ -1172,61 +1270,6 @@ mod tests {
                 "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\nprintf '%s\\n' 'fixture diagnostic' >&2\n{wait_command}"
             );
             (script, body)
-        };
-        std::fs::write(&script, body).unwrap();
-        #[cfg(windows)]
-        let spec = CliCommandSpec {
-            program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-            prefix_args: vec![
-                "/D".to_string(),
-                "/S".to_string(),
-                "/C".to_string(),
-                script.to_string_lossy().into_owned(),
-            ],
-            resolved_path: Some(script.to_string_lossy().into_owned()),
-        };
-        #[cfg(unix)]
-        let spec = CliCommandSpec {
-            program: "/bin/sh".to_string(),
-            prefix_args: vec![script.to_string_lossy().into_owned()],
-            resolved_path: Some(script.to_string_lossy().into_owned()),
-        };
-        FakeCliFixture { directory, spec }
-    }
-
-    fn fake_codex_app_server_fixture() -> FakeCliFixture {
-        let directory = tempfile::tempdir().unwrap();
-        #[cfg(windows)]
-        let (script, body) = {
-            let script = directory.path().join("fake-codex-app-server.cmd");
-            let body = concat!(
-                "@set /p initialize=\r\n",
-                "@echo {\"id\":1,\"result\":{}}\r\n",
-                "@set /p initialized=\r\n",
-                "@set /p thread=\r\n",
-                "@echo {\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\r\n",
-                "@set /p turn=\r\n",
-                "@echo {\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}\r\n",
-                "@echo {\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"itemId\":\"item-1\",\"delta\":\"done\"}}\r\n",
-                "@echo {\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}\r\n",
-            );
-            (script, body.to_string())
-        };
-        #[cfg(unix)]
-        let (script, body) = {
-            let script = directory.path().join("fake-codex-app-server.sh");
-            let body = concat!(
-                "read -r initialize\n",
-                "printf '%s\\n' '{\"id\":1,\"result\":{}}'\n",
-                "read -r initialized\n",
-                "read -r thread\n",
-                "printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}'\n",
-                "read -r turn\n",
-                "printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\n",
-                "printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"itemId\":\"item-1\",\"delta\":\"done\"}}'\n",
-                "printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\n",
-            );
-            (script, body.to_string())
         };
         std::fs::write(&script, body).unwrap();
         #[cfg(windows)]
