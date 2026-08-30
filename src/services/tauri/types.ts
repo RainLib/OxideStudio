@@ -364,6 +364,44 @@ export interface ExecuteDatabaseMaintenanceRequest {
   confirmationText: string;
 }
 
+export type SqliteBackupOperation = "backup" | "restore";
+
+export interface SqliteBackupPlanRequest {
+  operation: SqliteBackupOperation;
+  path: string;
+}
+
+export interface SqliteBackupPlan {
+  operation: SqliteBackupOperation;
+  path: string;
+  fileName: string;
+  summary: string;
+  risk: "low" | "medium" | "high";
+  destinationExists: boolean;
+  byteLen?: number | null;
+  sourceSha256?: string | null;
+  createsRecoveryPoint: boolean;
+  confirmationText: string;
+  confirmationToken: string;
+  connectedDriver: "sqlite";
+  serverVersion?: string | null;
+}
+
+export interface ExecuteSqliteBackupPlanRequest {
+  plan: SqliteBackupPlanRequest;
+  confirmationToken: string;
+  confirmationText: string;
+}
+
+export interface SqliteBackupExecutionReceipt {
+  operation: SqliteBackupOperation;
+  path: string;
+  byteLen: number;
+  integrityCheck: string;
+  recoveryPath?: string | null;
+  message: string;
+}
+
 export interface DatabaseAdminUser {
   name: string;
   host?: string | null;

@@ -6,6 +6,10 @@ import type {
   DatabaseMaintenancePlan,
   DatabaseMaintenanceRequest,
   ExecuteDatabaseMaintenanceRequest,
+  ExecuteSqliteBackupPlanRequest,
+  SqliteBackupExecutionReceipt,
+  SqliteBackupPlan,
+  SqliteBackupPlanRequest,
   DatabaseAdminSession,
   DatabaseAdminMetric,
   DatabaseAdminLockWait,
@@ -300,6 +304,26 @@ export async function executeDatabaseMaintenance(
   });
 }
 
+export async function previewSqliteBackupPlan(
+  connectionId: string,
+  request: SqliteBackupPlanRequest,
+): Promise<SqliteBackupPlan> {
+  return invokeWithInterceptors<SqliteBackupPlan>(
+    "preview_sqlite_backup_plan",
+    { connectionId, request },
+  );
+}
+
+export async function executeSqliteBackupPlan(
+  connectionId: string,
+  request: ExecuteSqliteBackupPlanRequest,
+): Promise<SqliteBackupExecutionReceipt> {
+  return invokeWithInterceptors<SqliteBackupExecutionReceipt>(
+    "execute_sqlite_backup_plan",
+    { connectionId, request },
+  );
+}
+
 export async function listDatabaseAdminMetrics(
   connectionId: string,
   driver: DatabaseDriver,
@@ -477,6 +501,8 @@ export const databaseService = {
   getDatabaseAdminServerIdentity,
   previewDatabaseMaintenance,
   executeDatabaseMaintenance,
+  previewSqliteBackupPlan,
+  executeSqliteBackupPlan,
   listDatabaseAdminSessions,
   listDatabaseAdminMetrics,
   listDatabaseAdminLockWaits,

@@ -5,7 +5,7 @@ use super::protocol::{
 use super::ssh::SshTunnel;
 use super::{
     dialect::DatabaseCapabilities,
-    driver::{DatabaseDriver, DocumentPageRequest},
+    driver::{DatabaseDriver, DocumentPageRequest, LocalDatabaseFileReceipt},
 };
 use anyhow::{anyhow, Result};
 use oxide_driver_protocol::{
@@ -14,6 +14,7 @@ use oxide_driver_protocol::{
     SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -265,6 +266,31 @@ impl ConnectionManager {
     pub async fn ping(&self, id: &str) -> Result<()> {
         let driver = self.get_driver(id).await?;
         driver.ping().await
+    }
+
+    pub async fn backup_local_database(
+        &self,
+        id: &str,
+        destination: &Path,
+    ) -> Result<LocalDatabaseFileReceipt> {
+        self.get_driver(id)
+            .await?
+            .backup_local_database(destination)
+            .await
+    }
+
+    pub async fn restore_local_database(
+        &self,
+        id: &str,
+        source: &Path,
+    ) -> Result<LocalDatabaseFileReceipt> {
+        let receipt = self
+            .get_driver(id)
+            .await?
+            .restore_local_database(source)
+            .await?;
+        self.clear_schema_context(id).await;
+        Ok(receipt)
     }
 
     pub async fn server_version(&self, id: &str) -> Result<Option<String>> {

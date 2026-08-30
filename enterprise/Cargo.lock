@@ -4862,7 +4862,7 @@ dependencies = [
 
 [[package]]
 name = "oxide-studio"
-version = "0.1.13"
+version = "0.1.16"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4872,6 +4872,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "calamine",
+ "cc",
  "chrono",
  "clap",
  "csv",
@@ -4881,6 +4882,7 @@ dependencies = [
  "hmac 0.12.1",
  "keyring",
  "libc",
+ "libsqlite3-sys",
  "minisign-verify",
  "mongodb",
  "oxide-driver-protocol",

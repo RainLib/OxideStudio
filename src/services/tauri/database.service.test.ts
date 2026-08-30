@@ -8,8 +8,10 @@ vi.mock("./client", () => ({ invokeWithInterceptors }));
 
 import {
   executeDatabaseMaintenance,
+  executeSqliteBackupPlan,
   getDatabaseAdminServerIdentity,
   previewDatabaseMaintenance,
+  previewSqliteBackupPlan,
 } from "./database.service";
 
 describe("database administration service", () => {
@@ -70,6 +72,47 @@ describe("database administration service", () => {
           maintenance,
           confirmationToken: "sha256:plan",
           confirmationText: "VACUUM FULL warehouse.public.events",
+        },
+      },
+    );
+  });
+
+  it("keeps SQLite backup and restore behind reviewed host plans", async () => {
+    const plan = {
+      operation: "restore" as const,
+      path: "C:/backups/app.sqlite",
+    };
+    invokeWithInterceptors
+      .mockResolvedValueOnce({
+        fileName: "app.sqlite",
+        confirmationToken: "sha256:restore",
+      })
+      .mockResolvedValueOnce({
+        operation: "restore",
+        integrityCheck: "ok",
+      });
+
+    await previewSqliteBackupPlan("connection-1", plan);
+    await executeSqliteBackupPlan("connection-1", {
+      plan,
+      confirmationToken: "sha256:restore",
+      confirmationText: "RESTORE SQLITE FROM app.sqlite",
+    });
+
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      1,
+      "preview_sqlite_backup_plan",
+      { connectionId: "connection-1", request: plan },
+    );
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      2,
+      "execute_sqlite_backup_plan",
+      {
+        connectionId: "connection-1",
+        request: {
+          plan,
+          confirmationToken: "sha256:restore",
+          confirmationText: "RESTORE SQLITE FROM app.sqlite",
         },
       },
     );

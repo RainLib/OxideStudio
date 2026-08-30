@@ -225,6 +225,8 @@ pub fn run() {
             commands::database_admin::get_database_admin_server_identity,
             commands::database_admin::maintenance::preview_database_maintenance,
             commands::database_admin::maintenance::execute_database_maintenance,
+            commands::sqlite_backup::preview_sqlite_backup_plan,
+            commands::sqlite_backup::execute_sqlite_backup_plan,
             commands::database_admin::list_database_admin_sessions,
             commands::database_admin::list_database_admin_metrics,
             commands::database_admin::list_database_admin_lock_waits,

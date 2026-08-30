@@ -14,6 +14,7 @@ use oxide_driver_protocol::{
     SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
     SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
 };
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DocumentPageRequest<'a> {
@@ -23,6 +24,12 @@ pub struct DocumentPageRequest<'a> {
     pub limit: usize,
     pub filter: Option<&'a str>,
     pub sort: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDatabaseFileReceipt {
+    pub byte_len: u64,
+    pub integrity_check: String,
 }
 
 fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
@@ -99,6 +106,19 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Check if connection is alive (simple ping)
     async fn ping(&self) -> Result<()>;
+
+    /// Create a consistent native backup of a local file database. Drivers
+    /// must override this explicitly; a renderer-selected product id never
+    /// enables the capability by itself.
+    async fn backup_local_database(&self, _destination: &Path) -> Result<LocalDatabaseFileReceipt> {
+        Err(unsupported_driver_feature("Local database backup"))
+    }
+
+    /// Restore a local file database through the live driver's native backup
+    /// boundary. Implementations must not copy over an open database file.
+    async fn restore_local_database(&self, _source: &Path) -> Result<LocalDatabaseFileReceipt> {
+        Err(unsupported_driver_feature("Local database restore"))
+    }
 
     /// Execute a query and return generic result set
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>>;

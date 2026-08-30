@@ -1,4 +1,4 @@
-use crate::core::driver::DatabaseDriver;
+use crate::core::driver::{DatabaseDriver, LocalDatabaseFileReceipt};
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
     QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
@@ -11,9 +11,14 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
-use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
-use sqlx::{Column, ConnectOptions, Executor, Pool, Row, Sqlite, TypeInfo};
+use sqlx::sqlite::{
+    LockedSqliteHandle, SqliteArguments, SqliteConnectOptions, SqliteConnection, SqlitePoolOptions,
+    SqliteRow,
+};
+use sqlx::{Column, ConnectOptions, Connection, Executor, Pool, Row, Sqlite, TypeInfo};
 use std::collections::HashMap;
+use std::ffi::CStr;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -32,6 +37,7 @@ pub struct SqliteDriver {
     read_only: bool,
     pool: Mutex<Option<Pool<Sqlite>>>,
     transaction_sessions: Mutex<HashMap<String, SqliteTransactionSession>>,
+    file_operation: Mutex<()>,
 }
 
 impl SqliteDriver {
@@ -41,6 +47,7 @@ impl SqliteDriver {
             read_only: false,
             pool: Mutex::new(None),
             transaction_sessions: Mutex::new(HashMap::new()),
+            file_operation: Mutex::new(()),
         }
     }
 
@@ -60,6 +67,7 @@ impl SqliteDriver {
             read_only: true,
             pool: Mutex::new(None),
             transaction_sessions: Mutex::new(HashMap::new()),
+            file_operation: Mutex::new(()),
         })
     }
 
@@ -200,6 +208,82 @@ impl DatabaseDriver for SqliteDriver {
     async fn ping(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool().await?).await?;
         Ok(())
+    }
+
+    async fn backup_local_database(&self, destination: &Path) -> Result<LocalDatabaseFileReceipt> {
+        if self.read_only {
+            return Err(anyhow!(
+                "Backup is unavailable through a read-only SQLite connection"
+            ));
+        }
+        let _operation = self.file_operation.lock().await;
+        self.ensure_no_active_transactions().await?;
+        let pool = self.pool().await?;
+        prepare_backup_destination(&pool, destination).await?;
+
+        let temporary = temporary_backup_path(destination)?;
+        let result = async {
+            let options = SqliteConnectOptions::new()
+                .filename(&temporary)
+                .create_if_missing(true)
+                .disable_statement_logging();
+            let mut backup = SqliteConnection::connect_with(&options).await?;
+            let mut source = pool.acquire().await?;
+            copy_sqlite_database(&mut source, &mut backup).await?;
+            let integrity_check = sqlite_connection_integrity(&mut backup).await?;
+            backup.close().await?;
+            sync_file(&temporary).await?;
+            replace_backup_file(&temporary, destination)?;
+            let byte_len = std::fs::metadata(destination)?.len();
+            Ok(LocalDatabaseFileReceipt {
+                byte_len,
+                integrity_check,
+            })
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    async fn restore_local_database(&self, source: &Path) -> Result<LocalDatabaseFileReceipt> {
+        if self.read_only {
+            return Err(anyhow!(
+                "Restore is unavailable through a read-only SQLite connection"
+            ));
+        }
+        let _operation = self.file_operation.lock().await;
+        self.ensure_no_active_transactions().await?;
+        let pool = self.pool().await?;
+        validate_restore_source(&pool, source).await?;
+
+        let options = SqliteConnectOptions::new()
+            .filename(source)
+            .read_only(true)
+            .disable_statement_logging();
+        let mut restore_source = SqliteConnection::connect_with(&options).await?;
+        let source_integrity = sqlite_connection_integrity(&mut restore_source).await?;
+        let mut destination = pool.acquire().await?;
+        copy_sqlite_database(&mut restore_source, &mut destination).await?;
+        restore_source.close().await?;
+        // Return the live handle before the integrity query. In-memory
+        // databases deliberately use a one-connection pool.
+        drop(destination);
+        let integrity_check: String = sqlx::query_scalar("PRAGMA main.integrity_check")
+            .fetch_one(&pool)
+            .await?;
+        if !integrity_check.eq_ignore_ascii_case("ok") {
+            return Err(anyhow!(
+                "Restored SQLite database failed its integrity check"
+            ));
+        }
+        let byte_len = std::fs::metadata(source)?.len();
+        Ok(LocalDatabaseFileReceipt {
+            byte_len,
+            integrity_check: source_integrity,
+        })
     }
 
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
@@ -538,6 +622,212 @@ impl DatabaseDriver for SqliteDriver {
     }
 }
 
+impl SqliteDriver {
+    async fn ensure_no_active_transactions(&self) -> Result<()> {
+        if self.transaction_sessions.lock().await.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Finish or roll back active SQLite transactions before backup or restore"
+            ))
+        }
+    }
+}
+
+async fn copy_sqlite_database(
+    source: &mut SqliteConnection,
+    destination: &mut SqliteConnection,
+) -> Result<()> {
+    let mut source = source.lock_handle().await?;
+    let mut destination = destination.lock_handle().await?;
+    sqlite_online_backup(&mut source, &mut destination)
+}
+
+fn sqlite_online_backup(
+    source: &mut LockedSqliteHandle<'_>,
+    destination: &mut LockedSqliteHandle<'_>,
+) -> Result<()> {
+    let source_handle = source.as_raw_handle().as_ptr();
+    let destination_handle = destination.as_raw_handle().as_ptr();
+    let main = c"main";
+    // SAFETY: both raw handles remain exclusively locked for this function,
+    // `main` is NUL-terminated, and the backup handle is always finished.
+    let backup = unsafe {
+        libsqlite3_sys::sqlite3_backup_init(
+            destination_handle,
+            main.as_ptr(),
+            source_handle,
+            main.as_ptr(),
+        )
+    };
+    if backup.is_null() {
+        return Err(anyhow!(sqlite_error_message(destination_handle)));
+    }
+
+    let mut busy_retries = 0_u16;
+    let step_code = loop {
+        // Copy in bounded page batches so a concurrent reader can briefly
+        // yield without turning this operation into an unbounded busy loop.
+        let code = unsafe { libsqlite3_sys::sqlite3_backup_step(backup, 256) };
+        match code {
+            libsqlite3_sys::SQLITE_OK => busy_retries = 0,
+            libsqlite3_sys::SQLITE_DONE => break code,
+            libsqlite3_sys::SQLITE_BUSY | libsqlite3_sys::SQLITE_LOCKED if busy_retries < 200 => {
+                busy_retries += 1;
+                std::thread::yield_now();
+            }
+            _ => break code,
+        }
+    };
+    let finish_code = unsafe { libsqlite3_sys::sqlite3_backup_finish(backup) };
+    if step_code == libsqlite3_sys::SQLITE_DONE && finish_code == libsqlite3_sys::SQLITE_OK {
+        return Ok(());
+    }
+    let code = if step_code == libsqlite3_sys::SQLITE_DONE {
+        finish_code
+    } else {
+        step_code
+    };
+    Err(anyhow!(
+        "SQLite online backup failed with code {code}: {}",
+        sqlite_error_message(destination_handle)
+    ))
+}
+
+fn sqlite_error_message(handle: *mut libsqlite3_sys::sqlite3) -> String {
+    // SAFETY: callers hold SQLx's exclusive LockedSqliteHandle and SQLite
+    // guarantees sqlite3_errmsg returns a valid NUL-terminated string.
+    unsafe { CStr::from_ptr(libsqlite3_sys::sqlite3_errmsg(handle)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+async fn sqlite_connection_integrity(connection: &mut SqliteConnection) -> Result<String> {
+    let result: String = sqlx::query_scalar("PRAGMA main.integrity_check")
+        .fetch_one(&mut *connection)
+        .await?;
+    if result.eq_ignore_ascii_case("ok") {
+        Ok(result)
+    } else {
+        Err(anyhow!("SQLite file failed its integrity check"))
+    }
+}
+
+async fn prepare_backup_destination(pool: &Pool<Sqlite>, destination: &Path) -> Result<()> {
+    if destination.as_os_str().is_empty() {
+        return Err(anyhow!("Backup destination is empty"));
+    }
+    if destination.is_dir() {
+        return Err(anyhow!("Backup destination must be a file"));
+    }
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(source) = sqlite_main_file(pool).await? {
+        if paths_match(&source, destination)? {
+            return Err(anyhow!(
+                "Backup destination must differ from the open SQLite database"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_restore_source(pool: &Pool<Sqlite>, source: &Path) -> Result<()> {
+    if !source.is_file() {
+        return Err(anyhow!("Restore source must be an existing SQLite file"));
+    }
+    if let Some(destination) = sqlite_main_file(pool).await? {
+        if paths_match(source, &destination)? {
+            return Err(anyhow!(
+                "Restore source must differ from the open SQLite database"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn sqlite_main_file(pool: &Pool<Sqlite>) -> Result<Option<PathBuf>> {
+    let rows = sqlx::query("PRAGMA database_list").fetch_all(pool).await?;
+    Ok(rows.into_iter().find_map(|row| {
+        let name = row.try_get::<String, _>("name").ok()?;
+        let file = row.try_get::<String, _>("file").ok()?;
+        (name == "main" && !file.trim().is_empty()).then(|| PathBuf::from(file))
+    }))
+}
+
+fn paths_match(left: &Path, right: &Path) -> Result<bool> {
+    Ok(canonicalize_existing_or_parent(left)? == canonicalize_existing_or_parent(right)?)
+}
+
+fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = std::fs::canonicalize(parent)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("File path is missing a file name"))?;
+    Ok(parent.join(file_name))
+}
+
+fn temporary_backup_path(destination: &Path) -> Result<PathBuf> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("Backup destination is missing a valid file name"))?;
+    Ok(destination.with_file_name(format!(
+        ".{file_name}.oxide-partial-{}",
+        uuid::Uuid::new_v4()
+    )))
+}
+
+fn replace_backup_file(temporary: &Path, destination: &Path) -> Result<()> {
+    if !destination.exists() {
+        std::fs::rename(temporary, destination)?;
+        return Ok(());
+    }
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("backup.sqlite");
+    let previous = destination.with_file_name(format!(
+        ".{file_name}.oxide-previous-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::rename(destination, &previous)?;
+    match std::fs::rename(temporary, destination) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(previous);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::rename(previous, destination);
+            Err(anyhow!("Failed to publish SQLite backup: {error}"))
+        }
+    }
+}
+
+async fn sync_file(path: &Path) -> Result<()> {
+    tokio::fs::OpenOptions::new()
+        // Windows requires a writable handle for FlushFileBuffers; a
+        // read-only handle reports ERROR_ACCESS_DENIED even though the
+        // completed SQLite file itself is valid.
+        .write(true)
+        .open(path)
+        .await?
+        .sync_all()
+        .await?;
+    Ok(())
+}
+
 fn normalize_sqlite_url(value: &str) -> String {
     let value = value.trim();
     if value == ":memory:" {
@@ -726,6 +1016,17 @@ mod tests {
         assert!(SqliteDriver::new_read_only("sqlite://workspace.db").is_ok());
     }
 
+    #[test]
+    fn failed_backup_publication_restores_the_previous_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("backup.sqlite");
+        let missing_temporary = directory.path().join("missing.sqlite");
+        std::fs::write(&destination, b"previous backup").unwrap();
+
+        assert!(replace_backup_file(&missing_temporary, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous backup");
+    }
+
     #[tokio::test]
     async fn readonly_sqlite_driver_allows_selects_but_engine_rejects_writes() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -745,6 +1046,66 @@ mod tests {
         assert_eq!(rows[0].rows[0][0], Value::String("safe".to_string()));
         assert!(read_only
             .query("INSERT INTO entries VALUES (2, 'blocked')")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn native_backup_captures_a_consistent_memory_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("snapshot.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query(
+                "CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO entries VALUES (1, 'snapshot');",
+            )
+            .await
+            .unwrap();
+
+        let receipt = driver.backup_local_database(&backup_path).await.unwrap();
+        assert!(receipt.byte_len > 0);
+        assert_eq!(receipt.integrity_check, "ok");
+
+        let mut restored = SqliteDriver::new(backup_path.to_string_lossy().as_ref());
+        restored.connect().await.unwrap();
+        let rows = restored.query("SELECT value FROM entries").await.unwrap();
+        assert_eq!(rows[0].rows[0][0], Value::String("snapshot".to_string()));
+    }
+
+    #[tokio::test]
+    async fn native_restore_replaces_the_live_database_without_copying_open_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let restore_path = directory.path().join("restore.sqlite");
+        let live_path = directory.path().join("live.sqlite");
+        let mut source = SqliteDriver::new(":memory:");
+        source.connect().await.unwrap();
+        source
+            .query(
+                "CREATE TABLE restored_entries (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO restored_entries VALUES (1, 'restored');",
+            )
+            .await
+            .unwrap();
+        source.backup_local_database(&restore_path).await.unwrap();
+
+        let mut destination = SqliteDriver::new(live_path.to_string_lossy().as_ref());
+        destination.connect().await.unwrap();
+        destination
+            .query("CREATE TABLE stale_entries (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let receipt = destination
+            .restore_local_database(&restore_path)
+            .await
+            .unwrap();
+        assert_eq!(receipt.integrity_check, "ok");
+        let rows = destination
+            .query("SELECT value FROM restored_entries")
+            .await
+            .unwrap();
+        assert_eq!(rows[0].rows[0][0], Value::String("restored".to_string()));
+        assert!(destination
+            .query("SELECT * FROM stale_entries")
             .await
             .is_err());
     }

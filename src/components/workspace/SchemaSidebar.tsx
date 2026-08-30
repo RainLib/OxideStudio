@@ -34,6 +34,7 @@ import {
   AlertTriangle,
   ShieldCheck,
   Wrench,
+  ArchiveRestore,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -83,7 +84,10 @@ import type {
   TableInfo,
 } from "@/services/tauri/types";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
-import type { DatabaseMaintenanceTarget } from "@/features/database-admin";
+import type {
+  DatabaseMaintenanceTarget,
+  SqliteBackupTarget,
+} from "@/features/database-admin";
 import {
   DEFAULT_DATABASE_DRIVER,
   databaseDriverProfile,
@@ -225,6 +229,11 @@ const DatabaseAdministrationDialog = lazy(() =>
 const DatabaseMaintenanceDialog = lazy(() =>
   import("@/features/database-admin").then((module) => ({
     default: module.DatabaseMaintenanceDialog,
+  })),
+);
+const SqliteBackupDialog = lazy(() =>
+  import("@/features/database-admin").then((module) => ({
+    default: module.SqliteBackupDialog,
   })),
 );
 const TableDataTransferDialog = lazy(() =>
@@ -524,6 +533,8 @@ export function SchemaSidebar() {
   ] = useState<string | null>(null);
   const [databaseMaintenanceTarget, setDatabaseMaintenanceTarget] =
     useState<DatabaseMaintenanceTarget | null>(null);
+  const [sqliteBackupTarget, setSqliteBackupTarget] =
+    useState<SqliteBackupTarget | null>(null);
   const [connectingConnectionIds, setConnectingConnectionIds] = useState<
     string[]
   >([]);
@@ -5436,6 +5447,42 @@ export function SchemaSidebar() {
                           Import/Export
                         </ContextMenuSubTrigger>
                         <ContextMenuSubContent className={menuContentClass}>
+                          {normalizeDatabaseDriverName(connection.driver) ===
+                            "sqlite" && (
+                            <>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!isActive || isManagedConnection}
+                                onClick={() =>
+                                  setSqliteBackupTarget({
+                                    connectionId: connection.id,
+                                    connectionName: connection.name,
+                                    initialOperation: "backup",
+                                  })
+                                }
+                              >
+                                <Download className="mr-2 h-3.5 w-3.5" />
+                                Back up SQLite database...
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!isActive || isManagedConnection}
+                                onClick={() =>
+                                  setSqliteBackupTarget({
+                                    connectionId: connection.id,
+                                    connectionName: connection.name,
+                                    initialOperation: "restore",
+                                  })
+                                }
+                              >
+                                <ArchiveRestore className="mr-2 h-3.5 w-3.5" />
+                                Restore SQLite database...
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                            </>
+                          )}
                           <ContextMenuItem
                             className={menuItemClass}
                             onClick={() =>
@@ -6288,6 +6335,19 @@ export function SchemaSidebar() {
             onOpenChange={(open) => {
               if (!open) setDatabaseMaintenanceTarget(null);
             }}
+          />
+        )}
+        {sqliteBackupTarget && (
+          <SqliteBackupDialog
+            key={`${sqliteBackupTarget.connectionId}:${sqliteBackupTarget.initialOperation || "backup"}`}
+            open
+            target={sqliteBackupTarget}
+            onOpenChange={(open) => {
+              if (!open) setSqliteBackupTarget(null);
+            }}
+            onCompleted={() =>
+              handleRefreshConnection(sqliteBackupTarget.connectionId)
+            }
           />
         )}
         {isCreateDbDialogOpen && (
