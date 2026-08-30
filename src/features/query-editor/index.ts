@@ -182,3 +182,4 @@ export {
   type QueryExecutionSnapshot,
   type QueryExecutionTarget,
 } from "./model/queryExecutionTarget";
+export { shouldRetriggerDocumentCompletion } from "./model/documentCompletionRefresh";

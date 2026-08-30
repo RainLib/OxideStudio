@@ -47,8 +47,10 @@ Oxide 的 `src/lib/elasticsearchConsole.ts` 已超过 DBX 的轻量 Console：
 3. **ES alias/data stream 真实集群验证（P1）**：逻辑已保留 typed descriptor；仍需在
    6.8/7/8、权限受限以及 rollover/data stream 环境验证 `_resolve`/`_alias` 的响应差异，
    再决定是否在 Explorer 增加独立图标或过滤器。
-4. **元数据刷新体验（P1）**：共享 cache 已有 TTL、single-flight 和有界淘汰；下一步是
-   在 Explorer refresh 后主动重新触发当前 Monaco completion，而非等待用户下一次输入。
+4. **元数据刷新体验（逻辑已对齐）**：共享 cache 已有 TTL、single-flight 和有界淘汰；
+   stale-while-revalidate 完成后会主动重触发仍处于活动状态的 Monaco completion，
+   不再等待下一次输入。刷新绑定原 provider cancellation token、model identity/version、
+   cursor 和 editor focus，关闭建议、编辑、移动光标或切换标签后不会误弹。
 
 ## 延后真实环境验证
 

@@ -26,6 +26,7 @@ export class DocumentMetadataCache<T> {
     key: string,
     loader: () => Promise<T>,
     now = Date.now(),
+    onBackgroundRefresh?: (value: T) => void,
   ): Promise<T> {
     const cached = this.entries.get(key);
     if (cached) {
@@ -33,8 +34,13 @@ export class DocumentMetadataCache<T> {
       this.entries.delete(key);
       this.entries.set(key, cached);
       if (cached.value !== undefined) {
+        let backgroundRefresh = cached.promise;
         if (cached.expiresAt <= now && !cached.promise) {
-          void this.refresh(key, cached, loader, now).catch(() => undefined);
+          backgroundRefresh = this.refresh(key, cached, loader, now);
+          void backgroundRefresh.catch(() => undefined);
+        }
+        if (backgroundRefresh && onBackgroundRefresh) {
+          void backgroundRefresh.then(onBackgroundRefresh, () => undefined);
         }
         return Promise.resolve(cached.value);
       }
@@ -142,8 +148,18 @@ const documentMetadataCache = new DocumentMetadataCache<unknown>();
 export function loadDocumentMetadata<T>(
   key: string,
   loader: () => Promise<T>,
+  options?: {
+    onBackgroundRefresh?: (value: T) => void;
+  },
 ) {
-  return documentMetadataCache.get(key, loader) as Promise<T>;
+  return documentMetadataCache.get(
+    key,
+    loader,
+    Date.now(),
+    options?.onBackgroundRefresh
+      ? (value) => options.onBackgroundRefresh?.(value as T)
+      : undefined,
+  ) as Promise<T>;
 }
 
 export function invalidateDocumentMetadataScope(

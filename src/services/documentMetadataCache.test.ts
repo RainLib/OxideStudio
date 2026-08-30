@@ -48,6 +48,55 @@ describe("DocumentMetadataCache", () => {
     ]);
   });
 
+  it("notifies active consumers when a stale catalog refresh completes", async () => {
+    const cache = new DocumentMetadataCache<string[]>(10, 8);
+    await cache.get("scope\u0000indices", async () => ["previous"], 1);
+    let resolve!: (value: string[]) => void;
+    const refreshed = vi.fn();
+
+    await expect(
+      cache.get(
+        "scope\u0000indices",
+        () =>
+          new Promise<string[]>((done) => {
+            resolve = done;
+          }),
+        12,
+        refreshed,
+      ),
+    ).resolves.toEqual(["previous"]);
+    expect(refreshed).not.toHaveBeenCalled();
+
+    resolve(["current"]);
+    await vi.waitFor(() => {
+      expect(refreshed).toHaveBeenCalledWith(["current"]);
+    });
+  });
+
+  it("shares one stale refresh while notifying each active consumer", async () => {
+    const cache = new DocumentMetadataCache<string[]>(10, 8);
+    await cache.get("scope\u0000indices", async () => ["previous"], 1);
+    let resolve!: (value: string[]) => void;
+    const loader = vi.fn(
+      () =>
+        new Promise<string[]>((done) => {
+          resolve = done;
+        }),
+    );
+    const first = vi.fn();
+    const second = vi.fn();
+
+    await cache.get("scope\u0000indices", loader, 12, first);
+    await cache.get("scope\u0000indices", loader, 13, second);
+    expect(loader).toHaveBeenCalledTimes(1);
+    resolve(["current"]);
+
+    await vi.waitFor(() => {
+      expect(first).toHaveBeenCalledWith(["current"]);
+      expect(second).toHaveBeenCalledWith(["current"]);
+    });
+  });
+
   it("bounds entries and isolates invalidation to one connection scope", async () => {
     const cache = new DocumentMetadataCache<string[]>(60_000, 2);
     await cache.get("one\u0000first", async () => ["first"], 1);

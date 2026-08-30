@@ -218,6 +218,7 @@ import {
   useQueryTransactionController,
 } from "@/features/query-editor";
 import { isCompletionRequestCurrent } from "@/features/query-editor/model/completionRequestGuard";
+import { shouldRetriggerDocumentCompletion } from "@/features/query-editor/model/documentCompletionRefresh";
 
 const RECORD_COMPLETION_USAGE_COMMAND = "oxide.sqlCompletion.recordUsage";
 const OPEN_BATCH_COLUMN_SELECTION_COMMAND = "oxide.sqlCompletion.openBatchColumns";
@@ -472,6 +473,38 @@ export function QueryEditor({
   } | null>(null);
   const pendingElasticsearchSqlTimerRef = useRef<number | null>(null);
   const effectiveConnectionId = activeTab?.connectionId || activeConnectionId;
+
+  const retriggerActiveDocumentCompletion = useCallback(
+    (request: {
+      model: any;
+      position: { lineNumber: number; column: number };
+      modelVersion: number;
+      token: { isCancellationRequested?: boolean };
+    }) => {
+      // Monaco cancels the provider token when the suggest session closes.
+      // Combining that signal with model, cursor and focus checks prevents a
+      // stale metadata refresh from reopening completion after the user has
+      // moved on to another document or interaction.
+      window.setTimeout(() => {
+        const editor = editorRef.current;
+        if (!shouldRetriggerDocumentCompletion(editor, request)) {
+          return;
+        }
+        completionTriggerOriginRef.current = "chained";
+        editor.trigger(
+          "oxide.documentMetadataRefresh",
+          "editor.action.triggerSuggest",
+          {},
+        );
+        window.setTimeout(() => {
+          if (completionTriggerOriginRef.current === "chained") {
+            completionTriggerOriginRef.current = null;
+          }
+        }, 0);
+      }, 0);
+    },
+    [],
+  );
   const activeConnection = connections.find(
     (c) => c.id === effectiveConnectionId,
   );
@@ -1205,7 +1238,7 @@ export function QueryEditor({
       namespace: collectionNamespace,
       kind: "collections",
     });
-    const loadCollections = () => {
+    const loadCollections = (onBackgroundRefresh?: () => void) => {
       const knownCollections = schemaCollections
         .filter(
           (collection) =>
@@ -1220,14 +1253,24 @@ export function QueryEditor({
         : schemaService
             .getCollections(effectiveConnectionId, collectionNamespace)
             .then((collections) => collections.map((collection) => collection.name));
-      return loadDocumentMetadata(collectionCacheKey, () => request
-        .then((collections) => [...new Set(collections.map((name) => name.trim()).filter(Boolean))])
-        .catch((error) => {
-          console.debug("[MongoDB Console] Collections unavailable", error);
-          return [];
-        }));
+      return loadDocumentMetadata(
+        collectionCacheKey,
+        () =>
+          request
+            .then((collections) => [
+              ...new Set(collections.map((name) => name.trim()).filter(Boolean)),
+            ])
+            .catch((error) => {
+              console.debug("[MongoDB Console] Collections unavailable", error);
+              return [];
+            }),
+        { onBackgroundRefresh },
+      );
     };
-    const loadFields = (collection: string) => {
+    const loadFields = (
+      collection: string,
+      onBackgroundRefresh?: () => void,
+    ) => {
       const cacheKey = documentMetadataCacheKey({
         projectId: activeProjectId || "local",
         connectionId: effectiveConnectionId,
@@ -1236,29 +1279,32 @@ export function QueryEditor({
         kind: "fields",
         objectName: collection,
       });
-      return loadDocumentMetadata(cacheKey, () =>
-        loadTableMetadata({
-          projectId: activeProjectId || undefined,
-          connectionId: effectiveConnectionId,
-          driver: "mongodb",
-          schema: collectionNamespace,
-          table: collection,
-          includeIndexes: false,
-          includeConstraints: false,
-        })
-          .then((metadata) =>
-            metadata.columns.map((column) => ({
-              name: column.name,
-              dataType: column.data_type || "field",
-            })),
-          )
-          .catch((error) => {
-            console.debug(
-              `[MongoDB Console] Fields unavailable for ${collection}`,
-              error,
-            );
-            return [];
-          }),
+      return loadDocumentMetadata(
+        cacheKey,
+        () =>
+          loadTableMetadata({
+            projectId: activeProjectId || undefined,
+            connectionId: effectiveConnectionId,
+            driver: "mongodb",
+            schema: collectionNamespace,
+            table: collection,
+            includeIndexes: false,
+            includeConstraints: false,
+          })
+            .then((metadata) =>
+              metadata.columns.map((column) => ({
+                name: column.name,
+                dataType: column.data_type || "field",
+              })),
+            )
+            .catch((error) => {
+              console.debug(
+                `[MongoDB Console] Fields unavailable for ${collection}`,
+                error,
+              );
+              return [];
+            }),
+        { onBackgroundRefresh },
       );
     };
 
@@ -1281,10 +1327,23 @@ export function QueryEditor({
         const needsCollections = context.area === "collection";
         const needsFields =
           context.area === "field" || context.area === "field-reference";
+        let refreshQueued = false;
+        const onBackgroundRefresh = () => {
+          if (refreshQueued) return;
+          refreshQueued = true;
+          retriggerActiveDocumentCompletion({
+            model,
+            position,
+            modelVersion: initialVersion,
+            token,
+          });
+        };
         const [collections, fields] = await Promise.all([
-          needsCollections ? loadCollections() : Promise.resolve([]),
+          needsCollections
+            ? loadCollections(onBackgroundRefresh)
+            : Promise.resolve([]),
           needsFields && context.collection
-            ? loadFields(context.collection)
+            ? loadFields(context.collection, onBackgroundRefresh)
             : Promise.resolve([]),
         ]);
         if (
@@ -1337,6 +1396,7 @@ export function QueryEditor({
     isActivePane,
     isMongoDbConsole,
     monaco,
+    retriggerActiveDocumentCompletion,
     schemaCollections,
   ]);
 
@@ -1396,6 +1456,17 @@ export function QueryEditor({
           }
 
           const modelVersion = model.getVersionId();
+          let refreshQueued = false;
+          const onBackgroundRefresh = () => {
+            if (refreshQueued) return;
+            refreshQueued = true;
+            retriggerActiveDocumentCompletion({
+              model,
+              position,
+              modelVersion,
+              token,
+            });
+          };
           let fieldCompletions: Array<{
             label: string;
             detail?: string;
@@ -1410,27 +1481,30 @@ export function QueryEditor({
               namespace: elasticsearchMetadataNamespace,
               kind: "collections",
             });
-            const collections = await loadDocumentMetadata(cacheKey, () =>
-              schemaService
-                .getCollections(
-                  effectiveConnectionId,
-                  elasticsearchMetadataNamespace,
-                )
-                .then((collections) =>
-                  collections
-                    .map((collection) => ({
-                      name: collection.name.trim(),
-                      type: collection.type || "index",
-                    }))
-                    .filter((collection) => Boolean(collection.name)),
-                )
-                .catch((error) => {
-                  console.debug(
-                    "[Elasticsearch Console] Indices unavailable",
-                    error,
-                  );
-                  return [];
-                }),
+            const collections = await loadDocumentMetadata(
+              cacheKey,
+              () =>
+                schemaService
+                  .getCollections(
+                    effectiveConnectionId,
+                    elasticsearchMetadataNamespace,
+                  )
+                  .then((collections) =>
+                    collections
+                      .map((collection) => ({
+                        name: collection.name.trim(),
+                        type: collection.type || "index",
+                      }))
+                      .filter((collection) => Boolean(collection.name)),
+                  )
+                  .catch((error) => {
+                    console.debug(
+                      "[Elasticsearch Console] Indices unavailable",
+                      error,
+                    );
+                    return [];
+                  }),
+              { onBackgroundRefresh },
             );
             fieldCompletions = elasticsearchSchemaCompletionsForContext(
               collections.map((collection) => ({
@@ -1450,7 +1524,9 @@ export function QueryEditor({
               kind: "fields",
               objectName: indexName!,
             });
-            const fields = await loadDocumentMetadata(cacheKey, async () => {
+            const fields = await loadDocumentMetadata(
+              cacheKey,
+              async () => {
                 try {
                   const metadataOptions = {
                     projectId: activeProjectId || undefined,
@@ -1482,7 +1558,9 @@ export function QueryEditor({
                   );
                   return [];
                 }
-              });
+              },
+              { onBackgroundRefresh },
+            );
             fieldCompletions = elasticsearchMappingFieldCompletions(
               fields,
               completionContext,
@@ -1573,6 +1651,7 @@ export function QueryEditor({
     lspReady,
     monaco,
     preferredElasticsearchIndex,
+    retriggerActiveDocumentCompletion,
   ]);
 
   // Keep cached relation completion available while the semantic server is
