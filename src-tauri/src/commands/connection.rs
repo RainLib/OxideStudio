@@ -26,6 +26,7 @@ pub struct RemoteSqliteWorkerPreparation {
     pub platform: String,
     pub version: String,
     pub installed: bool,
+    pub digest: Option<String>,
 }
 
 #[tauri::command]
@@ -34,11 +35,13 @@ pub async fn get_remote_sqlite_worker_status(
     platform: String,
 ) -> Result<Response<RemoteSqliteWorkerPreparation>, String> {
     let required = oxide_sqlite_worker::SQLITE_WORKER_PACKAGE_VERSION.to_string();
-    let installed = registry.resolve(&platform).is_ok();
+    let worker = registry.resolve(&platform).ok();
+    let installed = worker.is_some();
     Ok(Response::ok(RemoteSqliteWorkerPreparation {
         platform,
         version: required,
         installed,
+        digest: worker.map(|worker| worker.digest),
     }))
 }
 
@@ -58,11 +61,12 @@ pub async fn prepare_remote_sqlite_worker(
                 .install_release(&download_base_url, &platform, &version)
                 .await?;
         }
-        registry.resolve(&platform)?;
+        let worker = registry.resolve(&platform)?;
         Ok(RemoteSqliteWorkerPreparation {
             platform,
             version,
             installed: true,
+            digest: Some(worker.digest),
         })
     }
     .await;

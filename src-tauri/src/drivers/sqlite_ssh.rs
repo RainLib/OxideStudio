@@ -944,8 +944,10 @@ async fn prepare_and_start_worker(
     remove_worker_on_close: bool,
 ) -> Result<SqliteWorkerClient> {
     if config.placement != SqliteWorkerPlacement::Preplaced {
-        if !config.allow_worker_upload {
-            bail!("Uploading the signed SQLite worker requires explicit consent");
+        if !worker_upload_is_approved(config, worker) {
+            bail!(
+                "Preparing and approving this exact signed SQLite worker is required before upload"
+            );
         }
         session
             .upload_atomic_executable(worker_path, &worker.bytes)
@@ -965,6 +967,17 @@ async fn prepare_and_start_worker(
         home,
         remove_worker_on_close.then(|| worker_path.to_string()),
     ))
+}
+
+fn worker_upload_is_approved(
+    config: &RemoteSqliteSshConfig,
+    worker: &ResolvedSqliteWorker,
+) -> bool {
+    config.allow_worker_upload
+        && config
+            .approved_worker_digest
+            .as_deref()
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(&worker.digest))
 }
 
 async fn remote_home(session: &SshSession) -> Result<String> {
@@ -1273,7 +1286,23 @@ mod tests {
             placement: SqliteWorkerPlacement::Session,
             worker_path: None,
             allow_worker_upload: true,
+            approved_worker_digest: Some(worker.digest.clone()),
         };
+        assert!(worker_upload_is_approved(&config, &worker));
+        assert!(!worker_upload_is_approved(
+            &RemoteSqliteSshConfig {
+                approved_worker_digest: Some("b".repeat(64)),
+                ..config.clone()
+            },
+            &worker,
+        ));
+        assert!(!worker_upload_is_approved(
+            &RemoteSqliteSshConfig {
+                allow_worker_upload: false,
+                ..config.clone()
+            },
+            &worker,
+        ));
         let (path, remove) =
             worker_remote_path("connection/unsafe", &config, &worker, "/home/oxide").unwrap();
         assert!(path.starts_with("/home/oxide/.cache/oxide/sqlite-worker/session-"));

@@ -13,6 +13,7 @@ export interface RemoteSqliteWorkerPreparation {
   platform: string;
   version: string;
   installed: boolean;
+  digest?: string | null;
 }
 
 function activeProjectId() {

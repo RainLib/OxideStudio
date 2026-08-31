@@ -1314,6 +1314,8 @@ export interface RemoteSqliteSshConfig {
   placement: SqliteWorkerPlacement;
   workerPath?: string;
   allowWorkerUpload: boolean;
+  /** Exact signed worker SHA-256 authorized for this SSH target. */
+  approvedWorkerDigest?: string;
 }
 
 export interface SshTunnelConfig {

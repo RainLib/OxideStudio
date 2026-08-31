@@ -38,6 +38,11 @@ pub struct RemoteSqliteSshConfig {
     /// Host. Preplaced mode never consumes this flag.
     #[serde(default)]
     pub allow_worker_upload: bool,
+    /// SHA-256 of the exact signed worker the user prepared for this SSH
+    /// target. A newly released worker must be prepared and approved again;
+    /// the general upload switch alone is deliberately insufficient.
+    #[serde(default)]
+    pub approved_worker_digest: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -288,6 +293,7 @@ mod tests {
         assert_eq!(remote.placement, SqliteWorkerPlacement::Session);
         assert!(!remote.allow_worker_upload);
         assert!(remote.worker_path.is_none());
+        assert!(remote.approved_worker_digest.is_none());
 
         let config: SshTunnelConfig = serde_json::from_value(serde_json::json!({
             "enabled": true,
@@ -297,7 +303,8 @@ mod tests {
             "remoteSqlite": {
                 "placement": "preplaced",
                 "workerPath": "/opt/oxide/oxide-sqlite-worker",
-                "allowWorkerUpload": true
+                "allowWorkerUpload": true,
+                "approvedWorkerDigest": "a3f7c81e1f30eb317d5f504863df25b819f5beec5660bd2ef6cb54b663601b70"
             }
         }))
         .unwrap();
@@ -307,6 +314,25 @@ mod tests {
             remote.worker_path.as_deref(),
             Some("/opt/oxide/oxide-sqlite-worker")
         );
+        assert_eq!(
+            remote.approved_worker_digest.as_deref(),
+            Some("a3f7c81e1f30eb317d5f504863df25b819f5beec5660bd2ef6cb54b663601b70")
+        );
+
+        // Older broad-consent configurations must downgrade safely. They can
+        // still prepare the worker, but a new exact digest is required before
+        // any future remote upload is attempted.
+        let legacy: SshTunnelConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "host": "files.example.com",
+            "username": "deploy",
+            "password": "secret",
+            "remoteSqlite": { "allowWorkerUpload": true }
+        }))
+        .unwrap();
+        let legacy_remote = legacy.remote_sqlite.unwrap();
+        assert!(legacy_remote.allow_worker_upload);
+        assert!(legacy_remote.approved_worker_digest.is_none());
     }
 
     #[test]

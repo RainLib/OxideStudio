@@ -536,6 +536,7 @@ export function ConnectionForm({
     placement: "session" as const,
     workerPath: "",
     allowWorkerUpload: false,
+    approvedWorkerDigest: undefined,
     ...sshTunnel.remoteSqlite,
   };
 
@@ -566,6 +567,7 @@ export function ConnectionForm({
               remoteSqlite: {
                 ...sshTunnel.remoteSqlite,
                 allowWorkerUpload: false,
+                approvedWorkerDigest: undefined,
               },
             }
           : {}),
@@ -584,7 +586,9 @@ export function ConnectionForm({
       remoteSqlite: {
         ...remoteSqlite,
         ...updates,
-        ...(destinationChanged ? { allowWorkerUpload: false } : {}),
+        ...(destinationChanged
+          ? { allowWorkerUpload: false, approvedWorkerDigest: undefined }
+          : {}),
       },
     });
   };
@@ -880,9 +884,19 @@ export function ConnectionForm({
         sshTunnel,
         normalizedSource || "",
       );
+      if (
+        remoteSqlite.placement !== "preplaced" &&
+        remoteSqlite.allowWorkerUpload &&
+        result.digest
+      ) {
+        updateRemoteSqlite({ approvedWorkerDigest: result.digest });
+      }
       setStatus({
         type: "success",
-        message: `SQLite worker ${result.version} is ready for ${result.platform}.`,
+        message:
+          remoteSqlite.placement !== "preplaced" && remoteSqlite.allowWorkerUpload
+            ? `SQLite worker ${result.version} is ready for ${result.platform} and approved for this SSH target.`
+            : `SQLite worker ${result.version} is ready for ${result.platform}.`,
       });
     } catch (error) {
       setStatus({
@@ -1741,13 +1755,20 @@ export function ConnectionForm({
                             <Switch
                               checked={remoteSqlite.allowWorkerUpload}
                               onCheckedChange={(allowWorkerUpload) =>
-                                updateRemoteSqlite({ allowWorkerUpload })
+                                updateRemoteSqlite({
+                                  allowWorkerUpload,
+                                  ...(allowWorkerUpload
+                                    ? {}
+                                    : { approvedWorkerDigest: undefined }),
+                                })
                               }
                               className="h-5 w-9 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
                               aria-label="Allow signed SQLite worker upload"
                             />
                             <span className="text-[11px] wb-muted">
-                              Allow only the signed worker selected by OxideStudio
+                              {remoteSqlite.approvedWorkerDigest
+                                ? `Approved SHA-256 ${remoteSqlite.approvedWorkerDigest.slice(0, 12)}…`
+                                : "Prepare the exact signed worker before upload"}
                             </span>
                           </div>
                         </>
