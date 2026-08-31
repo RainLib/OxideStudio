@@ -10840,9 +10840,18 @@ fn verify_import_file_digest(path: &Path, expected: Option<&str>) -> Result<(), 
 
 type XlsxImportRows = (String, Vec<String>, Vec<BTreeMap<String, Value>>);
 
-fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
+fn xlsx_import_rows_with_cancel(
+    path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<XlsxImportRows, String> {
+    if is_cancelled() {
+        return Err(TABLE_IMPORT_CANCELLED.to_string());
+    }
     let mut workbook = open_workbook_auto(path)
         .map_err(|error| format!("Unable to read XLSX workbook: {error}"))?;
+    if is_cancelled() {
+        return Err(TABLE_IMPORT_CANCELLED.to_string());
+    }
     let sheet_name = workbook
         .sheet_names()
         .into_iter()
@@ -10851,6 +10860,9 @@ fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
     let range = workbook
         .worksheet_range(&sheet_name)
         .map_err(|error| format!("Unable to read worksheet '{sheet_name}': {error}"))?;
+    if is_cancelled() {
+        return Err(TABLE_IMPORT_CANCELLED.to_string());
+    }
     let mut rows = range.rows();
     let headers = rows
         .find(|row| row.iter().any(|cell| !matches!(cell, Data::Empty)))
@@ -10860,6 +10872,9 @@ fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
 
     let mut values = Vec::new();
     for row in rows.filter(|row| row.iter().any(|cell| !matches!(cell, Data::Empty))) {
+        if is_cancelled() {
+            return Err(TABLE_IMPORT_CANCELLED.to_string());
+        }
         if row
             .get(headers.len()..)
             .is_some_and(|extra| extra.iter().any(|cell| !matches!(cell, Data::Empty)))
@@ -10880,6 +10895,10 @@ fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
         );
     }
     Ok((sheet_name, headers, values))
+}
+
+fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
+    xlsx_import_rows_with_cancel(path, &|| false)
 }
 
 fn read_xlsx_import_preview(path: &Path) -> Result<TableXlsxImportPreview, String> {
@@ -11931,13 +11950,29 @@ async fn import_json_lines_in_transaction(
     import_result
 }
 
-fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String> {
+fn json_import_rows_with_cancel(
+    path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<BTreeMap<String, Value>>, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut reader = BufReader::new(file);
-    let mut source = String::new();
-    reader
-        .read_to_string(&mut source)
-        .map_err(|error| error.to_string())?;
+    let mut source = Vec::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        if is_cancelled() {
+            return Err(TABLE_IMPORT_CANCELLED.to_string());
+        }
+        let read = reader.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        source.extend_from_slice(&chunk[..read]);
+    }
+    if is_cancelled() {
+        return Err(TABLE_IMPORT_CANCELLED.to_string());
+    }
+    let source = String::from_utf8(source)
+        .map_err(|_| "JSON imports must use valid UTF-8 encoding".to_string())?;
 
     let values = match serde_json::from_str::<Value>(&source) {
         Ok(Value::Array(values)) => values,
@@ -11950,6 +11985,9 @@ fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String>
             .enumerate()
             .filter(|(_, line)| !line.trim().is_empty())
             .map(|(index, line)| {
+                if is_cancelled() {
+                    return Err(TABLE_IMPORT_CANCELLED.to_string());
+                }
                 serde_json::from_str::<Value>(line)
                     .map_err(|error| format!("Invalid JSON object on line {}: {error}", index + 1))
             })
@@ -11960,10 +11998,15 @@ fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String>
         .into_iter()
         .enumerate()
         .map(|(index, value)| match value {
-            Value::Object(object) => Ok(object.into_iter().collect()),
+            Value::Object(object) if !is_cancelled() => Ok(object.into_iter().collect()),
+            Value::Object(_) => Err(TABLE_IMPORT_CANCELLED.to_string()),
             _ => Err(format!("JSON row {} is not an object", index + 1)),
         })
         .collect()
+}
+
+fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    json_import_rows_with_cancel(path, &|| false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12087,13 +12130,27 @@ pub async fn import_table_data(
                 report_id: None,
             });
         }
-        let source_rows = match format {
-            TableImportFormat::Json => json_import_rows(&path)?,
-            TableImportFormat::Xlsx => xlsx_import_rows(&path)?.2,
-            // CSV and JSONL return before this branch so the source remains
-            // streamable rather than materializing every row in memory.
-            TableImportFormat::Csv => unreachable!("CSV import returned above"),
-        };
+        // JSON arrays and XLSX worksheets are bounded but materialized by
+        // blocking parsers. Keep that CPU/filesystem work off Tokio's command
+        // workers and propagate the active import cancellation flag into row
+        // conversion so query/LSP/cancel IPC remains responsive.
+        let parse_path = path.clone();
+        let parse_cancel_rx = context.cancel_rx.clone();
+        let source_rows = tauri::async_runtime::spawn_blocking(move || {
+            let is_cancelled = || *parse_cancel_rx.borrow();
+            match format {
+                TableImportFormat::Json => json_import_rows_with_cancel(&parse_path, &is_cancelled),
+                TableImportFormat::Xlsx => {
+                    xlsx_import_rows_with_cancel(&parse_path, &is_cancelled).map(|rows| rows.2)
+                }
+                // CSV and JSONL return before this branch so the source
+                // remains streamable rather than materializing every row.
+                TableImportFormat::Csv => unreachable!("CSV import returned above"),
+            }
+        })
+        .await
+        .map_err(|error| format!("Import parser worker failed: {error}"))??;
+        context.ensure_not_cancelled()?;
         if source_rows.len() > MAX_IMPORT_ROWS {
             return Err(format!(
                 "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
@@ -13727,18 +13784,18 @@ mod tests {
         finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
         generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
         generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
-        normalized_table_data_transfer_project_id, object_label_from_type,
-        object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
-        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
-        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
-        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
-        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
-        postgres_sequence_setval_sql, postgres_view_definition_query,
-        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
-        query_target, query_target_parameterized, read_csv_import_preview,
-        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_csv_import_row_range, resolve_csv_text_encoding,
+        json_import_rows_with_cancel, normalized_table_data_transfer_project_id,
+        object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
+        object_type_is_view, order_postgres_views, overwrite_transfer_verification,
+        postgres_backup_index_definitions, postgres_backup_routine_definitions,
+        postgres_backup_routine_definitions_query, postgres_identity_reseed_verification_query,
+        postgres_materialized_view_populated_query, postgres_multirange_type_names,
+        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
+        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
+        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
+        push_delimited_export_row, query_target, query_target_parameterized,
+        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
+        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
         summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
@@ -13749,21 +13806,21 @@ mod tests {
         transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
-        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
-        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
-        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
-        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
-        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
-        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
-        TableExportWriterContext, TableExportWriterMessage, TableFilter,
-        TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
-        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
-        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
-        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
+        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
+        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataCompareResult, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
+        TableDataTransferRequest, TableDataTransferTargetColumn,
+        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
+        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
+        TableFilter, TableImportCancellationState, TableImportFormat, TableImportMode,
+        TableImportTextEncoding, TableRowUpdate, TableSort,
+        MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
+        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -14549,6 +14606,28 @@ mod tests {
         assert_eq!(
             table_import_replace_statement(DatabaseKind::Mysql, "store", "order-items").sql,
             "DELETE FROM `store`.`order-items`"
+        );
+    }
+
+    #[test]
+    fn materialized_import_parsers_observe_cancellation_before_database_writes() {
+        let json_path = std::env::temp_dir().join(format!(
+            "oxide-table-import-cancel-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&json_path, r#"[{"id":1},{"id":2}]"#).unwrap();
+        let checks = AtomicU64::new(0);
+        let error = json_import_rows_with_cancel(&json_path, &|| {
+            checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1
+        })
+        .unwrap_err();
+        fs::remove_file(json_path).unwrap();
+        assert_eq!(error, super::TABLE_IMPORT_CANCELLED);
+
+        let missing_xlsx = std::env::temp_dir().join("oxide-import-cancel-missing.xlsx");
+        assert_eq!(
+            xlsx_import_rows_with_cancel(&missing_xlsx, &|| true).unwrap_err(),
+            super::TABLE_IMPORT_CANCELLED
         );
     }
 

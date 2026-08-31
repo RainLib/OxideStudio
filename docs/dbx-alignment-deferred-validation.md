@@ -194,6 +194,11 @@ database target until its relevant queue entries pass.
   source never clears rows, the first valid batch replaces exactly once, and
   later parse/write/cancellation failures roll back both the delete and all
   inserts.
+- JSON-array and XLSX execution parsing now runs on a blocking worker and
+  observes the active import cancellation flag before/after blocking stages
+  and while materializing rows. Stress-test cancellation during Calamine's
+  internal ZIP/shared-string preprocessing separately; Oxide has not yet
+  replaced that library stage with DBX's custom chunk-controlled XLSX reader.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an
