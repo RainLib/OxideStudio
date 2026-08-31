@@ -1776,6 +1776,8 @@ export interface SchemaObjectSnapshot {
   } | null;
   /** Last readable PostgreSQL sequence value; absent when catalog access is restricted. */
   sequenceLastValue?: string | null;
+  /** Whether nextval() has returned a value; absent in legacy/restricted snapshots. */
+  sequenceIsCalled?: boolean | null;
   /** Native prerequisite names, currently PostgreSQL trigger callback routines. */
   dependencies?: string[];
 }

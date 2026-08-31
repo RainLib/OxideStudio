@@ -2072,6 +2072,7 @@ struct PostgresExportSequence {
     cycle: bool,
     cache_size: String,
     last_value: Option<String>,
+    is_called: Option<bool>,
     owner_table: Option<String>,
     owner_column: Option<String>,
 }
@@ -2123,6 +2124,17 @@ fn postgres_sequence_from_row(row: &[Value]) -> Result<PostgresExportSequence, S
         .filter(|value| !value.is_null())
         .map(|value| postgres_sequence_integer(Some(value), "last value", &name))
         .transpose()?;
+    let is_called = row.get(9).and_then(|value| match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => Some(true),
+            "false" | "f" | "no" | "n" | "0" => Some(false),
+            _ => None,
+        },
+        Value::Number(value) if value.as_i64() == Some(1) => Some(true),
+        Value::Number(value) if value.as_i64() == Some(0) => Some(false),
+        _ => None,
+    });
     Ok(PostgresExportSequence {
         name: name.clone(),
         data_type,
@@ -2133,12 +2145,13 @@ fn postgres_sequence_from_row(row: &[Value]) -> Result<PostgresExportSequence, S
         cycle,
         cache_size: postgres_sequence_integer(row.get(7), "cache size", &name)?,
         last_value,
+        is_called,
         owner_table: row
-            .get(9)
+            .get(10)
             .and_then(value_to_string)
             .filter(|value| !value.trim().is_empty()),
         owner_column: row
-            .get(10)
+            .get(11)
             .and_then(value_to_string)
             .filter(|value| !value.trim().is_empty()),
     })
@@ -2162,9 +2175,10 @@ fn postgres_sequence_setval_sql(schema: &str, sequence: &PostgresExportSequence)
     sequence.last_value.as_ref().map(|last_value| {
         let qualified = DatabaseKind::Postgres.qualified_table(Some(schema), &sequence.name);
         format!(
-            "SELECT pg_catalog.setval({}::regclass, {}, true);",
+            "SELECT pg_catalog.setval({}::regclass, {}, {});",
             postgres_sql_string_literal(&qualified),
-            last_value
+            last_value,
+            sequence.is_called.unwrap_or(true),
         )
     })
 }
@@ -2178,6 +2192,23 @@ fn postgres_sequence_owner_sql(schema: &str, sequence: &PostgresExportSequence) 
         DatabaseKind::Postgres.qualified_table(Some(schema), table),
         DatabaseKind::Postgres.quote_identifier(column),
     ))
+}
+
+fn postgres_sequence_metadata_query(schema: &str) -> String {
+    format!(
+        "SELECT sequence_class.relname, sequences.data_type, sequences.start_value, sequences.min_value, sequences.max_value, sequences.increment_by, sequences.cycle, sequences.cache_size, \
+         CASE WHEN pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT') OR pg_catalog.has_sequence_privilege(sequence_class.oid, 'USAGE') THEN COALESCE(sequences.last_value, sequences.start_value) ELSE NULL END, \
+         CASE WHEN pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT') OR pg_catalog.has_sequence_privilege(sequence_class.oid, 'USAGE') THEN sequences.last_value IS NOT NULL ELSE NULL END, \
+         owner_table.relname, owner_column.attname \
+         FROM pg_catalog.pg_sequences sequences \
+         JOIN pg_catalog.pg_class sequence_class ON sequence_class.relname = sequences.sequencename \
+         JOIN pg_catalog.pg_namespace sequence_namespace ON sequence_namespace.oid = sequence_class.relnamespace AND sequence_namespace.nspname = sequences.schemaname \
+         LEFT JOIN pg_catalog.pg_depend ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence_class.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.deptype IN ('a', 'i') \
+         LEFT JOIN pg_catalog.pg_class owner_table ON owner_table.oid = ownership.refobjid \
+         LEFT JOIN pg_catalog.pg_attribute owner_column ON owner_column.attrelid = owner_table.oid AND owner_column.attnum = ownership.refobjsubid \
+         WHERE sequences.schemaname = {} ORDER BY sequence_class.relname",
+        postgres_sql_string_literal(schema),
+    )
 }
 
 fn csv_escape(value: &Value) -> String {
@@ -13447,17 +13478,7 @@ pub async fn export_database_sql(
         // to exist before CREATE TABLE is replayed.  Read the bounded catalog
         // metadata once and use it for DDL before relations plus state after
         // data, rather than inferring sequences from column default text.
-        let sequence_metadata_sql = format!(
-            "SELECT sequence_class.relname, sequences.data_type, sequences.start_value, sequences.min_value, sequences.max_value, sequences.increment_by, sequences.cycle, sequences.cache_size, sequences.last_value, owner_table.relname, owner_column.attname \
-             FROM pg_catalog.pg_sequences sequences \
-             JOIN pg_catalog.pg_class sequence_class ON sequence_class.relname = sequences.sequencename \
-             JOIN pg_catalog.pg_namespace sequence_namespace ON sequence_namespace.oid = sequence_class.relnamespace AND sequence_namespace.nspname = sequences.schemaname \
-             LEFT JOIN pg_catalog.pg_depend ownership ON ownership.classid = 'pg_class'::regclass AND ownership.objid = sequence_class.oid AND ownership.refclassid = 'pg_class'::regclass AND ownership.deptype IN ('a', 'i') \
-             LEFT JOIN pg_catalog.pg_class owner_table ON owner_table.oid = ownership.refobjid \
-             LEFT JOIN pg_catalog.pg_attribute owner_column ON owner_column.attrelid = owner_table.oid AND owner_column.attnum = ownership.refobjsubid \
-             WHERE sequences.schemaname = {} ORDER BY sequence_class.relname",
-            postgres_sql_string_literal(schema),
-        );
+        let sequence_metadata_sql = postgres_sequence_metadata_query(schema);
         let sequence_results = manager
             .query(
                 &connection_id,
@@ -17614,11 +17635,12 @@ mod tests {
         postgres_identity_reseed_statements, postgres_identity_reseed_verification_query,
         postgres_materialized_view_populated_query, postgres_multirange_type_names,
         postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
-        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
-        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
-        push_delimited_export_row, query_target, query_target_parameterized,
-        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
-        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
+        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_metadata_query,
+        postgres_sequence_setval_sql, postgres_view_definition_query,
+        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
+        query_target, query_target_parameterized, read_csv_import_preview,
+        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
+        resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_transfer_target_column_quoting, resolve_transfer_upsert_key_columns,
         reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
         skipped_table_data_compare_result, sql_export_insert_batch_rows, sql_insert_statements,
@@ -19852,6 +19874,7 @@ mod tests {
                     column_name: "id".to_string(),
                 }),
                 sequence_last_value: Some("41".to_string()),
+                sequence_is_called: Some(true),
                 dependencies: Vec::new(),
             }],
         );
@@ -19945,6 +19968,7 @@ mod tests {
                 ),
                 sequence_owner: None,
                 sequence_last_value: None,
+                sequence_is_called: None,
                 dependencies: vec!["touch".to_string()],
             }],
         );
@@ -23502,6 +23526,34 @@ WITH DATA;"#
             postgres_sequence_setval_sql("public", &sequence).as_deref(),
             Some("SELECT pg_catalog.setval('\"public\".\"Order Seq\"'::regclass, 88, true);")
         );
+    }
+
+    #[test]
+    fn postgres_sequence_export_preserves_never_called_state() {
+        let sequence = postgres_sequence_from_row(&[
+            json!("fresh_seq"),
+            json!("bigint"),
+            json!(5),
+            json!(1),
+            json!(9223372036854775807_i64),
+            json!(1),
+            json!(false),
+            json!(1),
+            json!(5),
+            json!(false),
+        ])
+        .unwrap();
+        assert_eq!(sequence.is_called, Some(false));
+        assert_eq!(
+            postgres_sequence_setval_sql("public", &sequence).as_deref(),
+            Some("SELECT pg_catalog.setval('\"public\".\"fresh_seq\"'::regclass, 5, false);")
+        );
+
+        let metadata_query = postgres_sequence_metadata_query("p'ublic");
+        assert!(metadata_query.contains("pg_catalog.has_sequence_privilege"));
+        assert!(metadata_query.contains("COALESCE(sequences.last_value, sequences.start_value)"));
+        assert!(metadata_query.contains("sequences.last_value IS NOT NULL"));
+        assert!(metadata_query.contains("WHERE sequences.schemaname = 'p''ublic'"));
     }
 
     #[test]

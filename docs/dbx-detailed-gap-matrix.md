@@ -1,6 +1,6 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
-> 审计基线：2026-08-31
+> 审计基线：2026-09-01
 > DBX 参考提交：`f075caef2`
 > 参考工程：`sources/dbx`（只读）
 
@@ -8,6 +8,12 @@
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 当前差距补齐记录（2026-09-01）
+
+| 差距 | 本轮补齐 | 验证状态 |
+| --- | --- | --- |
+| PostgreSQL sequence `is_called` 与 ownership 状态 | DBX 与旧 Oxide 都只读取 `last_value` 并生成 `setval(..., true)`。Oxide 现在在具备 `SELECT`/`USAGE` 权限时同时捕获 state value 与 `is_called`；从未调用的 sequence 使用 start value + `false` 恢复。Schema Diff 将同名 sequence 的结构变化与状态变化分离，可审阅地恢复 `OWNED BY <table.column>`、`OWNED BY NONE` 和精确 `setval`，不会再把纯状态差异误判为不可执行的对象定义变更。旧快照未包含 `sequenceIsCalled` 时继续按历史 `true` 语义读取。SQL 备份也保留相同状态，权限不足时不猜测。 | 新增/更新 Rust 单元测试覆盖 never-called export、同名 sequence 状态恢复、owner 解除、只读 catalog 查询和旧快照 fallback；真实 PostgreSQL 版本/权限 fixture 仍按统一数据库验证阶段执行。此记录取代下文 T05/M01 中“仍缺 `is_called` 逻辑”的旧残差描述。 |
 
 ### 最新增量审计（`1d98eca99` → `f075caef2`）
 

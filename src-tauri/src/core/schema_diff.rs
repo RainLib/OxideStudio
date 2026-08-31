@@ -117,6 +117,11 @@ pub struct SchemaObjectSnapshot {
     /// `pg_sequence_last_value` can be unavailable to a restricted role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_last_value: Option<String>,
+    /// Whether `nextval()` has returned a value for this PostgreSQL sequence.
+    /// Legacy snapshots omit this field and retain the historical `true`
+    /// interpretation whenever a readable last value is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_is_called: Option<bool>,
     /// Direct native object prerequisites. PostgreSQL currently captures the
     /// trigger callback routine name; the planner turns it into an exact
     /// dependency only when the corresponding routine create is unambiguous.
@@ -134,6 +139,7 @@ impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
             definition: None,
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }
     }
@@ -382,6 +388,9 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
             .map(str::trim)
             .filter(|value| value.parse::<i64>().is_ok())
             .map(ToString::to_string);
+        if object.sequence_last_value.is_none() {
+            object.sequence_is_called = None;
+        }
     }
     snapshot.warnings.sort();
     snapshot.warnings.dedup();
@@ -2288,10 +2297,30 @@ fn postgres_sequence_setval_ddl(
     schema_name: &str,
     sequence_name: &str,
     last_value: &str,
+    is_called: bool,
 ) -> String {
     let qualified = DatabaseKind::Postgres.qualified_table(Some(schema_name), sequence_name);
     let literal = format!("'{}'", qualified.replace('\'', "''"));
-    format!("SELECT pg_catalog.setval({literal}::regclass, {last_value}, true);")
+    format!("SELECT pg_catalog.setval({literal}::regclass, {last_value}, {is_called});")
+}
+
+fn postgres_sequence_unowned_ddl(schema_name: &str, sequence_name: &str) -> String {
+    format!(
+        "ALTER SEQUENCE {} OWNED BY NONE;",
+        DatabaseKind::Postgres.qualified_table(Some(schema_name), sequence_name),
+    )
+}
+
+fn postgres_sequence_structure_eq(
+    source: &SchemaObjectSnapshot,
+    target: &SchemaObjectSnapshot,
+) -> bool {
+    source.name == target.name
+        && source.object_type.eq_ignore_ascii_case(&target.object_type)
+        && source.parent_name == target.parent_name
+        && source.description == target.description
+        && source.definition == target.definition
+        && source.dependencies == target.dependencies
 }
 
 /// Keep state restoration distinct from CREATE SEQUENCE: new relations that
@@ -2300,27 +2329,37 @@ fn postgres_sequence_setval_ddl(
 fn postgres_sequence_state_change(
     schema_name: &str,
     object: &SchemaObjectSnapshot,
+    target: Option<&SchemaObjectSnapshot>,
 ) -> Option<SchemaChange> {
     if !object.object_type.eq_ignore_ascii_case("sequence") {
         return None;
     }
     let mut sql = Vec::new();
-    if let Some(owner) = object.sequence_owner.as_ref() {
-        sql.push(postgres_sequence_owner_ddl(
-            schema_name,
-            &object.name,
-            owner,
-        ));
+    if target.is_none_or(|target| target.sequence_owner != object.sequence_owner) {
+        if let Some(owner) = object.sequence_owner.as_ref() {
+            sql.push(postgres_sequence_owner_ddl(
+                schema_name,
+                &object.name,
+                owner,
+            ));
+        } else if target.is_some_and(|target| target.sequence_owner.is_some()) {
+            sql.push(postgres_sequence_unowned_ddl(schema_name, &object.name));
+        }
     }
-    if let Some(last_value) = object
-        .sequence_last_value
-        .as_deref()
+    let state_changed = target.is_none_or(|target| {
+        target.sequence_last_value != object.sequence_last_value
+            || target.sequence_is_called != object.sequence_is_called
+    });
+    if let Some(last_value) = state_changed
+        .then_some(object.sequence_last_value.as_deref())
+        .flatten()
         .filter(|value| value.parse::<i64>().is_ok())
     {
         sql.push(postgres_sequence_setval_ddl(
             schema_name,
             &object.name,
             last_value,
+            object.sequence_is_called.unwrap_or(true),
         ));
     }
     if sql.is_empty() {
@@ -2401,7 +2440,7 @@ fn compare_schema_objects(
                 ));
                 if database_kind == Some(DatabaseKind::Postgres) {
                     if let Some(state_change) =
-                        postgres_sequence_state_change(schema_name, source_object)
+                        postgres_sequence_state_change(schema_name, source_object, None)
                     {
                         changes.push(state_change);
                     }
@@ -2413,6 +2452,18 @@ fn compare_schema_objects(
                 target_object,
                 format!("Review removal of {}", schema_object_label(target_object)),
             )),
+            (Some(source_object), Some(target_object))
+                if database_kind == Some(DatabaseKind::Postgres)
+                    && source_object.object_type.eq_ignore_ascii_case("sequence")
+                    && target_object.object_type.eq_ignore_ascii_case("sequence")
+                    && postgres_sequence_structure_eq(source_object, target_object) =>
+            {
+                if let Some(state_change) =
+                    postgres_sequence_state_change(schema_name, source_object, Some(target_object))
+                {
+                    changes.push(state_change);
+                }
+            }
             (Some(source_object), Some(target_object)) if source_object != target_object => {
                 changes.push(schema_object_review_change_with_definition(
                     SchemaChangeKind::SchemaObjectModify,
@@ -2438,7 +2489,7 @@ fn compare_schema_objects(
                     || object.object_type.eq_ignore_ascii_case("sequence"))
         });
         warnings.push(if catalog_backed && database_kind == Some(DatabaseKind::Postgres) {
-            "PostgreSQL catalog trigger/sequence DDL is included only for review-gated creation; object removal remains blocked."
+            "PostgreSQL catalog trigger/sequence DDL is included only for review-gated creation and sequence state restoration; object removal remains blocked."
                 .to_string()
         } else if catalog_backed && database_kind == Some(DatabaseKind::Mysql) {
             "MySQL catalog trigger/event DDL is included only for review-gated single-statement creation; compound bodies and object removal remain blocked."
@@ -5667,6 +5718,7 @@ mod tests {
             definition: None,
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5705,6 +5757,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5738,6 +5791,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5777,6 +5831,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5810,6 +5865,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5845,6 +5901,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5877,6 +5934,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5892,6 +5950,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         }];
         let target = finalize_schema_snapshot(target).unwrap();
@@ -5926,6 +5985,7 @@ mod tests {
                 column_name: "id".to_string(),
             }),
             sequence_last_value: Some("42".to_string()),
+            sequence_is_called: Some(true),
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5973,6 +6033,56 @@ mod tests {
     }
 
     #[test]
+    fn existing_postgres_sequence_restores_uncalled_state_and_removes_owner() {
+        let definition = "CREATE SEQUENCE public.users_id_seq AS bigint INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1 NO CYCLE;".to_string();
+        let source_object = SchemaObjectSnapshot {
+            name: "users_id_seq".to_string(),
+            object_type: "sequence".to_string(),
+            parent_name: None,
+            description: None,
+            definition: Some(definition.clone()),
+            sequence_owner: None,
+            sequence_last_value: Some("1".to_string()),
+            sequence_is_called: Some(false),
+            dependencies: Vec::new(),
+        };
+        let target_object = SchemaObjectSnapshot {
+            sequence_owner: Some(SchemaSequenceOwnerSnapshot {
+                table_name: "users".to_string(),
+                column_name: "id".to_string(),
+            }),
+            sequence_last_value: Some("41".to_string()),
+            sequence_is_called: Some(true),
+            ..source_object.clone()
+        };
+        let mut source = snapshot("desired", vec![column("id", "int8", false)]);
+        source.schema_objects = vec![source_object];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int8", false)]);
+        target.schema_objects = vec![target_object];
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let changes = plan
+            .changes
+            .iter()
+            .filter(|change| change.kind == SchemaChangeKind::SchemaObjectModify)
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 1);
+        let state = changes[0];
+        assert_eq!(state.child_name.as_deref(), Some("ownership/state"));
+        assert!(state.blocked_reason.is_none());
+        assert_eq!(
+            state.sql,
+            vec![
+                "ALTER SEQUENCE \"public\".\"users_id_seq\" OWNED BY NONE;".to_string(),
+                "SELECT pg_catalog.setval('\"public\".\"users_id_seq\"'::regclass, 1, false);"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn postgres_routines_are_ordered_before_catalog_triggers() {
         let mut source = snapshot("desired", vec![column("id", "int4", false)]);
         let mut routine = routine("audit_order", "trigger");
@@ -5992,6 +6102,7 @@ mod tests {
             ),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: vec!["audit_order".to_string()],
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -6868,6 +6979,7 @@ mod tests {
             definition: Some("CREATE SEQUENCE template.users_id_seq;".to_string()),
             sequence_owner: None,
             sequence_last_value: None,
+            sequence_is_called: None,
             dependencies: Vec::new(),
         });
         source = finalize_schema_snapshot(source).unwrap();

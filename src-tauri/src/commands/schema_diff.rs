@@ -480,6 +480,7 @@ async fn capture_postgres_sequence_definitions(
 struct PostgresSequenceState {
     owner: Option<SchemaSequenceOwnerSnapshot>,
     last_value: Option<String>,
+    is_called: Option<bool>,
 }
 
 fn postgres_sequence_owner_query(schema: &str) -> String {
@@ -505,12 +506,35 @@ fn postgres_sequence_owner_query(schema: &str) -> String {
 fn postgres_sequence_last_value_query(schema: &str) -> String {
     let schema = sql_string_literal(schema);
     format!(
-        "SELECT sequence.relname AS sequence_name, pg_catalog.pg_sequence_last_value(sequence.oid)::text AS last_value \
+        "SELECT sequence.relname AS sequence_name, \
+         CASE WHEN pg_catalog.has_sequence_privilege(sequence.oid, 'SELECT') \
+                    OR pg_catalog.has_sequence_privilege(sequence.oid, 'USAGE') \
+              THEN COALESCE(pg_catalog.pg_sequence_last_value(sequence.oid), parameters.seqstart)::text \
+              ELSE NULL END AS state_value, \
+         CASE WHEN pg_catalog.has_sequence_privilege(sequence.oid, 'SELECT') \
+                    OR pg_catalog.has_sequence_privilege(sequence.oid, 'USAGE') \
+              THEN pg_catalog.pg_sequence_last_value(sequence.oid) IS NOT NULL \
+              ELSE NULL END AS is_called \
          FROM pg_catalog.pg_class sequence \
          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = sequence.relnamespace \
+         JOIN pg_catalog.pg_sequence parameters ON parameters.seqrelid = sequence.oid \
          WHERE namespace.nspname = {schema} AND sequence.relkind = 'S' \
          ORDER BY sequence.relname;"
     )
+}
+
+fn optional_postgres_sequence_boolean(value: Option<&serde_json::Value>) -> Option<bool> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => Some(true),
+            "false" | "f" | "no" | "n" | "0" => Some(false),
+            _ => None,
+        },
+        serde_json::Value::Number(value) if value.as_i64() == Some(1) => Some(true),
+        serde_json::Value::Number(value) if value.as_i64() == Some(0) => Some(false),
+        _ => None,
+    }
 }
 
 async fn capture_postgres_sequence_state(
@@ -587,15 +611,17 @@ async fn capture_postgres_sequence_state(
     }
     .map_err(|error| error.to_string())?;
     for row in value_results.iter().flat_map(|result| result.rows.iter()) {
-        let (Some(name), Some(last_value)) = (
+        let (Some(name), Some(last_value), Some(is_called)) = (
             row.first().and_then(serde_json::Value::as_str),
             row.get(1).and_then(serde_json::Value::as_str),
+            optional_postgres_sequence_boolean(row.get(2)),
         ) else {
             continue;
         };
         if last_value.trim().parse::<i64>().is_ok() {
-            state.entry(name.to_string()).or_default().last_value =
-                Some(last_value.trim().to_string());
+            let sequence = state.entry(name.to_string()).or_default();
+            sequence.last_value = Some(last_value.trim().to_string());
+            sequence.is_called = Some(is_called);
         }
     }
     Ok(state)
@@ -1623,6 +1649,7 @@ pub(crate) async fn capture_schema_snapshot_inner(
                         if let Some(state) = states.get(&object.name) {
                             object.sequence_owner = state.owner.clone();
                             object.sequence_last_value = state.last_value.clone();
+                            object.sequence_is_called = state.is_called;
                         }
                     }
                 }
@@ -3276,6 +3303,7 @@ fn current_timestamp_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::core::protocol::{ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo};
+    use serde_json::json;
 
     fn semantic_fixture_snapshot() -> SchemaSnapshot {
         SchemaSnapshot {
@@ -3401,8 +3429,23 @@ mod tests {
 
         let sequence_last_value = postgres_sequence_last_value_query("public");
         assert!(sequence_last_value.contains("pg_catalog.pg_sequence_last_value"));
+        assert!(sequence_last_value.contains("pg_catalog.has_sequence_privilege"));
+        assert!(sequence_last_value.contains("parameters.seqstart"));
+        assert!(sequence_last_value.contains("IS NOT NULL"));
         assert!(sequence_last_value.contains("namespace.nspname = 'public'"));
         assert!(!sequence_last_value.contains("setval"));
+        assert_eq!(
+            optional_postgres_sequence_boolean(Some(&json!(false))),
+            Some(false)
+        );
+        assert_eq!(
+            optional_postgres_sequence_boolean(Some(&json!("t"))),
+            Some(true)
+        );
+        assert_eq!(
+            optional_postgres_sequence_boolean(Some(&json!("unknown"))),
+            None
+        );
 
         let sequence_dependency = postgres_relation_sequence_dependency_query("public");
         assert!(sequence_dependency.contains("pg_catalog.pg_attrdef"));
