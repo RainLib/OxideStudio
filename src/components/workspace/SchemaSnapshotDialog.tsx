@@ -48,6 +48,11 @@ import {
   isChartDbMetadataSnapshot,
 } from "@/features/schema-diff/model/chartDbMetadataImport";
 import { chartDbMetadataQueryForDriver } from "@/features/schema-diff/model/chartDbMetadataQueries";
+import {
+  schemaComparisonNextPhase,
+  schemaComparisonPhaseLabel,
+  type SchemaComparisonPhase,
+} from "@/features/schema-diff/model/schemaComparisonProgress";
 
 interface SchemaSnapshotDialogProps {
   open: boolean;
@@ -72,6 +77,8 @@ export function SchemaSnapshotDialog({
   const [operation, setOperation] = useState<
     "capture" | "compare" | "import" | null
   >(null);
+  const [comparisonProgress, setComparisonProgress] =
+    useState<SchemaComparisonPhase | null>(null);
   const [importSource, setImportSource] = useState<
     "project" | "ddl" | "dbml" | "metadata" | null
   >(null);
@@ -91,7 +98,7 @@ export function SchemaSnapshotDialog({
       state.projects.find((project) => project.id === state.activeProjectId)
         ?.root_path || null,
   );
-  const { startTask, finishTask, failTask } = useTaskStore();
+  const { startTask, updateTask, finishTask, failTask } = useTaskStore();
   const supportsRestorePlan =
     identity?.driver === "postgres" || identity?.driver === "mysql";
   const supportsSchemaReviewPlan =
@@ -110,6 +117,9 @@ export function SchemaSnapshotDialog({
   );
   const selectedIsOffline =
     selectedIsProjectDdl || selectedIsDbml || selectedIsMetadata;
+  const nextComparisonProgress = comparisonProgress
+    ? schemaComparisonNextPhase(comparisonProgress)
+    : null;
   const selectedProjectDdlSources = useMemo(
     () =>
       selected && isProjectDdlSnapshot(selected)
@@ -442,9 +452,19 @@ export function SchemaSnapshotDialog({
       detail: "Snapshot → live target",
     });
     setOperation("compare");
+    setComparisonProgress("capture-target");
     setError(null);
     try {
-      const { target, plan } = await compareSnapshotToLive(selected, identity);
+      const { target, plan } = await compareSnapshotToLive(
+        selected,
+        identity,
+        (phase) => {
+          setComparisonProgress(phase);
+          updateTask(taskId, { detail: schemaComparisonPhaseLabel(phase) });
+        },
+      );
+      setComparisonProgress("open-review");
+      updateTask(taskId, { detail: schemaComparisonPhaseLabel("open-review") });
       openSchemaDiffTab(plan, selected, target);
       finishTask(
         taskId,
@@ -458,6 +478,7 @@ export function SchemaSnapshotDialog({
       failTask(taskId, message);
     } finally {
       setOperation(null);
+      setComparisonProgress(null);
     }
   };
 
@@ -858,6 +879,21 @@ export function SchemaSnapshotDialog({
               >
                 <AlertCircle size={12} className="mt-0.5 shrink-0" />
                 <span>{error}</span>
+              </div>
+            )}
+            {operation === "compare" && comparisonProgress && (
+              <div
+                className="mt-auto flex items-center gap-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised)/0.6)] px-2.5 py-2 text-[10px]"
+                role="status"
+                data-schema-comparison-progress={comparisonProgress}
+              >
+                <Loader2 size={12} className="shrink-0 animate-spin text-[hsl(var(--wb-accent))]" />
+                <span>{schemaComparisonPhaseLabel(comparisonProgress)}</span>
+                {nextComparisonProgress && (
+                  <span className="ml-auto whitespace-nowrap wb-muted">
+                    Next: {schemaComparisonPhaseLabel(nextComparisonProgress)}
+                  </span>
+                )}
               </div>
             )}
           </section>

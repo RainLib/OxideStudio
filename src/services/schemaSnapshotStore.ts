@@ -6,6 +6,7 @@ import {
   type SchemaSnapshot,
 } from "@/services/tauri";
 import type { DatabaseDriver } from "@/services/tauri/types";
+import type { SchemaComparisonPhase } from "@/features/schema-diff/model/schemaComparisonProgress";
 
 const SCHEMA_SNAPSHOT_KIND = "SCHEMA_SNAPSHOT";
 const SCHEMA_SNAPSHOT_VERSION = 1;
@@ -113,8 +114,11 @@ export async function deleteSchemaSnapshot(snapshot: SchemaSnapshot) {
 export async function compareSnapshotToLive(
   source: SchemaSnapshot,
   targetIdentity: SchemaSnapshotIdentity,
+  onProgress?: (phase: SchemaComparisonPhase) => void,
 ): Promise<{ target: SchemaSnapshot; plan: SchemaDiffPlan }> {
+  onProgress?.("capture-target");
   const target = await captureLiveSchemaSnapshot(targetIdentity);
+  onProgress?.("compare-snapshots");
   const plan = await schemaService.compareSchemaSnapshots(source, target);
   return { target, plan };
 }
