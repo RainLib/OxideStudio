@@ -2909,7 +2909,8 @@ async fn bundled_sql_lsp_exposes_oracle_table_sources_and_wrapped_routines() -> 
             .as_ref()
             .and_then(|item| item.get("insertText"))
             .and_then(Value::as_str),
-        Some("JSON_TABLE(${1:expr}, ${2:path}) ${3:jt}")
+        Some("JSON_TABLE(${1:expr}, ${2:path}) ${3:jt}"),
+        "Oracle relation-source completion response: {relation}"
     );
     let fetch_rows = find(&routine, "fetch_rows").context("Oracle table routine completion")?;
     assert_eq!(

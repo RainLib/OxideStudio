@@ -165,6 +165,15 @@ pub struct SchemaSnapshot {
     pub warnings: Vec<String>,
 }
 
+/// The explicit source-to-target namespace selected for a schema diff.
+/// Keeping the pair together prevents helpers from accidentally mixing a
+/// source identifier with the destination DDL namespace.
+#[derive(Debug, Clone, Copy)]
+struct SchemaNameMapping<'a> {
+    source: &'a str,
+    target: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum SchemaChangeRisk {
@@ -400,19 +409,20 @@ pub fn compare_schema_snapshots(
     }
     let source_spec = database_spec_for_driver(&source.driver);
     let target_spec = database_spec_for_driver(&target.driver);
-    if source.schema_name != target.schema_name {
-        return Err(anyhow!(
-            "Cross-schema comparison requires an explicit schema mapping: {} -> {}",
-            source.schema_name,
-            target.schema_name
-        ));
-    }
+    let maps_schemas = source.schema_name != target.schema_name;
 
     // A signed external package can provide a full metadata contract without
     // being compiled into the host's DDL planner. Keep those snapshots useful
     // for review, diagrams and drift detection, while deliberately refusing to
     // synthesize generic migration SQL for an unknown dialect.
     let (Some(source_spec), Some(target_spec)) = (source_spec, target_spec) else {
+        if maps_schemas {
+            return Err(anyhow!(
+                "Cross-schema comparison requires a native PostgreSQL schema mapping: {} -> {}",
+                source.schema_name,
+                target.schema_name
+            ));
+        }
         if source.driver != target.driver {
             let mut plan =
                 compare_metadata_snapshots(source, target, generated_at, &target.driver)?;
@@ -426,6 +436,13 @@ pub fn compare_schema_snapshots(
             compare_metadata_snapshots(source, target, generated_at, target_spec.driver)?;
         annotate_cross_driver_review(&mut plan, source, target);
         return Ok(plan);
+    }
+    if maps_schemas && target_spec.driver != "postgres" {
+        return Err(anyhow!(
+            "Cross-schema comparison is currently supported only for native PostgreSQL snapshots: {} -> {}",
+            source.schema_name,
+            target.schema_name
+        ));
     }
     if !target_spec.supports_table_browsing {
         return compare_metadata_snapshots(source, target, generated_at, target_spec.driver);
@@ -456,6 +473,12 @@ pub fn compare_schema_snapshots(
         .chain(target.warnings.iter())
         .cloned()
         .collect::<Vec<_>>();
+    if maps_schemas {
+        warnings.push(format!(
+            "PostgreSQL schema mapping {} -> {} is review-gated. Catalog-backed identifiers are rewritten only in verified SQL positions; inspect all generated DDL before execution.",
+            source.schema_name, target.schema_name
+        ));
+    }
 
     for relation_name in relation_names {
         match (
@@ -487,7 +510,13 @@ pub fn compare_schema_snapshots(
                     .iter()
                     .filter(|constraint| is_foreign_constraint(constraint))
                 {
-                    let sql = add_constraint_sql(kind, target_schema, &relation_name, constraint);
+                    let sql = add_constraint_sql(
+                        kind,
+                        &source.schema_name,
+                        target_schema,
+                        &relation_name,
+                        constraint,
+                    );
                     if sql.is_none() {
                         warnings.push(format!(
                             "Foreign key {}.{} requires an exact source definition including referential actions.",
@@ -580,6 +609,10 @@ pub fn compare_schema_snapshots(
     );
     compare_routines(
         Some(kind),
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: target_schema,
+        },
         &source.routines,
         &target.routines,
         target_schema,
@@ -588,6 +621,10 @@ pub fn compare_schema_snapshots(
     );
     compare_schema_objects(
         Some(kind),
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: target_schema,
+        },
         &source.schema_objects,
         &target.schema_objects,
         target_schema,
@@ -1169,6 +1206,10 @@ fn compare_metadata_snapshots(
     let mut routine_warnings = Vec::new();
     compare_routines(
         None,
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: &target.schema_name,
+        },
         &source.routines,
         &target.routines,
         &target.schema_name,
@@ -1177,6 +1218,10 @@ fn compare_metadata_snapshots(
     );
     compare_schema_objects(
         None,
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: &target.schema_name,
+        },
         &source.schema_objects,
         &target.schema_objects,
         &target.schema_name,
@@ -1363,6 +1408,10 @@ fn compare_sqlite_schema_snapshots(
 
     compare_routines(
         None,
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: &target.schema_name,
+        },
         &source.routines,
         &target.routines,
         &target.schema_name,
@@ -1371,6 +1420,10 @@ fn compare_sqlite_schema_snapshots(
     );
     compare_schema_objects(
         None,
+        SchemaNameMapping {
+            source: &source.schema_name,
+            target: &target.schema_name,
+        },
         &source.schema_objects,
         &target.schema_objects,
         &target.schema_name,
@@ -1960,6 +2013,8 @@ fn routine_review_change(
 fn routine_review_change_with_definition(
     kind: SchemaChangeKind,
     database_kind: Option<DatabaseKind>,
+    source_schema: &str,
+    target_schema: &str,
     schema_name: &str,
     routine: &SchemaRoutineSnapshot,
     summary: String,
@@ -1978,7 +2033,11 @@ fn routine_review_change_with_definition(
                 .to_ascii_uppercase()
                 .starts_with("CREATE OR REPLACE ") =>
         {
-            Some(definition.to_string())
+            Some(rewrite_postgres_schema_qualified_references(
+                definition,
+                source_schema,
+                target_schema,
+            ))
         }
         _ => None,
     };
@@ -2006,6 +2065,7 @@ fn routine_review_change_with_definition(
 
 fn compare_routines(
     database_kind: Option<DatabaseKind>,
+    schema_mapping: SchemaNameMapping<'_>,
     source: &[SchemaRoutineSnapshot],
     target: &[SchemaRoutineSnapshot],
     schema_name: &str,
@@ -2031,6 +2091,8 @@ fn compare_routines(
             (Some(source_routine), None) => changes.push(routine_review_change_with_definition(
                 SchemaChangeKind::RoutineCreate,
                 database_kind,
+                schema_mapping.source,
+                schema_mapping.target,
                 schema_name,
                 source_routine,
                 format!(
@@ -2051,6 +2113,8 @@ fn compare_routines(
                 changes.push(routine_review_change_with_definition(
                     SchemaChangeKind::RoutineModify,
                     database_kind,
+                    schema_mapping.source,
+                    schema_mapping.target,
                     schema_name,
                     source_routine,
                     format!("Review changed routine {}", routine_label(source_routine)),
@@ -2128,6 +2192,8 @@ fn schema_object_review_change(
 fn schema_object_review_change_with_definition(
     kind: SchemaChangeKind,
     database_kind: Option<DatabaseKind>,
+    source_schema: &str,
+    target_schema: &str,
     schema_name: &str,
     object: &SchemaObjectSnapshot,
     summary: String,
@@ -2147,7 +2213,9 @@ fn schema_object_review_change_with_definition(
             true,
             _,
             Some(definition),
-        ) if definition.to_ascii_uppercase().starts_with("CREATE ") => Some(definition.to_string()),
+        ) if definition.to_ascii_uppercase().starts_with("CREATE ") => Some(
+            rewrite_postgres_schema_qualified_references(definition, source_schema, target_schema),
+        ),
         (
             SchemaChangeKind::SchemaObjectCreate,
             Some(DatabaseKind::Postgres),
@@ -2158,7 +2226,11 @@ fn schema_object_review_change_with_definition(
             .to_ascii_uppercase()
             .starts_with("CREATE SEQUENCE ") =>
         {
-            Some(definition.to_string())
+            Some(rewrite_postgres_schema_qualified_references(
+                definition,
+                source_schema,
+                target_schema,
+            ))
         }
         (
             SchemaChangeKind::SchemaObjectCreate,
@@ -2297,6 +2369,7 @@ fn is_safe_mysql_event_definition(definition: &str) -> bool {
 
 fn compare_schema_objects(
     database_kind: Option<DatabaseKind>,
+    schema_mapping: SchemaNameMapping<'_>,
     source: &[SchemaObjectSnapshot],
     target: &[SchemaObjectSnapshot],
     schema_name: &str,
@@ -2320,6 +2393,8 @@ fn compare_schema_objects(
                 changes.push(schema_object_review_change_with_definition(
                     SchemaChangeKind::SchemaObjectCreate,
                     database_kind,
+                    schema_mapping.source,
+                    schema_mapping.target,
                     schema_name,
                     source_object,
                     format!("Review creation of {}", schema_object_label(source_object)),
@@ -2342,6 +2417,8 @@ fn compare_schema_objects(
                 changes.push(schema_object_review_change_with_definition(
                     SchemaChangeKind::SchemaObjectModify,
                     database_kind,
+                    schema_mapping.source,
+                    schema_mapping.target,
                     schema_name,
                     source_object,
                     format!("Review changed {}", schema_object_label(source_object)),
@@ -2685,8 +2762,24 @@ fn compare_relation(
         return;
     }
 
-    compare_columns(kind, target_schema, source, target, changes, warnings);
-    compare_constraints(kind, target_schema, source, target, changes, warnings);
+    compare_columns(
+        kind,
+        source_schema,
+        target_schema,
+        source,
+        target,
+        changes,
+        warnings,
+    );
+    compare_constraints(
+        kind,
+        source_schema,
+        target_schema,
+        source,
+        target,
+        changes,
+        warnings,
+    );
     compare_indexes(
         kind,
         source_schema,
@@ -2907,6 +3000,7 @@ fn external_view_dependency_warnings(relation: &SchemaRelationSnapshot) -> Vec<S
 
 fn compare_columns(
     kind: DatabaseKind,
+    source_schema: &str,
     target_schema: &str,
     source: &SchemaRelationSnapshot,
     target: &SchemaRelationSnapshot,
@@ -2937,7 +3031,8 @@ fn compare_columns(
             target_columns.get(column_name),
         ) {
             (Some(source_column), None) => {
-                let (definition, definition_warnings) = column_definition(kind, source_column);
+                let (definition, definition_warnings) =
+                    column_definition(kind, source_schema, target_schema, source_column);
                 warnings.extend(definition_warnings);
                 let ownership_unmodeled = source_column.is_generated != Some(false)
                     || source_column.is_hidden != Some(false);
@@ -2994,6 +3089,7 @@ fn compare_columns(
             {
                 let (sql, manual_review, alter_warnings) = alter_column_sql(
                     kind,
+                    source_schema,
                     target_schema,
                     &source.name,
                     source_column,
@@ -3202,6 +3298,7 @@ fn compare_indexes(
 
 fn compare_constraints(
     kind: DatabaseKind,
+    source_schema: &str,
     target_schema: &str,
     source: &SchemaRelationSnapshot,
     target: &SchemaRelationSnapshot,
@@ -3232,7 +3329,13 @@ fn compare_constraints(
             target_constraints.get(constraint_name),
         ) {
             (Some(source_constraint), None) => {
-                let sql = add_constraint_sql(kind, target_schema, &source.name, source_constraint);
+                let sql = add_constraint_sql(
+                    kind,
+                    source_schema,
+                    target_schema,
+                    &source.name,
+                    source_constraint,
+                );
                 let manual_review = sql.is_none();
                 if manual_review {
                     warnings.push(format!(
@@ -3276,8 +3379,13 @@ fn compare_constraints(
             (Some(source_constraint), Some(target_constraint))
                 if source_constraint != target_constraint =>
             {
-                let add_sql =
-                    add_constraint_sql(kind, target_schema, &source.name, source_constraint);
+                let add_sql = add_constraint_sql(
+                    kind,
+                    source_schema,
+                    target_schema,
+                    &source.name,
+                    source_constraint,
+                );
                 if add_sql.is_none() {
                     warnings.push(format!(
                         "Constraint {}.{} has no executable replacement definition.",
@@ -3344,6 +3452,11 @@ fn create_relation_sql(
             ));
             return (Vec::new(), true, warnings);
         };
+        let definition = if kind == DatabaseKind::Postgres {
+            rewrite_postgres_schema_qualified_references(&definition, source_schema, target_schema)
+        } else {
+            definition
+        };
         if flags.is_materialized_view {
             let sql = kind
                 .create_materialized_view_query(
@@ -3403,7 +3516,8 @@ fn create_relation_sql(
         .columns
         .iter()
         .map(|column| {
-            let (definition, column_warnings) = column_definition(kind, column);
+            let (definition, column_warnings) =
+                column_definition(kind, source_schema, target_schema, column);
             warnings.extend(column_warnings);
             format!("  {definition}")
         })
@@ -3419,7 +3533,9 @@ fn create_relation_sql(
         .iter()
         .filter(|constraint| !is_foreign_constraint(constraint))
     {
-        if let Some(clause) = inline_constraint_clause(kind, constraint) {
+        if let Some(clause) =
+            inline_constraint_clause(kind, source_schema, target_schema, constraint)
+        {
             definitions.push(format!("  {clause}"));
         } else {
             warnings.push(format!(
@@ -3499,19 +3615,20 @@ fn create_index_sql(
     index: &IndexInfo,
 ) -> std::result::Result<String, String> {
     if kind == DatabaseKind::Postgres {
-        if source_schema != target_schema {
-            return Err(format!(
-                "Index {}.{} requires schema-aware definition mapping from {} to {}.",
-                relation_name, index.name, source_schema, target_schema
-            ));
-        }
         if let Some(definition) = index
             .definition
             .as_deref()
             .map(str::trim)
             .filter(|definition| !definition.is_empty())
         {
-            return Ok(format!("{};", definition.trim_end_matches(';')));
+            return Ok(format!(
+                "{};",
+                rewrite_postgres_schema_qualified_references(
+                    definition.trim_end_matches(';'),
+                    source_schema,
+                    target_schema,
+                )
+            ));
         }
     }
 
@@ -3542,11 +3659,25 @@ fn create_index_sql(
     ))
 }
 
-fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<String>) {
+fn column_definition(
+    kind: DatabaseKind,
+    source_schema: &str,
+    target_schema: &str,
+    column: &ColumnInfo,
+) -> (String, Vec<String>) {
+    let data_type = if kind == DatabaseKind::Postgres {
+        rewrite_postgres_schema_qualified_references(
+            &column.data_type,
+            source_schema,
+            target_schema,
+        )
+    } else {
+        column.data_type.clone()
+    };
     let mut definition = format!(
         "{} {}",
         kind.quote_identifier(&column.name),
-        column.data_type.trim()
+        data_type.trim()
     );
     let mut warnings = Vec::new();
     if column.is_generated == Some(true) {
@@ -3579,7 +3710,16 @@ fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<St
     if column.is_generated != Some(true) {
         if let Some(default_value) = column.default_value.as_deref() {
             definition.push_str(" DEFAULT ");
-            definition.push_str(&kind.metadata_default_sql(&column.data_type, default_value));
+            let default_value = if kind == DatabaseKind::Postgres {
+                rewrite_postgres_schema_qualified_references(
+                    default_value,
+                    source_schema,
+                    target_schema,
+                )
+            } else {
+                default_value.to_string()
+            };
+            definition.push_str(&kind.metadata_default_sql(&data_type, &default_value));
         }
     }
     if !column.is_nullable {
@@ -3601,6 +3741,7 @@ fn is_postgres_sequence_default(default_value: &str) -> bool {
 
 fn alter_column_sql(
     kind: DatabaseKind,
+    source_schema: &str,
     schema: &str,
     table: &str,
     source: &ColumnInfo,
@@ -3625,7 +3766,8 @@ fn alter_column_sql(
     }
 
     if kind == DatabaseKind::Mysql {
-        let (definition, definition_warnings) = column_definition(kind, source);
+        let (definition, definition_warnings) =
+            column_definition(kind, source_schema, schema, source);
         warnings.extend(definition_warnings);
         sql.push(format!(
             "ALTER TABLE {relation} MODIFY COLUMN {definition};"
@@ -3634,10 +3776,14 @@ fn alter_column_sql(
     }
 
     if source.data_type != target.data_type {
+        let source_type = rewrite_postgres_schema_qualified_references(
+            source.data_type.trim(),
+            source_schema,
+            schema,
+        );
         sql.push(format!(
             "ALTER TABLE {relation} ALTER COLUMN {column} TYPE {} USING {column}::{};",
-            source.data_type.trim(),
-            source.data_type.trim()
+            source_type, source_type
         ));
         manual_review = true;
     }
@@ -3645,7 +3791,18 @@ fn alter_column_sql(
         match source.default_value.as_deref() {
             Some(default_value) => sql.push(format!(
                 "ALTER TABLE {relation} ALTER COLUMN {column} SET DEFAULT {};",
-                kind.metadata_default_sql(&source.data_type, default_value)
+                kind.metadata_default_sql(
+                    &rewrite_postgres_schema_qualified_references(
+                        &source.data_type,
+                        source_schema,
+                        schema,
+                    ),
+                    &rewrite_postgres_schema_qualified_references(
+                        default_value,
+                        source_schema,
+                        schema,
+                    )
+                )
             )),
             None => sql.push(format!(
                 "ALTER TABLE {relation} ALTER COLUMN {column} DROP DEFAULT;"
@@ -3687,14 +3844,17 @@ fn alter_column_sql(
 
 fn add_constraint_sql(
     kind: DatabaseKind,
-    schema: &str,
+    source_schema: &str,
+    target_schema: &str,
     table: &str,
     constraint: &ConstraintInfo,
 ) -> Option<String> {
-    if let Some(definition) = constraint_definition_sql(kind, constraint) {
+    if let Some(definition) =
+        constraint_definition_sql(kind, source_schema, target_schema, constraint)
+    {
         return Some(format!(
             "ALTER TABLE {} ADD CONSTRAINT {} {};",
-            kind.qualified_table(Some(schema), table),
+            kind.qualified_table(Some(target_schema), table),
             kind.quote_identifier(&constraint.name),
             definition
         ));
@@ -3702,7 +3862,7 @@ fn add_constraint_sql(
     let normalized = constraint.constraint_type.to_ascii_uppercase();
     if normalized.contains("PRIMARY") {
         return Some(kind.add_primary_key_constraint_query(
-            Some(schema),
+            Some(target_schema),
             table,
             &constraint.name,
             &constraint.columns,
@@ -3710,7 +3870,7 @@ fn add_constraint_sql(
     }
     if normalized.contains("UNIQUE") {
         return Some(kind.add_unique_constraint_query(
-            Some(schema),
+            Some(target_schema),
             table,
             &constraint.name,
             &constraint.columns,
@@ -3725,11 +3885,18 @@ fn add_constraint_sql(
             .as_deref()
             .map(|referenced_table| {
                 kind.add_foreign_key_constraint_query(
-                    Some(schema),
+                    Some(target_schema),
                     table,
                     &constraint.name,
                     &constraint.columns,
-                    constraint.referenced_schema.as_deref().or(Some(schema)),
+                    mapped_constraint_schema(
+                        kind,
+                        constraint.referenced_schema.as_deref(),
+                        source_schema,
+                        target_schema,
+                    )
+                    .as_deref()
+                    .or(Some(target_schema)),
                     referenced_table,
                     &constraint.referenced_columns,
                     None,
@@ -3740,8 +3907,15 @@ fn add_constraint_sql(
     None
 }
 
-fn inline_constraint_clause(kind: DatabaseKind, constraint: &ConstraintInfo) -> Option<String> {
-    if let Some(definition) = constraint_definition_sql(kind, constraint) {
+fn inline_constraint_clause(
+    kind: DatabaseKind,
+    source_schema: &str,
+    target_schema: &str,
+    constraint: &ConstraintInfo,
+) -> Option<String> {
+    if let Some(definition) =
+        constraint_definition_sql(kind, source_schema, target_schema, constraint)
+    {
         return Some(format!(
             "CONSTRAINT {} {}",
             kind.quote_identifier(&constraint.name),
@@ -3781,13 +3955,27 @@ fn inline_constraint_clause(kind: DatabaseKind, constraint: &ConstraintInfo) -> 
         return Some(format!(
             "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
             kind.quote_identifier(&constraint.name),
-            kind.qualified_table(constraint.referenced_schema.as_deref(), referenced_table)
+            kind.qualified_table(
+                mapped_constraint_schema(
+                    kind,
+                    constraint.referenced_schema.as_deref(),
+                    source_schema,
+                    target_schema,
+                )
+                .as_deref(),
+                referenced_table,
+            )
         ));
     }
     None
 }
 
-fn constraint_definition_sql(kind: DatabaseKind, constraint: &ConstraintInfo) -> Option<String> {
+fn constraint_definition_sql(
+    kind: DatabaseKind,
+    source_schema: &str,
+    target_schema: &str,
+    constraint: &ConstraintInfo,
+) -> Option<String> {
     let definition = constraint
         .definition
         .as_deref()
@@ -3801,7 +3989,26 @@ fn constraint_definition_sql(kind: DatabaseKind, constraint: &ConstraintInfo) ->
     {
         return Some(format!("CHECK ({definition})"));
     }
-    Some(definition.to_string())
+    Some(if kind == DatabaseKind::Postgres {
+        rewrite_postgres_schema_qualified_references(definition, source_schema, target_schema)
+    } else {
+        definition.to_string()
+    })
+}
+
+fn mapped_constraint_schema(
+    kind: DatabaseKind,
+    schema: Option<&str>,
+    source_schema: &str,
+    target_schema: &str,
+) -> Option<String> {
+    schema.map(|schema| {
+        if kind == DatabaseKind::Postgres && schema == source_schema {
+            target_schema.to_string()
+        } else {
+            schema.to_string()
+        }
+    })
 }
 
 fn is_foreign_constraint(constraint: &ConstraintInfo) -> bool {
@@ -4698,6 +4905,7 @@ fn build_preflight_checks(
                             }
                             if let Some(sql) = foreign_key_preflight_sql(
                                 kind,
+                                &source.schema_name,
                                 &target.schema_name,
                                 &change.relation_name,
                                 constraint,
@@ -4723,6 +4931,7 @@ fn build_preflight_checks(
 
 fn foreign_key_preflight_sql(
     kind: DatabaseKind,
+    source_schema: &str,
     target_schema: &str,
     relation_name: &str,
     constraint: &ConstraintInfo,
@@ -4735,10 +4944,14 @@ fn foreign_key_preflight_sql(
     }
     let local_relation = kind.qualified_table(Some(target_schema), relation_name);
     let referenced_relation = kind.qualified_table(
-        constraint
-            .referenced_schema
-            .as_deref()
-            .or(Some(target_schema)),
+        mapped_constraint_schema(
+            kind,
+            constraint.referenced_schema.as_deref(),
+            source_schema,
+            target_schema,
+        )
+        .as_deref()
+        .or(Some(target_schema)),
         referenced_table,
     );
     let local_not_null = constraint
@@ -4933,6 +5146,187 @@ fn hex_digest(value: &[u8]) -> String {
 
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Rewrites only PostgreSQL identifier positions for an explicit one-schema
+/// mapping. String literals and comments remain opaque, except for a
+/// standalone `regclass` literal such as `nextval('old.seq'::regclass)`.
+/// Dollar-quoted routine bodies are also preserved verbatim: their dynamic
+/// SQL is outside the verified catalog positions this mapper may change.
+/// The helper deliberately never attempts cross-database rewriting.
+fn rewrite_postgres_schema_qualified_references(
+    input: &str,
+    source_schema: &str,
+    target_schema: &str,
+) -> String {
+    if source_schema.trim().is_empty() || source_schema == target_schema {
+        return input.to_string();
+    }
+    let target_identifier = DatabaseKind::Postgres.quote_identifier(target_schema);
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].starts_with(b"--") {
+            let end = bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|index| offset + index)
+                .unwrap_or(bytes.len());
+            output.push_str(&input[offset..end]);
+            offset = end;
+            continue;
+        }
+        if bytes[offset..].starts_with(b"/*") {
+            let end = bytes[offset + 2..]
+                .windows(2)
+                .position(|window| window == b"*/")
+                .map(|index| offset + index + 4)
+                .unwrap_or(bytes.len());
+            output.push_str(&input[offset..end]);
+            offset = end;
+            continue;
+        }
+        if bytes[offset] == b'\'' {
+            let (end, content) = postgres_single_quoted_literal(input, offset);
+            let after_literal = input[end..].trim_start();
+            if after_literal.to_ascii_lowercase().starts_with("::regclass") {
+                output.push('\'');
+                output.push_str(&rewrite_postgres_regclass_literal(
+                    content,
+                    source_schema,
+                    &target_identifier,
+                ));
+                output.push('\'');
+            } else {
+                output.push_str(&input[offset..end]);
+            }
+            offset = end;
+            continue;
+        }
+        if bytes[offset] == b'$' {
+            if let Some(end) = postgres_dollar_quoted_literal_end(input, offset) {
+                output.push_str(&input[offset..end]);
+                offset = end;
+                continue;
+            }
+        }
+        if bytes[offset] == b'"' {
+            let (end, identifier) = postgres_quoted_identifier(input, offset);
+            if identifier == source_schema && input[end..].starts_with('.') {
+                output.push_str(&target_identifier);
+            } else {
+                output.push_str(&input[offset..end]);
+            }
+            offset = end;
+            continue;
+        }
+        if is_postgres_unquoted_identifier_start(bytes[offset]) {
+            let end = input[offset..]
+                .bytes()
+                .take_while(|byte| is_postgres_unquoted_identifier_continue(*byte))
+                .count()
+                + offset;
+            let identifier = &input[offset..end];
+            if identifier == source_schema && input[end..].starts_with('.') {
+                output.push_str(&target_identifier);
+            } else {
+                output.push_str(identifier);
+            }
+            offset = end;
+            continue;
+        }
+        let character = input[offset..].chars().next().expect("valid UTF-8 input");
+        output.push(character);
+        offset += character.len_utf8();
+    }
+    output
+}
+
+fn postgres_single_quoted_literal(input: &str, start: usize) -> (usize, &str) {
+    let bytes = input.as_bytes();
+    let mut offset = start + 1;
+    while offset < bytes.len() {
+        if bytes[offset] == b'\'' {
+            if bytes.get(offset + 1) == Some(&b'\'') {
+                offset += 2;
+                continue;
+            }
+            return (offset + 1, &input[start + 1..offset]);
+        }
+        let character = input[offset..].chars().next().expect("valid UTF-8 input");
+        offset += character.len_utf8();
+    }
+    (input.len(), &input[start + 1..])
+}
+
+fn postgres_quoted_identifier(input: &str, start: usize) -> (usize, &str) {
+    let bytes = input.as_bytes();
+    let mut offset = start + 1;
+    while offset < bytes.len() {
+        if bytes[offset] == b'"' {
+            if bytes.get(offset + 1) == Some(&b'"') {
+                offset += 2;
+                continue;
+            }
+            return (offset + 1, &input[start + 1..offset]);
+        }
+        let character = input[offset..].chars().next().expect("valid UTF-8 input");
+        offset += character.len_utf8();
+    }
+    (input.len(), &input[start + 1..])
+}
+
+fn postgres_dollar_quoted_literal_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    debug_assert_eq!(bytes.get(start), Some(&b'$'));
+    let mut delimiter_end = start + 1;
+    if bytes.get(delimiter_end) == Some(&b'$') {
+        delimiter_end += 1;
+    } else {
+        let tag_start = delimiter_end;
+        while let Some(byte) = bytes.get(delimiter_end) {
+            if !(byte.is_ascii_alphanumeric() || *byte == b'_') {
+                break;
+            }
+            delimiter_end += 1;
+        }
+        if delimiter_end == tag_start
+            || !is_postgres_unquoted_identifier_start(bytes[tag_start])
+            || bytes.get(delimiter_end) != Some(&b'$')
+        {
+            return None;
+        }
+        delimiter_end += 1;
+    }
+
+    let delimiter = &input[start..delimiter_end];
+    input[delimiter_end..]
+        .find(delimiter)
+        .map(|offset| delimiter_end + offset + delimiter.len())
+}
+
+fn rewrite_postgres_regclass_literal(
+    literal: &str,
+    source_schema: &str,
+    target_identifier: &str,
+) -> String {
+    let quoted_source = format!("\"{source_schema}\".");
+    if let Some(rest) = literal.strip_prefix(&quoted_source) {
+        return format!("{target_identifier}.{rest}");
+    }
+    if let Some(rest) = literal.strip_prefix(&format!("{source_schema}.")) {
+        return format!("{target_identifier}.{rest}");
+    }
+    literal.to_string()
+}
+
+fn is_postgres_unquoted_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_postgres_unquoted_identifier_continue(byte: u8) -> bool {
+    is_postgres_unquoted_identifier_start(byte) || byte.is_ascii_digit() || byte == b'$'
 }
 
 fn table_comment_sql(
@@ -6346,6 +6740,24 @@ mod tests {
     }
 
     #[test]
+    fn postgres_schema_reference_rewrite_preserves_literals_and_comments() {
+        let input = "SELECT * FROM source.users -- source.audit\nWHERE note = 'source.users' AND id = nextval('source.users_id_seq'::regclass) AND \"source\".kind = 'x'";
+        assert_eq!(
+            rewrite_postgres_schema_qualified_references(input, "source", "target"),
+            "SELECT * FROM \"target\".users -- source.audit\nWHERE note = 'source.users' AND id = nextval('\"target\".users_id_seq'::regclass) AND \"target\".kind = 'x'"
+        );
+    }
+
+    #[test]
+    fn postgres_schema_reference_rewrite_preserves_dollar_quoted_routine_bodies() {
+        let input = "CREATE FUNCTION source.fn() RETURNS void LANGUAGE plpgsql AS $body$ BEGIN RAISE NOTICE 'source.users'; PERFORM source.dynamic_sql; END $body$; SELECT * FROM source.users";
+        assert_eq!(
+            rewrite_postgres_schema_qualified_references(input, "source", "target"),
+            "CREATE FUNCTION \"target\".fn() RETURNS void LANGUAGE plpgsql AS $body$ BEGIN RAISE NOTICE 'source.users'; PERFORM source.dynamic_sql; END $body$; SELECT * FROM \"target\".users"
+        );
+    }
+
+    #[test]
     fn relation_without_captured_columns_does_not_emit_invalid_create_sql() {
         let mut source = snapshot("desired", Vec::new());
         let mut target = snapshot("actual", Vec::new());
@@ -6413,15 +6825,127 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cross_schema_comparison_without_explicit_mapping() {
+    fn postgres_cross_schema_mapping_rewrites_catalog_backed_identifiers() {
         let mut source = snapshot("desired", vec![column("id", "int4", false)]);
         source.schema_name = "template".to_string();
+        source.relations[0].columns[0].default_value =
+            Some("nextval('template.users_id_seq'::regclass)".to_string());
+        source.relations[0].indexes = vec![IndexInfo {
+            definition: Some(
+                "CREATE INDEX users_id_idx ON template.users USING btree (id)".to_string(),
+            ),
+            ..index("users_id_idx", &[], "btree")
+        }];
+        source.relations.push(SchemaRelationSnapshot {
+            name: "active_users".to_string(),
+            object_type: Some("VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM template.users".to_string()),
+            materialized_view_populated: None,
+            dependencies: vec!["users".to_string()],
+            external_dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        source.routines.push(SchemaRoutineSnapshot {
+            name: "refresh_users".to_string(),
+            routine_type: Some("FUNCTION".to_string()),
+            parameters: Vec::new(),
+            return_type: "integer".to_string(),
+            description: None,
+            definition: Some(
+                "CREATE OR REPLACE FUNCTION template.refresh_users() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;"
+                    .to_string(),
+            ),
+        });
+        source.schema_objects.push(SchemaObjectSnapshot {
+            name: "users_id_seq".to_string(),
+            object_type: "sequence".to_string(),
+            parent_name: None,
+            description: None,
+            definition: Some("CREATE SEQUENCE template.users_id_seq;".to_string()),
+            sequence_owner: None,
+            sequence_last_value: None,
+            dependencies: Vec::new(),
+        });
         source = finalize_schema_snapshot(source).unwrap();
-        let target = snapshot("actual", vec![column("id", "int4", false)]);
+        let mut target = snapshot("actual", Vec::new());
+        target.relations.clear();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("schema mapping template -> public") }));
+        assert!(plan
+            .migration_sql
+            .contains("nextval('\"public\".users_id_seq'::regclass)"));
+        assert!(plan
+            .migration_sql
+            .contains("CREATE INDEX users_id_idx ON \"public\".users"));
+        assert!(plan
+            .migration_sql
+            .contains("SELECT id FROM \"public\".users"));
+        assert!(
+            plan.migration_sql
+                .contains("CREATE OR REPLACE FUNCTION \"public\".refresh_users"),
+            "{}",
+            plan.migration_sql
+        );
+        assert!(plan
+            .migration_sql
+            .contains("CREATE SEQUENCE \"public\".users_id_seq"));
+    }
+
+    #[test]
+    fn cross_schema_mapping_rejects_non_postgres_snapshots() {
+        let mut source = snapshot("desired", vec![column("id", "int", false)]);
+        let mut target = snapshot("actual", vec![column("id", "int", false)]);
+        source.driver = "mysql".to_string();
+        target.driver = "mysql".to_string();
+        source.schema_name = "template".to_string();
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
 
         let error = compare_schema_snapshots(&source, &target, 2).unwrap_err();
 
-        assert!(error.to_string().contains("explicit schema mapping"));
+        assert!(error
+            .to_string()
+            .contains("currently supported only for native PostgreSQL"));
+    }
+
+    #[test]
+    fn postgres_cross_schema_foreign_key_uses_the_target_schema_for_ddl_and_preflight() {
+        let foreign_key = ConstraintInfo {
+            referenced_schema: Some("template".to_string()),
+            referenced_table: Some("accounts".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            ..constraint("users_account_fk", "FOREIGN KEY", &["account_id"])
+        };
+
+        let ddl = add_constraint_sql(
+            DatabaseKind::Postgres,
+            "template",
+            "public",
+            "users",
+            &foreign_key,
+        )
+        .expect("foreign key DDL");
+        let preflight = foreign_key_preflight_sql(
+            DatabaseKind::Postgres,
+            "template",
+            "public",
+            "users",
+            &foreign_key,
+        )
+        .expect("foreign key preflight");
+
+        assert!(ddl.contains("REFERENCES \"public\".\"accounts\""));
+        assert!(preflight.contains("FROM \"public\".\"accounts\" AS parent"));
     }
 
     #[test]
