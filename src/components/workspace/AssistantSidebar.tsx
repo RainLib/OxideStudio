@@ -15,6 +15,11 @@ import {
   DEFAULT_ASSISTANT_CONTEXT_SETTINGS,
   type AssistantContextSettings,
 } from "@/ai/assistant/contextPreview";
+import {
+  appendAssistantDatabaseTableContext,
+  mergeAssistantDatabaseTableMentions,
+  type AssistantDatabaseTableMention,
+} from "@/ai/assistant/databaseTableContext";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AssistantHeader } from "./assistant/AssistantHeader";
 import {
@@ -297,6 +302,9 @@ function AgentHostAssistantSidebar() {
   ]);
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
+  const [databaseMentions, setDatabaseMentions] = useState<
+    AssistantDatabaseTableMention[]
+  >([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isAddingAttachment, setIsAddingAttachment] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -449,8 +457,12 @@ function AgentHostAssistantSidebar() {
     cliSetupForCurrentIdentity?.version,
   );
   const modelPrompt = useMemo(
-    () => promptWithTextAttachments(message, attachments),
-    [attachments, message],
+    () =>
+      promptWithTextAttachments(
+        appendAssistantDatabaseTableContext(message, databaseMentions),
+        attachments,
+      ),
+    [attachments, databaseMentions, message],
   );
   const contextPreview = useMemo(
     () =>
@@ -1190,8 +1202,12 @@ function AgentHostAssistantSidebar() {
     if (!prompt || session.isBusy || assistantSubmissionBlockReason) return;
     const mode = resolveAssistantMode(assistantMode, prompt);
     const submittedAttachments = attachments;
+    const submittedDatabaseMentions = databaseMentions;
     const submittedPrompt = promptWithTextAttachments(
-      prompt,
+      appendAssistantDatabaseTableContext(
+        prompt,
+        submittedDatabaseMentions,
+      ),
       submittedAttachments,
     );
     if (submittedPrompt.length > 200_000) {
@@ -1216,6 +1232,7 @@ function AgentHostAssistantSidebar() {
     const binding = scopedContext.workspaceContext!;
     setMessage("");
     setAttachments([]);
+    setDatabaseMentions([]);
     setAttachmentError(null);
     autoFollowConversationRef.current = true;
     await session.startTurn({
@@ -1316,6 +1333,23 @@ function AgentHostAssistantSidebar() {
   };
   const handleUseComposeRequest = () => {
     if (!composeRequest) return;
+    if (composeRequest.source === "database-tables") {
+      setDatabaseMentions((current) =>
+        composeRequest.replaceExisting
+          ? composeRequest.tableMentions
+          : mergeAssistantDatabaseTableMentions(
+              current,
+              composeRequest.tableMentions,
+            ),
+      );
+      consumeComposeRequest(composeRequest.id);
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLTextAreaElement>('[data-assistant-prompt="true"]')
+          ?.focus();
+      });
+      return;
+    }
     const targetExists = useTabStore
       .getState()
       .tabs.some((tab) => tab.id === composeRequest.tabId);
@@ -1348,7 +1382,8 @@ function AgentHostAssistantSidebar() {
   };
 
   useEffect(() => {
-    if (!composeRequest || session.isBusy || message.trim()) return;
+    if (!composeRequest || session.isBusy) return;
+    if (composeRequest.source === "query-error" && message.trim()) return;
     handleUseComposeRequest();
   }, [composeRequest, message, session.isBusy]);
 
@@ -1616,7 +1651,7 @@ function AgentHostAssistantSidebar() {
             onUndo={undoPendingFileChange}
           />
 
-          {composeRequest && message.trim() && (
+          {composeRequest?.source === "query-error" && message.trim() && (
             <div
               className="flex items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2.5 py-1.5 text-[10px]"
               data-assistant-compose-suggestion
@@ -1755,12 +1790,24 @@ function AgentHostAssistantSidebar() {
             submissionBlockReason={assistantSubmissionBlockReason}
             modeOptions={assistantProviderDefinition(aiProvider).modeOptions}
             attachments={attachments}
+            databaseMentions={databaseMentions}
             attachmentError={attachmentError}
             isAddingAttachment={isAddingAttachment}
             onAddAttachment={() => void handleAddAttachment()}
             onRemoveAttachment={(attachmentId) =>
               setAttachments((current) =>
                 current.filter((attachment) => attachment.id !== attachmentId),
+              )
+            }
+            onRemoveDatabaseMention={(mention) =>
+              setDatabaseMentions((current) =>
+                current.filter(
+                  (candidate) =>
+                    candidate.connectionId !== mention.connectionId ||
+                    candidate.database !== mention.database ||
+                    candidate.schema !== mention.schema ||
+                    candidate.table !== mention.table,
+                ),
               )
             }
           />

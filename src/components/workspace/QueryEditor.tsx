@@ -119,6 +119,14 @@ import {
 import { documentTextRevision } from "@/lib/documentRevision";
 import { applyEditorTextPatch } from "@/lib/editorPatch";
 import {
+  explorerTableReferenceInsertText,
+  OXIDE_TABLE_REFERENCE_DRAG_END_EVENT,
+  OXIDE_TABLE_REFERENCE_DROP_EVENT,
+  OXIDE_TABLE_REFERENCE_HOVER_EVENT,
+  type ExplorerTableReferenceDropDetail,
+  type ExplorerTableReferenceHoverDetail,
+} from "@/features/query-editor/model/explorerTableReferenceDrop";
+import {
   analyzePatchExplainPlan,
   completePatchSqlDocuments,
   comparePatchExplainPlans,
@@ -440,6 +448,8 @@ export function QueryEditor({
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const [mountedEditor, setMountedEditor] = useState<any>(null);
+  const tableDropTargetRef = useRef<HTMLDivElement | null>(null);
+  const tableDropCaretRef = useRef<HTMLSpanElement | null>(null);
   const activeTabIdRef = useRef<string | null>(effectiveTabId);
   const vimControllerRef = useRef<VimModeController | null>(null);
   const vimModeRef = useRef("NORMAL");
@@ -3736,6 +3746,101 @@ export function QueryEditor({
     monaco,
     ownerKey: effectiveTabId ? `${effectiveTabId}\u0000${documentUri}` : "",
   });
+  const canAcceptExplorerTableDrop = Boolean(
+    activeTab &&
+      mountedEditor &&
+      capabilities.supportsSqlQuery &&
+      !isProjectFilePreview &&
+      !activeTab.agentFileDiffPreview &&
+      !activeTab.gitFileDiffPreview,
+  );
+  useEffect(() => {
+    const hideCaret = () => {
+      if (tableDropCaretRef.current) {
+        tableDropCaretRef.current.style.display = "none";
+      }
+    };
+    if (!canAcceptExplorerTableDrop || !mountedEditor) {
+      hideCaret();
+      return;
+    }
+    const ownsPoint = (clientX: number, clientY: number) => {
+      const target = document.elementFromPoint(clientX, clientY);
+      return Boolean(target && tableDropTargetRef.current?.contains(target));
+    };
+    const editorPositionAt = (clientX: number, clientY: number) =>
+      mountedEditor.getTargetAtClientPoint?.(clientX, clientY)?.position ??
+      null;
+    const onHover = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<ExplorerTableReferenceHoverDetail>;
+      if (!ownsPoint(event.detail.clientX, event.detail.clientY)) {
+        hideCaret();
+        return;
+      }
+      const position = editorPositionAt(
+        event.detail.clientX,
+        event.detail.clientY,
+      );
+      const visible = position
+        ? mountedEditor.getScrolledVisiblePosition?.(position)
+        : null;
+      const editorNode = mountedEditor.getDomNode?.() as HTMLElement | null;
+      const targetNode = tableDropTargetRef.current;
+      const caret = tableDropCaretRef.current;
+      if (!visible || !editorNode || !targetNode || !caret) {
+        hideCaret();
+        return;
+      }
+      const editorRect = editorNode.getBoundingClientRect();
+      const targetRect = targetNode.getBoundingClientRect();
+      caret.style.display = "block";
+      caret.style.left = `${editorRect.left - targetRect.left + visible.left}px`;
+      caret.style.top = `${editorRect.top - targetRect.top + visible.top}px`;
+      caret.style.height = `${visible.height}px`;
+    };
+    const onDrop = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<ExplorerTableReferenceDropDetail>;
+      hideCaret();
+      if (!ownsPoint(event.detail.clientX, event.detail.clientY)) return;
+      const position =
+        editorPositionAt(event.detail.clientX, event.detail.clientY) ??
+        mountedEditor.getPosition?.();
+      if (!position) return;
+      const text = explorerTableReferenceInsertText(event.detail.payload);
+      if (!text) return;
+      mountedEditor.pushUndoStop?.();
+      mountedEditor.executeEdits("oxide.explorer-table-drop", [
+        {
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+          text,
+          forceMoveMarkers: true,
+        },
+      ]);
+      mountedEditor.pushUndoStop?.();
+      mountedEditor.setPosition({
+        lineNumber: position.lineNumber,
+        column: position.column + text.length,
+      });
+      mountedEditor.focus();
+    };
+    const onDragEnd = () => hideCaret();
+    window.addEventListener(OXIDE_TABLE_REFERENCE_HOVER_EVENT, onHover);
+    window.addEventListener(OXIDE_TABLE_REFERENCE_DROP_EVENT, onDrop);
+    window.addEventListener(OXIDE_TABLE_REFERENCE_DRAG_END_EVENT, onDragEnd);
+    return () => {
+      window.removeEventListener(OXIDE_TABLE_REFERENCE_HOVER_EVENT, onHover);
+      window.removeEventListener(OXIDE_TABLE_REFERENCE_DROP_EVENT, onDrop);
+      window.removeEventListener(
+        OXIDE_TABLE_REFERENCE_DRAG_END_EVENT,
+        onDragEnd,
+      );
+    };
+  }, [canAcceptExplorerTableDrop, mountedEditor]);
   if (!activeTab) return null;
 
   return (
@@ -4028,7 +4133,11 @@ export function QueryEditor({
       )}
 
       {/* Editor */}
-      <div className="flex-1 min-h-0">
+      <div
+        ref={tableDropTargetRef}
+        className="relative flex-1 min-h-0"
+        data-sql-table-drop-target={canAcceptExplorerTableDrop || undefined}
+      >
         {activeTab.agentFileDiffPreview ? (
           <DiffEditor
             height="100%"
@@ -4099,6 +4208,12 @@ export function QueryEditor({
             options={editorOptions}
           />
         )}
+        <span
+          ref={tableDropCaretRef}
+          data-sql-table-drop-caret="true"
+          className="pointer-events-none absolute z-20 hidden w-0.5 rounded-full bg-[hsl(var(--wb-accent))] shadow-[0_0_4px_hsl(var(--wb-accent)/0.7)]"
+          aria-hidden="true"
+        />
       </div>
       {isActivePane &&
         !isProjectFilePreview &&

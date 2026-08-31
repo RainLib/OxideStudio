@@ -36,6 +36,7 @@ import {
   ShieldCheck,
   Wrench,
   ArchiveRestore,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,6 +59,10 @@ import { useTabStore } from "@/store/useTabStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import {
+  APP_EVENT_OPEN_ASSISTANT,
+  useAssistantComposerStore,
+} from "@/store/useAssistantComposerStore";
 import {
   databaseObjectNavigationKey,
   databaseSchemaNavigationKey,
@@ -167,6 +172,11 @@ import {
   type TableBatchFailureDetail,
   type TableBatchSelection,
 } from "@/features/database-explorer/model/tableBatchSelection";
+import {
+  createExplorerTableReferencePayload,
+  explorerTableReferenceDragLabel,
+} from "@/features/query-editor/model/explorerTableReferenceDrop";
+import { beginExplorerTableReferenceDrag } from "@/features/query-editor/model/explorerTableReferenceDrag";
 import {
   explorerActivationLabel,
   shouldActivateExplorerObject,
@@ -600,6 +610,7 @@ export function SchemaSidebar() {
     string[]
   >([]);
   const [expandedTableKeys, setExpandedTableKeys] = useState<string[]>([]);
+  const suppressTableReferenceClickRef = useRef(false);
 
   // Programmatic activation (startup cache, Search Everywhere, AI navigation)
   // should expose the same tree state as a direct row click. Paint cached
@@ -3377,6 +3388,73 @@ export function SchemaSidebar() {
       schemaNodeState?.status === "loading" ||
       (isCurrentSchema && isLoading && schemaObjects.tables.length === 0);
 
+    const addTablesToAssistant = async (tableNames: readonly string[]) => {
+      if (!objectConnection || tableNames.length === 0) return;
+      const targetDatabase =
+        navigationDatabaseName || objectConnection.database || undefined;
+      const tabStateBefore = useTabStore.getState();
+      const activeTabBefore = tabStateBefore.tabs.find(
+        (tab) => tab.id === tabStateBefore.activeTabId,
+      );
+      const matchesTargetContext = (tab: typeof activeTabBefore) =>
+        Boolean(
+          tab &&
+            tab.connectionId === connectionId &&
+            (tab.databaseName || objectConnection.database || "") ===
+              (targetDatabase || "") &&
+            (tab.schemaName || "") === schema,
+        );
+      const contextChanged = !matchesTargetContext(activeTabBefore);
+      const connectionError = await setActiveConnection(connectionId);
+      if (connectionError) {
+        setNamespaceError(connectionError);
+        return;
+      }
+      if (schema !== useSchemaStore.getState().currentSchema) {
+        await setCurrentSchema(schema);
+      }
+      const tabState = useTabStore.getState();
+      if (!matchesTargetContext(activeTabBefore)) {
+        const contextTab = tabState.tabs.find(
+          (tab) => tab.type === "query" && matchesTargetContext(tab),
+        );
+        if (contextTab) {
+          tabState.setActiveTab(contextTab.id);
+        } else {
+          tabState.createTab("query", "New Query", "", {
+            connectionId,
+            databaseName: targetDatabase,
+            schemaName: schema,
+          });
+        }
+      }
+      const request = useAssistantComposerStore
+        .getState()
+        .queueDatabaseTables(
+          tableNames.map((table) => ({
+            connectionId,
+            connectionName: objectConnection.name,
+            database: targetDatabase,
+            schema,
+            table,
+          })),
+          { replaceExisting: contextChanged },
+        );
+      if (!request) return;
+      setNamespaceError(null);
+      window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_ASSISTANT));
+    };
+
+    const tableReferencePayload = (tableNames: readonly string[]) =>
+      createExplorerTableReferencePayload({
+        connectionId,
+        database:
+          navigationDatabaseName || objectConnection?.database || undefined,
+        schema,
+        tables: tableNames,
+        identifierQuote: activeCapabilities.identifierQuote,
+      });
+
     const routinesKey = objectGroupKey(
       connectionId,
       driver,
@@ -4340,6 +4418,21 @@ export function SchemaSidebar() {
                     !objectConnection ||
                     tableBatchAction?.running
                   }
+                  title="Add selected tables to Assistant context"
+                  onClick={() =>
+                    void addTablesToAssistant(selectedTableBatchNames)
+                  }
+                >
+                  AI
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    !objectConnection ||
+                    tableBatchAction?.running
+                  }
                   title="Load the selected tables into one DDL viewer"
                   onClick={() => {
                     if (!objectConnection) return;
@@ -4616,6 +4709,11 @@ export function SchemaSidebar() {
                   const canImportRelationRows =
                     !isReadOnlyRelation &&
                     relationCapabilities.supportsTableRowMutation;
+                  const contextualTableNames =
+                    selectedTableBatchSet.has(table.name) &&
+                    selectedTableBatchNames.length > 0
+                      ? selectedTableBatchNames
+                      : [table.name];
 
                   return (
                     <div key={`${schema}:${table.name}`}>
@@ -4648,12 +4746,36 @@ export function SchemaSidebar() {
                                 : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                             )}
                             onClick={(event) => {
+                              if (suppressTableReferenceClickRef.current) {
+                                suppressTableReferenceClickRef.current = false;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                return;
+                              }
                               if (isTableBatchSelectionActive) {
                                 if (tableBatchAction?.running) return;
                                 setTableBatchSelection({
                                   scopeKey: groupKey,
                                   ...toggleTableBatchSelection(
                                     scopedTableBatchSelection,
+                                    table.name,
+                                    tableRelationNames,
+                                    { range: event.shiftKey },
+                                  ),
+                                });
+                                return;
+                              }
+                              if (
+                                event.ctrlKey ||
+                                event.metaKey ||
+                                event.shiftKey
+                              ) {
+                                event.preventDefault();
+                                setTableBatchAction(null);
+                                setTableBatchSelection({
+                                  scopeKey: groupKey,
+                                  ...toggleTableBatchSelection(
+                                    { names: [], anchor: null },
                                     table.name,
                                     tableRelationNames,
                                     { range: event.shiftKey },
@@ -4686,12 +4808,43 @@ export function SchemaSidebar() {
                                 void handleTableDoubleClick(table, schema);
                               }
                             }}
+                            onMouseDown={(event) => {
+                              const target = event.target as HTMLElement;
+                              if (target.closest("button,[role='checkbox']")) {
+                                return;
+                              }
+                              const draggedTables =
+                                isTableBatchSelectionActive &&
+                                selectedTableBatchSet.has(table.name)
+                                  ? selectedTableBatchNames
+                                  : [table.name];
+                              const payload =
+                                tableReferencePayload(draggedTables);
+                              if (!payload) return;
+                              beginExplorerTableReferenceDrag(
+                                event.nativeEvent,
+                                {
+                                  payload,
+                                  label: explorerTableReferenceDragLabel(payload),
+                                  onFinish: (dragged) => {
+                                    if (dragged) {
+                                      suppressTableReferenceClickRef.current =
+                                        true;
+                                      window.setTimeout(() => {
+                                        suppressTableReferenceClickRef.current =
+                                          false;
+                                      }, 0);
+                                    }
+                                  },
+                                },
+                              );
+                            }}
                             onKeyDown={(event) => {
                               if (event.key !== "Enter" || isTableBatchSelectionActive) return;
                               event.preventDefault();
                               void handleTableDoubleClick(table, schema);
                             }}
-                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\n${explorerActivationLabel(explorerActivationMode)} to open data · Right-click for actions · Expand for columns and indexes`}
+                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\n${explorerActivationLabel(explorerActivationMode)} to open data · Ctrl/Cmd-click to select · Drag into a SQL editor · Right-click for actions`}
                           >
                             {isTableBatchSelectionActive && (
                               <Checkbox
@@ -4811,6 +4964,16 @@ export function SchemaSidebar() {
                           >
                             <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
                             Schema Snapshots / Diff...
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={!objectConnection}
+                            onClick={() =>
+                              void addTablesToAssistant(contextualTableNames)
+                            }
+                          >
+                            <Sparkles className="mr-2 h-3.5 w-3.5" />
+                            Add {contextualTableNames.length > 1 ? "tables" : "table"} to AI context
                           </ContextMenuItem>
                           <ContextMenuSeparator
                             className={menuSeparatorClass}

@@ -1591,3 +1591,21 @@ explicit deferred validation task rather than an implicit release check.
 - Run PostgreSQL fixtures that cover empty schemas, generated/identity columns, foreign-key ordering, large relations, cancellation during metadata and data pages, and restore into a clean target.
 - Validate the exported structure/data against `pg_dump`/DBX for foreign-key ordering, sequences, views, materialized views, routines, extensions, grants, comments, ownership, RLS policies, partitioning, and privilege-sensitive objects. These are deliberately omitted by the initial relation-only path.
 - Add a signed, product-owned backup contract before enabling this command for an external driver or a non-PostgreSQL built-in dialect.
+
+## Explorer table-reference drag and Assistant context
+
+- In packaged Windows WebView2, macOS WKWebView and Linux WebKitGTK builds,
+  drag one table and a Ctrl/Cmd/Shift multi-selection into Monaco at the start,
+  middle and end of a document. Confirm the native data-transfer custom MIME
+  survives the WebView boundary, the exact mouse target is used, undo is one
+  operation, and no click/double-click activation fires after a completed drag.
+- Repeat with PostgreSQL double quotes, MySQL/Hive backticks and SQL Server
+  brackets, including spaces, reserved words, closing delimiters and Unicode.
+  Cross-connection drops must remain text-only and must never switch the query
+  execution target or carry a connection URL/credential.
+- Add one and many selected tables to Assistant while a draft exists, while the
+  shared panel is hidden, and before choosing/configuring a provider. Verify
+  chip removal, the 200-reference/64-KiB bounds, connection/schema activation, visible
+  user-message isolation and unchanged Chat/Plan/Agent permission manifests.
+  This phase adds pure payload/store tests, full Assistant UI coverage and a
+  production frontend build; it opens no live database.

@@ -1,21 +1,41 @@
 import { create } from "zustand";
 import type { QueryExecutionErrorDetail } from "@/lib/queryErrorPresentation";
+import {
+  mergeAssistantDatabaseTableMentions,
+  normalizeAssistantDatabaseTableMentions,
+  type AssistantDatabaseTableMention,
+} from "@/ai/assistant/databaseTableContext";
 
 export const APP_EVENT_OPEN_ASSISTANT = "oxide:open-assistant";
 
-export interface AssistantComposeRequest {
+export interface AssistantQueryErrorComposeRequest {
   id: string;
   tabId: string;
   prompt: string;
   source: "query-error";
 }
 
+export interface AssistantDatabaseTablesComposeRequest {
+  id: string;
+  source: "database-tables";
+  tableMentions: AssistantDatabaseTableMention[];
+  replaceExisting: boolean;
+}
+
+export type AssistantComposeRequest =
+  | AssistantQueryErrorComposeRequest
+  | AssistantDatabaseTablesComposeRequest;
+
 interface AssistantComposerState {
   request: AssistantComposeRequest | null;
   queueQueryErrorFix: (
     tabId: string,
     detail: QueryExecutionErrorDetail,
-  ) => AssistantComposeRequest;
+  ) => AssistantQueryErrorComposeRequest;
+  queueDatabaseTables: (
+    mentions: readonly AssistantDatabaseTableMention[],
+    options?: { replaceExisting?: boolean },
+  ) => AssistantDatabaseTablesComposeRequest | null;
   consumeRequest: (requestId: string) => void;
 }
 
@@ -53,7 +73,7 @@ export const useAssistantComposerStore = create<AssistantComposerState>(
   (set) => ({
     request: null,
     queueQueryErrorFix: (tabId, detail) => {
-      const request: AssistantComposeRequest = {
+      const request: AssistantQueryErrorComposeRequest = {
         id: `assistant-compose:${globalThis.crypto?.randomUUID?.() || Date.now().toString(36)}`,
         tabId,
         prompt: queryErrorFixPrompt(detail),
@@ -61,6 +81,29 @@ export const useAssistantComposerStore = create<AssistantComposerState>(
       };
       set({ request });
       return request;
+    },
+    queueDatabaseTables: (mentions, options) => {
+      let queued: AssistantDatabaseTablesComposeRequest | null = null;
+      set((state) => {
+        const normalized = normalizeAssistantDatabaseTableMentions(mentions);
+        if (normalized.length === 0) return state;
+        const tableMentions =
+          state.request?.source === "database-tables" &&
+          !options?.replaceExisting
+            ? mergeAssistantDatabaseTableMentions(
+                state.request.tableMentions,
+                normalized,
+              )
+            : normalized;
+        queued = {
+          id: `assistant-compose:${globalThis.crypto?.randomUUID?.() || Date.now().toString(36)}`,
+          source: "database-tables",
+          tableMentions,
+          replaceExisting: options?.replaceExisting === true,
+        };
+        return { request: queued };
+      });
+      return queued;
     },
     consumeRequest: (requestId) =>
       set((state) =>
