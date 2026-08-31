@@ -13,6 +13,7 @@
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
+| `ba11e4be8` | Editor settings 的实时预览固定在设置滚动区上方，并修复异步预览生命周期 | 已按 Oxide 的 Monaco 架构对齐且避免额外编辑器实例：Editor 设置页顶部新增固定实时 SQL 预览，设置列表单独滚动；预览同步反映字号、Tab、换行模式、Minimap、Vim 相对行号以及 keyword/function case、FROM/逻辑运算符布局。预览由纯数据函数生成，不注册 Monaco model/provider、不改变全局 Monaco theme，也不接触项目或数据库。组件与 Dialog 结构测试覆盖布局、大小写、换行、Minimap、字号和相对行号。 |
 | `42c0dc7f8` | API 型 AI Provider 支持自定义 HTTP Header | 已对齐并强化凭据边界：OpenAI Compatible Assistant 与行内补全分别提供紧凑的 gateway/tenant Header 编辑器；`Authorization` 可在默认 Bearer 之后覆盖，`Host`、`Content-Length`、`Content-Type`、`Connection`、`Transfer-Encoding`、`Proxy-Authorization` 等 framing/代理头由 Host 保留。名称、值、大小、条数与大小写重复均由前后端校验。Header 值不进入 Zustand/localStorage、项目、日志、Agent sidecar 或 checkpoint，只在显式打开设置时读取，并按 `assistant`/`inline` + destination 存入当前用户私有 Rust credential file。Agent Host 与 inline command 在发送前重新装载；renderer 即使注入 `customHeaders` 也会被反序列化边界丢弃。API Key 同步升级为 Assistant/Inline 独立作用域，旧 URL-only credential 可读取迁移，显式删除以空私有 marker 阻止旧凭据回退。 |
 | `40a806a24` | 分页表格排序必须由数据库执行并从第一页重载 | Oxide 已有等价且边界更清晰：表 Tab 的 header/context sort 永远调用 `loadTablePage(tabId, 0, ..., sortOverride)`，Host 生成带结构化 `TableSort` 的分页查询；后续翻页从 tab `gridState` 继续携带同一 sort。只有非表的已物化查询结果使用本地稳定排序，因此不会把“当前一页重排”伪装成全表排序。 |
 | `662037295` | Tab 菜单支持关闭左侧 Tabs | 已有等价能力：`TabBar` 根据可见顺序计算 `canCloseLeft`，菜单提供 Close to the Left；Store 保留 pinned tabs、对所有将关闭的 dirty tab 统一确认、释放 document cursor，并且不改变仍有效的 active tab。Close Right/Others/All 共享相同约束。 |

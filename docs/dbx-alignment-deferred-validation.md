@@ -1,5 +1,17 @@
 # DBX alignment: deferred validation queue
 
+## Phase 139 -- pinned Editor settings live preview
+
+- Open Settings → Editor at compact and narrow window sizes. Confirm the SQL
+  preview stays below the section header while only the settings list scrolls.
+- Change font size, tab size, wrap mode, minimap, Vim relative line numbers and
+  SQL formatting selections rapidly. Confirm the preview updates without
+  moving focus, changing an open query editor theme, or creating a second
+  Monaco model/provider.
+- Repeat with light/dark/system appearance and reduced motion. Automated tests
+  cover the pure preview model and pinned DOM structure; packaged WebView visual
+  inspection remains part of the final UI verification pass.
+
 ## Phase 138 -- ArgoDB signed package and Hive-baseline routing
 
 - The reference catalogue now includes `argo` as a distinct DBX product and

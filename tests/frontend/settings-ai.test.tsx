@@ -169,6 +169,24 @@ describe("AI settings", () => {
     expect(document.body.textContent).toContain("save failed");
   });
 
+  it("pins the editor live preview above the scrolling settings body", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <ThemeContext.Provider value={themeContext}>
+          <SettingsDialog open initialSection="editor" onOpenChange={vi.fn()} />
+        </ThemeContext.Provider>,
+      );
+      await flushAsyncWork();
+    });
+
+    const preview = document.querySelector("[data-editor-settings-preview]");
+    const scrollBody = document.querySelector("[data-settings-scroll-body]");
+    expect(preview).toBeTruthy();
+    expect(scrollBody).toBeTruthy();
+    expect(preview?.parentElement?.nextElementSibling).toBe(scrollBody);
+  });
+
   it("keeps assistant gateway headers in the Rust credential service", async () => {
     await act(async () => {
       root = createRoot(container);

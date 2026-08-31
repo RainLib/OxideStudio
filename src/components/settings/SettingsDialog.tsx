@@ -62,6 +62,7 @@ import {
 import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { McpHttpSettings } from "@/components/settings/McpHttpSettings";
+import { EditorSettingsPreview } from "@/components/settings/EditorSettingsPreview";
 import {
   REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
@@ -739,7 +740,16 @@ export function SettingsDialog({
               </div>
             )}
 
-            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            {activeSection === "editor" && filterText.trim().length === 0 && (
+              <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-5 py-3">
+                <EditorSettingsPreview editor={appSettings.editor} />
+              </div>
+            )}
+
+            <div
+              className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-4"
+              data-settings-scroll-body
+            >
               {activeSection === "appearance" && (
                 <AppearanceSettings
                   mode={mode}
