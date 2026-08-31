@@ -956,6 +956,8 @@ export interface TableDataTransferRequest {
   maxRows?: number;
   batchSize?: number;
   reseedIdentity?: boolean;
+  /** Defaults to true; false is Host-gated to reviewed GaussDB/openGauss packages. */
+  quoteTargetColumnNames?: boolean;
 }
 
 /** A read-only role-to-member relationship returned by the connected server. */
@@ -1087,6 +1089,8 @@ export interface TableDataTransferBatchPlanRequest {
   maxRows?: number;
   batchSize?: number;
   reseedIdentity?: boolean;
+  /** Defaults to true; false is Host-gated to reviewed GaussDB/openGauss packages. */
+  quoteTargetColumnNames?: boolean;
 }
 
 export type TableDataTransferObjectKind =

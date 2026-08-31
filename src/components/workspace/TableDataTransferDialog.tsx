@@ -27,6 +27,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { resolveInitialTransferTableSelection } from "@/features/database-explorer/model/tableTransferSelection";
+import { canConfigureUnquotedTransferTargetColumns } from "@/lib/tableDataTransferPolicy";
 import { ensureConnectionReady, type ConnectionConfig } from "@/store/useConnectionStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
 import type {
@@ -256,6 +257,7 @@ export function TableDataTransferDialog({
   const [maxRows, setMaxRows] = useState("1000");
   const [batchSize, setBatchSize] = useState("250");
   const [reseedIdentity, setReseedIdentity] = useState(false);
+  const [quoteTargetColumnNames, setQuoteTargetColumnNames] = useState(true);
   const [schemas, setSchemas] = useState<string[]>([]);
   const [databases, setDatabases] = useState<string[]>([]);
   const [targetCapabilities, setTargetCapabilities] =
@@ -339,6 +341,11 @@ export function TableDataTransferDialog({
   const effectiveSource = useMemo(
     () => ({ ...source, schema: activeSourceSchema, table: selectedSourceTable }),
     [activeSourceSchema, selectedSourceTable, source],
+  );
+  const canConfigureTargetColumnQuoting = canConfigureUnquotedTransferTargetColumns(
+    targetConnection?.driver,
+    targetDistribution,
+    targetCapabilities,
   );
   const selectedTransferObjects = useMemo(
     () => sourceTransferObjects.filter((object) =>
@@ -500,6 +507,7 @@ export function TableDataTransferDialog({
       maxRows: Number.parseInt(maxRows, 10) || undefined,
       batchSize: Number.parseInt(batchSize, 10) || undefined,
       reseedIdentity,
+      quoteTargetColumnNames,
     };
   }, [
     batchSize,
@@ -507,6 +515,7 @@ export function TableDataTransferDialog({
     mode,
     projectId,
     reseedIdentity,
+    quoteTargetColumnNames,
     effectiveSource,
     transferId,
     targetConnection,
@@ -539,6 +548,7 @@ export function TableDataTransferDialog({
         maxRows: Number.parseInt(maxRows, 10) || undefined,
         batchSize: Number.parseInt(batchSize, 10) || undefined,
         reseedIdentity,
+        quoteTargetColumnNames,
       },
     };
   }, [
@@ -546,6 +556,7 @@ export function TableDataTransferDialog({
     maxRows,
     mode,
     reseedIdentity,
+    quoteTargetColumnNames,
     projectId,
     selectedSourceTables,
     selectedTransferObjects,
@@ -624,6 +635,7 @@ export function TableDataTransferDialog({
     setTargetTableMode("existing");
     setMode("append");
     setReseedIdentity(false);
+    setQuoteTargetColumnNames(true);
     setSchemas([]);
     setDatabases([]);
     setTargetCapabilities(null);
@@ -1616,6 +1628,26 @@ export function TableDataTransferDialog({
                     <ShieldAlert size={13} className="mt-0.5 shrink-0 text-[hsl(var(--wb-warning))]" />
                     Replace deletes destination rows inside the reviewed transaction before copying. Check the preview carefully before confirming.
                   </p>
+                )}
+                {canConfigureTargetColumnQuoting && (
+                  <label className="flex items-start gap-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 text-[10px] leading-4">
+                    <Checkbox
+                      checked={quoteTargetColumnNames}
+                      onCheckedChange={(checked) => {
+                        setQuoteTargetColumnNames(checked === true);
+                        resetTransferReview();
+                      }}
+                      disabled={isSubmitting}
+                    />
+                    <span>
+                      Quote destination column names
+                      <span className="mt-0.5 block wb-muted">
+                        Disable only when the GaussDB/openGauss target expects
+                        unquoted identifiers to fold to lowercase. Reserved or
+                        unsafe names remain quoted by the Host.
+                      </span>
+                    </span>
+                  </label>
                 )}
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block space-y-1">

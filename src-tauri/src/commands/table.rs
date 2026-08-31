@@ -1086,6 +1086,12 @@ pub struct TableDataTransferRequest {
     /// unless explicitly reviewed and is bound into the transfer token.
     #[serde(default)]
     pub reseed_identity: bool,
+    /// Keep target column identifiers quoted by default. Disabling this is a
+    /// narrowly reviewed compatibility path for GaussDB/openGauss packages,
+    /// whose unquoted identifiers fold to lowercase. The Host revalidates the
+    /// connected package before honoring `false`.
+    #[serde(default = "default_true")]
+    pub quote_target_column_names: bool,
 }
 
 /// A bounded, dependency-aware table selection. Unlike the single-table
@@ -1114,6 +1120,8 @@ pub struct TableDataTransferBatchPlanRequest {
     pub batch_size: Option<u32>,
     #[serde(default)]
     pub reseed_identity: bool,
+    #[serde(default = "default_true")]
+    pub quote_target_column_names: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1291,6 +1299,10 @@ pub struct TableDataTransferObjectReport {
 
 fn default_table_data_transfer_mode() -> TableDataTransferMode {
     TableDataTransferMode::Append
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1828,6 +1840,55 @@ async fn table_data_transfer_dialect(
             endpoint.driver.trim()
         )
     })
+}
+
+async fn resolve_transfer_target_column_quoting(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+    requested: bool,
+) -> Result<bool, String> {
+    if requested {
+        return Ok(true);
+    }
+
+    let driver = normalized_transfer_driver_id(&endpoint.driver);
+    if !matches!(driver.as_str(), "gaussdb" | "opengauss") {
+        return Err(
+            "Unquoted transfer target columns are available only for GaussDB/openGauss targets."
+                .to_string(),
+        );
+    }
+    let connected_driver = manager
+        .connection_driver_id(&endpoint.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "Unquoted transfer target columns require a live, identified driver package."
+                .to_string()
+        })?;
+    if connected_driver != driver {
+        return Err(
+            "The connected driver changed before the unquoted transfer plan was reviewed."
+                .to_string(),
+        );
+    }
+    let capabilities = manager
+        .package_capabilities(&endpoint.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "Unquoted transfer target columns require a signed external driver package.".to_string()
+        })?;
+    if !capabilities.supports_table_data_transfer
+        || capabilities.lsp_language_id.trim() != "postgres"
+    {
+        return Err(format!(
+            "{} does not provide the reviewed PostgreSQL-compatible transfer contract required for unquoted target columns.",
+            capabilities.display_name
+        ));
+    }
+
+    Ok(false)
 }
 
 /// Table DDL currently has host-owned, dialect-specific builders only. A
@@ -5755,12 +5816,150 @@ fn build_table_order_by(
     Ok((!order.is_empty()).then(|| order.join(", ")))
 }
 
+/// Render one target column under the reviewed transfer policy. Even when
+/// Gauss-compatible quoting is disabled, unsafe and reserved identifiers stay
+/// quoted so the option cannot turn metadata into executable SQL syntax.
+fn transfer_column_identifier(
+    kind: DatabaseKind,
+    identifier: &str,
+    quote_column_names: bool,
+) -> String {
+    let mut characters = identifier.chars();
+    let is_simple = characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        });
+    let normalized = identifier.to_ascii_lowercase();
+    let is_postgres_reserved = matches!(
+        normalized.as_str(),
+        "all"
+            | "analyse"
+            | "analyze"
+            | "and"
+            | "any"
+            | "array"
+            | "as"
+            | "asc"
+            | "asymmetric"
+            | "authorization"
+            | "binary"
+            | "both"
+            | "case"
+            | "cast"
+            | "check"
+            | "collate"
+            | "collation"
+            | "column"
+            | "concurrently"
+            | "constraint"
+            | "create"
+            | "cross"
+            | "current_catalog"
+            | "current_date"
+            | "current_role"
+            | "current_schema"
+            | "current_time"
+            | "current_timestamp"
+            | "current_user"
+            | "default"
+            | "deferrable"
+            | "desc"
+            | "distinct"
+            | "do"
+            | "else"
+            | "end"
+            | "except"
+            | "false"
+            | "fetch"
+            | "for"
+            | "foreign"
+            | "freeze"
+            | "from"
+            | "full"
+            | "grant"
+            | "group"
+            | "having"
+            | "ilike"
+            | "in"
+            | "initially"
+            | "inner"
+            | "intersect"
+            | "into"
+            | "is"
+            | "isnull"
+            | "join"
+            | "lateral"
+            | "leading"
+            | "left"
+            | "like"
+            | "limit"
+            | "localtime"
+            | "localtimestamp"
+            | "natural"
+            | "not"
+            | "notnull"
+            | "null"
+            | "offset"
+            | "on"
+            | "only"
+            | "or"
+            | "order"
+            | "outer"
+            | "overlaps"
+            | "placing"
+            | "primary"
+            | "references"
+            | "returning"
+            | "right"
+            | "select"
+            | "session_user"
+            | "similar"
+            | "some"
+            | "symmetric"
+            | "system_user"
+            | "table"
+            | "tablesample"
+            | "then"
+            | "to"
+            | "trailing"
+            | "true"
+            | "union"
+            | "unique"
+            | "user"
+            | "using"
+            | "variadic"
+            | "verbose"
+            | "when"
+            | "where"
+            | "window"
+            | "with"
+    );
+    if quote_column_names || kind != DatabaseKind::Postgres || !is_simple || is_postgres_reserved {
+        kind.quote_identifier(identifier)
+    } else {
+        identifier.to_string()
+    }
+}
+
 fn build_insert_mutation(
     kind: DatabaseKind,
     schema: &str,
     table: &str,
     columns: &BTreeMap<String, ColumnInfo>,
     values: &BTreeMap<String, Value>,
+) -> Result<(String, Vec<QueryParameter>), String> {
+    build_insert_mutation_with_column_quoting(kind, schema, table, columns, values, true)
+}
+
+fn build_insert_mutation_with_column_quoting(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    values: &BTreeMap<String, Value>,
+    quote_column_names: bool,
 ) -> Result<(String, Vec<QueryParameter>), String> {
     validate_insert_values(columns, values)?;
 
@@ -5779,7 +5978,11 @@ fn build_insert_mutation(
 
     for (column_name, value) in values {
         let column = writable_column_for(columns, column_name)?;
-        names.push(kind.quote_identifier(column_name));
+        names.push(transfer_column_identifier(
+            kind,
+            column_name,
+            quote_column_names,
+        ));
         placeholders.push(kind.parameter_placeholder(params.len() + 1, &column.data_type));
         params.push(query_parameter(column, value));
     }
@@ -5793,6 +5996,7 @@ fn build_insert_mutation(
     Ok((sql, params))
 }
 
+#[cfg(test)]
 fn build_upsert_mutation(
     kind: DatabaseKind,
     schema: &str,
@@ -5800,6 +6004,27 @@ fn build_upsert_mutation(
     columns: &BTreeMap<String, ColumnInfo>,
     values: &BTreeMap<String, Value>,
     key_columns: &[String],
+) -> Result<(String, Vec<QueryParameter>), String> {
+    build_upsert_mutation_with_column_quoting(
+        kind,
+        schema,
+        table,
+        columns,
+        values,
+        key_columns,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_upsert_mutation_with_column_quoting(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    values: &BTreeMap<String, Value>,
+    key_columns: &[String],
+    quote_column_names: bool,
 ) -> Result<(String, Vec<QueryParameter>), String> {
     if key_columns.is_empty() {
         return Err("Upsert requires a target primary key".to_string());
@@ -5812,7 +6037,14 @@ fn build_upsert_mutation(
         }
     }
 
-    let (insert, params) = build_insert_mutation(kind, schema, table, columns, values)?;
+    let (insert, params) = build_insert_mutation_with_column_quoting(
+        kind,
+        schema,
+        table,
+        columns,
+        values,
+        quote_column_names,
+    )?;
     let insert = insert.trim_end_matches(';');
     let mutable_columns = values
         .keys()
@@ -5827,7 +6059,7 @@ fn build_upsert_mutation(
         DatabaseKind::Postgres => {
             let conflict = key_columns
                 .iter()
-                .map(|column| kind.quote_identifier(column))
+                .map(|column| transfer_column_identifier(kind, column, quote_column_names))
                 .collect::<Vec<_>>()
                 .join(", ");
             if mutable_columns.is_empty() {
@@ -5836,7 +6068,8 @@ fn build_upsert_mutation(
                 let updates = mutable_columns
                     .iter()
                     .map(|column| {
-                        let identifier = kind.quote_identifier(column);
+                        let identifier =
+                            transfer_column_identifier(kind, column, quote_column_names);
                         format!("{identifier} = EXCLUDED.{identifier}")
                     })
                     .collect::<Vec<_>>()
@@ -5846,13 +6079,14 @@ fn build_upsert_mutation(
         }
         DatabaseKind::Mysql => {
             let updates = if mutable_columns.is_empty() {
-                let key = kind.quote_identifier(&key_columns[0]);
+                let key = transfer_column_identifier(kind, &key_columns[0], quote_column_names);
                 format!("{key} = VALUES({key})")
             } else {
                 mutable_columns
                     .iter()
                     .map(|column| {
-                        let identifier = kind.quote_identifier(column);
+                        let identifier =
+                            transfer_column_identifier(kind, column, quote_column_names);
                         format!("{identifier} = VALUES({identifier})")
                     })
                     .collect::<Vec<_>>()
@@ -6393,6 +6627,7 @@ async fn execute_target_parameterized_batch(
 struct ResolvedTableDataTransferPlan {
     source_kind: DatabaseKind,
     target_kind: DatabaseKind,
+    quote_target_column_names: bool,
     mapped_columns: Vec<TableDataTransferColumnMapping>,
     skipped_source_columns: Vec<String>,
     source_columns: BTreeMap<String, ColumnInfo>,
@@ -7049,6 +7284,7 @@ fn transfer_confirmation_token(
         "targetRowsToDelete": binding.target_rows_to_delete,
         "upsertKeyColumns": binding.upsert_key_columns,
         "reseedIdentity": request.reseed_identity,
+        "quoteTargetColumnNames": request.quote_target_column_names,
         "identityReseedPlans": binding.identity_reseed_plans,
     });
     let encoded = serde_json::to_vec(&binding).map_err(|error| error.to_string())?;
@@ -8192,6 +8428,12 @@ async fn resolve_table_data_transfer_plan(
     ensure_transfer_endpoint_driver_matches_connection(manager, &request.target).await?;
     let source_kind = table_data_transfer_dialect(manager, &request.source).await?;
     let target_kind = table_data_transfer_dialect(manager, &request.target).await?;
+    let quote_target_column_names = resolve_transfer_target_column_quoting(
+        manager,
+        &request.target,
+        request.quote_target_column_names,
+    )
+    .await?;
     if request.source.connection_id == request.target.connection_id
         && request.source.database == request.target.database
         && request.source.schema == request.target.schema
@@ -8344,6 +8586,12 @@ async fn resolve_table_data_transfer_plan(
             skipped_source_columns.join(", ")
         ));
     }
+    if !quote_target_column_names {
+        warnings.push(
+            "GaussDB/openGauss target column quoting is disabled. Safe identifiers are emitted unquoted and therefore fold according to the target server; reserved or unsafe names remain quoted."
+                .to_string(),
+        );
+    }
     warnings.extend(transfer_type_mapping_warnings(&mapped_columns));
     warnings.push(format!(
         "Each run is bounded to {max_rows} rows, writes batches of at most {batch_size} rows, and commits the target only after every batch succeeds."
@@ -8352,6 +8600,7 @@ async fn resolve_table_data_transfer_plan(
     Ok(ResolvedTableDataTransferPlan {
         source_kind,
         target_kind,
+        quote_target_column_names,
         mapped_columns,
         skipped_source_columns,
         source_columns: column_lookup(source_columns),
@@ -9449,6 +9698,7 @@ async fn resolve_table_data_transfer_batch_plan(
                 max_rows: request.max_rows,
                 batch_size: request.batch_size,
                 reseed_identity: request.reseed_identity,
+                quote_target_column_names: request.quote_target_column_names,
             };
             match resolve_table_data_transfer_plan(manager, &preflight_request).await {
                 Ok(table_plan) => {
@@ -9713,21 +9963,23 @@ async fn execute_resolved_table_data_transfer_in_transaction(
             .iter()
             .map(|row| {
                 let mutation = if request.mode == TableDataTransferMode::Upsert {
-                    build_upsert_mutation(
+                    build_upsert_mutation_with_column_quoting(
                         plan.target_kind,
                         &request.target.schema,
                         &request.target.table,
                         &plan.target_columns,
                         row,
                         &plan.upsert_key_columns,
+                        plan.quote_target_column_names,
                     )
                 } else {
-                    build_insert_mutation(
+                    build_insert_mutation_with_column_quoting(
                         plan.target_kind,
                         &request.target.schema,
                         &request.target.table,
                         &plan.target_columns,
                         row,
+                        plan.quote_target_column_names,
                     )
                 };
                 mutation.map(|(sql, params)| ParameterizedStatement { sql, params })
@@ -10082,6 +10334,7 @@ pub async fn execute_table_data_transfer_batch(
                 max_rows: request.plan.max_rows,
                 batch_size: request.plan.batch_size,
                 reseed_identity: request.plan.reseed_identity,
+                quote_target_column_names: request.plan.quote_target_column_names,
             };
             let table_plan = resolve_table_data_transfer_plan(&manager, &table_request).await?;
             let expected_digest = batch_plan
@@ -17329,26 +17582,27 @@ mod tests {
         build_create_view_statement, build_data_transfer_column_mapping,
         build_drop_table_column_statement, build_drop_table_constraint_statement,
         build_drop_table_index_statement, build_insert_mutation,
-        build_rename_table_column_statement, build_rename_table_index_statement,
-        build_sqlite_add_column_statements, build_sqlite_create_index_statement,
-        build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
-        build_sqlite_drop_index_statement, build_structured_filter_where,
-        build_table_data_compare_result, build_table_data_compare_sync_parameterized_statements,
+        build_insert_mutation_with_column_quoting, build_rename_table_column_statement,
+        build_rename_table_index_statement, build_sqlite_add_column_statements,
+        build_sqlite_create_index_statement, build_sqlite_create_table_statements,
+        build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
+        build_structured_filter_where, build_table_data_compare_result,
+        build_table_data_compare_sync_parameterized_statements,
         build_table_data_compare_sync_statements, build_table_data_transfer_object_plan,
         build_table_order_by, build_transfer_target_columns, build_update_mutation,
-        build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
-        csv_import_reader, csv_import_row_selected, csv_import_source_columns, csv_record_values,
-        data_compare_degradation_level, data_compare_key,
-        data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
-        data_compare_row_values, data_compare_sample_key_predicate,
-        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
-        ensure_sql_insert_conflict_policy, ensure_table_export_format,
-        ensure_transfer_endpoint_driver_matches_connection, execute_frozen_table_data_compare_sync,
-        execute_target_parameterized_batch, filter_sql_export_batch,
-        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
-        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
-        infer_csv_import_columns, infer_json_lines_import_columns,
+        build_upsert_mutation, build_upsert_mutation_with_column_quoting, canonical_import_columns,
+        column_lookup, csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
+        csv_import_source_columns, csv_record_values, data_compare_degradation_level,
+        data_compare_key, data_compare_key_columns_are_declared_unique,
+        data_compare_keyset_continuation, data_compare_row_values,
+        data_compare_sample_key_predicate, delete_table_data_transfer_target_for_overwrite,
+        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
+        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
+        execute_frozen_table_data_compare_sync, execute_target_parameterized_batch,
+        filter_sql_export_batch, finish_table_data_transfer_transaction,
+        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        import_string_inferred_type, infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
         json_import_rows_with_cancel, merge_data_compare_sample_keys,
         normalized_data_compare_threshold, normalized_table_data_transfer_objects,
@@ -17365,31 +17619,32 @@ mod tests {
         push_delimited_export_row, query_target, query_target_parameterized,
         read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
         resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
-        resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
-        select_database_sql_export_tables, skipped_table_data_compare_result,
-        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
-        table_data_compare_sync_metadata_digest, table_data_dialect,
+        resolve_transfer_target_column_quoting, resolve_transfer_upsert_key_columns,
+        reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
+        skipped_table_data_compare_result, sql_export_insert_batch_rows, sql_insert_statements,
+        summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
-        table_import_mapping_digest, table_import_replace_statement, transfer_confirmation_token,
-        transfer_plan_can_execute, transfer_target_column_type, transfer_target_confirmation_token,
-        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
-        validate_table_data_compare_sync_preview, validate_table_data_transfer_id,
-        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
-        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
-        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
-        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, FrozenTableDataCompareSyncPlan, ImportInferredType, RelationOperation,
-        SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareCancellationState,
-        TableDataCompareDegradationLevel, TableDataCompareDegradationThreshold,
-        TableDataCompareEndpoint, TableDataCompareResult, TableDataCompareSamplingStrategy,
-        TableDataCompareSyncPlanState, TableDataCompareSyncPreviewRequest,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConfirmationBinding, TableDataTransferConversion,
-        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
-        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
+        table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
+        transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
+        transfer_target_confirmation_token, transfer_type_mapping_assessment,
+        transfer_type_mapping_warnings, tsv_escape, validate_table_data_compare_sync_preview,
+        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
+        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
+        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
+        xlsx_import_rows_with_cancel, AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind,
+        AnalyticalTypePolicy, CreateTableColumn, FrozenTableDataCompareSyncPlan,
+        ImportInferredType, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataCompareCancellationState, TableDataCompareDegradationLevel,
+        TableDataCompareDegradationThreshold, TableDataCompareEndpoint, TableDataCompareResult,
+        TableDataCompareSamplingStrategy, TableDataCompareSyncPlanState,
+        TableDataCompareSyncPreviewRequest, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
+        TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
+        TableDataTransferObjectKind, TableDataTransferObjectReport,
         TableDataTransferObjectSelection, TableDataTransferPreview,
         TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
@@ -17431,6 +17686,8 @@ mod tests {
     struct PreviewTargetDriver;
 
     struct RestrictedExternalPostgresDriver;
+
+    struct ReviewedGaussTransferDriver;
 
     struct TransferTransactionDriver {
         events: Arc<Mutex<Vec<String>>>,
@@ -18978,6 +19235,7 @@ mod tests {
             max_rows: Some(500),
             batch_size: Some(100),
             reseed_identity: false,
+            quote_target_column_names: true,
         };
         let mappings =
             build_data_transfer_column_mapping(&[target_column("id")], &[target_column("id")])
@@ -19032,6 +19290,12 @@ mod tests {
             token,
             confirmation_token(&request, Some(5), None, &[], &[]).unwrap()
         );
+        changed = request.clone();
+        changed.quote_target_column_names = false;
+        assert_ne!(
+            token,
+            confirmation_token(&changed, Some(4), None, &[], &[]).unwrap()
+        );
 
         let generator = TableDataTransferIdentityReseedPlan {
             column: "id".to_string(),
@@ -19047,6 +19311,39 @@ mod tests {
             token,
             confirmation_token(&request, Some(4), None, &[], &[generator]).unwrap()
         );
+    }
+
+    #[test]
+    fn legacy_transfer_requests_keep_target_column_quoting_enabled() {
+        let request: TableDataTransferRequest = serde_json::from_value(serde_json::json!({
+            "transferId": "transfer-legacy-0001",
+            "source": {
+                "connectionId": "source",
+                "driver": "postgres",
+                "schema": "public",
+                "table": "users"
+            },
+            "target": {
+                "connectionId": "target",
+                "driver": "gaussdb",
+                "schema": "public",
+                "table": "users_copy"
+            }
+        }))
+        .unwrap();
+        assert!(request.quote_target_column_names);
+
+        let batch: TableDataTransferBatchPlanRequest = serde_json::from_value(serde_json::json!({
+            "sourceConnectionId": "source",
+            "sourceDriver": "postgres",
+            "sourceSchema": "public",
+            "targetConnectionId": "target",
+            "targetDriver": "gaussdb",
+            "targetSchema": "public",
+            "tables": ["users"]
+        }))
+        .unwrap();
+        assert!(batch.quote_target_column_names);
     }
 
     #[test]
@@ -19189,6 +19486,87 @@ mod tests {
         assert!(mysql.contains("ON DUPLICATE KEY UPDATE"));
         assert!(mysql.contains("`display_name` = VALUES(`display_name`)"));
         assert_eq!(mysql_params.len(), 2);
+    }
+
+    #[test]
+    fn gauss_transfer_column_policy_leaves_only_safe_names_unquoted() {
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Postgres, "USER_ID", false),
+            "USER_ID"
+        );
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Postgres, "CamelName", false),
+            "CamelName"
+        );
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Postgres, "select", false),
+            "\"select\""
+        );
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Postgres, "has space", false),
+            "\"has space\""
+        );
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Postgres, "USER_ID", true),
+            "\"USER_ID\""
+        );
+        assert_eq!(
+            transfer_column_identifier(DatabaseKind::Mysql, "USER_ID", false),
+            "`USER_ID`"
+        );
+    }
+
+    #[test]
+    fn gauss_transfer_insert_and_upsert_share_the_column_policy() {
+        let mut id = target_column("USER_ID");
+        id.is_primary_key = true;
+        id.is_nullable = false;
+        let columns = column_lookup(vec![
+            id,
+            target_column("CamelName"),
+            target_column("select"),
+        ]);
+        let values = BTreeMap::from([
+            ("USER_ID".to_string(), serde_json::json!(7)),
+            ("CamelName".to_string(), serde_json::json!("Ada")),
+            ("select".to_string(), serde_json::json!("safe")),
+        ]);
+
+        let (insert, insert_params) = build_insert_mutation_with_column_quoting(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &values,
+            false,
+        )
+        .unwrap();
+        assert!(insert.contains("CamelName"), "sql: {insert}");
+        assert!(insert.contains("USER_ID"), "sql: {insert}");
+        assert!(insert.contains("\"select\""), "sql: {insert}");
+        assert!(!insert.contains("\"CamelName\""), "sql: {insert}");
+        assert_eq!(insert_params.len(), 3);
+
+        let (upsert, upsert_params) = build_upsert_mutation_with_column_quoting(
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &values,
+            &["USER_ID".to_string()],
+            false,
+        )
+        .unwrap();
+        assert!(upsert.contains("ON CONFLICT (USER_ID)"), "sql: {upsert}");
+        assert!(
+            upsert.contains("CamelName = EXCLUDED.CamelName"),
+            "sql: {upsert}"
+        );
+        assert!(
+            upsert.contains("\"select\" = EXCLUDED.\"select\""),
+            "sql: {upsert}"
+        );
+        assert_eq!(upsert_params.len(), 3);
     }
 
     #[test]
@@ -19634,6 +20012,7 @@ mod tests {
             max_rows: None,
             batch_size: None,
             reseed_identity: false,
+            quote_target_column_names: true,
         };
         let users = ConstraintInfo {
             name: "users_pkey".to_string(),
@@ -19887,6 +20266,45 @@ mod tests {
         assert!(error.contains("reviewed bounded table-data transfer path"));
     }
 
+    #[tokio::test]
+    async fn unquoted_transfer_columns_require_an_identified_reviewed_gauss_package() {
+        let manager = ConnectionManager::new();
+        manager
+            .replace_connection_with_tunnel_and_driver_id(
+                "gauss".to_string(),
+                Box::new(ReviewedGaussTransferDriver),
+                None,
+                Some("gaussdb".to_string()),
+            )
+            .await
+            .unwrap();
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "gauss".to_string(),
+            driver: "gaussdb".to_string(),
+            schema: "public".to_string(),
+            table: "events".to_string(),
+            database: None,
+        };
+
+        assert!(
+            resolve_transfer_target_column_quoting(&manager, &endpoint, true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !resolve_transfer_target_column_quoting(&manager, &endpoint, false)
+                .await
+                .unwrap()
+        );
+
+        let mut postgres = endpoint.clone();
+        postgres.driver = "postgres".to_string();
+        let error = resolve_transfer_target_column_quoting(&manager, &postgres, false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("only for GaussDB/openGauss"));
+    }
+
     fn target_column(name: &str) -> ColumnInfo {
         ColumnInfo {
             name: name.to_string(),
@@ -20000,6 +20418,33 @@ mod tests {
 
         async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
             Ok(vec![QueryResult::execution("restricted", 0)])
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for ReviewedGaussTransferDriver {
+        fn package_capabilities(&self) -> Option<crate::core::dialect::DatabaseCapabilities> {
+            let mut capabilities = DatabaseKind::Postgres.capabilities();
+            capabilities.driver = "gaussdb".to_string();
+            capabilities.display_name = "Reviewed GaussDB package".to_string();
+            capabilities.supports_table_data_transfer = true;
+            Some(capabilities)
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(vec![QueryResult::execution("gauss", 0)])
         }
     }
 
