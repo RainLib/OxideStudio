@@ -156,6 +156,14 @@ pub struct SavedConnection {
     pub connection_url: Option<String>,
     pub ssl_mode: Option<String>,
     #[serde(default)]
+    pub elasticsearch_mode: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_kibana_base_path: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_connectivity_check_path: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_connectivity_check_disabled: bool,
+    #[serde(default)]
     pub index_grouping_pattern: Option<String>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub tags: Option<Vec<String>>,
@@ -304,6 +312,10 @@ mod tests {
         assert_eq!(connection.project_id, "sqls");
         assert!(connection.ssh_tunnel.is_none());
         assert!(connection.note.is_none());
+        assert!(connection.elasticsearch_mode.is_none());
+        assert!(connection.elasticsearch_kibana_base_path.is_none());
+        assert!(connection.elasticsearch_connectivity_check_path.is_none());
+        assert!(!connection.elasticsearch_connectivity_check_disabled);
         assert_eq!(connection.environment, ConnectionEnvironment::Unclassified);
         assert!(connection.production_databases.is_empty());
     }

@@ -1513,6 +1513,14 @@ export interface SavedConnection {
   database?: string;
   connectionUrl?: string;
   sslMode?: string;
+  /** Elasticsearch HTTP transport. Kibana mode uses the Console proxy endpoint. */
+  elasticsearchMode?: "direct" | "kibana";
+  /** Optional Kibana/OpenSearch Dashboards deployment base path. */
+  elasticsearchKibanaBasePath?: string;
+  /** Least-privilege GET path used to verify Elasticsearch connectivity. */
+  elasticsearchConnectivityCheckPath?: string;
+  /** Skip Elasticsearch probing when the account cannot access a stable health path. */
+  elasticsearchConnectivityCheckDisabled?: boolean;
   /** Optional regex that collapses rolling Elasticsearch index names into a `*` pattern. */
   indexGroupingPattern?: string;
   sshTunnel?: SshTunnelConfig;

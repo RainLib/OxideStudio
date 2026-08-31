@@ -5611,7 +5611,7 @@ fn connection_url_from_config(
         if parsed.host_str().is_none() && parsed.scheme() != "redis" {
             return Err(anyhow!("saved connection URL must include a host"));
         }
-        return Ok(value.to_string());
+        return apply_saved_elasticsearch_options(capabilities, value, config);
     }
 
     if is_file_connection {
@@ -5683,6 +5683,86 @@ fn connection_url_from_config(
             _ => "sslmode",
         };
         url.query_pairs_mut().append_pair(parameter, ssl_mode);
+    }
+    apply_saved_elasticsearch_options(capabilities, url.as_str(), config)
+}
+
+fn apply_saved_elasticsearch_options(
+    capabilities: &DatabaseCapabilities,
+    value: &str,
+    config: &ConfigSavedConnection,
+) -> Result<String> {
+    if capabilities.driver != "elasticsearch" {
+        return Ok(value.to_string());
+    }
+    let mut url = url::Url::parse(value).context("saved Elasticsearch URL is invalid")?;
+    const INTERNAL_KEYS: &[&str] = &[
+        "mode",
+        "kibanaBasePath",
+        "connectivityCheckPath",
+        "connectivityCheckDisabled",
+        "indexGroupingPattern",
+    ];
+    let retained = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            !INTERNAL_KEYS
+                .iter()
+                .any(|candidate| key.eq_ignore_ascii_case(candidate))
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    url.query_pairs_mut().extend_pairs(retained);
+
+    if config
+        .elasticsearch_mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("kibana"))
+    {
+        url.query_pairs_mut().append_pair("mode", "kibana");
+        if let Some(base_path) = config
+            .elasticsearch_kibana_base_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            let normalized = format!("/{}", base_path.trim_matches('/'));
+            url.query_pairs_mut()
+                .append_pair("kibanaBasePath", &normalized);
+        }
+    }
+    if let Some(check_path) = config
+        .elasticsearch_connectivity_check_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && *path != "/")
+    {
+        let first_line = check_path.lines().next().unwrap_or("").trim();
+        let path = first_line
+            .strip_prefix("GET ")
+            .or_else(|| first_line.strip_prefix("get "))
+            .or_else(|| first_line.strip_prefix("Get "))
+            .unwrap_or(first_line)
+            .trim();
+        if !path.is_empty() && path != "/" {
+            let normalized = format!("/{}", path.trim_start_matches('/'));
+            url.query_pairs_mut()
+                .append_pair("connectivityCheckPath", &normalized);
+        }
+    }
+    if config.elasticsearch_connectivity_check_disabled {
+        url.query_pairs_mut()
+            .append_pair("connectivityCheckDisabled", "true");
+    }
+    if let Some(pattern) = config
+        .index_grouping_pattern
+        .as_deref()
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+    {
+        url.query_pairs_mut()
+            .append_pair("indexGroupingPattern", pattern);
     }
     Ok(url.to_string())
 }
@@ -8017,6 +8097,10 @@ mod tests {
             database: Some("app data".to_string()),
             connection_url: None,
             ssl_mode: Some("require".to_string()),
+            elasticsearch_mode: None,
+            elasticsearch_kibana_base_path: None,
+            elasticsearch_connectivity_check_path: None,
+            elasticsearch_connectivity_check_disabled: false,
             index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
@@ -8049,6 +8133,10 @@ mod tests {
             database: None,
             connection_url: None,
             ssl_mode: None,
+            elasticsearch_mode: None,
+            elasticsearch_kibana_base_path: None,
+            elasticsearch_connectivity_check_path: None,
+            elasticsearch_connectivity_check_disabled: false,
             index_grouping_pattern: None,
             ssh_tunnel: None,
             tags: None,
@@ -8065,6 +8153,55 @@ mod tests {
             )
             .unwrap(),
             "sqlite:///tmp/workspace.db"
+        );
+    }
+
+    #[test]
+    fn elasticsearch_connection_url_carries_saved_console_proxy_options() {
+        let config: ConfigSavedConnection = serde_json::from_value(json!({
+            "id": "elastic",
+            "projectId": "project",
+            "name": "Elastic",
+            "driver": "elasticsearch",
+            "url": "",
+            "host": "elastic.internal",
+            "port": 5601,
+            "sslMode": "require",
+            "elasticsearchMode": "kibana",
+            "elasticsearchKibanaBasePath": "/kibana/s/analytics/",
+            "elasticsearchConnectivityCheckPath": "GET logs-*/_search",
+            "elasticsearchConnectivityCheckDisabled": true,
+            "indexGroupingPattern": "[-_]\\d+"
+        }))
+        .unwrap();
+        let capabilities = database_capabilities_for_driver("elasticsearch").unwrap();
+        let value = connection_url_from_config(&capabilities, &config).unwrap();
+        let url = url::Url::parse(&value).unwrap();
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "mode")
+                .map(|(_, value)| value.into_owned()),
+            Some("kibana".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "kibanaBasePath")
+                .map(|(_, value)| value.into_owned()),
+            Some("/kibana/s/analytics".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "connectivityCheckPath")
+                .map(|(_, value)| value.into_owned()),
+            Some("/logs-*/_search".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "connectivityCheckDisabled")
+                .map(|(_, value)| value.into_owned()),
+            Some("true".to_string())
         );
     }
 

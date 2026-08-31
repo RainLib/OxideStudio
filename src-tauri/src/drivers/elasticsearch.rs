@@ -21,10 +21,28 @@ pub struct ElasticsearchDriver {
     base_url: Url,
     client: Client,
     auth: Option<(String, String)>,
+    transport_mode: ElasticsearchTransportMode,
+    connectivity_check_path: String,
+    connectivity_check_disabled: bool,
     server_info: Mutex<Option<ElasticsearchServerInfo>>,
     mapping_types: Mutex<HashMap<String, String>>,
     active_index: Mutex<Option<String>>,
     connected: Mutex<bool>,
+    index_grouping: Option<Regex>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchTransportMode {
+    Direct,
+    KibanaProxy,
+}
+
+#[derive(Debug)]
+struct ElasticsearchConnectionOptions {
+    transport_mode: ElasticsearchTransportMode,
+    kibana_base_path: String,
+    connectivity_check_path: String,
+    connectivity_check_disabled: bool,
     index_grouping: Option<Regex>,
 }
 
@@ -44,6 +62,7 @@ struct ElasticsearchRequest {
 const ELASTICSEARCH_PIT_KEEP_ALIVE: &str = "1m";
 const ELASTICSEARCH_MAX_RESULT_WINDOW: usize = 10_000;
 const ELASTICSEARCH_DOCUMENT_CURSOR_MAX_BYTES: usize = 64 * 1024;
+const KIBANA_PROXY_STATUS_HEADER: &str = "x-console-proxy-status-code";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -175,8 +194,12 @@ fn elasticsearch_document_result(response: &Value) -> QueryResult {
 impl ElasticsearchDriver {
     pub fn new(url: &str) -> Result<Self> {
         let mut base_url = normalize_elasticsearch_base_url(url)?;
+        let options = elasticsearch_connection_options(&base_url)?;
+        strip_elasticsearch_internal_query_parameters(&mut base_url);
+        if options.transport_mode == ElasticsearchTransportMode::KibanaProxy {
+            append_elasticsearch_base_path(&mut base_url, &options.kibana_base_path)?;
+        }
         let auth = extract_basic_auth(&mut base_url)?;
-        let index_grouping = elasticsearch_index_grouping_pattern(&base_url);
         let client_builder = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30));
@@ -191,11 +214,14 @@ impl ElasticsearchDriver {
                 .build()
                 .context("Failed to initialize Elasticsearch HTTP client")?,
             auth,
+            transport_mode: options.transport_mode,
+            connectivity_check_path: options.connectivity_check_path,
+            connectivity_check_disabled: options.connectivity_check_disabled,
             server_info: Mutex::new(None),
             mapping_types: Mutex::new(HashMap::new()),
             active_index: Mutex::new(None),
             connected: Mutex::new(false),
-            index_grouping,
+            index_grouping: options.index_grouping,
         })
     }
 
@@ -324,26 +350,8 @@ impl ElasticsearchDriver {
         &self,
         request: &ElasticsearchRequest,
     ) -> Result<(StatusCode, Value)> {
-        let url = self
-            .base_url
-            .join(request.path.trim_start_matches('/'))
-            .with_context(|| format!("Invalid Elasticsearch request path: {}", request.path))?;
-        let mut builder = self.client.request(request.method.clone(), url);
-        builder = builder.header("accept", "application/json");
-        if let Some((username, password)) = &self.auth {
-            builder = builder.basic_auth(username, Some(password));
-        }
-        if let Some(body) = request
-            .body
-            .as_deref()
-            .filter(|body| !body.trim().is_empty())
-        {
-            builder = builder
-                .header("content-type", "application/json")
-                .body(body.to_string());
-        }
-
-        let response = builder.send().await.map_err(|error| {
+        let transport_request = self.build_transport_request(request)?;
+        let response = self.client.execute(transport_request).await.map_err(|error| {
             let endpoint = safe_endpoint_label(&self.base_url);
             let hint = if self.base_url.scheme() == "http" {
                 " If this endpoint requires TLS, select an SSL mode so the connection uses HTTPS."
@@ -352,7 +360,11 @@ impl ElasticsearchDriver {
             };
             anyhow!("Elasticsearch transport request to {endpoint} failed: {error}.{hint}")
         })?;
-        let status = response.status();
+        let status = elasticsearch_effective_response_status(
+            self.transport_mode,
+            response.status(),
+            response.headers(),
+        );
         let text = response
             .text()
             .await
@@ -364,6 +376,55 @@ impl ElasticsearchDriver {
         };
 
         Ok((status, body))
+    }
+
+    fn build_transport_request(&self, request: &ElasticsearchRequest) -> Result<reqwest::Request> {
+        let (method, url) = self.request_target(request)?;
+        let mut builder = self.client.request(method, url);
+        builder = builder.header("accept", "application/json");
+        if self.transport_mode == ElasticsearchTransportMode::KibanaProxy {
+            builder = builder
+                .header("kbn-xsrf", "true")
+                .header("osd-xsrf", "true");
+        }
+        if let Some((username, password)) = &self.auth {
+            builder = builder.basic_auth(username, Some(password));
+        }
+        if let Some(body) = request
+            .body
+            .as_deref()
+            .filter(|body| !body.trim().is_empty())
+        {
+            let (content_type, body) = if is_elasticsearch_ndjson_path(&request.path) {
+                (
+                    "application/x-ndjson",
+                    normalize_elasticsearch_ndjson_body(body)?,
+                )
+            } else {
+                ("application/json", body.to_string())
+            };
+            builder = builder.header("content-type", content_type).body(body);
+        }
+        builder
+            .build()
+            .context("Failed to build Elasticsearch transport request")
+    }
+
+    fn request_target(&self, request: &ElasticsearchRequest) -> Result<(Method, Url)> {
+        match self.transport_mode {
+            ElasticsearchTransportMode::Direct => {
+                let url = join_elasticsearch_request_path(&self.base_url, &request.path)?;
+                Ok((request.method.clone(), url))
+            }
+            ElasticsearchTransportMode::KibanaProxy => {
+                let mut url =
+                    join_elasticsearch_request_path(&self.base_url, "/api/console/proxy")?;
+                url.query_pairs_mut()
+                    .append_pair("path", &request.path)
+                    .append_pair("method", request.method.as_str());
+                Ok((Method::POST, url))
+            }
+        }
     }
 
     async fn open_document_pit(&self, index: &str) -> Result<String> {
@@ -541,14 +602,39 @@ impl DatabaseDriver for ElasticsearchDriver {
         *self.connected.lock().await = false;
         *self.server_info.lock().await = None;
         self.mapping_types.lock().await.clear();
+
+        if self.connectivity_check_disabled {
+            *self.connected.lock().await = true;
+            *self.active_index.lock().await = None;
+            return Ok(());
+        }
+
         let request = ElasticsearchRequest {
             method: Method::GET,
-            path: "/".to_string(),
+            path: self.connectivity_check_path.clone(),
             body: None,
         };
         let (_, body) = self.send_request_unchecked(&request).await?;
-        let server_info = parse_elasticsearch_server_info(&body)?;
-        *self.server_info.lock().await = Some(server_info);
+        if self.connectivity_check_path == "/" {
+            let server_info = parse_elasticsearch_server_info(&body)?;
+            *self.server_info.lock().await = Some(server_info);
+        } else {
+            // A least-privilege account may only be allowed to probe an index.
+            // The configured path proves connectivity; root version discovery is
+            // best-effort and must not turn that successful probe into a failure.
+            let version_request = ElasticsearchRequest {
+                method: Method::GET,
+                path: "/".to_string(),
+                body: None,
+            };
+            if let Ok((status, body)) = self.send_request_response(&version_request).await {
+                if status.is_success() {
+                    if let Ok(server_info) = parse_elasticsearch_server_info(&body) {
+                        *self.server_info.lock().await = Some(server_info);
+                    }
+                }
+            }
+        }
         *self.connected.lock().await = true;
         *self.active_index.lock().await = None;
         Ok(())
@@ -563,9 +649,13 @@ impl DatabaseDriver for ElasticsearchDriver {
     }
 
     async fn ping(&self) -> Result<()> {
+        self.ensure_connected().await?;
+        if self.connectivity_check_disabled {
+            return Ok(());
+        }
         let request = ElasticsearchRequest {
             method: Method::GET,
-            path: "/".to_string(),
+            path: self.connectivity_check_path.clone(),
             body: None,
         };
         self.send_request(&request).await.map(|_| ())
@@ -874,6 +964,152 @@ fn normalize_elasticsearch_base_url(url: &str) -> Result<Url> {
     Ok(parsed)
 }
 
+fn elasticsearch_connection_options(url: &Url) -> Result<ElasticsearchConnectionOptions> {
+    let query_value = |name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.into_owned())
+    };
+    let transport_mode = if query_value("mode")
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("kibana"))
+    {
+        ElasticsearchTransportMode::KibanaProxy
+    } else {
+        ElasticsearchTransportMode::Direct
+    };
+    let kibana_base_path = if transport_mode == ElasticsearchTransportMode::KibanaProxy {
+        normalize_kibana_base_path(query_value("kibanaBasePath").as_deref().unwrap_or(""))?
+    } else {
+        String::new()
+    };
+    let connectivity_check_path = normalize_elasticsearch_connectivity_check_path(
+        query_value("connectivityCheckPath")
+            .as_deref()
+            .unwrap_or(""),
+    )?;
+    let connectivity_check_disabled = query_value("connectivityCheckDisabled")
+        .as_deref()
+        .is_some_and(is_enabled_connection_option);
+    let index_grouping = elasticsearch_index_grouping_pattern(url);
+
+    Ok(ElasticsearchConnectionOptions {
+        transport_mode,
+        kibana_base_path,
+        connectivity_check_path,
+        connectivity_check_disabled,
+        index_grouping,
+    })
+}
+
+fn strip_elasticsearch_internal_query_parameters(url: &mut Url) {
+    const INTERNAL_KEYS: &[&str] = &[
+        "mode",
+        "kibanaBasePath",
+        "connectivityCheckPath",
+        "connectivityCheckDisabled",
+        "indexGroupingPattern",
+    ];
+    let retained = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            !INTERNAL_KEYS
+                .iter()
+                .any(|candidate| key.eq_ignore_ascii_case(candidate))
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    if !retained.is_empty() {
+        url.query_pairs_mut().extend_pairs(retained);
+    }
+}
+
+fn normalize_kibana_base_path(value: &str) -> Result<String> {
+    let value = value.trim().trim_matches('/');
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    validate_elasticsearch_local_path(value, "Kibana base path")?;
+    Ok(format!("/{value}"))
+}
+
+fn normalize_elasticsearch_connectivity_check_path(value: &str) -> Result<String> {
+    let line = value.lines().next().unwrap_or("").trim();
+    let without_method = line
+        .strip_prefix("GET ")
+        .or_else(|| line.strip_prefix("get "))
+        .or_else(|| line.strip_prefix("Get "))
+        .unwrap_or(line)
+        .trim();
+    if without_method.is_empty() || without_method == "/" {
+        return Ok("/".to_string());
+    }
+    validate_elasticsearch_local_path(without_method, "connectivity-check path")?;
+    Ok(format!("/{}", without_method.trim_start_matches('/')))
+}
+
+fn validate_elasticsearch_local_path(path: &str, label: &str) -> Result<()> {
+    if path.contains("://")
+        || path.contains('\\')
+        || path.contains('#')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(anyhow!("Invalid Elasticsearch {label}"));
+    }
+    Ok(())
+}
+
+fn is_enabled_connection_option(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("true")
+        || value == "1"
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+}
+
+fn elasticsearch_effective_response_status(
+    transport_mode: ElasticsearchTransportMode,
+    transport_status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> StatusCode {
+    if transport_mode == ElasticsearchTransportMode::KibanaProxy {
+        if let Some(status) = headers
+            .get(KIBANA_PROXY_STATUS_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u16>().ok())
+            .and_then(|value| StatusCode::from_u16(value).ok())
+        {
+            return status;
+        }
+    }
+    transport_status
+}
+
+fn append_elasticsearch_base_path(url: &mut Url, base_path: &str) -> Result<()> {
+    if base_path.is_empty() {
+        return Ok(());
+    }
+    let existing = url.path().trim_end_matches('/');
+    let combined = format!("{existing}{base_path}");
+    url.set_path(&combined);
+    Ok(())
+}
+
+fn join_elasticsearch_request_path(base_url: &Url, request_path: &str) -> Result<Url> {
+    validate_elasticsearch_local_path(request_path, "request path")?;
+    let mut url = base_url.clone();
+    let (path, query) = request_path
+        .split_once('?')
+        .map_or((request_path, None), |(path, query)| (path, Some(query)));
+    let base_path = base_url.path().trim_end_matches('/');
+    let request_path = path.trim_start_matches('/');
+    url.set_path(&format!("{base_path}/{request_path}"));
+    url.set_query(query);
+    Ok(url)
+}
+
 fn extract_basic_auth(url: &mut Url) -> Result<Option<(String, String)>> {
     let has_credentials = !url.username().is_empty() || url.password().is_some();
     if !has_credentials {
@@ -1063,6 +1299,35 @@ fn parse_elasticsearch_requests(input: &str) -> Result<Vec<ElasticsearchRequest>
     }
 
     Ok(requests)
+}
+
+fn is_elasticsearch_ndjson_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "/_bulk"
+        || path.ends_with("/_bulk")
+        || path == "/_msearch"
+        || path.ends_with("/_msearch")
+        || path == "/_msearch/template"
+        || path.ends_with("/_msearch/template")
+}
+
+fn normalize_elasticsearch_ndjson_body(body: &str) -> Result<String> {
+    let mut has_line = false;
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        has_line = true;
+        serde_json::from_str::<Value>(line)
+            .with_context(|| format!("Invalid Elasticsearch NDJSON body at line {}", index + 1))?;
+    }
+    if !has_line {
+        return Err(anyhow!("Elasticsearch NDJSON body is required"));
+    }
+    let mut normalized = body.trim_end().to_string();
+    normalized.push('\n');
+    Ok(normalized)
 }
 
 fn strip_elasticsearch_console_comments(input: &str) -> String {
@@ -1999,6 +2264,139 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_strips_elasticsearch_transport_options() {
+        let mut url = normalize_elasticsearch_base_url(
+            "http://localhost:5601/root?mode=kibana&kibanaBasePath=%2Fkibana%2Fs%2Fanalytics%2F&connectivityCheckPath=GET%20logs-%2A%2F_search&connectivityCheckDisabled=yes&indexGroupingPattern=%5B-_%5D%5Cd%2B",
+        )
+        .unwrap();
+        let options = elasticsearch_connection_options(&url).unwrap();
+
+        assert_eq!(
+            options.transport_mode,
+            ElasticsearchTransportMode::KibanaProxy
+        );
+        assert_eq!(options.kibana_base_path, "/kibana/s/analytics");
+        assert_eq!(options.connectivity_check_path, "/logs-*/_search");
+        assert!(options.connectivity_check_disabled);
+        assert_eq!(
+            options.index_grouping.as_ref().map(Regex::as_str),
+            Some("[-_]\\d+")
+        );
+
+        strip_elasticsearch_internal_query_parameters(&mut url);
+        assert!(url.query().is_none());
+        append_elasticsearch_base_path(&mut url, &options.kibana_base_path).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://localhost:5601/root/kibana/s/analytics"
+        );
+    }
+
+    #[test]
+    fn normalizes_connectivity_paths_and_rejects_remote_targets() {
+        assert_eq!(
+            normalize_elasticsearch_connectivity_check_path("GET my-index/_search\n{\"query\":{}}")
+                .unwrap(),
+            "/my-index/_search"
+        );
+        assert_eq!(
+            normalize_elasticsearch_connectivity_check_path("").unwrap(),
+            "/"
+        );
+        assert!(normalize_elasticsearch_connectivity_check_path("https://example.com/").is_err());
+        assert!(normalize_kibana_base_path("/../admin").is_err());
+    }
+
+    #[test]
+    fn builds_kibana_console_proxy_target_and_uses_proxy_status() {
+        let driver = ElasticsearchDriver::new(
+            "http://localhost:5601?mode=kibana&kibanaBasePath=%2Fs%2Fanalytics",
+        )
+        .unwrap();
+        let request = ElasticsearchRequest {
+            method: Method::DELETE,
+            path: "/logs-2026/_doc/1?refresh=true".to_string(),
+            body: None,
+        };
+        let (method, url) = driver.request_target(&request).unwrap();
+
+        assert_eq!(method, Method::POST);
+        assert_eq!(url.path(), "/s/analytics/api/console/proxy");
+        let query = url.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            query.get("path").map(|value| value.as_ref()),
+            Some("/logs-2026/_doc/1?refresh=true")
+        );
+        assert_eq!(
+            query.get("method").map(|value| value.as_ref()),
+            Some("DELETE")
+        );
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(KIBANA_PROXY_STATUS_HEADER, "404".parse().unwrap());
+        assert_eq!(
+            elasticsearch_effective_response_status(
+                ElasticsearchTransportMode::KibanaProxy,
+                StatusCode::OK,
+                &headers,
+            ),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            elasticsearch_effective_response_status(
+                ElasticsearchTransportMode::Direct,
+                StatusCode::OK,
+                &headers,
+            ),
+            StatusCode::OK
+        );
+
+        let transport_request = driver
+            .build_transport_request(&ElasticsearchRequest {
+                method: Method::POST,
+                path: "/_bulk".to_string(),
+                body: Some("{\"index\":{}}\n{\"message\":\"ok\"}".to_string()),
+            })
+            .unwrap();
+        assert_eq!(transport_request.method(), Method::POST);
+        assert_eq!(
+            transport_request
+                .headers()
+                .get("kbn-xsrf")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            transport_request
+                .headers()
+                .get("osd-xsrf")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            transport_request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/x-ndjson")
+        );
+        assert!(transport_request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .is_some_and(|body| body.ends_with(b"\n")));
+    }
+
+    #[tokio::test]
+    async fn disabled_connectivity_check_marks_driver_connected_without_version_probe() {
+        let mut driver =
+            ElasticsearchDriver::new("http://127.0.0.1:9?connectivityCheckDisabled=true").unwrap();
+
+        driver.connect().await.unwrap();
+        assert!(driver.server_version().await.is_none());
+        driver.ping().await.unwrap();
+    }
+
+    #[test]
     fn parses_json_body_as_default_search() {
         let requests = parse_elasticsearch_requests(r#"{"query":{"match_all":{}}}"#).unwrap();
 
@@ -2179,6 +2577,22 @@ mod tests {
         assert!(parse_elasticsearch_requests("GET").is_err());
         assert!(parse_elasticsearch_requests("GET https://other.test/_search").is_err());
         assert!(parse_elasticsearch_requests("not-json").is_err());
+    }
+
+    #[test]
+    fn validates_and_terminates_ndjson_request_bodies() {
+        assert!(is_elasticsearch_ndjson_path("/logs/_bulk?refresh=true"));
+        assert!(is_elasticsearch_ndjson_path("/_msearch/template"));
+        assert!(!is_elasticsearch_ndjson_path("/logs/_search"));
+
+        let normalized = normalize_elasticsearch_ndjson_body(
+            "{\"index\":{\"_index\":\"logs\"}}\n{\"message\":\"ok\"}",
+        )
+        .unwrap();
+        assert!(normalized.ends_with('\n'));
+        assert_eq!(normalized.lines().count(), 2);
+        assert!(normalize_elasticsearch_ndjson_body("{invalid}").is_err());
+        assert!(normalize_elasticsearch_ndjson_body("\n\n").is_err());
     }
 
     #[test]

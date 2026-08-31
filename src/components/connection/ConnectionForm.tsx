@@ -32,7 +32,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
+  applyElasticsearchConnectionOptions,
   buildConnectionUrl,
+  elasticsearchConnectionOptionsFromQueryParams,
   parseConnectionUrl,
 } from "@/lib/connectionUrlParser";
 import {
@@ -509,7 +511,7 @@ export function ConnectionForm({
   const connectionUrlTemplate =
     selectedDriverPackage?.connectionUrlTemplate ||
     connectionUrlTemplateForDriver(selectedConnection.driver);
-  const generatedUrl = buildConnectionUrl({
+  const baseGeneratedUrl = buildConnectionUrl({
     driver: selectedConnection.driver,
     host: selectedConnection.host,
     port: selectedConnection.port,
@@ -519,6 +521,18 @@ export function ConnectionForm({
     sslMode: selectedConnection.sslMode || "disable",
     connectionUrlTemplate,
   });
+  const generatedUrl =
+    selectedConnection.driver === "elasticsearch"
+      ? applyElasticsearchConnectionOptions(baseGeneratedUrl, {
+          mode: selectedConnection.elasticsearchMode,
+          kibanaBasePath: selectedConnection.elasticsearchKibanaBasePath,
+          connectivityCheckPath:
+            selectedConnection.elasticsearchConnectivityCheckPath,
+          connectivityCheckDisabled:
+            selectedConnection.elasticsearchConnectivityCheckDisabled,
+          indexGroupingPattern: selectedConnection.indexGroupingPattern,
+        })
+      : baseGeneratedUrl;
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
   const sshTunnel = {
     enabled: false,
@@ -704,6 +718,10 @@ export function ConnectionForm({
 
   const updateConnectionUrl = (value: string) => {
     const parsed = parseConnectionUrl(value, selectedConnection.driver);
+    const elasticsearchOptions =
+      parsed?.driver === "elasticsearch"
+        ? elasticsearchConnectionOptionsFromQueryParams(parsed.queryParams)
+        : null;
     updateConnectionConfig(
       parsed
         ? {
@@ -715,8 +733,19 @@ export function ConnectionForm({
             password: parsed.password || "",
             database: parsed.database || "",
             sslMode: parsed.sslMode,
-            indexGroupingPattern:
-              parsed.queryParams?.indexGroupingPattern || "",
+            ...(elasticsearchOptions
+              ? {
+                  elasticsearchMode: elasticsearchOptions.mode,
+                  elasticsearchKibanaBasePath:
+                    elasticsearchOptions.kibanaBasePath,
+                  elasticsearchConnectivityCheckPath:
+                    elasticsearchOptions.connectivityCheckPath,
+                  elasticsearchConnectivityCheckDisabled:
+                    elasticsearchOptions.connectivityCheckDisabled,
+                  indexGroupingPattern:
+                    elasticsearchOptions.indexGroupingPattern,
+                }
+              : {}),
           }
         : { connectionUrl: value },
     );
@@ -1373,6 +1402,127 @@ export function ConnectionForm({
 
               {selectedConnection.driver === "elasticsearch" && (
                 <>
+                  <label
+                    className={labelClass}
+                    htmlFor="connection-elasticsearch-mode"
+                  >
+                    Transport
+                  </label>
+                  <div className="space-y-1.5">
+                    <Select
+                      value={selectedConnection.elasticsearchMode || "direct"}
+                      onValueChange={(value: "direct" | "kibana") =>
+                        updateField("elasticsearchMode", value)
+                      }
+                    >
+                      <SelectTrigger
+                        id="connection-elasticsearch-mode"
+                        className={fieldClass}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                        <SelectItem value="direct">Direct HTTP</SelectItem>
+                        <SelectItem value="kibana">
+                          Kibana / OpenSearch Console proxy
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <div className="flex min-h-6 items-center gap-1.5 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2 font-mono text-[10px] wb-muted">
+                      <span className="text-[hsl(var(--wb-text))]">OxideStudio</span>
+                      <span aria-hidden="true">→</span>
+                      {selectedConnection.elasticsearchMode === "kibana" && (
+                        <>
+                          <span className="text-[hsl(var(--wb-accent))]">
+                            Kibana / Dashboards
+                          </span>
+                          <span aria-hidden="true">→</span>
+                        </>
+                      )}
+                      <span>Elasticsearch cluster</span>
+                    </div>
+                  </div>
+
+                  {selectedConnection.elasticsearchMode === "kibana" && (
+                    <>
+                      <label
+                        className={labelClass}
+                        htmlFor="connection-elasticsearch-kibana-base-path"
+                      >
+                        Console base path
+                      </label>
+                      <div>
+                        <input
+                          id="connection-elasticsearch-kibana-base-path"
+                          value={
+                            selectedConnection.elasticsearchKibanaBasePath || ""
+                          }
+                          onChange={(event) =>
+                            updateField(
+                              "elasticsearchKibanaBasePath",
+                              event.target.value,
+                            )
+                          }
+                          className={fieldClass}
+                          placeholder="Optional, e.g. /kibana/s/analytics"
+                          spellCheck={false}
+                        />
+                        <p className="mt-1 text-[10px] wb-muted">
+                          Requests use the Console proxy and include Kibana and
+                          OpenSearch anti-CSRF headers.
+                        </p>
+                      </div>
+                    </>
+                  )}
+
+                  <label
+                    className={labelClass}
+                    htmlFor="connection-elasticsearch-check-path"
+                  >
+                    Connection check
+                  </label>
+                  <div className="space-y-1.5">
+                    <input
+                      id="connection-elasticsearch-check-path"
+                      value={
+                        selectedConnection.elasticsearchConnectivityCheckPath ||
+                        ""
+                      }
+                      onChange={(event) =>
+                        updateField(
+                          "elasticsearchConnectivityCheckPath",
+                          event.target.value,
+                        )
+                      }
+                      className={fieldClass}
+                      placeholder="GET / (or a permitted index path)"
+                      spellCheck={false}
+                      disabled={
+                        selectedConnection.elasticsearchConnectivityCheckDisabled
+                      }
+                    />
+                    <label className="flex items-center justify-between gap-3 text-[10px] wb-muted">
+                      <span>
+                        Skip the probe only when this account has no stable
+                        read-only health path.
+                      </span>
+                      <Switch
+                        checked={
+                          selectedConnection.elasticsearchConnectivityCheckDisabled ||
+                          false
+                        }
+                        onCheckedChange={(checked) =>
+                          updateField(
+                            "elasticsearchConnectivityCheckDisabled",
+                            checked,
+                          )
+                        }
+                        className="h-5 w-9 shrink-0 data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=unchecked]:bg-[hsl(var(--wb-border))] [&>span]:h-4 [&>span]:w-4 [&>span]:data-[state=checked]:translate-x-4"
+                        aria-label="Skip Elasticsearch connectivity check"
+                      />
+                    </label>
+                  </div>
+
                   <label
                     className={labelClass}
                     htmlFor="connection-elasticsearch-index-grouping"

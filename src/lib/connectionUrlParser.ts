@@ -103,25 +103,102 @@ export function normalizeConnectionUrlForDriver(
  * driver without ever putting it in a request path. Invalid/manual URLs stay
  * untouched so the connection form remains recoverable while the user edits.
  */
-export function applyElasticsearchIndexGroupingPattern(
-  connectionUrl: string,
-  pattern: string | undefined,
+export type ElasticsearchConnectionMode = "direct" | "kibana";
+
+export interface ElasticsearchConnectionOptions {
+  mode?: ElasticsearchConnectionMode;
+  kibanaBasePath?: string;
+  connectivityCheckPath?: string;
+  connectivityCheckDisabled?: boolean;
+  indexGroupingPattern?: string;
+}
+
+export function elasticsearchConnectionOptionsFromQueryParams(
+  queryParams: Record<string, string> | undefined,
+): ElasticsearchConnectionOptions {
+  const read = (name: string) => {
+    const key = Object.keys(queryParams || {}).find(
+      (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    );
+    return key ? queryParams?.[key] : undefined;
+  };
+  const disabled = read("connectivityCheckDisabled")?.trim().toLowerCase();
+  return {
+    mode: read("mode")?.toLowerCase() === "kibana" ? "kibana" : "direct",
+    kibanaBasePath: normalizeKibanaBasePath(read("kibanaBasePath")),
+    connectivityCheckPath: normalizeElasticsearchConnectivityCheckPath(
+      read("connectivityCheckPath"),
+    ),
+    connectivityCheckDisabled:
+      disabled === "true" ||
+      disabled === "1" ||
+      disabled === "yes" ||
+      disabled === "on",
+    indexGroupingPattern: read("indexGroupingPattern")?.trim() || "",
+  };
+}
+
+export function normalizeKibanaBasePath(value: string | undefined) {
+  const path = value?.trim().replace(/^\/+|\/+$/g, "") || "";
+  return path ? `/${path}` : "";
+}
+
+export function normalizeElasticsearchConnectivityCheckPath(
+  value: string | undefined,
 ) {
-  const normalizedPattern = pattern?.trim() || "";
+  const line = value?.trim().split(/\r?\n/u, 1)[0]?.trim() || "";
+  const path = line.replace(/^GET\s+/iu, "").trim();
+  if (!path || path === "/") return "";
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+export function applyElasticsearchConnectionOptions(
+  connectionUrl: string,
+  options: ElasticsearchConnectionOptions,
+) {
   try {
     const url = new URL(connectionUrl);
+    const internalKeys = new Set([
+      "mode",
+      "kibanabasepath",
+      "connectivitycheckpath",
+      "connectivitycheckdisabled",
+      "indexgroupingpattern",
+    ]);
     for (const key of Array.from(url.searchParams.keys())) {
-      if (key.toLowerCase() === "indexgroupingpattern") {
+      if (internalKeys.has(key.toLowerCase())) {
         url.searchParams.delete(key);
       }
     }
-    if (normalizedPattern) {
-      url.searchParams.set("indexGroupingPattern", normalizedPattern);
+
+    if (options.mode === "kibana") {
+      url.searchParams.set("mode", "kibana");
+      const basePath = normalizeKibanaBasePath(options.kibanaBasePath);
+      if (basePath) url.searchParams.set("kibanaBasePath", basePath);
     }
+    const checkPath = normalizeElasticsearchConnectivityCheckPath(
+      options.connectivityCheckPath,
+    );
+    if (checkPath) url.searchParams.set("connectivityCheckPath", checkPath);
+    if (options.connectivityCheckDisabled) {
+      url.searchParams.set("connectivityCheckDisabled", "true");
+    }
+    const grouping = options.indexGroupingPattern?.trim() || "";
+    if (grouping) url.searchParams.set("indexGroupingPattern", grouping);
     return url.toString();
   } catch {
     return connectionUrl;
   }
+}
+
+/** @deprecated Prefer applyElasticsearchConnectionOptions for the full transport contract. */
+export function applyElasticsearchIndexGroupingPattern(
+  connectionUrl: string,
+  pattern: string | undefined,
+) {
+  return applyElasticsearchConnectionOptions(connectionUrl, {
+    indexGroupingPattern: pattern,
+  });
 }
 
 function getQueryParam(

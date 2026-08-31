@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
 import { useSchemaStore } from "./useSchemaStore";
 import {
-  applyElasticsearchIndexGroupingPattern,
+  applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   normalizeConnectionUrlForDriver,
 } from "@/lib/connectionUrlParser";
@@ -108,10 +108,14 @@ function connectionUrlForConfig(config: ConnectionConfig) {
     });
 
   return config.driver === "elasticsearch"
-    ? applyElasticsearchIndexGroupingPattern(
-        connectionUrl,
-        config.indexGroupingPattern,
-      )
+    ? applyElasticsearchConnectionOptions(connectionUrl, {
+        mode: config.elasticsearchMode,
+        kibanaBasePath: config.elasticsearchKibanaBasePath,
+        connectivityCheckPath: config.elasticsearchConnectivityCheckPath,
+        connectivityCheckDisabled:
+          config.elasticsearchConnectivityCheckDisabled,
+        indexGroupingPattern: config.indexGroupingPattern,
+      })
     : connectionUrl;
 }
 
