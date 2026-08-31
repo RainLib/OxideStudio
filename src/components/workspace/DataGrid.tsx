@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   DataEditor,
   GridCell,
@@ -89,11 +90,13 @@ import {
   tableColumnEditability,
   tableColumnReadOnlyReason,
   transposeQueryResult,
+  filterDataGridColumnLookupItems,
   gridLayoutKey,
   loadGridLayout,
   normalizeGridLayout,
   type DataGridContextMenuItem,
   type DataGridHoverTooltipState,
+  type DataGridColumnLookupItem,
 } from "@/features/data-grid";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
 import { isTableCellExpression } from "@/lib/tableCellExpression";
@@ -128,6 +131,7 @@ const EMPTY_PENDING_EDITS = new Map<string, unknown>();
 
 export interface DataGridHandle {
   openSearch: () => void;
+  openColumnLookup: () => boolean;
   fitColumns: () => void;
   deleteSelectedRows: () => Promise<void>;
   /** Source result indexes, after translating the current visual sort/filter. */
@@ -374,6 +378,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
     const deferredGridSelectionContext = useDeferredValue(gridSelectionContext);
     const [showSearch, setShowSearch] = useState(false);
+    const [columnLookupOpen, setColumnLookupOpen] = useState(false);
+    const [columnLookupQuery, setColumnLookupQuery] = useState("");
+    const [columnLookupSelectedIndex, setColumnLookupSelectedIndex] = useState(0);
     const [valueEditorTarget, setValueEditorTarget] =
       useState<GridValueEditorTarget | null>(null);
 
@@ -392,6 +399,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
     const gridContainerRef = useRef<HTMLDivElement>(null);
     const dataEditorRef = useRef<DataEditorRef>(null);
+    const columnLookupInputRef = useRef<HTMLInputElement>(null);
     const restoredLayoutRef = useRef<string | null>(null);
 
     const tableColumns = activeTab?.tableColumns;
@@ -567,6 +575,94 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       hiddenColumns,
       isTransposed,
     ]);
+
+    const columnLookupItems = useMemo<DataGridColumnLookupItem[]>(() => {
+      if (isTransposed) return [];
+      return columns.map((visualColumn, index) => {
+        const resultColumnIndex = result
+          ? resultColumnIndexByGridId(result.columns, visualColumn.id)
+          : -1;
+        const resultColumn = result?.columns[resultColumnIndex];
+        const name =
+          resultColumn?.name ||
+          overrideColumns?.[resultColumnIndex]?.name ||
+          String(visualColumn.id);
+        const metadata = tableColumnsByName.get(name);
+        const detail = [resultColumn?.data_type || metadata?.data_type, metadata?.comment]
+          .filter((value): value is string => Boolean(value))
+          .join(" · ");
+        return { index, name, detail: detail || undefined };
+      });
+    }, [columns, isTransposed, overrideColumns, result, tableColumnsByName]);
+
+    const filteredColumnLookupItems = useMemo(
+      () => filterDataGridColumnLookupItems(columnLookupItems, columnLookupQuery),
+      [columnLookupItems, columnLookupQuery],
+    );
+
+    const openColumnLookup = useCallback(() => {
+      if (columnLookupItems.length === 0) return false;
+      setColumnLookupQuery("");
+      setColumnLookupSelectedIndex(0);
+      setColumnLookupOpen(true);
+      return true;
+    }, [columnLookupItems.length]);
+
+    const selectColumnLookupItem = useCallback(
+      (item: DataGridColumnLookupItem | undefined) => {
+        if (!item) return;
+        dataEditorRef.current?.scrollTo(item.index, 0, "horizontal", 16, 0, {
+          hAlign: "center",
+          behavior: "smooth",
+        });
+        setColumnLookupOpen(false);
+        dataEditorRef.current?.focus();
+      },
+      [],
+    );
+
+    const onColumnLookupKeyDown = useCallback(
+      (event: ReactKeyboardEvent<HTMLInputElement>) => {
+        const count = filteredColumnLookupItems.length;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!count) return;
+          setColumnLookupSelectedIndex((index) =>
+            (index + (event.key === "ArrowDown" ? 1 : -1) + count) % count,
+          );
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+          selectColumnLookupItem(filteredColumnLookupItems[columnLookupSelectedIndex]);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          setColumnLookupOpen(false);
+        }
+      },
+      [columnLookupSelectedIndex, filteredColumnLookupItems, selectColumnLookupItem],
+    );
+
+    useEffect(() => {
+      if (!columnLookupOpen) return;
+      const timer = window.setTimeout(() => columnLookupInputRef.current?.focus(), 0);
+      return () => window.clearTimeout(timer);
+    }, [columnLookupOpen]);
+
+    useEffect(() => {
+      setColumnLookupSelectedIndex(0);
+    }, [columnLookupQuery]);
+
+    useEffect(() => {
+      setColumnLookupSelectedIndex((current) =>
+        Math.min(current, Math.max(filteredColumnLookupItems.length - 1, 0)),
+      );
+    }, [filteredColumnLookupItems.length]);
 
     // Apply filters and sorting
     const { filteredRows, sortedIndices } = useMemo(() => {
@@ -1195,6 +1291,15 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const onGridKeyDown = useCallback(
       (event: GridKeyEventArgs) => {
         if (
+          (event.ctrlKey || event.metaKey) &&
+          event.key.toLocaleLowerCase() === "g" &&
+          openColumnLookup()
+        ) {
+          event.preventDefault();
+          event.cancel();
+          return;
+        }
+        if (
           event.shiftKey &&
           event.key === "Enter" &&
           event.location &&
@@ -1205,7 +1310,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           openValueEditor(event.location);
         }
       },
-      [openValueEditor],
+      [openColumnLookup, openValueEditor],
     );
 
     const handleCopyAll = useCallback(async () => {
@@ -1549,6 +1654,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           setShowSearch(true);
           dataEditorRef.current?.focus();
         },
+        openColumnLookup,
         fitColumns: () => {
           if (columns.length === 0) return;
           dataEditorRef.current?.remeasureColumns(
@@ -1558,7 +1664,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         deleteSelectedRows: handleDeleteSelectedRows,
         getSelectedRowIndexes: () => [...selectedRowIndexes],
       }),
-      [columns.length, handleDeleteSelectedRows, selectedRowIndexes],
+      [columns.length, handleDeleteSelectedRows, openColumnLookup, selectedRowIndexes],
     );
 
     const contextCellValue = useMemo(() => {
@@ -2503,6 +2609,57 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 showSearch={showSearch}
                 onSearchClose={() => setShowSearch(false)}
               />
+              {columnLookupOpen && (
+                <div
+                  className="absolute right-3 top-3 z-20 w-72 overflow-hidden rounded-md border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface-raised))] shadow-xl animate-in fade-in-0 zoom-in-95"
+                  role="dialog"
+                  aria-label="Go to column"
+                >
+                  <div className="border-b border-[hsl(var(--wb-border-subtle))] px-2 py-1.5">
+                    <input
+                      ref={columnLookupInputRef}
+                      value={columnLookupQuery}
+                      onChange={(event) => setColumnLookupQuery(event.target.value)}
+                      onKeyDown={onColumnLookupKeyDown}
+                      placeholder="Go to column…"
+                      aria-label="Search columns"
+                      className="h-7 w-full rounded border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] px-2 text-xs outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+                    />
+                  </div>
+                  <div className="max-h-56 overflow-y-auto p-1" role="listbox" aria-label="Matching columns">
+                    {filteredColumnLookupItems.length === 0 ? (
+                      <p className="px-2 py-3 text-center text-xs text-[hsl(var(--wb-text-muted))]">
+                        No matching column
+                      </p>
+                    ) : (
+                      filteredColumnLookupItems.map((item, index) => (
+                        <button
+                          key={`${item.index}:${item.name}`}
+                          id={`grid-column-lookup-${item.index}`}
+                          type="button"
+                          role="option"
+                          aria-selected={index === columnLookupSelectedIndex}
+                          onMouseMove={() => setColumnLookupSelectedIndex(index)}
+                          onClick={() => selectColumnLookupItem(item)}
+                          className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-x-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
+                            index === columnLookupSelectedIndex
+                              ? "bg-[hsl(var(--wb-accent)/0.18)] text-[hsl(var(--wb-text))]"
+                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-surface-hover))] hover:text-[hsl(var(--wb-text))]"
+                          }`}
+                        >
+                          <span className="min-w-0 truncate font-medium">{item.name}</span>
+                          <span className="font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">#{item.index + 1}</span>
+                          {item.detail && (
+                            <span className="col-span-2 min-w-0 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
+                              {item.detail}
+                            </span>
+                          )}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
               {filteredRows.length === 0 && newRowsCount === 0 && (
                 <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground/50">

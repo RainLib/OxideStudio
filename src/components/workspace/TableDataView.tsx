@@ -1949,6 +1949,7 @@ export function TableDataView() {
         onSave={() => void commitEdits(activeTab.id)}
         onRevert={() => cancelEdits(activeTab.id)}
         onSearch={() => dataGridRef.current?.openSearch()}
+        onGoToColumn={() => dataGridRef.current?.openColumnLookup()}
         onFitColumns={() => dataGridRef.current?.fitColumns()}
         onResetColumns={() => resetColumnLayout(activeTab.id)}
         onToggleEditing={() => setIsEditingEnabled((value) => !value)}

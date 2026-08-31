@@ -70,6 +70,7 @@ interface TableDataToolbarProps {
   onSave: () => void;
   onRevert: () => void;
   onSearch: () => void;
+  onGoToColumn?: () => void;
   onFitColumns: () => void;
   onResetColumns: () => void;
   onToggleEditing: () => void;
@@ -125,6 +126,7 @@ export function TableDataToolbar({
   onSave,
   onRevert,
   onSearch,
+  onGoToColumn,
   onFitColumns,
   onResetColumns,
   onToggleEditing,
@@ -257,6 +259,11 @@ export function TableDataToolbar({
         <ToolbarButton title="Find in data grid" onClick={onSearch}>
           <Search size={14} />
         </ToolbarButton>
+        {onGoToColumn && (
+          <ToolbarButton title="Go to column (Ctrl+G)" onClick={onGoToColumn}>
+            <Columns3 size={14} />
+          </ToolbarButton>
+        )}
         <ToolbarButton title="Fit all columns" onClick={onFitColumns}>
           <Columns3 size={14} />
         </ToolbarButton>

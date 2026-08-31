@@ -16,6 +16,7 @@
 | `73a7b3f4c` | Elasticsearch 通过 PIT + `search_after` 跨越 10k result window | 已迁移为 native opaque cursor 协议；Grid 分页、fallback 与 cursor 清理逻辑完成，真实 ES 6/7/8 验证延期。 |
 | `5a11b8f14` | MongoDB 创建数据库预览和确认 | 已迁移为严格 JSON 预览与后端固定初始化 collection 的语义命令，避免执行 shell source；真实权限/竞争验证延期。 |
 | `eafc0b2b1` | Grid 筛选列搜索固定在下拉顶部 | 已对齐：通用 Select 支持固定 header，Data Grid 的字段选择器在可滚动列列表上方提供可访问搜索框；匹配真实 identifier 与显示名、保持原 metadata 顺序、空结果有状态提示，关闭列表会清除临时关键词。 |
+| `22775f363` | Grid 跳转到列支持搜索与键盘导航 | 已对齐：工具栏和 Ctrl/Cmd+G 打开锚定在数据网格上的紧凑列定位器，按视觉列顺序搜索列名、类型/注释和一基序号；↑/↓ 循环选择、Enter 平滑横向定位并回焦 grid、Esc 关闭。隐藏列不伪装为可定位列，空结果有明确状态。 |
 | `45fb7fb7e` | Grid 的精确总数改为显式刷新，避免每次分页都阻塞在 count | 已对齐：默认预览只获取当前页；仅用户点击总数刷新时才运行精确 `COUNT(*)`。翻页保留同一筛选/排序范围内已知总数，筛选或排序变更会失效旧数值；有未提交编辑时禁用统计，避免为计数刷新而丢失草稿。真实大表/复杂筛选的时延与资源曲线延期。 |
 | `bd3e58562`、`143be57d4` | completion popup 多选列并批量生成 SELECT/INSERT | 逻辑已对齐：Monaco 建议列表末尾提供 batch action，独立选择面板支持搜索、checkbox 与可访问焦点；SELECT 按 metadata 顺序插入，INSERT 生成可 Tab 导航的 VALUES snippet。batch action 的上下文复用当前 statement boundary 与 SQL noise mask，因此注释、字面量和 PostgreSQL dollar quote 中的 `;`/`FROM`/`INSERT` 不会误触发；普通单列继续作为默认 Enter 目标，不耦合 Monaco 私有 DOM。真实 WebView/IME 验证延期。 |
 | `d5f4eadf7` | 工具栏执行前冻结 SQL selection | 已对齐：pointer-down 捕获 immutable snapshot，执行目标不再受 focus transition 影响。 |

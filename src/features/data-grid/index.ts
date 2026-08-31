@@ -45,3 +45,7 @@ export {
   type TableColumnEditability,
   type TableColumnOwnership,
 } from "./model/tableColumnEditability";
+export {
+  filterDataGridColumnLookupItems,
+  type DataGridColumnLookupItem,
+} from "./model/columnLookup";
