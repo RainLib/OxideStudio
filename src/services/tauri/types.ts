@@ -1558,8 +1558,10 @@ export interface SchemaRelationSnapshot {
   /**
    * Read-only SELECT source captured for native views. It is absent for
    * tables, older snapshots, and drivers without a safe catalog contract.
-   */
+  */
   definition?: string | null;
+  /** Direct same-schema view prerequisites used only to order reviewed DDL. */
+  dependencies?: string[];
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   constraints: ConstraintInfo[];

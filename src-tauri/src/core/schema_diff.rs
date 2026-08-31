@@ -28,6 +28,11 @@ pub struct SchemaRelationSnapshot {
     /// it and remain review-only for view changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// Direct same-schema relation dependencies captured from the catalog for
+    /// views. The planner uses these only to order reviewed DDL; they never
+    /// broaden the set of objects selected for a migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
@@ -285,6 +290,8 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
         .relations
         .sort_by(|left, right| left.name.cmp(&right.name));
     for relation in &mut snapshot.relations {
+        relation.dependencies.sort();
+        relation.dependencies.dedup();
         relation
             .indexes
             .sort_by(|left, right| left.name.cmp(&right.name));
@@ -3383,6 +3390,15 @@ fn finalize_change_plan(
     let constraint_drops = child_change_id_map(&changes, SchemaChangeKind::ConstraintDrop);
     let index_drops = child_change_id_map(&changes, SchemaChangeKind::IndexDrop);
     let column_adds = child_change_id_map(&changes, SchemaChangeKind::ColumnAdd);
+    let relation_definition_changes = changes
+        .iter()
+        .filter(|change| {
+            change.kind == SchemaChangeKind::RelationCreate
+                || (change.kind == SchemaChangeKind::RelationModify
+                    && relation_flags(change.object_type.as_deref()).is_view)
+        })
+        .map(|change| (change.relation_name.clone(), change.id.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     for change in &mut changes {
         let mut dependencies = Vec::new();
@@ -3582,6 +3598,22 @@ fn finalize_change_plan(
                 }
             }
             _ => {}
+        }
+        let is_view_definition_change = change.kind == SchemaChangeKind::RelationCreate
+            || (change.kind == SchemaChangeKind::RelationModify
+                && relation_flags(change.object_type.as_deref()).is_view);
+        if is_view_definition_change {
+            if let Some(relation) = relation_by_name(source, &change.relation_name) {
+                if relation_flags(relation.object_type.as_deref()).is_view {
+                    for prerequisite in &relation.dependencies {
+                        if let Some(dependency) = relation_definition_changes.get(prerequisite) {
+                            if dependency != &change.id {
+                                dependencies.push(dependency.clone());
+                            }
+                        }
+                    }
+                }
+            }
         }
         dependencies.sort();
         dependencies.dedup();
@@ -4232,6 +4264,7 @@ mod tests {
                 object_type: Some("BASE TABLE".to_string()),
                 comment: None,
                 definition: None,
+                dependencies: Vec::new(),
                 columns,
                 indexes: Vec::new(),
                 constraints: Vec::new(),
@@ -4362,6 +4395,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4732,6 +4766,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4846,6 +4881,56 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn captured_view_dependencies_order_new_relations_before_dependent_views() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.push(SchemaRelationSnapshot {
+            name: "active_users".to_string(),
+            object_type: Some("VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM users WHERE active".to_string()),
+            dependencies: vec!["users".to_string()],
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        source.relations.push(SchemaRelationSnapshot {
+            name: "visible_users".to_string(),
+            object_type: Some("VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM active_users".to_string()),
+            dependencies: vec!["active_users".to_string()],
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        let mut target = snapshot("actual", Vec::new());
+        target.relations.clear();
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let users = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "users")
+            .expect("table creation should be planned");
+        let active = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users")
+            .expect("first view creation should be planned");
+        let visible = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "visible_users")
+            .expect("dependent view creation should be planned");
+
+        assert!(active.depends_on.contains(&users.id));
+        assert!(visible.depends_on.contains(&active.id));
+        assert!(users.order < active.order && active.order < visible.order);
     }
 
     #[test]
@@ -4989,6 +5074,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),

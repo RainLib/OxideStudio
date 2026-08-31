@@ -113,6 +113,71 @@ async fn capture_native_view_definition(
     Ok(query_first_string(&results))
 }
 
+fn postgres_view_dependency_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT dependent.relname AS view_name, referenced.relname AS depends_on \
+         FROM pg_catalog.pg_rewrite rewrite \
+         JOIN pg_catalog.pg_class dependent ON dependent.oid = rewrite.ev_class \
+         JOIN pg_catalog.pg_namespace dependent_namespace ON dependent_namespace.oid = dependent.relnamespace \
+         JOIN pg_catalog.pg_depend dependency ON dependency.objid = rewrite.oid \
+         JOIN pg_catalog.pg_class referenced ON referenced.oid = dependency.refobjid \
+         JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.relnamespace \
+         WHERE dependent_namespace.nspname = {schema} \
+           AND referenced_namespace.nspname = {schema} \
+           AND dependent.relkind IN ('v', 'm') \
+           AND referenced.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') \
+           AND dependent.oid <> referenced.oid \
+           AND dependency.deptype = 'n' \
+         ORDER BY dependent.relname, referenced.relname;"
+    )
+}
+
+async fn capture_postgres_view_dependencies(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let sql = postgres_view_dependency_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut dependencies = HashMap::<String, Vec<String>>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let Some(view) = row.first().and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(dependency) = row.get(1).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !view.trim().is_empty()
+            && !dependency.trim().is_empty()
+            && !view.eq_ignore_ascii_case(dependency)
+        {
+            dependencies
+                .entry(view.to_string())
+                .or_default()
+                .push(dependency.to_string());
+        }
+    }
+    for relation_dependencies in dependencies.values_mut() {
+        relation_dependencies.sort();
+        relation_dependencies.dedup();
+    }
+    Ok(dependencies)
+}
+
 #[derive(Default)]
 pub struct ExternalSchemaMigrationSessionState {
     sessions: Mutex<HashMap<String, ExternalSchemaMigrationSession>>,
@@ -457,8 +522,29 @@ async fn capture_schema_snapshot_inner(
                 .collect()
         };
 
-    let manager = manager.clone();
     let mut warnings = Vec::new();
+    let view_dependencies = if capabilities.supports_table_browsing {
+        match capture_postgres_view_dependencies(
+            manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
+                warnings.push(format!(
+                    "PostgreSQL view dependency metadata was unavailable; view DDL remains reviewable but uses the conservative default order: {error}"
+                ));
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+    let manager = manager.clone();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
     let snapshot_driver = capabilities.driver.clone();
@@ -469,6 +555,10 @@ async fn capture_schema_snapshot_inner(
         let database = database.map(ToString::to_string);
         let schema = schema.to_string();
         let driver = snapshot_driver.clone();
+        let dependencies = view_dependencies
+            .get(&relation_name)
+            .cloned()
+            .unwrap_or_default();
         let supports_indexes = capabilities.supports_table_indexes;
         let supports_constraints = capabilities.supports_table_constraints;
         let database_scoped = capabilities.supports_table_browsing && database.is_some();
@@ -559,6 +649,7 @@ async fn capture_schema_snapshot_inner(
                         object_type,
                         comment,
                         definition,
+                        dependencies,
                         columns: metadata.0,
                         indexes: metadata.1,
                         constraints: metadata.2,
@@ -571,6 +662,7 @@ async fn capture_schema_snapshot_inner(
                         object_type,
                         comment,
                         definition,
+                        dependencies,
                         columns: Vec::new(),
                         indexes: Vec::new(),
                         constraints: Vec::new(),
@@ -2320,6 +2412,7 @@ mod tests {
                 object_type: Some("TABLE".to_string()),
                 comment: None,
                 definition: None,
+                dependencies: Vec::new(),
                 columns: vec![ColumnInfo {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
@@ -2378,6 +2471,18 @@ mod tests {
                 .expect("quoted PostgreSQL catalog query")
                 .contains("'p''ublic'")
         );
+    }
+
+    #[test]
+    fn postgres_view_dependency_query_is_same_schema_and_read_only() {
+        let query = postgres_view_dependency_query("public");
+        assert!(query.contains("pg_catalog.pg_rewrite"));
+        assert!(query.contains("dependent_namespace.nspname = 'public'"));
+        assert!(query.contains("referenced_namespace.nspname = 'public'"));
+        assert!(query.contains("dependent.relkind IN ('v', 'm')"));
+        assert!(query.contains("referenced.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"));
+        assert!(!query.contains("INSERT"));
+        assert!(!query.contains("UPDATE"));
     }
 
     fn check(assertion: SchemaPreflightAssertion, column: Option<&str>) -> SchemaPreflightCheck {
