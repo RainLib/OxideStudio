@@ -1593,6 +1593,8 @@ export interface SchemaObjectSnapshot {
   parentName?: string | null;
   description?: string | null;
   definition?: string | null;
+  /** Native prerequisite names, currently PostgreSQL trigger callback routines. */
+  dependencies?: string[];
 }
 
 export interface SchemaSnapshot {

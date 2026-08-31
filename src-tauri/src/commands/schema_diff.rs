@@ -365,6 +365,62 @@ async fn capture_postgres_trigger_definitions(
     Ok(definitions)
 }
 
+fn postgres_trigger_routine_dependency_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT trigger.tgname AS trigger_name, relation.relname AS parent_name, routine.proname AS routine_name \
+         FROM pg_catalog.pg_trigger trigger \
+         JOIN pg_catalog.pg_class relation ON relation.oid = trigger.tgrelid \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+         JOIN pg_catalog.pg_proc routine ON routine.oid = trigger.tgfoid \
+         WHERE namespace.nspname = {schema} AND NOT trigger.tgisinternal \
+         ORDER BY relation.relname, trigger.tgname, routine.proname;"
+    )
+}
+
+async fn capture_postgres_trigger_routine_dependencies(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let sql = postgres_trigger_routine_dependency_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut dependencies = HashMap::<String, Vec<String>>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(parent_name), Some(routine)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+            row.get(2).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if !name.trim().is_empty() && !parent_name.trim().is_empty() && !routine.trim().is_empty() {
+            dependencies
+                .entry(schema_object_definition_key(Some(parent_name), name))
+                .or_default()
+                .push(routine.to_string());
+        }
+    }
+    for trigger_dependencies in dependencies.values_mut() {
+        trigger_dependencies.sort();
+        trigger_dependencies.dedup();
+    }
+    Ok(dependencies)
+}
+
 async fn capture_postgres_view_dependencies(
     manager: &ConnectionManager,
     connection_id: &str,
@@ -1077,6 +1133,35 @@ async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "PostgreSQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_postgres_trigger_routine_dependencies(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(dependencies) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("trigger") {
+                        object.dependencies = dependencies
+                            .get(&schema_object_definition_key(
+                                object.parent_name.as_deref(),
+                                &object.name,
+                            ))
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "PostgreSQL trigger routine dependency metadata was unavailable; trigger DDL retains conservative ordering: {error}"
             )),
         }
     }
@@ -2866,6 +2951,12 @@ mod tests {
         assert!(sequence_dependency.contains("sequence.relkind = 'S'"));
         assert!(sequence_dependency.contains("relation_namespace.nspname = 'public'"));
         assert!(!sequence_dependency.contains("DELETE"));
+
+        let trigger_dependency = postgres_trigger_routine_dependency_query("public");
+        assert!(trigger_dependency.contains("trigger.tgfoid"));
+        assert!(trigger_dependency.contains("namespace.nspname = 'public'"));
+        assert!(trigger_dependency.contains("NOT trigger.tgisinternal"));
+        assert!(!trigger_dependency.contains("INSERT"));
         assert_eq!(
             schema_object_definition_key(Some("orders"), "orders_audit"),
             "orders\u{1f}orders_audit"

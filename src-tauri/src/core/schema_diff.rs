@@ -89,6 +89,11 @@ pub struct SchemaObjectSnapshot {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// Direct native object prerequisites. PostgreSQL currently captures the
+    /// trigger callback routine name; the planner turns it into an exact
+    /// dependency only when the corresponding routine create is unambiguous.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
 }
 
 impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
@@ -99,6 +104,7 @@ impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
             parent_name: object.parent_name,
             description: object.comment,
             definition: None,
+            dependencies: Vec::new(),
         }
     }
 }
@@ -316,6 +322,10 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
     }
     snapshot.routines.sort_by_key(routine_sort_key);
     snapshot.schema_objects.sort_by_key(schema_object_sort_key);
+    for object in &mut snapshot.schema_objects {
+        object.dependencies.sort();
+        object.dependencies.dedup();
+    }
     snapshot.warnings.sort();
     snapshot.warnings.dedup();
     snapshot.fingerprint = snapshot_fingerprint(&snapshot)?;
@@ -3567,6 +3577,20 @@ fn finalize_change_plan(
         })
         .map(|change| (change.relation_name.clone(), change.id.clone()))
         .collect::<BTreeMap<_, _>>();
+    let mut routine_create_candidates = BTreeMap::<String, Vec<String>>::new();
+    for change in changes
+        .iter()
+        .filter(|change| change.kind == SchemaChangeKind::RoutineCreate)
+    {
+        routine_create_candidates
+            .entry(change.relation_name.clone())
+            .or_default()
+            .push(change.id.clone());
+    }
+    let routine_creates = routine_create_candidates
+        .into_iter()
+        .filter_map(|(name, ids)| (ids.len() == 1).then(|| (name, ids[0].clone())))
+        .collect::<BTreeMap<_, _>>();
     let constraint_drops = child_change_id_map(&changes, SchemaChangeKind::ConstraintDrop);
     let index_drops = child_change_id_map(&changes, SchemaChangeKind::IndexDrop);
     let column_adds = child_change_id_map(&changes, SchemaChangeKind::ColumnAdd);
@@ -3790,6 +3814,22 @@ fn finalize_change_plan(
                 }
             }
             _ => {}
+        }
+        if change.kind == SchemaChangeKind::SchemaObjectCreate
+            && change
+                .object_type
+                .as_deref()
+                .is_some_and(|object_type| object_type.eq_ignore_ascii_case("trigger"))
+        {
+            if let Some(object) = source.schema_objects.iter().find(|object| {
+                object.name == change.relation_name
+                    && object.object_type.eq_ignore_ascii_case("trigger")
+                    && object.parent_name == change.child_name
+            }) {
+                for routine in &object.dependencies {
+                    add_dependency(&mut dependencies, routine_creates.get(routine));
+                }
+            }
         }
         let is_view_definition_change = change.kind == SchemaChangeKind::RelationCreate
             || (change.kind == SchemaChangeKind::RelationModify
@@ -4757,6 +4797,7 @@ mod tests {
             parent_name: Some("orders".to_string()),
             description: Some("Primary-key generator".to_string()),
             definition: None,
+            dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let target = snapshot("actual", vec![column("id", "int4", false)]);
@@ -4792,6 +4833,7 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let target = snapshot("actual", vec![column("id", "int4", false)]);
@@ -4821,6 +4863,7 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot("actual", vec![column("id", "int4", false)]);
@@ -4833,6 +4876,7 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            dependencies: Vec::new(),
         }];
         let target = finalize_schema_snapshot(target).unwrap();
 
@@ -4861,6 +4905,7 @@ mod tests {
                 "CREATE SEQUENCE public.users_id_seq AS integer INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE;"
                     .to_string(),
             ),
+            dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot("actual", Vec::new());
@@ -4909,6 +4954,7 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            dependencies: vec!["audit_order".to_string()],
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let target = snapshot("actual", vec![column("id", "int4", false)]);
@@ -4924,6 +4970,7 @@ mod tests {
             .iter()
             .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
             .unwrap();
+        assert!(trigger.depends_on.contains(&routine.id));
         assert!(routine.order < trigger.order);
     }
 
