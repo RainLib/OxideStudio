@@ -22,7 +22,7 @@ use oxide_driver_protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     str::FromStr,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
@@ -131,6 +131,121 @@ fn postgres_view_dependency_query(schema: &str) -> String {
            AND dependency.deptype = 'n' \
          ORDER BY dependent.relname, referenced.relname;"
     )
+}
+
+#[derive(Debug, Clone)]
+struct PostgresRoutineDefinition {
+    name: String,
+    routine_type: String,
+    definition: String,
+}
+
+/// `pg_get_functiondef` is the native, fully-qualified create-or-replace
+/// definition for a function or procedure. The ordering intentionally mirrors
+/// the PostgreSQL driver's routine discovery query, so overloads can be paired
+/// without guessing from rendered parameter text.
+fn postgres_routine_definition_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT procedure.proname AS routine_name, \
+         CASE WHEN procedure.prokind = 'p' THEN 'procedure' ELSE 'function' END AS routine_type, \
+         pg_catalog.pg_get_functiondef(procedure.oid) AS definition \
+         FROM pg_catalog.pg_proc procedure \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace \
+         WHERE namespace.nspname = {schema} AND procedure.prokind IN ('f', 'p') \
+         ORDER BY procedure.proname, pg_catalog.pg_get_function_identity_arguments(procedure.oid);"
+    )
+}
+
+async fn capture_postgres_routine_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<Vec<PostgresRoutineDefinition>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(Vec::new());
+    }
+    let sql = postgres_routine_definition_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .filter_map(|row| {
+            Some(PostgresRoutineDefinition {
+                name: row.first()?.as_str()?.to_string(),
+                routine_type: row.get(1)?.as_str()?.to_ascii_lowercase(),
+                definition: row.get(2)?.as_str()?.trim().to_string(),
+            })
+        })
+        .filter(|definition| !definition.definition.is_empty())
+        .collect())
+}
+
+fn postgres_trigger_definition_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT trigger.tgname AS trigger_name, relation.relname AS parent_name, \
+         pg_catalog.pg_get_triggerdef(trigger.oid, true) AS definition \
+         FROM pg_catalog.pg_trigger trigger \
+         JOIN pg_catalog.pg_class relation ON relation.oid = trigger.tgrelid \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+         WHERE namespace.nspname = {schema} AND NOT trigger.tgisinternal \
+         ORDER BY relation.relname, trigger.tgname;"
+    )
+}
+
+fn schema_object_definition_key(parent_name: Option<&str>, name: &str) -> String {
+    format!("{}\u{1f}{}", parent_name.unwrap_or_default(), name)
+}
+
+async fn capture_postgres_trigger_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, String>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let sql = postgres_trigger_definition_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(parent_name), Some(definition)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+            row.get(2).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let definition = definition.trim();
+        if !name.trim().is_empty() && !parent_name.trim().is_empty() && !definition.is_empty() {
+            definitions.insert(
+                schema_object_definition_key(Some(parent_name), name),
+                definition.to_string(),
+            );
+        }
+    }
+    Ok(definitions)
 }
 
 async fn capture_postgres_view_dependencies(
@@ -699,11 +814,10 @@ async fn capture_schema_snapshot_inner(
         }
     }
 
-    // Capture only review-safe routine signatures. Definitions/bodies are not
-    // requested because they are dialect-specific and may contain sensitive
-    // implementation details; the diff planner deliberately never emits DDL
-    // from these records.
-    let routines = if capabilities.supports_functions {
+    // Routine metadata is available across many drivers. PostgreSQL additionally
+    // exposes exact catalog-owned create-or-replace source; only that narrow
+    // contract is carried into a review-gated native migration plan.
+    let mut routines = if capabilities.supports_functions {
         let functions = match (capabilities.supports_table_browsing, database) {
             (true, Some(database)) => {
                 manager
@@ -721,11 +835,55 @@ async fn capture_schema_snapshot_inner(
         Vec::new()
     };
 
+    if !routines.is_empty() {
+        match capture_postgres_routine_definitions(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                let mut by_identity = HashMap::<(String, String), VecDeque<String>>::new();
+                for definition in definitions {
+                    by_identity
+                        .entry((definition.name, definition.routine_type))
+                        .or_default()
+                        .push_back(definition.definition);
+                }
+                for routine in &mut routines {
+                    let routine_type = routine
+                        .routine_type
+                        .as_deref()
+                        .unwrap_or("function")
+                        .to_ascii_lowercase();
+                    if let Some(definition) = by_identity
+                        .get_mut(&(routine.name.clone(), routine_type))
+                        .and_then(VecDeque::pop_front)
+                    {
+                        routine.definition = Some(definition);
+                    }
+                }
+                if by_identity.values().any(|values| !values.is_empty()) {
+                    warnings.push(
+                        "Some PostgreSQL routine definitions could not be paired with their metadata signatures; those routines remain review-only."
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "PostgreSQL routine source was unavailable; routine drift remains review-only: {error}"
+            )),
+        }
+    }
+
     // Descriptor discovery is deliberately best-effort. A role that can read
     // relations may still lack catalog visibility for extensions, triggers or
     // types; that must not make an otherwise usable snapshot fail. The warning
     // binds this incomplete coverage to the snapshot review record.
-    let schema_objects = if capabilities.supports_table_browsing {
+    let mut schema_objects = if capabilities.supports_table_browsing {
         let result = match database {
             Some(database) => {
                 manager
@@ -750,6 +908,34 @@ async fn capture_schema_snapshot_inner(
     } else {
         Vec::new()
     };
+
+    if !schema_objects.is_empty() {
+        match capture_postgres_trigger_definitions(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("trigger") {
+                        object.definition = definitions
+                            .get(&schema_object_definition_key(
+                                object.parent_name.as_deref(),
+                                &object.name,
+                            ))
+                            .cloned();
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "PostgreSQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
 
     finalize_schema_snapshot(SchemaSnapshot {
         version: SCHEMA_SNAPSHOT_VERSION,
@@ -2483,6 +2669,26 @@ mod tests {
         assert!(query.contains("referenced.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"));
         assert!(!query.contains("INSERT"));
         assert!(!query.contains("UPDATE"));
+    }
+
+    #[test]
+    fn postgres_native_object_source_queries_are_catalog_scoped_and_read_only() {
+        let routine = postgres_routine_definition_query("public");
+        assert!(routine.contains("pg_catalog.pg_get_functiondef"));
+        assert!(routine.contains("namespace.nspname = 'public'"));
+        assert!(routine.contains("procedure.prokind IN ('f', 'p')"));
+        assert!(routine.contains("ORDER BY procedure.proname"));
+        assert!(!routine.contains("INSERT"));
+
+        let trigger = postgres_trigger_definition_query("public");
+        assert!(trigger.contains("pg_catalog.pg_get_triggerdef"));
+        assert!(trigger.contains("namespace.nspname = 'public'"));
+        assert!(trigger.contains("NOT trigger.tgisinternal"));
+        assert!(!trigger.contains("UPDATE"));
+        assert_eq!(
+            schema_object_definition_key(Some("orders"), "orders_audit"),
+            "orders\u{1f}orders_audit"
+        );
     }
 
     fn check(assertion: SchemaPreflightAssertion, column: Option<&str>) -> SchemaPreflightCheck {

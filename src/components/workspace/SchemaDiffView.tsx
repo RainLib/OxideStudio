@@ -141,6 +141,9 @@ export function SchemaDiffView() {
   const descriptorOnlyObjectChanges = plan.changes.filter(
     isDescriptorOnlySchemaObjectChange,
   );
+  const catalogBackedObjectChanges = plan.changes.filter(
+    isCatalogBackedObjectChange,
+  );
   const requiresReview = plan.requiresReviewApproval ?? plan.changes.some(
     (change) => change.manualReview || change.risk === "review",
   );
@@ -444,7 +447,19 @@ export function SchemaDiffView() {
         >
           <ShieldAlert size={12} className="mt-0.5 shrink-0 text-sky-300" />
           <span>
-            {descriptorOnlyObjectChanges.length} schema object change{descriptorOnlyObjectChanges.length === 1 ? " is" : "s are"} review-only. Source DDL is not captured in schema descriptors, so these objects are excluded from generated migration SQL and must be reviewed and applied manually.
+            {descriptorOnlyObjectChanges.length} schema object change{descriptorOnlyObjectChanges.length === 1 ? " is" : "s are"} descriptor-only. No executable source DDL was captured, so these objects are excluded from generated migration SQL and must be reviewed and applied manually.
+          </span>
+        </div>
+      )}
+
+      {catalogBackedObjectChanges.length > 0 && (
+        <div
+          className="flex shrink-0 items-start gap-2 border-b border-violet-400/20 bg-violet-400/[0.045] px-4 py-2 text-[9px] leading-4 text-violet-100/90"
+          data-schema-object-catalog-ddl-summary
+        >
+          <ShieldAlert size={12} className="mt-0.5 shrink-0 text-violet-300" />
+          <span>
+            {catalogBackedObjectChanges.length} PostgreSQL routine or trigger change{catalogBackedObjectChanges.length === 1 ? " has" : "s have"} catalog-backed DDL in this preview. It remains review-gated and is applied only after target confirmation; delete operations are never generated automatically.
           </span>
         </div>
       )}
@@ -815,9 +830,21 @@ export function SchemaDiffView() {
 
 function isDescriptorOnlySchemaObjectChange(change: SchemaChange) {
   return (
-    change.kind === "schemaObjectCreate" ||
-    change.kind === "schemaObjectDrop" ||
-    change.kind === "schemaObjectModify"
+    (change.kind === "schemaObjectCreate" ||
+      change.kind === "schemaObjectDrop" ||
+      change.kind === "schemaObjectModify") &&
+    change.sql.length === 0
+  );
+}
+
+function isCatalogBackedObjectChange(change: SchemaChange) {
+  return (
+    (change.kind === "routineCreate" ||
+      change.kind === "routineModify" ||
+      change.kind === "schemaObjectCreate" ||
+      change.kind === "schemaObjectModify") &&
+    change.sql.length > 0 &&
+    change.manualReview
   );
 }
 

@@ -1568,8 +1568,9 @@ export interface SchemaRelationSnapshot {
 }
 
 /**
- * Review-only routine metadata. Definitions are intentionally not captured,
- * because snapshot diffs must never synthesize dialect-specific routine DDL.
+ * Review-gated routine metadata. Native PostgreSQL snapshots can include a
+ * catalog-provided CREATE OR REPLACE definition; other drivers remain
+ * descriptor-only.
  */
 export interface SchemaRoutineSnapshot {
   name: string;
@@ -1577,17 +1578,19 @@ export interface SchemaRoutineSnapshot {
   parameters: FunctionParameterInfo[];
   returnType: string;
   description?: string | null;
+  definition?: string | null;
 }
 
 /**
- * Descriptor-only schema metadata. It intentionally excludes source and DDL,
- * therefore its diff entries are always review-only.
+ * Schema-object metadata. A native PostgreSQL trigger may include exact
+ * catalog DDL; applying it still requires review approval.
  */
 export interface SchemaObjectSnapshot {
   name: string;
   objectType: string;
   parentName?: string | null;
   description?: string | null;
+  definition?: string | null;
 }
 
 export interface SchemaSnapshot {

@@ -38,9 +38,9 @@ pub struct SchemaRelationSnapshot {
     pub constraints: Vec<ConstraintInfo>,
 }
 
-/// A compact routine signature intentionally excludes source/DDL text. Routine
-/// bodies can contain credentials, implementation details, and dialect-specific
-/// syntax; signatures are enough for drift review but never for auto-migration.
+/// A compact routine signature. Native PostgreSQL snapshots may additionally
+/// carry the catalog-provided create-or-replace DDL. It is always review-gated:
+/// source text can be dialect-specific and can contain implementation details.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRoutineSnapshot {
@@ -52,6 +52,10 @@ pub struct SchemaRoutineSnapshot {
     pub return_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Native, catalog-provided routine DDL. This is absent for legacy
+    /// snapshots and every driver without an explicit safe source contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
 }
 
 impl From<FunctionInfo> for SchemaRoutineSnapshot {
@@ -62,12 +66,13 @@ impl From<FunctionInfo> for SchemaRoutineSnapshot {
             parameters: function.parameters,
             return_type: function.return_type,
             description: function.description,
+            definition: None,
         }
     }
 }
 
-/// Descriptor-only schema object metadata. Unlike relation metadata this never
-/// contains source/DDL, so every resulting drift item remains manual review.
+/// Schema object metadata. Native PostgreSQL triggers may carry their exact
+/// catalog DDL; every other descriptor remains review-only without source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaObjectSnapshot {
@@ -77,6 +82,8 @@ pub struct SchemaObjectSnapshot {
     pub parent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
 }
 
 impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
@@ -86,6 +93,7 @@ impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
             object_type: object.object_type,
             parent_name: object.parent_name,
             description: object.comment,
+            definition: None,
         }
     }
 }
@@ -498,6 +506,7 @@ pub fn compare_schema_snapshots(
         }
     }
     compare_routines(
+        Some(kind),
         &source.routines,
         &target.routines,
         target_schema,
@@ -505,6 +514,7 @@ pub fn compare_schema_snapshots(
         &mut warnings,
     );
     compare_schema_objects(
+        Some(kind),
         &source.schema_objects,
         &target.schema_objects,
         target_schema,
@@ -1085,6 +1095,7 @@ fn compare_metadata_snapshots(
     }
     let mut routine_warnings = Vec::new();
     compare_routines(
+        None,
         &source.routines,
         &target.routines,
         &target.schema_name,
@@ -1092,6 +1103,7 @@ fn compare_metadata_snapshots(
         &mut routine_warnings,
     );
     compare_schema_objects(
+        None,
         &source.schema_objects,
         &target.schema_objects,
         &target.schema_name,
@@ -1277,6 +1289,7 @@ fn compare_sqlite_schema_snapshots(
     }
 
     compare_routines(
+        None,
         &source.routines,
         &target.routines,
         &target.schema_name,
@@ -1284,6 +1297,7 @@ fn compare_sqlite_schema_snapshots(
         &mut warnings,
     );
     compare_schema_objects(
+        None,
         &source.schema_objects,
         &target.schema_objects,
         &target.schema_name,
@@ -1870,7 +1884,55 @@ fn routine_review_change(
     change
 }
 
+fn routine_review_change_with_definition(
+    kind: SchemaChangeKind,
+    database_kind: Option<DatabaseKind>,
+    schema_name: &str,
+    routine: &SchemaRoutineSnapshot,
+    summary: String,
+) -> SchemaChange {
+    let definition = routine
+        .definition
+        .as_deref()
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty());
+    // pg_get_functiondef produces CREATE OR REPLACE FUNCTION/PROCEDURE DDL.
+    // Do not accept an arbitrary definition from a persisted snapshot: only
+    // a native PostgreSQL plan may expose it, and it remains review-gated.
+    let executable_definition = match (database_kind, definition) {
+        (Some(DatabaseKind::Postgres), Some(definition))
+            if definition
+                .to_ascii_uppercase()
+                .starts_with("CREATE OR REPLACE ") =>
+        {
+            Some(definition.to_string())
+        }
+        _ => None,
+    };
+    let mut change = change(
+        kind,
+        SchemaChangeRisk::Review,
+        schema_name,
+        &routine.name,
+        routine_object_type(routine),
+        Some(routine_label(routine)),
+        summary,
+        executable_definition.into_iter().collect(),
+        false,
+        true,
+    );
+    if change.sql.is_empty() {
+        change.phase = SchemaChangePhase::ManualReview;
+        change.blocked_reason = Some(
+            "Routine source/DDL is unavailable or is not a reviewed native PostgreSQL create-or-replace definition."
+                .to_string(),
+        );
+    }
+    change
+}
+
 fn compare_routines(
+    database_kind: Option<DatabaseKind>,
     source: &[SchemaRoutineSnapshot],
     target: &[SchemaRoutineSnapshot],
     schema_name: &str,
@@ -1893,8 +1955,9 @@ fn compare_routines(
             source_routines.get(&identity),
             target_routines.get(&identity),
         ) {
-            (Some(source_routine), None) => changes.push(routine_review_change(
+            (Some(source_routine), None) => changes.push(routine_review_change_with_definition(
                 SchemaChangeKind::RoutineCreate,
+                database_kind,
                 schema_name,
                 source_routine,
                 format!(
@@ -1912,8 +1975,9 @@ fn compare_routines(
                 ),
             )),
             (Some(source_routine), Some(target_routine)) if source_routine != target_routine => {
-                changes.push(routine_review_change(
+                changes.push(routine_review_change_with_definition(
                     SchemaChangeKind::RoutineModify,
+                    database_kind,
                     schema_name,
                     source_routine,
                     format!("Review changed routine {}", routine_label(source_routine)),
@@ -1939,9 +2003,10 @@ fn schema_object_map(objects: &[SchemaObjectSnapshot]) -> BTreeMap<String, &Sche
 
 fn schema_object_identity(object: &SchemaObjectSnapshot) -> String {
     format!(
-        "{}:{}",
+        "{}:{}:{}",
         object.object_type.to_ascii_uppercase(),
-        object.name
+        object.parent_name.as_deref().unwrap_or_default(),
+        object.name,
     )
 }
 
@@ -1978,7 +2043,51 @@ fn schema_object_review_change(
     change
 }
 
+fn schema_object_review_change_with_definition(
+    kind: SchemaChangeKind,
+    database_kind: Option<DatabaseKind>,
+    schema_name: &str,
+    object: &SchemaObjectSnapshot,
+    summary: String,
+) -> SchemaChange {
+    let is_trigger = object.object_type.eq_ignore_ascii_case("trigger");
+    let definition = object
+        .definition
+        .as_deref()
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty());
+    let executable_definition = match (database_kind, is_trigger, definition) {
+        (Some(DatabaseKind::Postgres), true, Some(definition))
+            if definition.to_ascii_uppercase().starts_with("CREATE ") =>
+        {
+            Some(definition.to_string())
+        }
+        _ => None,
+    };
+    let mut change = change(
+        kind,
+        SchemaChangeRisk::Review,
+        schema_name,
+        &object.name,
+        Some(object.object_type.clone()),
+        object.parent_name.clone(),
+        summary,
+        executable_definition.into_iter().collect(),
+        false,
+        true,
+    );
+    if change.sql.is_empty() {
+        change.phase = SchemaChangePhase::ManualReview;
+        change.blocked_reason = Some(
+            "Schema object source/DDL is unavailable or lacks a reviewed native PostgreSQL create definition."
+                .to_string(),
+        );
+    }
+    change
+}
+
 fn compare_schema_objects(
+    database_kind: Option<DatabaseKind>,
     source: &[SchemaObjectSnapshot],
     target: &[SchemaObjectSnapshot],
     schema_name: &str,
@@ -1998,12 +2107,15 @@ fn compare_schema_objects(
     let change_start = changes.len();
     for identity in identities {
         match (source_objects.get(&identity), target_objects.get(&identity)) {
-            (Some(source_object), None) => changes.push(schema_object_review_change(
-                SchemaChangeKind::SchemaObjectCreate,
-                schema_name,
-                source_object,
-                format!("Review creation of {}", schema_object_label(source_object)),
-            )),
+            (Some(source_object), None) => {
+                changes.push(schema_object_review_change_with_definition(
+                    SchemaChangeKind::SchemaObjectCreate,
+                    database_kind,
+                    schema_name,
+                    source_object,
+                    format!("Review creation of {}", schema_object_label(source_object)),
+                ))
+            }
             (None, Some(target_object)) => changes.push(schema_object_review_change(
                 SchemaChangeKind::SchemaObjectDrop,
                 schema_name,
@@ -2011,8 +2123,9 @@ fn compare_schema_objects(
                 format!("Review removal of {}", schema_object_label(target_object)),
             )),
             (Some(source_object), Some(target_object)) if source_object != target_object => {
-                changes.push(schema_object_review_change(
+                changes.push(schema_object_review_change_with_definition(
                     SchemaChangeKind::SchemaObjectModify,
+                    database_kind,
                     schema_name,
                     source_object,
                     format!("Review changed {}", schema_object_label(source_object)),
@@ -3787,7 +3900,7 @@ fn topologically_order_changes(
         .collect::<BTreeSet<_>>();
     let mut ordered = Vec::with_capacity(changes_by_id.len());
     while let Some(key) = ready.pop_first() {
-        let id = key.4;
+        let id = key.5;
         let Some(change) = changes_by_id.remove(&id) else {
             continue;
         };
@@ -3829,14 +3942,41 @@ fn topologically_order_changes(
 
 fn owned_change_sort_key(
     change: &SchemaChange,
-) -> (SchemaChangePhase, String, String, SchemaChangeKind, String) {
+) -> (
+    SchemaChangePhase,
+    u8,
+    String,
+    String,
+    SchemaChangeKind,
+    String,
+) {
     (
         change.phase,
+        manual_review_object_rank(change),
         change.relation_name.clone(),
         change.child_name.clone().unwrap_or_default(),
         change.kind,
         change.id.clone(),
     )
+}
+
+/// Keep catalog-backed schema-object creation in the same conservative order
+/// used by DBX transfer: routines are available before triggers are created.
+/// Exact dependencies still need catalog evidence; this rank only resolves
+/// otherwise-independent review-gated changes deterministically.
+fn manual_review_object_rank(change: &SchemaChange) -> u8 {
+    match change.kind {
+        SchemaChangeKind::RoutineCreate | SchemaChangeKind::RoutineModify => 0,
+        SchemaChangeKind::SchemaObjectCreate | SchemaChangeKind::SchemaObjectModify
+            if change
+                .object_type
+                .as_deref()
+                .is_some_and(|object_type| object_type.eq_ignore_ascii_case("trigger")) =>
+        {
+            1
+        }
+        _ => 2,
+    }
 }
 
 fn build_preflight_checks(
@@ -4287,6 +4427,7 @@ mod tests {
             }],
             return_type: return_type.to_string(),
             description: None,
+            definition: None,
         }
     }
 
@@ -4500,6 +4641,33 @@ mod tests {
     }
 
     #[test]
+    fn postgres_catalog_routine_definition_is_review_gated_but_executable() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        let mut routine = routine("normalize_email", "text");
+        routine.definition = Some(
+            "CREATE OR REPLACE FUNCTION public.normalize_email(input text) RETURNS text LANGUAGE sql AS $$ SELECT lower(input) $$"
+                .to_string(),
+        );
+        source.routines = vec![routine];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot("actual", vec![column("id", "int4", false)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::RoutineCreate)
+            .unwrap();
+
+        assert!(change.manual_review);
+        assert_eq!(change.risk, SchemaChangeRisk::Review);
+        assert!(change.blocked_reason.is_none());
+        assert_eq!(change.sql.len(), 1);
+        assert!(change.sql[0].starts_with("CREATE OR REPLACE FUNCTION"));
+        assert_eq!(plan.summary.blocked, 0);
+    }
+
+    #[test]
     fn descriptor_object_drift_is_review_only_and_never_generates_ddl() {
         let mut source = snapshot("desired", vec![column("id", "int4", false)]);
         source.schema_objects = vec![SchemaObjectSnapshot {
@@ -4507,6 +4675,7 @@ mod tests {
             object_type: "sequence".to_string(),
             parent_name: Some("orders".to_string()),
             description: Some("Primary-key generator".to_string()),
+            definition: None,
         }];
         let source = finalize_schema_snapshot(source).unwrap();
         let target = snapshot("actual", vec![column("id", "int4", false)]);
@@ -4528,6 +4697,71 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("Schema object descriptor drift")));
+    }
+
+    #[test]
+    fn postgres_catalog_trigger_definition_is_review_gated_but_executable() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
+                    .to_string(),
+            ),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot("actual", vec![column("id", "int4", false)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+
+        assert!(change.manual_review);
+        assert!(change.blocked_reason.is_none());
+        assert_eq!(change.sql.len(), 1);
+        assert!(change.sql[0].starts_with("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn postgres_routines_are_ordered_before_catalog_triggers() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        let mut routine = routine("audit_order", "trigger");
+        routine.definition = Some(
+            "CREATE OR REPLACE FUNCTION public.audit_order() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"
+                .to_string(),
+        );
+        source.routines = vec![routine];
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
+                    .to_string(),
+            ),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = snapshot("actual", vec![column("id", "int4", false)]);
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let routine = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::RoutineCreate)
+            .unwrap();
+        let trigger = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+        assert!(routine.order < trigger.order);
     }
 
     #[test]
