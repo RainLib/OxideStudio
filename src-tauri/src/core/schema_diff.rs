@@ -570,6 +570,14 @@ pub fn compare_schema_snapshots(
             (None, None) => unreachable!(),
         }
     }
+    add_postgres_materialized_view_dependent_rebuilds(
+        kind,
+        source,
+        target,
+        target_schema,
+        &mut changes,
+        &mut warnings,
+    );
     compare_routines(
         Some(kind),
         &source.routines,
@@ -2627,7 +2635,7 @@ fn compare_relation(
                 if let Some(create_sql) = create_sql {
                     warnings.extend(external_view_dependency_warnings(source));
                     warnings.push(format!(
-                        "Materialized view {} changes are represented as a destructive, review-required DROP/CREATE without CASCADE; dependent target views must be handled explicitly.",
+                        "Materialized view {} changes are represented as a destructive, review-required DROP/CREATE without CASCADE; captured unchanged dependent views are rebuilt explicitly, while incomplete dependencies block this plan.",
                         source.name
                     ));
                     changes.push(change(
@@ -2707,6 +2715,167 @@ fn compare_relation(
             false,
         ));
     }
+}
+
+const MATERIALIZED_VIEW_DEPENDENT_DROP_PREFIX: &str = "Temporarily drop dependent view ";
+const MATERIALIZED_VIEW_DEPENDENT_RECREATE_PREFIX: &str = "Recreate dependent view ";
+
+/// PostgreSQL refuses to drop a materialized view while ordinary views still
+/// depend on it. When the dependent views are unchanged and their catalog
+/// source is available, turn that server-side dependency into explicit,
+/// review-gated DDL instead of relying on CASCADE. Any incomplete edge blocks
+/// the materialized-view recreation rather than dropping objects blindly.
+fn add_postgres_materialized_view_dependent_rebuilds(
+    kind: DatabaseKind,
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    target_schema: &str,
+    changes: &mut Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) {
+    if kind != DatabaseKind::Postgres {
+        return;
+    }
+    let materialized_changes = changes
+        .iter()
+        .filter(|change| {
+            change.kind == SchemaChangeKind::RelationModify
+                && !change.sql.is_empty()
+                && relation_by_name(source, &change.relation_name).is_some_and(|relation| {
+                    relation_flags(relation.object_type.as_deref()).is_materialized_view
+                })
+        })
+        .map(|change| (change.id.clone(), change.relation_name.clone()))
+        .collect::<Vec<_>>();
+
+    for (change_id, materialized_name) in materialized_changes {
+        let dependents = dependent_regular_views(target, &materialized_name);
+        if dependents.is_empty() {
+            continue;
+        }
+
+        let unsupported = dependents
+            .iter()
+            .filter_map(|name| {
+                let source_view = relation_by_name(source, name);
+                let target_view = relation_by_name(target, name);
+                let supported =
+                    source_view
+                        .zip(target_view)
+                        .is_some_and(|(source_view, target_view)| {
+                            let flags = relation_flags(source_view.object_type.as_deref());
+                            flags.is_view
+                                && !flags.is_materialized_view
+                                && source_view == target_view
+                                && normalized_view_select_definition(
+                                    source_view.definition.as_deref(),
+                                )
+                                .is_some()
+                        });
+                (!supported).then(|| name.clone())
+            })
+            .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            if let Some(change) = changes.iter_mut().find(|change| change.id == change_id) {
+                block_change(
+                    change,
+                    format!(
+                        "Dependent PostgreSQL views require source-preserving recreation before materialized view {} can be dropped: {}.",
+                        materialized_name,
+                        unsupported.join(", ")
+                    ),
+                    warnings,
+                );
+            }
+            continue;
+        }
+
+        warnings.push(format!(
+            "Materialized view {} has dependent PostgreSQL view(s): {}. The reviewed plan drops and recreates them explicitly without CASCADE.",
+            materialized_name,
+            dependents.join(", ")
+        ));
+        for name in &dependents {
+            let source_view = relation_by_name(source, name).expect("supported view exists");
+            let mut drop = change(
+                SchemaChangeKind::RelationDrop,
+                SchemaChangeRisk::Destructive,
+                target_schema,
+                name,
+                source_view.object_type.clone(),
+                None,
+                format!("{MATERIALIZED_VIEW_DEPENDENT_DROP_PREFIX}{name}"),
+                vec![kind.drop_relation_query_with_kind(
+                    Some(target_schema),
+                    name,
+                    true,
+                    false,
+                    false,
+                    false,
+                )],
+                false,
+                true,
+            );
+            drop.phase = SchemaChangePhase::DropDependencies;
+            changes.push(drop);
+        }
+        for name in &dependents {
+            let source_view = relation_by_name(source, name).expect("supported view exists");
+            let definition = normalized_view_select_definition(source_view.definition.as_deref())
+                .expect("supported view has source");
+            let mut recreate = change(
+                SchemaChangeKind::RelationCreate,
+                SchemaChangeRisk::Review,
+                target_schema,
+                name,
+                source_view.object_type.clone(),
+                None,
+                format!("{MATERIALIZED_VIEW_DEPENDENT_RECREATE_PREFIX}{name}"),
+                vec![kind.create_view_query(Some(target_schema), name, &definition, false)],
+                false,
+                true,
+            );
+            recreate.phase = SchemaChangePhase::CreateDependencies;
+            changes.push(recreate);
+        }
+    }
+}
+
+fn dependent_regular_views(snapshot: &SchemaSnapshot, root_relation: &str) -> Vec<String> {
+    let mut dependencies = BTreeSet::from([root_relation.to_string()]);
+    let mut dependents = BTreeSet::new();
+    loop {
+        let next = snapshot
+            .relations
+            .iter()
+            .filter(|relation| {
+                let flags = relation_flags(relation.object_type.as_deref());
+                flags.is_view
+                    && !flags.is_materialized_view
+                    && relation
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependencies.contains(dependency))
+                    && !dependents.contains(&relation.name)
+            })
+            .map(|relation| relation.name.clone())
+            .collect::<Vec<_>>();
+        if next.is_empty() {
+            break;
+        }
+        for relation in next {
+            dependencies.insert(relation.clone());
+            dependents.insert(relation);
+        }
+    }
+    dependents.into_iter().collect()
+}
+
+fn is_materialized_view_dependent_drop(change: &SchemaChange) -> bool {
+    change.kind == SchemaChangeKind::RelationDrop
+        && change
+            .summary
+            .starts_with(MATERIALIZED_VIEW_DEPENDENT_DROP_PREFIX)
 }
 
 /// View definitions are persisted as a single read-only SELECT body. Reject
@@ -3838,6 +4007,11 @@ fn finalize_change_plan(
         })
         .map(|change| (change.relation_name.clone(), change.id.clone()))
         .collect::<BTreeMap<_, _>>();
+    let materialized_view_dependent_drops = changes
+        .iter()
+        .filter(|change| is_materialized_view_dependent_drop(change))
+        .map(|change| (change.relation_name.clone(), change.id.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     for change in &mut changes {
         let mut dependencies = Vec::new();
@@ -3883,6 +4057,22 @@ fn finalize_change_plan(
                         ),
                         warnings,
                     );
+                }
+                if is_materialized_view_dependent_drop(change) {
+                    for dependent in target.relations.iter().filter(|relation| {
+                        let flags = relation_flags(relation.object_type.as_deref());
+                        flags.is_view
+                            && !flags.is_materialized_view
+                            && relation
+                                .dependencies
+                                .iter()
+                                .any(|dependency| dependency == &change.relation_name)
+                    }) {
+                        add_dependency(
+                            &mut dependencies,
+                            materialized_view_dependent_drops.get(&dependent.name),
+                        );
+                    }
                 }
             }
             SchemaChangeKind::ColumnDrop => {
@@ -4044,6 +4234,27 @@ fn finalize_change_plan(
                                 &mut dependencies,
                                 column_adds.get(&child_key(&change.relation_name, column)),
                             );
+                        }
+                    }
+                }
+            }
+            SchemaChangeKind::RelationModify => {
+                if relation_by_name(source, &change.relation_name).is_some_and(|relation| {
+                    relation_flags(relation.object_type.as_deref()).is_materialized_view
+                }) {
+                    for dependent in target.relations.iter().filter(|relation| {
+                        let flags = relation_flags(relation.object_type.as_deref());
+                        flags.is_view
+                            && !flags.is_materialized_view
+                            && relation
+                                .dependencies
+                                .iter()
+                                .any(|dependency| dependency == &change.relation_name)
+                    }) {
+                        if let Some(dependency) =
+                            materialized_view_dependent_drops.get(&dependent.name)
+                        {
+                            dependencies.push(dependency.clone());
                         }
                     }
                 }
@@ -5941,6 +6152,158 @@ mod tests {
         );
         assert!(plan.requires_destructive_approval);
         assert!(!change.sql.join("\n").contains("CASCADE"));
+    }
+
+    #[test]
+    fn materialized_view_recreation_rebuilds_captured_dependent_views_without_cascade() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.extend([
+            SchemaRelationSnapshot {
+                name: "active_users_mv".to_string(),
+                object_type: Some("MATERIALIZED VIEW".to_string()),
+                comment: None,
+                definition: Some("SELECT id FROM users WHERE active".to_string()),
+                materialized_view_populated: Some(false),
+                dependencies: vec!["users".to_string()],
+                external_dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
+                columns: vec![column("id", "int4", false)],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+            },
+            SchemaRelationSnapshot {
+                name: "active_users".to_string(),
+                object_type: Some("VIEW".to_string()),
+                comment: None,
+                definition: Some("SELECT id FROM active_users_mv".to_string()),
+                materialized_view_populated: None,
+                dependencies: vec!["active_users_mv".to_string()],
+                external_dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
+                columns: vec![column("id", "int4", false)],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+            },
+            SchemaRelationSnapshot {
+                name: "active_users_report".to_string(),
+                object_type: Some("VIEW".to_string()),
+                comment: None,
+                definition: Some("SELECT id FROM active_users".to_string()),
+                materialized_view_populated: None,
+                dependencies: vec!["active_users".to_string()],
+                external_dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
+                columns: vec![column("id", "int4", false)],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+            },
+        ]);
+        let mut target = source.clone();
+        target
+            .relations
+            .iter_mut()
+            .find(|relation| relation.name == "active_users_mv")
+            .expect("target materialized view")
+            .definition = Some("SELECT id FROM users WHERE NOT active".to_string());
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let drop_report = plan
+            .changes
+            .iter()
+            .find(|change| change.summary == "Temporarily drop dependent view active_users_report")
+            .expect("transitive dependent view drop");
+        let drop_view = plan
+            .changes
+            .iter()
+            .find(|change| change.summary == "Temporarily drop dependent view active_users")
+            .expect("direct dependent view drop");
+        let materialized = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users_mv")
+            .expect("materialized recreation");
+        let recreate_view = plan
+            .changes
+            .iter()
+            .find(|change| change.summary == "Recreate dependent view active_users")
+            .expect("direct dependent view recreation");
+        let recreate_report = plan
+            .changes
+            .iter()
+            .find(|change| change.summary == "Recreate dependent view active_users_report")
+            .expect("transitive dependent view recreation");
+
+        assert!(drop_view.depends_on.contains(&drop_report.id));
+        assert!(materialized.depends_on.contains(&drop_view.id));
+        assert!(recreate_view.depends_on.contains(&materialized.id));
+        assert!(recreate_report.depends_on.contains(&recreate_view.id));
+        assert!(plan.changes.iter().all(|change| change.manual_review));
+        assert!(plan
+            .changes
+            .iter()
+            .flat_map(|change| change.sql.iter())
+            .all(|sql| !sql.contains("CASCADE")));
+    }
+
+    #[test]
+    fn materialized_view_recreation_blocks_when_a_dependent_view_cannot_be_rebuilt() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.extend([
+            SchemaRelationSnapshot {
+                name: "active_users_mv".to_string(),
+                object_type: Some("MATERIALIZED VIEW".to_string()),
+                comment: None,
+                definition: Some("SELECT id FROM users WHERE active".to_string()),
+                materialized_view_populated: Some(false),
+                dependencies: vec!["users".to_string()],
+                external_dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
+                columns: vec![column("id", "int4", false)],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+            },
+            SchemaRelationSnapshot {
+                name: "active_users".to_string(),
+                object_type: Some("VIEW".to_string()),
+                comment: None,
+                definition: None,
+                materialized_view_populated: None,
+                dependencies: vec!["active_users_mv".to_string()],
+                external_dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
+                columns: vec![column("id", "int4", false)],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+            },
+        ]);
+        let mut target = source.clone();
+        target
+            .relations
+            .iter_mut()
+            .find(|relation| relation.name == "active_users_mv")
+            .expect("target materialized view")
+            .definition = Some("SELECT id FROM users WHERE NOT active".to_string());
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let materialized = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users_mv")
+            .expect("materialized recreation");
+
+        assert!(materialized.sql.is_empty());
+        assert!(materialized
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("active_users")));
+        assert!(!plan
+            .changes
+            .iter()
+            .any(|change| { change.summary == "Temporarily drop dependent view active_users" }));
     }
 
     #[test]
