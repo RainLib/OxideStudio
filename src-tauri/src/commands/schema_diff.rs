@@ -62,14 +62,18 @@ fn object_type_is_view(object_type: Option<&str>) -> bool {
 /// Catalog source is enabled only for native PostgreSQL/MySQL views. Both
 /// adapters return a SELECT body rather than CREATE DDL, which keeps the
 /// snapshot source portable across schemas of the same dialect and lets the
-/// planner own the target-side identifier quoting. Other drivers remain
-/// metadata-only until their package exposes an equivalent safe contract.
+/// planner own the target-side identifier quoting. PostgreSQL additionally
+/// returns `relispopulated` for materialized views so their initial refresh
+/// behavior is not silently changed. Other drivers remain metadata-only until
+/// their package exposes an equivalent safe contract.
 fn native_view_definition_query(driver: &str, schema: &str, view: &str) -> Option<String> {
     let schema = sql_string_literal(schema);
     let view = sql_string_literal(view);
     match driver.trim().to_ascii_lowercase().as_str() {
         "postgres" => Some(format!(
-            "SELECT pg_catalog.pg_get_viewdef(class.oid, true) AS definition \
+            "SELECT pg_catalog.pg_get_viewdef(class.oid, true) AS definition, \
+                    CASE WHEN class.relkind = 'm' THEN class.relispopulated::text ELSE NULL END \
+                        AS materialized_view_populated \
              FROM pg_catalog.pg_class class \
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace \
              WHERE namespace.nspname = {schema} AND class.relname = {view} \
@@ -83,7 +87,7 @@ fn native_view_definition_query(driver: &str, schema: &str, view: &str) -> Optio
     }
 }
 
-fn query_first_string(results: &[QueryResult]) -> Option<String> {
+fn query_native_view_definition(results: &[QueryResult]) -> Option<(String, Option<bool>)> {
     results
         .first()?
         .rows
@@ -92,6 +96,19 @@ fn query_first_string(results: &[QueryResult]) -> Option<String> {
         .as_str()
         .map(str::to_string)
         .filter(|value| !value.trim().is_empty())
+        .map(|definition| {
+            let materialized_view_populated = results
+                .first()
+                .and_then(|result| result.rows.first())
+                .and_then(|row| row.get(1))
+                .and_then(|value| value.as_str())
+                .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                    "true" | "t" | "1" => Some(true),
+                    "false" | "f" | "0" => Some(false),
+                    _ => None,
+                });
+            (definition, materialized_view_populated)
+        })
 }
 
 async fn capture_native_view_definition(
@@ -101,7 +118,7 @@ async fn capture_native_view_definition(
     driver: &str,
     schema: &str,
     view: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, Option<bool>)>, String> {
     let Some(sql) = native_view_definition_query(driver, schema, view) else {
         return Ok(None);
     };
@@ -114,7 +131,7 @@ async fn capture_native_view_definition(
         }
     }
     .map_err(|error| error.to_string())?;
-    Ok(query_first_string(&results))
+    Ok(query_native_view_definition(&results))
 }
 
 fn postgres_view_dependency_query(schema: &str) -> String {
@@ -1199,7 +1216,7 @@ async fn capture_schema_snapshot_inner(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Schema snapshot concurrency gate closed".to_string())?;
-            let (definition, view_warning) = if object_type_is_view(object_type.as_deref()) {
+            let (definition, materialized_view_populated, view_warning) = if object_type_is_view(object_type.as_deref()) {
                 match capture_native_view_definition(
                     &manager,
                     &connection_id,
@@ -1210,8 +1227,14 @@ async fn capture_schema_snapshot_inner(
                 )
                 .await
                 {
-                    Ok(definition) => (definition, None),
+                    Ok(definition) => match definition {
+                        Some((definition, materialized_view_populated)) => {
+                            (Some(definition), materialized_view_populated, None)
+                        }
+                        None => (None, None, None),
+                    },
                     Err(error) => (
+                        None,
                         None,
                         Some(format!(
                             "View source for {schema}.{relation_name} was unavailable; this view remains review-only: {error}"
@@ -1219,7 +1242,7 @@ async fn capture_schema_snapshot_inner(
                     ),
                 }
             } else {
-                (None, None)
+                (None, None, None)
             };
             let columns = async {
                 match (database_scoped, database.as_deref()) {
@@ -1281,6 +1304,7 @@ async fn capture_schema_snapshot_inner(
                         object_type,
                         comment,
                         definition,
+                        materialized_view_populated,
                         dependencies,
                         sequence_dependencies,
                         columns: metadata.0,
@@ -1295,6 +1319,7 @@ async fn capture_schema_snapshot_inner(
                         object_type,
                         comment,
                         definition,
+                        materialized_view_populated,
                         dependencies,
                         sequence_dependencies,
                         columns: Vec::new(),
@@ -3250,6 +3275,7 @@ mod tests {
                 object_type: Some("TABLE".to_string()),
                 comment: None,
                 definition: None,
+                materialized_view_populated: None,
                 dependencies: Vec::new(),
                 sequence_dependencies: Vec::new(),
                 columns: vec![ColumnInfo {
@@ -3295,6 +3321,8 @@ mod tests {
         let postgres = native_view_definition_query("postgres", "public", "active_users")
             .expect("PostgreSQL view introspection should be supported");
         assert!(postgres.contains("pg_catalog.pg_get_viewdef"));
+        assert!(postgres.contains("class.relispopulated::text"));
+        assert!(postgres.contains("materialized_view_populated"));
         assert!(postgres.contains("namespace.nspname = 'public'"));
         assert!(postgres.contains("class.relname = 'active_users'"));
 

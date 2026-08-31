@@ -28,6 +28,12 @@ pub struct SchemaRelationSnapshot {
     /// it and remain review-only for view changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// PostgreSQL exposes whether a materialized view currently contains data.
+    /// This stays absent for ordinary views, other drivers, and legacy snapshots.
+    /// A missing value is deliberately restored as `WITH NO DATA` so review-only
+    /// migration never causes an unexpected source query execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_view_populated: Option<bool>,
     /// Direct same-schema relation dependencies captured from the catalog for
     /// views. The planner uses these only to order reviewed DDL; they never
     /// broaden the set of objects selected for a migration.
@@ -3109,17 +3115,24 @@ fn create_relation_sql(
                     Some(target_schema),
                     &relation.name,
                     &definition,
-                    true,
+                    relation.materialized_view_populated.unwrap_or(false),
                 )
                 .into_iter()
                 .collect();
             return (
                 sql,
                 true,
-                vec![format!(
-                    "Materialized view {} must be reviewed before creation because its source query can depend on target data.",
-                    relation.name
-                )],
+                vec![if relation.materialized_view_populated == Some(true) {
+                    format!(
+                        "Materialized view {} must be reviewed before creation because WITH DATA executes its source query on the target.",
+                        relation.name
+                    )
+                } else {
+                    format!(
+                        "Materialized view {} is created WITH NO DATA because its captured population state is false or unavailable; refresh it manually after review.",
+                        relation.name
+                    )
+                }],
             );
         }
         return (
@@ -4705,6 +4718,7 @@ mod tests {
                 object_type: Some("BASE TABLE".to_string()),
                 comment: None,
                 definition: None,
+                materialized_view_populated: None,
                 dependencies: Vec::new(),
                 sequence_dependencies: Vec::new(),
                 columns,
@@ -4838,6 +4852,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            materialized_view_populated: None,
             dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
@@ -5562,6 +5577,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            materialized_view_populated: None,
             dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
@@ -5688,6 +5704,7 @@ mod tests {
             object_type: Some("VIEW".to_string()),
             comment: None,
             definition: Some("SELECT id FROM users WHERE active".to_string()),
+            materialized_view_populated: None,
             dependencies: vec!["users".to_string()],
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
@@ -5699,6 +5716,7 @@ mod tests {
             object_type: Some("VIEW".to_string()),
             comment: None,
             definition: Some("SELECT id FROM active_users".to_string()),
+            materialized_view_populated: None,
             dependencies: vec!["active_users".to_string()],
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
@@ -5730,6 +5748,78 @@ mod tests {
         assert!(active.depends_on.contains(&users.id));
         assert!(visible.depends_on.contains(&active.id));
         assert!(users.order < active.order && active.order < visible.order);
+    }
+
+    #[test]
+    fn postgres_materialized_view_preserves_captured_population_state() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.push(SchemaRelationSnapshot {
+            name: "active_users_mv".to_string(),
+            object_type: Some("MATERIALIZED VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM users WHERE active".to_string()),
+            materialized_view_populated: Some(false),
+            dependencies: vec!["users".to_string()],
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        source.relations.push(SchemaRelationSnapshot {
+            name: "all_users_mv".to_string(),
+            object_type: Some("MATERIALIZED VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM users".to_string()),
+            materialized_view_populated: Some(true),
+            dependencies: vec!["users".to_string()],
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        let mut target = snapshot("actual", Vec::new());
+        target.relations.clear();
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let users = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "users")
+            .expect("table creation should be planned");
+        let materialized_view = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users_mv")
+            .expect("materialized view creation should be planned");
+
+        assert!(materialized_view.manual_review);
+        assert!(materialized_view.depends_on.contains(&users.id));
+        assert_eq!(
+            materialized_view.sql,
+            vec![
+                "CREATE MATERIALIZED VIEW \"public\".\"active_users_mv\" AS\nSELECT id FROM users WHERE active\nWITH NO DATA;"
+                    .to_string()
+            ]
+        );
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("WITH NO DATA")));
+        let populated_materialized_view = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "all_users_mv")
+            .expect("populated materialized view creation should be planned");
+        assert!(populated_materialized_view.depends_on.contains(&users.id));
+        assert_eq!(
+            populated_materialized_view.sql,
+            vec![
+                "CREATE MATERIALIZED VIEW \"public\".\"all_users_mv\" AS\nSELECT id FROM users\nWITH DATA;"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
@@ -5873,6 +5963,7 @@ mod tests {
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
             definition: None,
+            materialized_view_populated: None,
             dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
