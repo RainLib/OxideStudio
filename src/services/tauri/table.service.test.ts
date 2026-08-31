@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import {
   exportDatabaseSql,
   exportTableData,
+  inferTableImportColumns,
   importTableData,
   preflightTableCsvImport,
 } from "./table.service";
@@ -129,6 +130,41 @@ describe("table import write mode", () => {
     expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
       "preflight_table_csv_import",
       expect.objectContaining({ mode: "truncate" }),
+    );
+  });
+});
+
+describe("table import schema inference", () => {
+  beforeEach(() => {
+    invokeWithInterceptors.mockReset();
+    invokeWithInterceptors.mockResolvedValue({
+      columns: [{ name: "order_id", dataType: "BIGINT" }],
+      totalRows: 2,
+      contentDigest: "sha256:reviewed",
+      csvOptions: { firstRowHeader: true, columnMapping: [] },
+    });
+  });
+
+  it("sends only the reviewed native-file contract to the host", async () => {
+    await inferTableImportColumns(
+      "postgres",
+      "C:/imports/orders.csv",
+      "csv",
+      true,
+      { delimiter: ";", firstRowHeader: true },
+      "sha256:expected",
+    );
+
+    expect(invokeWithInterceptors).toHaveBeenCalledWith(
+      "infer_table_import_columns",
+      {
+        driver: "postgres",
+        filePath: "C:/imports/orders.csv",
+        format: "csv",
+        firstRowHeader: true,
+        csvOptions: { delimiter: ";", firstRowHeader: true },
+        expectedFileDigest: "sha256:expected",
+      },
     );
   });
 });

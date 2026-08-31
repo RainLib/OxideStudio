@@ -760,6 +760,14 @@ export interface TableImportResult {
   reportId?: string | null;
 }
 
+/** Column-only schema proposal derived from a reviewed native import file. */
+export interface TableImportColumnInference {
+  columns: CreateTableColumn[];
+  totalRows: number;
+  contentDigest: string;
+  csvOptions?: TableCsvImportOptions | null;
+}
+
 export type TableImportMode = "append" | "truncate";
 export type TableImportReportStatus = "done" | "cancelled" | "error";
 

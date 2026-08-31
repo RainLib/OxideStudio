@@ -49,6 +49,12 @@ Implementation work is intentionally being completed before these checks run.
 Do not mark a capability as production-ready or count it toward the 70+
 database target until its relevant queue entries pass.
 
+## Native file-to-table inference
+
+- Against PostgreSQL, MySQL and SQLite fixtures, choose CSV (including quoted thousands separators and leading-zero identifiers), JSON, JSONL/NDJSON and XLSX sources. Verify the editable proposed schema uses the documented native type family, source mappings preserve the reviewed CSV order, and the file SHA-256 is checked again before insertion.
+- Simulate an import error after successful `CREATE TABLE` on each dialect. The table must remain discoverable, no partial import transaction may commit, and the workbench must state that the table was created but rows were not committed; do not represent this cross-dialect sequence as atomic.
+- Use a large JSONL fixture near the supported source-size ceiling and record peak process memory while schema inference runs. Confirm its streaming path does not materialize the entire source, and repeat cancellation/invalid-line/error-redaction coverage when cancellable preflight is introduced.
+
 ## Completed non-database checks (2026-08-10)
 
 - `npm test`: 231 test files and 1,185 tests passed. PostgreSQL remote-content,

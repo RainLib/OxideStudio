@@ -732,6 +732,20 @@ pub struct TableXlsxImportPreview {
     pub truncated: bool,
 }
 
+/// A reviewed schema proposal derived from the exact native import source.
+/// It carries column metadata only: row values and file paths never leave the
+/// Host during type inference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableImportColumnInference {
+    pub columns: Vec<CreateTableColumn>,
+    pub total_rows: u64,
+    pub content_digest: String,
+    /// CSV sources may require an explicit source-index to newly-created
+    /// target-column mapping when title labels are normalized by the user.
+    pub csv_options: Option<TableCsvImportOptions>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataTransferEndpoint {
@@ -10960,6 +10974,437 @@ pub async fn preview_table_xlsx_import(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportInferredType {
+    Boolean,
+    Integer,
+    Decimal,
+    Date,
+    Timestamp,
+    Json,
+    Text,
+}
+
+fn merge_import_inferred_type(
+    current: Option<ImportInferredType>,
+    next: ImportInferredType,
+) -> ImportInferredType {
+    let Some(current) = current else {
+        return next;
+    };
+    if current == next {
+        return current;
+    }
+    match (current, next) {
+        (ImportInferredType::Text, _) | (_, ImportInferredType::Text) => ImportInferredType::Text,
+        (ImportInferredType::Integer, ImportInferredType::Decimal)
+        | (ImportInferredType::Decimal, ImportInferredType::Integer) => ImportInferredType::Decimal,
+        (ImportInferredType::Date, ImportInferredType::Timestamp)
+        | (ImportInferredType::Timestamp, ImportInferredType::Date) => {
+            ImportInferredType::Timestamp
+        }
+        _ => ImportInferredType::Text,
+    }
+}
+
+fn import_numeric_without_thousands(value: &str) -> Cow<'_, str> {
+    let value = value.trim();
+    if !value.contains(',') {
+        return Cow::Borrowed(value);
+    }
+    let unsigned = value.trim_start_matches(['+', '-']);
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => (&unsigned[..index], Some(&unsigned[index + 1..])),
+        None => (unsigned, None),
+    };
+    if exponent.is_some_and(|value| {
+        value.is_empty()
+            || !value
+                .trim_start_matches(['+', '-'])
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+    }) {
+        return Cow::Borrowed(value);
+    }
+    let mut mantissa_parts = mantissa.split('.');
+    let integer = mantissa_parts.next().unwrap_or_default();
+    let fraction = mantissa_parts.next();
+    if mantissa_parts.next().is_some()
+        || integer.is_empty()
+        || fraction.is_some_and(|part| !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Cow::Borrowed(value);
+    }
+    let mut groups = integer.split(',');
+    let Some(first) = groups.next() else {
+        return Cow::Borrowed(value);
+    };
+    if !(1..=3).contains(&first.len()) || !first.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Cow::Borrowed(value);
+    }
+    if !groups
+        .clone()
+        .all(|group| group.len() == 3 && group.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(value.replace(',', ""))
+}
+
+fn import_string_inferred_type(value: &str) -> ImportInferredType {
+    let value = value.trim();
+    if value.is_empty() {
+        return ImportInferredType::Text;
+    }
+    if DateTime::parse_from_rfc3339(value).is_ok()
+        || [
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y/%m/%d %H:%M:%S%.f",
+            "%Y/%m/%dT%H:%M:%S%.f",
+        ]
+        .iter()
+        .any(|format| NaiveDateTime::parse_from_str(value, format).is_ok())
+    {
+        return ImportInferredType::Timestamp;
+    }
+    if ["%Y-%m-%d", "%Y/%m/%d"]
+        .iter()
+        .any(|format| NaiveDate::parse_from_str(value, format).is_ok())
+    {
+        return ImportInferredType::Date;
+    }
+    let numeric = import_numeric_without_thousands(value);
+    let numeric = numeric.as_ref();
+    let unsigned = numeric.trim_start_matches(['+', '-']);
+    if unsigned.len() > 1 && unsigned.starts_with('0') && unsigned.as_bytes()[1].is_ascii_digit() {
+        return ImportInferredType::Text;
+    }
+    if numeric.parse::<i64>().is_ok() || numeric.parse::<u64>().is_ok() {
+        return ImportInferredType::Integer;
+    }
+    if (numeric.contains('.') || numeric.contains('e') || numeric.contains('E'))
+        && numeric.parse::<f64>().is_ok_and(|value| value.is_finite())
+    {
+        return ImportInferredType::Decimal;
+    }
+    ImportInferredType::Text
+}
+
+fn import_value_inferred_type(value: &Value) -> Option<ImportInferredType> {
+    match value {
+        Value::Null => None,
+        Value::Bool(_) => Some(ImportInferredType::Boolean),
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            Some(ImportInferredType::Integer)
+        }
+        Value::Number(_) => Some(ImportInferredType::Decimal),
+        Value::String(value) => Some(import_string_inferred_type(value)),
+        Value::Array(_) | Value::Object(_) => Some(ImportInferredType::Json),
+    }
+}
+
+fn inferred_import_data_type(inferred: ImportInferredType, driver: &str) -> Result<String, String> {
+    if is_sqlite_driver(driver) {
+        return Ok(match inferred {
+            ImportInferredType::Boolean | ImportInferredType::Integer => "INTEGER",
+            ImportInferredType::Decimal => "REAL",
+            ImportInferredType::Date
+            | ImportInferredType::Timestamp
+            | ImportInferredType::Json
+            | ImportInferredType::Text => "TEXT",
+        }
+        .to_string());
+    }
+    match DatabaseKind::from_str(driver).map_err(|_| {
+        "Create-from-file is available for bundled PostgreSQL, MySQL, and SQLite connections."
+            .to_string()
+    })? {
+        DatabaseKind::Postgres => Ok(match inferred {
+            ImportInferredType::Boolean => "BOOLEAN",
+            ImportInferredType::Integer => "BIGINT",
+            ImportInferredType::Decimal => "DOUBLE PRECISION",
+            ImportInferredType::Date => "DATE",
+            ImportInferredType::Timestamp => "TIMESTAMP",
+            ImportInferredType::Json => "JSONB",
+            ImportInferredType::Text => "TEXT",
+        }
+        .to_string()),
+        DatabaseKind::Mysql => Ok(match inferred {
+            ImportInferredType::Boolean => "TINYINT(1)",
+            ImportInferredType::Integer => "BIGINT",
+            ImportInferredType::Decimal => "DOUBLE",
+            ImportInferredType::Date => "DATE",
+            ImportInferredType::Timestamp => "DATETIME",
+            ImportInferredType::Json => "JSON",
+            ImportInferredType::Text => "TEXT",
+        }
+        .to_string()),
+    }
+}
+
+fn validated_import_column_names(source_columns: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    source_columns
+        .iter()
+        .map(|value| value.trim())
+        .enumerate()
+        .map(|(index, value)| {
+            if value.is_empty() {
+                return Err(format!("Source column {} has no name", index + 1));
+            }
+            if value.chars().any(char::is_control) {
+                return Err(format!(
+                    "Source column {} contains a control character",
+                    index + 1
+                ));
+            }
+            if !seen.insert(value.to_ascii_lowercase()) {
+                return Err(format!("Source column name is duplicated: {value}"));
+            }
+            Ok(value.to_string())
+        })
+        .collect()
+}
+
+fn create_table_columns_from_inference(
+    source_columns: Vec<String>,
+    inferred_types: Vec<Option<ImportInferredType>>,
+    driver: &str,
+) -> Result<Vec<CreateTableColumn>, String> {
+    let source_columns = validated_import_column_names(&source_columns)?;
+    if source_columns.len() != inferred_types.len() {
+        return Err("Import type inference lost source-column alignment".to_string());
+    }
+    source_columns
+        .into_iter()
+        .zip(inferred_types)
+        .map(|(name, inferred)| {
+            Ok(CreateTableColumn {
+                name,
+                data_type: inferred_import_data_type(
+                    inferred.unwrap_or(ImportInferredType::Text),
+                    driver,
+                )?,
+                length: None,
+                is_primary_key: false,
+                is_not_null: false,
+                is_auto_increment: false,
+                comment: None,
+            })
+        })
+        .collect()
+}
+
+fn infer_csv_import_columns(
+    path: &Path,
+    driver: &str,
+    first_row_header: Option<bool>,
+    csv_options: Option<&TableCsvImportOptions>,
+) -> Result<(Vec<CreateTableColumn>, u64, TableCsvImportOptions), String> {
+    let row_range = resolve_csv_import_row_range(first_row_header, csv_options)?;
+    let mut reader = csv_import_reader(
+        path,
+        false,
+        csv_delimiter(path, csv_options)?,
+        csv_options.and_then(|options| options.encoding),
+    )?;
+    let (mut source_columns, consumed_records) = if row_range.title_row.is_some() {
+        csv_import_source_columns(&mut reader, row_range, Vec::new())?
+    } else {
+        (Vec::new(), 0)
+    };
+    let trim_values = csv_options
+        .and_then(|options| options.trim_values)
+        .unwrap_or(false);
+    let mut inferred_types = Vec::<Option<ImportInferredType>>::new();
+    let mut total_rows = 0_u64;
+    for (index, record) in reader.records().enumerate() {
+        let row_number = consumed_records + index as u64 + 1;
+        if row_number < row_range.data_start_row {
+            continue;
+        }
+        if !csv_import_row_selected(row_range, row_number) {
+            break;
+        }
+        let record = record.map_err(|error| error.to_string())?;
+        if source_columns.is_empty() {
+            source_columns = (1..=record.len())
+                .map(|index| format!("column_{index}"))
+                .collect();
+            inferred_types.resize(source_columns.len(), None);
+        }
+        if record.len() != source_columns.len() {
+            return Err(format!(
+                "CSV row {row_number} has {} values but {} columns were expected",
+                record.len(),
+                source_columns.len()
+            ));
+        }
+        if inferred_types.is_empty() {
+            inferred_types.resize(source_columns.len(), None);
+        }
+        for (inferred, value) in inferred_types.iter_mut().zip(record.iter()) {
+            let value = if trim_values { value.trim() } else { value };
+            *inferred = Some(merge_import_inferred_type(
+                *inferred,
+                import_string_inferred_type(value),
+            ));
+        }
+        total_rows += 1;
+    }
+    if total_rows == 0 {
+        return Err("The selected CSV range does not contain any data rows".to_string());
+    }
+    let columns =
+        create_table_columns_from_inference(source_columns.clone(), inferred_types, driver)?;
+    let mut options = csv_options.cloned().unwrap_or_default();
+    options.column_mapping = columns
+        .iter()
+        .enumerate()
+        .map(|(source_index, column)| TableCsvColumnMapping {
+            source_index,
+            target_column: Some(column.name.clone()),
+        })
+        .collect();
+    Ok((columns, total_rows, options))
+}
+
+fn infer_materialized_import_columns(
+    rows: Vec<BTreeMap<String, Value>>,
+    driver: &str,
+) -> Result<(Vec<CreateTableColumn>, u64), String> {
+    if rows.is_empty() {
+        return Err("The import file does not contain any object rows".to_string());
+    }
+    let source_columns = rows
+        .iter()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut inferred_types = vec![None; source_columns.len()];
+    for row in &rows {
+        for (index, column) in source_columns.iter().enumerate() {
+            if let Some(value) = row.get(column).and_then(import_value_inferred_type) {
+                inferred_types[index] =
+                    Some(merge_import_inferred_type(inferred_types[index], value));
+            }
+        }
+    }
+    let total_rows = rows.len() as u64;
+    Ok((
+        create_table_columns_from_inference(source_columns, inferred_types, driver)?,
+        total_rows,
+    ))
+}
+
+/// JSON Lines imports are intentionally streamed during inference.  The
+/// regular JSON reader materializes an array so it can support both array and
+/// document forms, whereas `.jsonl`/`.ndjson` may use the larger streaming
+/// import budget and must not be copied into memory merely to propose a table.
+fn infer_json_lines_import_columns(
+    path: &Path,
+    driver: &str,
+) -> Result<(Vec<CreateTableColumn>, u64), String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut source_columns = BTreeSet::new();
+    let mut inferred_types = BTreeMap::<String, Option<ImportInferredType>>::new();
+    let mut total_rows = 0_u64;
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|error| format!("Invalid JSON object on line {}: {error}", index + 1))?;
+        let Value::Object(object) = value else {
+            return Err(format!("JSON row {} is not an object", index + 1));
+        };
+        for (column, value) in object {
+            source_columns.insert(column.clone());
+            if let Some(next) = import_value_inferred_type(&value) {
+                let inferred = inferred_types.entry(column).or_insert(None);
+                *inferred = Some(merge_import_inferred_type(*inferred, next));
+            }
+        }
+        total_rows += 1;
+    }
+
+    if total_rows == 0 {
+        return Err("The import file does not contain any object rows".to_string());
+    }
+    let source_columns = source_columns.into_iter().collect::<Vec<_>>();
+    let inferred_types = source_columns
+        .iter()
+        .map(|column| inferred_types.get(column).copied().flatten())
+        .collect();
+    Ok((
+        create_table_columns_from_inference(source_columns, inferred_types, driver)?,
+        total_rows,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn infer_table_import_columns(
+    driver: String,
+    file_path: String,
+    format: TableImportFormat,
+    first_row_header: Option<bool>,
+    csv_options: Option<TableCsvImportOptions>,
+    expected_file_digest: Option<String>,
+) -> Result<Response<TableImportColumnInference>, String> {
+    let path = PathBuf::from(file_path.trim());
+    let driver_for_worker = driver.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        validate_import_file(&path, format)?;
+        verify_import_file_digest(&path, expected_file_digest.as_deref())?;
+        let content_digest = import_file_digest(&path)?;
+        let (columns, total_rows, csv_options) = match format {
+            TableImportFormat::Csv => {
+                let (columns, total_rows, csv_options) = infer_csv_import_columns(
+                    &path,
+                    &driver_for_worker,
+                    first_row_header,
+                    csv_options.as_ref(),
+                )?;
+                (columns, total_rows, Some(csv_options))
+            }
+            TableImportFormat::Json => {
+                let (columns, total_rows) = if is_json_lines_path(&path) {
+                    infer_json_lines_import_columns(&path, &driver_for_worker)?
+                } else {
+                    let rows = json_import_rows(&path)?;
+                    infer_materialized_import_columns(rows, &driver_for_worker)?
+                };
+                (columns, total_rows, None)
+            }
+            TableImportFormat::Xlsx => {
+                let (_, _, rows) = xlsx_import_rows(&path)?;
+                let (columns, total_rows) =
+                    infer_materialized_import_columns(rows, &driver_for_worker)?;
+                (columns, total_rows, None)
+            }
+        };
+        Ok::<_, String>(TableImportColumnInference {
+            columns,
+            total_rows,
+            content_digest,
+            csv_options,
+        })
+    })
+    .await
+    .map_err(|error| format!("Import inference worker failed: {error}"))?;
+
+    match result {
+        Ok(inference) => Ok(Response::ok(inference)),
+        Err(error) => Ok(Response::err("INFER_TABLE_IMPORT_COLUMNS_ERROR", &error)),
+    }
+}
+
 fn canonical_import_columns(
     headers: &[String],
     columns: &BTreeMap<String, ColumnInfo>,
@@ -13783,7 +14228,9 @@ mod tests {
         execute_target_parameterized_batch, filter_sql_export_batch,
         finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
         generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, is_json_lines_path,
+        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
+        infer_csv_import_columns, infer_json_lines_import_columns,
+        infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
         json_import_rows_with_cancel, normalized_table_data_transfer_project_id,
         object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
         object_type_is_view, order_postgres_views, overwrite_transfer_verification,
@@ -13808,19 +14255,20 @@ mod tests {
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
         AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
-        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
-        TableDataCompareResult, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
-        TableDataTransferRequest, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
-        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableImportCancellationState, TableImportFormat, TableImportMode,
-        TableImportTextEncoding, TableRowUpdate, TableSort,
-        MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
-        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        CreateTableColumn, ImportInferredType, RelationOperation, SqlExportDialect,
+        SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
+        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
+        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
+        TableExportWriterContext, TableExportWriterMessage, TableFilter,
+        TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
+        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
+        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
+        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -14532,6 +14980,109 @@ mod tests {
         assert_eq!(values.get("id"), Some(&Value::String("7".to_string())));
         assert_eq!(values.get("display_name"), Some(&Value::Null));
         assert!(!values.contains_key("ignored"));
+    }
+
+    #[test]
+    fn import_schema_inference_keeps_identifiers_and_uses_native_type_families() {
+        assert_eq!(
+            import_string_inferred_type("00123"),
+            ImportInferredType::Text,
+            "leading-zero values are identifiers, not numeric keys"
+        );
+        assert_eq!(
+            import_string_inferred_type("1,234"),
+            ImportInferredType::Integer
+        );
+        assert_eq!(
+            import_string_inferred_type("1,234.50"),
+            ImportInferredType::Decimal
+        );
+        assert_eq!(
+            import_string_inferred_type("2026-08-31"),
+            ImportInferredType::Date
+        );
+        assert_eq!(
+            import_string_inferred_type("2026-08-31T14:22:00Z"),
+            ImportInferredType::Timestamp
+        );
+        assert_eq!(
+            inferred_import_data_type(ImportInferredType::Json, "postgres").unwrap(),
+            "JSONB"
+        );
+        assert_eq!(
+            inferred_import_data_type(ImportInferredType::Timestamp, "mysql").unwrap(),
+            "DATETIME"
+        );
+        assert_eq!(
+            inferred_import_data_type(ImportInferredType::Decimal, "sqlite").unwrap(),
+            "REAL"
+        );
+    }
+
+    #[test]
+    fn import_schema_inference_returns_reviewable_csv_mapping_and_object_types() {
+        let directory = tempfile::tempdir().unwrap();
+        let csv_path = directory.path().join("orders.csv");
+        fs::write(
+            &csv_path,
+            "order_code,total,created_at\n00123,\"1,234.50\",2026-08-31\n00456,8.25,2026-09-01\n",
+        )
+        .unwrap();
+        let (columns, rows, options) =
+            infer_csv_import_columns(&csv_path, "postgres", Some(true), None).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.data_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("order_code", "TEXT"),
+                ("total", "DOUBLE PRECISION"),
+                ("created_at", "DATE"),
+            ]
+        );
+        assert_eq!(
+            options
+                .column_mapping
+                .iter()
+                .map(|mapping| mapping.target_column.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("order_code"), Some("total"), Some("created_at")]
+        );
+
+        let rows = vec![BTreeMap::from([
+            ("id".to_string(), json!(1)),
+            ("details".to_string(), json!({ "source": "native" })),
+        ])];
+        let (columns, rows) = infer_materialized_import_columns(rows, "postgres").unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(columns[0].data_type, "JSONB");
+        assert_eq!(columns[1].data_type, "BIGINT");
+    }
+
+    #[test]
+    fn json_lines_schema_inference_streams_rows_without_materializing_the_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.ndjson");
+        fs::write(
+            &path,
+            "{\"event_id\":1,\"enabled\":true}\n{\"event_id\":2,\"payload\":{\"kind\":\"login\"}}\n",
+        )
+        .unwrap();
+        let (columns, rows) = infer_json_lines_import_columns(&path, "postgres").unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.data_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("enabled", "BOOLEAN"),
+                ("event_id", "BIGINT"),
+                ("payload", "JSONB"),
+            ]
+        );
     }
 
     #[test]

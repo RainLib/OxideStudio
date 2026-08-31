@@ -9,10 +9,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
-import { FileCode2, Plus, Trash2, GripVertical } from "lucide-react";
+import { FileCode2, FileUp, Loader2, Plus, Trash2, GripVertical, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { databaseService, tableService } from "@/services/tauri";
-import type { DatabaseCapabilities } from "@/services/tauri";
+import type {
+  DatabaseCapabilities,
+  TableCsvImportOptions,
+  TableImportFormat,
+} from "@/services/tauri";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
 import { StatusBarPortal } from "./StatusBarPortal";
@@ -40,6 +45,32 @@ interface ColumnDefinition {
   comment: string;
 }
 
+interface InferredImportSource {
+  filePath: string;
+  format: TableImportFormat;
+  contentDigest: string;
+  totalRows: number;
+  csvOptions?: TableCsvImportOptions | null;
+}
+
+function importFormatForPath(filePath: string): TableImportFormat | null {
+  const extension = filePath.split(".").pop()?.toLowerCase();
+  if (["csv", "tsv", "txt"].includes(extension || "")) return "csv";
+  if (["json", "jsonl", "ndjson"].includes(extension || "")) return "json";
+  if (extension === "xlsx") return "xlsx";
+  return null;
+}
+
+function importTableNameSuggestion(filePath: string): string {
+  const fileName = filePath.split(/[\\/]/).pop() || "imported_data";
+  const withoutExtension = fileName.replace(/\.[^.]+$/, "");
+  const normalized = withoutExtension
+    .trim()
+    .replace(/[^A-Za-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || "imported_data";
+}
+
 export function CreateTableTab({
   tabId,
   connectionId,
@@ -62,6 +93,8 @@ export function CreateTableTab({
   const [success, setSuccess] = useState(false);
   const [previewSql, setPreviewSql] = useState("");
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [importSource, setImportSource] = useState<InferredImportSource | null>(null);
+  const [isInferringImport, setIsInferringImport] = useState(false);
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(
     null
   );
@@ -115,6 +148,54 @@ export function CreateTableTab({
       },
     ]);
   }, [activeCapabilities.defaultPrimaryKeyType]);
+
+  const handleInferImportSchema = async () => {
+    if (isInferringImport || isSubmitting) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [
+        { name: "Import data", extensions: ["csv", "tsv", "txt", "json", "jsonl", "ndjson", "xlsx"] },
+      ],
+    });
+    if (typeof selected !== "string") return;
+    const format = importFormatForPath(selected);
+    if (!format) {
+      setError("Choose a CSV, TSV, TXT, JSON, JSONL, NDJSON, or XLSX file.");
+      return;
+    }
+    setIsInferringImport(true);
+    setError(null);
+    try {
+      const inferred = await tableService.inferTableImportColumns(
+        driver,
+        selected,
+        format,
+      );
+      setColumns(inferred.columns.map((column) => ({
+        name: column.name,
+        type: column.dataType,
+        length: column.length || "",
+        isPrimaryKey: false,
+        isNotNull: false,
+        isAutoIncrement: false,
+        comment: "",
+      })));
+      setImportSource({
+        filePath: selected,
+        format,
+        contentDigest: inferred.contentDigest,
+        totalRows: inferred.totalRows,
+        csvOptions: inferred.csvOptions,
+      });
+      if (!tableName.trim()) setTableName(importTableNameSuggestion(selected));
+    } catch (cause) {
+      setImportSource(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsInferringImport(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -251,6 +332,7 @@ export function CreateTableTab({
     setIsSubmitting(true);
     setError(null);
     setSuccess(false);
+    let tableCreated = false;
 
     try {
       await tableService.createTable(
@@ -268,18 +350,56 @@ export function CreateTableTab({
           comment: column.comment || null,
         }))
       );
+      tableCreated = true;
+
+      let importedRows: number | null = null;
+      if (importSource) {
+        try {
+          const imported = await tableService.importTableData(
+            connectionId,
+            driver,
+            schemaName,
+            tableName,
+            importSource.filePath,
+            importSource.format,
+            importSource.csvOptions?.firstRowHeader ?? true,
+            undefined,
+            importSource.csvOptions || undefined,
+            importSource.contentDigest,
+          );
+          importedRows = imported.rowsImported;
+        } catch (cause) {
+          const detail = cause instanceof Error ? cause.message : String(cause);
+          throw new Error(
+            `Table \"${tableName}\" was created, but no import rows were committed: ${detail}`,
+          );
+        }
+      }
 
       // Refresh tables
       await loadTables(connectionId, schemaName, true);
 
       setSuccess(true);
-      updateTabTitle(tabId, `Created ${tableName}`);
+      updateTabTitle(
+        tabId,
+        importedRows === null ? `Created ${tableName}` : `Imported ${tableName}`,
+      );
 
       // Close tab after 1.5 seconds
       setTimeout(() => {
         closeTab(tabId);
       }, 1500);
     } catch (e: any) {
+      // DDL is not transactional with every supported driver's import path.
+      // If import failed after a successful create, surface the durable table
+      // in Explorer immediately instead of leaving the user with a stale tree.
+      if (tableCreated) {
+        try {
+          await loadTables(connectionId, schemaName, true);
+        } catch {
+          // The original create/import error is the actionable error here.
+        }
+      }
       setError(e.toString());
     } finally {
       setIsSubmitting(false);
@@ -307,7 +427,9 @@ export function CreateTableTab({
 
         {success && (
           <div className="bg-green-500/10 text-green-400 text-xs p-3 rounded border border-green-500/20">
-            Table created successfully. This tab will close shortly.
+            {importSource
+              ? `${importSource.totalRows.toLocaleString()} reviewed row(s) were imported. This tab will close shortly.`
+              : "Table created successfully. This tab will close shortly."}
           </div>
         )}
 
@@ -323,6 +445,44 @@ export function CreateTableTab({
             className="max-w-md border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))]"
           />
         </div>
+
+        <section className="rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-3">
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">
+              <FileUp size={15} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-medium">Create from import file</div>
+              <div className="truncate text-[11px] wb-muted">
+                {importSource
+                  ? `${importSource.filePath.split(/[\\/]/).pop()} · ${importSource.totalRows.toLocaleString()} reviewed rows · edit the inferred columns before creating`
+                  : "Infer editable columns from CSV, JSON, or XLSX; creation is followed by a checked native import."}
+              </div>
+            </div>
+            {importSource && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0 text-muted-foreground"
+                onClick={() => setImportSource(null)}
+                disabled={isSubmitting || isInferringImport}
+                title="Use manual columns only"
+              >
+                <X size={14} />
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleInferImportSchema()}
+              disabled={isSubmitting || isInferringImport}
+              className="h-8 shrink-0 text-xs"
+            >
+              {isInferringImport ? <Loader2 size={13} className="mr-1.5 animate-spin" /> : <FileUp size={13} className="mr-1.5" />}
+              {importSource ? "Replace file" : "Choose file"}
+            </Button>
+          </div>
+        </section>
 
         {/* Columns */}
         <div className="space-y-2">
@@ -529,7 +689,7 @@ export function CreateTableTab({
             disabled={isSubmitting || success}
             className="h-8 text-xs"
           >
-            {isSubmitting ? "Creating..." : "Create Table"}
+            {isSubmitting ? "Creating..." : importSource ? "Create and Import" : "Create Table"}
           </Button>
         </div>
       </StatusBarPortal>

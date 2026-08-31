@@ -25,6 +25,7 @@ import type {
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableImportResult,
+  TableImportColumnInference,
   TableImportReport,
   TableImportProgress,
   TableDataTransferPreview,
@@ -266,6 +267,27 @@ export async function preflightTableCsvImport(
     connectionId, driver, schema, table, filePath, firstRowHeader, mode,
     database: databaseName, csvOptions, expectedFileDigest,
   });
+}
+
+export async function inferTableImportColumns(
+  driver: DatabaseDriver,
+  filePath: string,
+  format: TableImportFormat,
+  firstRowHeader = true,
+  csvOptions?: TableCsvImportOptions,
+  expectedFileDigest?: string,
+): Promise<TableImportColumnInference> {
+  return invokeWithInterceptors<TableImportColumnInference>(
+    "infer_table_import_columns",
+    {
+      driver,
+      filePath,
+      format,
+      firstRowHeader,
+      csvOptions,
+      expectedFileDigest,
+    },
+  );
 }
 
 export async function listTableImportReports(
@@ -873,6 +895,7 @@ export const tableService = {
   listTableExportReports,
   previewTableCsvImport,
   preflightTableCsvImport,
+  inferTableImportColumns,
   previewTableJsonImport,
   previewTableXlsxImport,
   importTableData,

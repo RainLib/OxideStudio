@@ -92,9 +92,15 @@ describe("Workbench settings entry", () => {
       await flushAsyncWork();
     });
 
-    await vi.waitFor(() => {
-      expect(document.body.textContent).toContain("Settings");
-    });
+    await vi.waitFor(
+      () => {
+        expect(document.body.textContent).toContain("Settings");
+      },
+      // SettingsDialog is intentionally lazy-loaded. Under a full parallel
+      // Vitest run, module evaluation may exceed the default one-second poll
+      // budget even though the click has already opened the dialog.
+      { timeout: 5_000 },
+    );
     expect(document.body.textContent).toContain("AI Assistant");
 
     const aiTab = Array.from(document.querySelectorAll("button")).find(

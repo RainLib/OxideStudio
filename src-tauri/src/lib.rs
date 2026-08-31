@@ -319,6 +319,7 @@ pub fn run() {
             commands::table::preview_table_csv_import,
             commands::table::preview_table_json_import,
             commands::table::preview_table_xlsx_import,
+            commands::table::infer_table_import_columns,
             commands::table::preflight_table_csv_import,
             commands::table::import_table_data,
             commands::table::cancel_table_import,
