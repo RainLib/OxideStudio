@@ -13,6 +13,7 @@
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
+| `42c0dc7f8` | API 型 AI Provider 支持自定义 HTTP Header | 已对齐并强化凭据边界：OpenAI Compatible Assistant 与行内补全分别提供紧凑的 gateway/tenant Header 编辑器；`Authorization` 可在默认 Bearer 之后覆盖，`Host`、`Content-Length`、`Content-Type`、`Connection`、`Transfer-Encoding`、`Proxy-Authorization` 等 framing/代理头由 Host 保留。名称、值、大小、条数与大小写重复均由前后端校验。Header 值不进入 Zustand/localStorage、项目、日志、Agent sidecar 或 checkpoint，只在显式打开设置时读取，并按 `assistant`/`inline` + destination 存入当前用户私有 Rust credential file。Agent Host 与 inline command 在发送前重新装载；renderer 即使注入 `customHeaders` 也会被反序列化边界丢弃。API Key 同步升级为 Assistant/Inline 独立作用域，旧 URL-only credential 可读取迁移，显式删除以空私有 marker 阻止旧凭据回退。 |
 | `d411f0497` | Elasticsearch REST 请求风险按 method/path 分类，读请求不再被误判为 mutation | 已对齐并保持更严格删除策略：前端与应用内 Agent Host 现在共同接受 GET/HEAD/OPTIONS，以及 POST `_search/_count/_sql/_msearch/_field_caps/_terms_enum/_validate/_explain/_rank_eval/_search_shards`、EQL/async search/scroll；多请求取最高风险，未知 POST fail closed。`#`、`//` 和跨行块注释中的伪请求不参与分类。DELETE 仍按 Oxide 的 destructive confirmation 处理，不因 DBX 把单文档删除列为普通 write 而削弱确认。 |
 | `cb3de0ef4` | Elasticsearch JSON key completion 不遗留自动闭合引号，并区分已有 `:` 的 key | Oxide 原 Monaco provider 已能覆盖紧邻 closing quote，本阶段把逻辑抽成 UTF-16 model offset 可验证的完整 key replacement：同时替换旧 key 后缀与 closing quote；若右侧已有 `:`，只替换 key，不再插入第二份 value scaffold。quoted filter text 与纯逻辑回归保证首次、再次补全和 key 中间光标一致。 |
 

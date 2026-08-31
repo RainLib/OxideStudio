@@ -8,9 +8,10 @@ use crate::{
     core::{
         cli_provider_secret::{load_cli_environment, save_cli_environment},
         protocol::Response,
+        provider_headers::{load_provider_headers, provider_header_map, save_provider_headers},
         provider_secret::{
-            has_provider_secret, load_provider_secret, normalize_provider_secret,
-            save_provider_secret,
+            has_scoped_provider_secret, load_scoped_provider_secret, normalize_provider_secret,
+            save_scoped_provider_secret,
         },
         store::MetaStore,
     },
@@ -108,13 +109,31 @@ impl AiCancellationState {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProviderConfig {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_deserializing)]
+    custom_headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for AiProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .field("timeout_ms", &self.timeout_ms)
+            .field(
+                "custom_header_names",
+                &self.custom_headers.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -191,6 +210,17 @@ pub struct AiProviderTestResult {
 pub struct AiProviderSecretRequest {
     pub base_url: String,
     pub api_key: Option<String>,
+    #[serde(default = "default_provider_scope")]
+    pub scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderHeadersRequest {
+    pub base_url: String,
+    pub scope: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[tauri::command]
@@ -198,7 +228,9 @@ pub async fn ai_set_provider_secret(
     app: AppHandle,
     request: AiProviderSecretRequest,
 ) -> Result<Response<bool>, String> {
-    match save_provider_secret(&app, &request.base_url, request.api_key).await {
+    match save_scoped_provider_secret(&app, &request.scope, &request.base_url, request.api_key)
+        .await
+    {
         Ok(saved) => Ok(Response::ok(saved)),
         Err(error) => Ok(Response::err(
             "AI_PROVIDER_SECRET_ERROR",
@@ -211,14 +243,49 @@ pub async fn ai_set_provider_secret(
 pub async fn ai_has_provider_secret(
     app: AppHandle,
     base_url: String,
+    scope: Option<String>,
 ) -> Result<Response<bool>, String> {
-    match has_provider_secret(&app, &base_url).await {
+    let scope = scope.as_deref().unwrap_or("assistant");
+    match has_scoped_provider_secret(&app, scope, &base_url).await {
         Ok(available) => Ok(Response::ok(available)),
         Err(error) => Ok(Response::err(
             "AI_PROVIDER_SECRET_ERROR",
             &error.to_string(),
         )),
     }
+}
+
+#[tauri::command]
+pub async fn ai_set_provider_headers(
+    app: AppHandle,
+    request: AiProviderHeadersRequest,
+) -> Result<Response<Vec<String>>, String> {
+    match save_provider_headers(&app, &request.scope, &request.base_url, request.headers).await {
+        Ok(names) => Ok(Response::ok(names)),
+        Err(error) => Ok(Response::err(
+            "AI_PROVIDER_HEADERS_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn ai_get_provider_headers(
+    app: AppHandle,
+    base_url: String,
+    scope: String,
+) -> Result<Response<BTreeMap<String, String>>, String> {
+    match load_provider_headers(&app, &scope, &base_url).await {
+        Ok(headers) => Ok(Response::ok(headers)),
+        Err(error) => Ok(Response::err(
+            "AI_PROVIDER_HEADERS_ERROR",
+            &error.to_string(),
+        )),
+    }
+}
+
+fn default_provider_scope() -> String {
+    "assistant".to_string()
 }
 
 async fn cli_environment(
@@ -827,7 +894,8 @@ async fn send_chat_completion(
     app: &AppHandle,
     mut request: AiChatCompletionRequest,
 ) -> Result<AiChatCompletionResult, String> {
-    hydrate_provider_secret(app, &mut request.config).await?;
+    hydrate_provider_secret(app, "assistant", &mut request.config).await?;
+    hydrate_provider_headers(app, "assistant", &mut request.config).await?;
     validate_config(&request.config)?;
     if request.messages.is_empty() {
         return Err("At least one model message is required".to_string());
@@ -861,6 +929,9 @@ async fn send_chat_completion(
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
     }
+    builder = builder.headers(
+        provider_header_map(&request.config.custom_headers).map_err(|error| error.to_string())?,
+    );
 
     let response = builder.send().await.map_err(|error| error.to_string())?;
     let status = response.status();
@@ -891,7 +962,8 @@ async fn send_inline_completion(
     app: &AppHandle,
     mut request: AiInlineCompletionRequest,
 ) -> Result<AiInlineCompletionResult, String> {
-    hydrate_provider_secret(app, &mut request.config).await?;
+    hydrate_provider_secret(app, "inline", &mut request.config).await?;
+    hydrate_provider_headers(app, "inline", &mut request.config).await?;
     validate_config(&request.config)?;
     let timeout = Duration::from_millis(
         request
@@ -973,6 +1045,9 @@ async fn send_inline_completion(
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
     }
+    builder = builder.headers(
+        provider_header_map(&request.config.custom_headers).map_err(|error| error.to_string())?,
+    );
     let response = builder.send().await.map_err(|error| error.to_string())?;
     let status = response.status();
     let value: Value = response
@@ -1056,6 +1131,7 @@ fn validate_config(config: &AiProviderConfig) -> Result<(), String> {
 
 async fn hydrate_provider_secret(
     app: &AppHandle,
+    scope: &str,
     config: &mut AiProviderConfig,
 ) -> Result<(), String> {
     if config
@@ -1065,7 +1141,18 @@ async fn hydrate_provider_secret(
     {
         return Ok(());
     }
-    config.api_key = load_provider_secret(app, &config.base_url)
+    config.api_key = load_scoped_provider_secret(app, scope, &config.base_url)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn hydrate_provider_headers(
+    app: &AppHandle,
+    scope: &str,
+    config: &mut AiProviderConfig,
+) -> Result<(), String> {
+    config.custom_headers = load_provider_headers(app, scope, &config.base_url)
         .await
         .map_err(|error| error.to_string())?;
     Ok(())

@@ -121,6 +121,10 @@ pub struct AgentProviderConfig {
     pub access_mode: Option<String>,
     #[serde(default)]
     pub environment_keys: Vec<String>,
+    /// Rust-owned gateway credentials. The renderer cannot populate this
+    /// field, and it is never serialized to the sidecar or a checkpoint.
+    #[serde(default, skip_deserializing)]
+    pub(crate) custom_headers: std::collections::BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for AgentProviderConfig {
@@ -137,6 +141,10 @@ impl std::fmt::Debug for AgentProviderConfig {
             .field("service_tier", &self.service_tier)
             .field("access_mode", &self.access_mode)
             .field("environment_keys", &self.environment_keys)
+            .field(
+                "custom_header_names",
+                &self.custom_headers.keys().collect::<Vec<_>>(),
+            )
             .field("timeout_ms", &self.timeout_ms)
             .field("capabilities", &self.capabilities)
             .finish()
@@ -1031,6 +1039,7 @@ mod tests {
                 service_tier: None,
                 access_mode: Some("full".to_string()),
                 environment_keys: Vec::new(),
+                custom_headers: Default::default(),
             },
             workspace: WorkspaceContext {
                 project_id: "project".to_string(),
@@ -1080,6 +1089,10 @@ mod tests {
                 service_tier: None,
                 access_mode: None,
                 environment_keys: Vec::new(),
+                custom_headers: std::collections::BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer gateway-secret".to_string(),
+                )]),
             },
             workspace: WorkspaceContext {
                 project_id: "project".to_string(),
@@ -1104,6 +1117,7 @@ mod tests {
         let params = request.sidecar_params();
         let serialized = params.to_string();
         assert!(!serialized.contains("super-secret"));
+        assert!(!serialized.contains("gateway-secret"));
         assert!(!serialized.contains("baseUrl"));
         let tool = params["tools"][0].as_object().unwrap();
         assert!(!tool.contains_key("timeoutMs"));
@@ -1116,6 +1130,32 @@ mod tests {
             json!("https://example.com/v1")
         );
         assert!(!resumable_serialized.contains("super-secret"));
+        assert!(!resumable_serialized.contains("gateway-secret"));
         assert!(resumable["provider"].get("apiKey").is_none());
+    }
+
+    #[test]
+    fn renderer_cannot_inject_provider_header_values() {
+        let provider: AgentProviderConfig = serde_json::from_value(json!({
+            "kind": "openai-compatible",
+            "baseUrl": "https://example.test/v1",
+            "apiKey": null,
+            "model": "model",
+            "timeoutMs": 30000,
+            "capabilities": {
+                "streaming": true,
+                "toolCalling": true,
+                "structuredOutput": true,
+                "maxInputTokens": null,
+                "maxOutputTokens": null
+            },
+            "customHeaders": {
+                "Authorization": "Bearer renderer-injected"
+            }
+        }))
+        .unwrap();
+
+        assert!(provider.custom_headers.is_empty());
+        assert!(!format!("{provider:?}").contains("renderer-injected"));
     }
 }

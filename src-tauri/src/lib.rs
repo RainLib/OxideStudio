@@ -175,6 +175,8 @@ pub fn run() {
             commands::ai::ai_test_provider,
             commands::ai::ai_set_provider_secret,
             commands::ai::ai_has_provider_secret,
+            commands::ai::ai_set_provider_headers,
+            commands::ai::ai_get_provider_headers,
             commands::ai::ai_cli_detect,
             commands::ai::ai_cli_list_models,
             commands::ai::ai_cli_list_efforts,

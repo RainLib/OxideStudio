@@ -16,9 +16,27 @@ const MAX_PROVIDER_SECRET_BYTES: usize = 64 * 1024;
 /// directory. Provider credentials intentionally do not live in a project,
 /// frontend storage, or the Agent sidecar environment.
 pub async fn load_provider_secret(app: &AppHandle, base_url: &str) -> Result<Option<String>> {
-    let path = provider_secret_path(app, base_url)?;
+    load_scoped_provider_secret(app, "assistant", base_url).await
+}
+
+pub async fn load_scoped_provider_secret(
+    app: &AppHandle,
+    scope: &str,
+    base_url: &str,
+) -> Result<Option<String>> {
+    let path = scoped_provider_secret_path(app, scope, base_url)?;
+    let legacy_path = provider_secret_path(app, base_url)?;
     tokio::task::spawn_blocking(move || {
         let _guard = provider_secret_io_lock()?;
+        let path = match fs::metadata(&path) {
+            Ok(_) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => legacy_path,
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to inspect the provider credential file: {error}"
+                ))
+            }
+        };
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -57,7 +75,16 @@ pub async fn save_provider_secret(
     base_url: &str,
     secret: Option<String>,
 ) -> Result<bool> {
-    let path = provider_secret_path(app, base_url)?;
+    save_scoped_provider_secret(app, "assistant", base_url, secret).await
+}
+
+pub async fn save_scoped_provider_secret(
+    app: &AppHandle,
+    scope: &str,
+    base_url: &str,
+    secret: Option<String>,
+) -> Result<bool> {
+    let path = scoped_provider_secret_path(app, scope, base_url)?;
     tokio::task::spawn_blocking(move || {
         let _guard = provider_secret_io_lock()?;
         let mut secret = secret.unwrap_or_default();
@@ -68,13 +95,12 @@ pub async fn save_provider_secret(
             return Err(anyhow!("provider credential is unexpectedly large"));
         }
         let result = if normalized.is_empty() {
-            match fs::remove_file(&path) {
-                Ok(()) => Ok(false),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(anyhow!(
-                    "failed to delete the provider credential file: {error}"
-                )),
-            }
+            // Keep a private empty marker. A legacy URL-only credential may
+            // still exist from pre-scope versions; deleting this path would
+            // make the loader fall back to that credential and silently undo
+            // the user's explicit Remove action.
+            replace_private_file(&path, b"", "ai-provider")?;
+            Ok(false)
         } else {
             replace_private_file(&path, normalized.as_bytes(), "ai-provider")?;
 
@@ -126,7 +152,15 @@ pub fn normalize_provider_secret(secret: &str) -> String {
 }
 
 pub async fn has_provider_secret(app: &AppHandle, base_url: &str) -> Result<bool> {
-    let Some(mut secret) = load_provider_secret(app, base_url).await? else {
+    has_scoped_provider_secret(app, "assistant", base_url).await
+}
+
+pub async fn has_scoped_provider_secret(
+    app: &AppHandle,
+    scope: &str,
+    base_url: &str,
+) -> Result<bool> {
+    let Some(mut secret) = load_scoped_provider_secret(app, scope, base_url).await? else {
         return Ok(false);
     };
     let available = !secret.trim().is_empty();
@@ -143,6 +177,26 @@ fn provider_secret_path(app: &AppHandle, base_url: &str) -> Result<PathBuf> {
         .context("failed to resolve the application configuration directory")?
         .join("credentials")
         .join(format!("ai-provider-{digest}.secret")))
+}
+
+fn scoped_provider_secret_path(app: &AppHandle, scope: &str, base_url: &str) -> Result<PathBuf> {
+    let scope = normalized_provider_scope(scope)?;
+    let normalized = normalized_provider_url(base_url)?;
+    let digest = hex_digest(format!("{scope}:{normalized}").as_bytes());
+    Ok(app
+        .path()
+        .app_config_dir()
+        .context("failed to resolve the application configuration directory")?
+        .join("credentials")
+        .join(format!("ai-provider-{scope}-{digest}.secret")))
+}
+
+fn normalized_provider_scope(scope: &str) -> Result<&'static str> {
+    match scope.trim() {
+        "assistant" => Ok("assistant"),
+        "inline" => Ok("inline"),
+        _ => Err(anyhow!("unsupported AI provider credential scope")),
+    }
 }
 
 fn normalized_provider_url(base_url: &str) -> Result<&str> {
@@ -194,6 +248,13 @@ mod tests {
     #[test]
     fn provider_url_rejects_embedded_credentials() {
         assert!(normalized_provider_url("https://secret@example.com/v1").is_err());
+    }
+
+    #[test]
+    fn provider_credential_scopes_are_strict() {
+        assert_eq!(normalized_provider_scope("assistant").unwrap(), "assistant");
+        assert_eq!(normalized_provider_scope("inline").unwrap(), "inline");
+        assert!(normalized_provider_scope("agent").is_err());
     }
 
     #[test]

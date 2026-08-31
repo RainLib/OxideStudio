@@ -52,7 +52,8 @@ use crate::{
         explain::{build_explain_statement, parse_explain_results},
         manager::ConnectionManager,
         protocol::{ExplainPlanMode, QueryResult},
-        provider_secret::load_provider_secret,
+        provider_headers::load_provider_headers,
+        provider_secret::load_scoped_provider_secret,
         sqlite_worker_artifact::SqliteWorkerArtifactRegistry,
         ssh::SshTunnel,
         statement::{
@@ -865,13 +866,19 @@ impl AgentHostInner {
             // A missing entry is valid for keyless/local providers. Credential
             // manager failures are not: silently turning them into an anonymous
             // HTTP request produces a misleading provider 401.
-            match load_provider_secret(&self.app, &provider.base_url).await {
+            match load_scoped_provider_secret(&self.app, "assistant", &provider.base_url).await {
                 Ok(Some(secret)) => provider.api_key = Some(secret),
                 Ok(None) => {}
                 Err(error) => {
                     return Err(error.context("failed to load the AI provider credential"));
                 }
             }
+        }
+        if provider.kind == crate::agent::protocol::AgentProviderKind::OpenaiCompatible {
+            provider.custom_headers =
+                load_provider_headers(&self.app, "assistant", &provider.base_url)
+                    .await
+                    .context("failed to load the AI provider headers")?;
         }
 
         let turn_transition = self.turn_transition_lock.lock().await;

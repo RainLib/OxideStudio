@@ -12,6 +12,8 @@ vi.mock("@/services/tauri/ai.service", () => ({
     testProvider: vi.fn(),
     hasProviderSecret: vi.fn(async () => false),
     setProviderSecret: vi.fn(async () => true),
+    getProviderHeaders: vi.fn(async () => ({})),
+    setProviderHeaders: vi.fn(async () => []),
   },
 }));
 

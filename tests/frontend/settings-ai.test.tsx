@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   testProvider: vi.fn(),
   hasProviderSecret: vi.fn(),
   setProviderSecret: vi.fn(),
+  getProviderHeaders: vi.fn(),
+  setProviderHeaders: vi.fn(),
 }));
 
 vi.mock("@/services/tauri/ai.service", () => ({
@@ -19,6 +21,8 @@ vi.mock("@/services/tauri/ai.service", () => ({
     testProvider: mocks.testProvider,
     hasProviderSecret: mocks.hasProviderSecret,
     setProviderSecret: mocks.setProviderSecret,
+    getProviderHeaders: mocks.getProviderHeaders,
+    setProviderHeaders: mocks.setProviderHeaders,
   },
 }));
 
@@ -54,6 +58,8 @@ describe("AI settings", () => {
     });
     mocks.hasProviderSecret.mockResolvedValue(false);
     mocks.setProviderSecret.mockResolvedValue(true);
+    mocks.getProviderHeaders.mockResolvedValue({});
+    mocks.setProviderHeaders.mockResolvedValue(["Authorization"]);
     useAiSettingsStore.setState(
       {
         ...initialAiSettings,
@@ -161,5 +167,62 @@ describe("AI settings", () => {
     expect(mocks.testProvider).not.toHaveBeenCalled();
     expect(useAiSettingsStore.getState().apiKey).toBe("test-key");
     expect(document.body.textContent).toContain("save failed");
+  });
+
+  it("keeps assistant gateway headers in the Rust credential service", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <ThemeContext.Provider value={themeContext}>
+          <SettingsDialog open initialSection="ai" onOpenChange={vi.fn()} />
+        </ThemeContext.Provider>,
+      );
+      await flushAsyncWork();
+    });
+
+    const addHeader = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Add header"),
+    );
+    expect(addHeader).toBeTruthy();
+    await act(async () => {
+      addHeader?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const name = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Request header name"]',
+    );
+    const value = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Request header value"]',
+    );
+    expect(name).toBeTruthy();
+    expect(value).toBeTruthy();
+    await act(async () => {
+      const setInputValue = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      if (name) {
+        setInputValue?.call(name, "Authorization");
+        name.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      if (value) {
+        setInputValue?.call(value, "Bearer gateway-token");
+        value.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await flushAsyncWork();
+    });
+
+    await act(async () => {
+      buttonWithText(document, "Save headers")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(mocks.setProviderHeaders).toHaveBeenCalledWith(
+      "https://api.openai.com/v1",
+      "assistant",
+      { Authorization: "Bearer gateway-token" },
+    );
   });
 });

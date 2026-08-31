@@ -2,7 +2,7 @@ use crate::{
     agent::protocol::{
         AgentProviderConfig, AgentProviderKind, AgentToolManifestEntry, ModelCompleteRequest,
     },
-    core::provider_secret::normalize_provider_secret,
+    core::{provider_headers::provider_header_map, provider_secret::normalize_provider_secret},
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -84,6 +84,7 @@ impl ModelGateway {
         {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
+        builder = builder.headers(provider_header_map(&provider.custom_headers)?);
 
         let response = tokio::time::timeout(timeout, builder.send())
             .await
@@ -173,6 +174,7 @@ impl ModelGateway {
         {
             builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
+        builder = builder.headers(provider_header_map(&provider.custom_headers)?);
 
         let mut response = tokio::select! {
             result = tokio::time::timeout_at(deadline, builder.send()) => {

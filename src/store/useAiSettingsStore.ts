@@ -357,7 +357,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         const legacyInlineSecret = state.inlineApiKey.trim();
         if (legacyInlineSecret) {
           void aiService
-            .setProviderSecret(state.inlineBaseUrl, legacyInlineSecret)
+            .setProviderSecret(state.inlineBaseUrl, legacyInlineSecret, "inline")
             .then(() => state.updateSettings({ inlineApiKey: "" }))
             .catch(() => undefined);
         }
