@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/services/tauri";
 import {
+  mysqlVarbinaryClipboardText,
+  serializeQueryResultSelectionToTsv,
   serializeQueryResultToJsonLines,
   serializeQueryResultToMarkdown,
   serializeQueryResultToSql,
@@ -31,6 +33,32 @@ describe("query result export formats", () => {
     expect(serializeQueryResultToTsv(RESULT)).toBe(
       "id\tdisplay name\tactive\n1\tAda's account\ttrue\n2\t\tfalse",
     );
+  });
+
+  it("copies textual MySQL VARBINARY as text and preserves arbitrary bytes", () => {
+    const result: QueryResult = {
+      columns: [
+        { name: "token", data_type: "VARBINARY(64)" },
+        { name: "opaque", data_type: "VARBINARY(4)" },
+        { name: "fixed", data_type: "BINARY(3)" },
+      ],
+      rows: [["0x757365725f3432", "0xdeadbeef", "0x616263"]],
+    };
+
+    expect(
+      serializeQueryResultSelectionToTsv(result, [0], [0, 1, 2], false, "mysql"),
+    ).toBe("user_42\t0xdeadbeef\t0x616263");
+    expect(serializeQueryResultSelectionToTsv(result, [0], [0], false)).toBe(
+      "0x757365725f3432",
+    );
+    expect(mysqlVarbinaryClipboardText("0xe4b8ade69687", "varbinary(6)", "mariadb")).toBe(
+      "中文",
+    );
+    expect(mysqlVarbinaryClipboardText("0x0061", "varbinary(2)", "mysql")).toBeNull();
+    expect(mysqlVarbinaryClipboardText("0xfffe", "varbinary(2)", "mysql")).toBeNull();
+    expect(mysqlVarbinaryClipboardText("abcd", "varbinary(2)", "mysql")).toBeNull();
+    expect(mysqlVarbinaryClipboardText("0x616263", "blob", "mysql")).toBeNull();
+    expect(mysqlVarbinaryClipboardText("0x616263", "varbinary(3)", "sqlserver")).toBeNull();
   });
 
   it("serializes Markdown tables with escaped structure and explicit nulls", () => {

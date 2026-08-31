@@ -64,6 +64,61 @@ function escapeTsvValue(value: unknown) {
   return stringifyExportValue(value).replace(/[\t\r\n]+/g, " ");
 }
 
+const MYSQL_VARBINARY_TYPE = /^varbinary(?:\b|\()/i;
+const PREFIXED_HEX_VALUE = /^(?:0[xX]|\\x)([0-9a-fA-F]*)$/;
+
+/**
+ * MySQL result rows use `0x<hex>` as the lossless canonical representation
+ * for binary values. Clipboard text should recover a textual VARBINARY payload
+ * only when strict UTF-8 decoding round-trips byte-for-byte. Other binary
+ * families and arbitrary bytes stay in hex form.
+ */
+export function mysqlVarbinaryClipboardText(
+  value: unknown,
+  columnType?: string,
+  driver?: string,
+) {
+  const normalizedDriver = driver?.trim().toLowerCase();
+  if (
+    !["mysql", "mariadb"].includes(normalizedDriver || "") ||
+    !MYSQL_VARBINARY_TYPE.test(columnType?.trim() || "") ||
+    typeof value !== "string"
+  ) {
+    return null;
+  }
+  const match = value.trim().match(PREFIXED_HEX_VALUE);
+  if (!match || match[1]!.length % 2 !== 0) return null;
+
+  const bytes = new Uint8Array(match[1]!.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    const parsed = Number.parseInt(match[1]!.slice(index * 2, index * 2 + 2), 16);
+    if (Number.isNaN(parsed)) return null;
+    bytes[index] = parsed;
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  for (const character of text) {
+    const codePoint = character.codePointAt(0) || 0;
+    const allowedWhitespace = codePoint === 9 || codePoint === 10 || codePoint === 13;
+    if (!allowedWhitespace && (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159))) {
+      return null;
+    }
+  }
+  const encoded = new TextEncoder().encode(text);
+  if (
+    encoded.length !== bytes.length ||
+    !encoded.every((byte, index) => byte === bytes[index])
+  ) {
+    return null;
+  }
+  return text;
+}
+
 export function queryResultRowsToObjects(result: QueryResult) {
   const keys = jsonColumnKeys(result);
   return result.rows.map((_, rowIndex) =>
@@ -109,12 +164,13 @@ export function serializeQueryResultToJsonLines(result: QueryResult) {
     .join("\n");
 }
 
-export function serializeQueryResultToTsv(result: QueryResult) {
+export function serializeQueryResultToTsv(result: QueryResult, driver?: string) {
   return serializeQueryResultSelectionToTsv(
     result,
     result.rows.map((_, index) => index),
     result.columns.map((_, index) => index),
     true,
+    driver,
   );
 }
 
@@ -197,7 +253,8 @@ export function serializeQueryResultSelectionToTsv(
   result: QueryResult,
   rowIndexes: number[],
   columnIndexes: number[],
-  includeHeaders = false
+  includeHeaders = false,
+  driver?: string,
 ) {
   const lines: string[] = [];
 
@@ -213,7 +270,13 @@ export function serializeQueryResultSelectionToTsv(
     lines.push(
       columnIndexes
         .map((columnIndex) =>
-          escapeTsvValue(queryResultCellValue(result, rowIndex, columnIndex))
+          escapeTsvValue(
+            mysqlVarbinaryClipboardText(
+              queryResultCellValue(result, rowIndex, columnIndex),
+              result.columns[columnIndex]?.data_type,
+              driver,
+            ) ?? queryResultCellValue(result, rowIndex, columnIndex),
+          )
         )
         .join("\t")
     );

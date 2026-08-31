@@ -345,7 +345,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         ? transposeQueryResult(sourceResult)
         : sourceResult);
     const error = activeTab?.error;
-    const errorConnection = connections.find(
+    const activeConnection = connections.find(
       (connection) => connection.id === activeTab?.connectionId,
     );
     const errorPresentation = useMemo(
@@ -353,11 +353,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         error
           ? presentQueryError(
               error,
-              errorConnection?.name,
+              activeConnection?.name,
               activeTab?.queryError,
             )
           : null,
-      [activeTab?.queryError, error, errorConnection?.name],
+      [activeTab?.queryError, activeConnection?.name, error],
     );
     const gridState = activeTab?.gridState;
     const pendingEdits = activeTab?.pendingEdits || EMPTY_PENDING_EDITS;
@@ -1374,6 +1374,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         rowIndexes,
         columnIndexes,
         copyIncludeHeaders,
+        activeConnection?.driver,
       );
 
       try {
@@ -1382,7 +1383,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       } catch (err) {
         console.error("Failed to copy query result:", err);
       }
-    }, [copyIncludeHeaders, result]);
+    }, [activeConnection?.driver, copyIncludeHeaders, result]);
 
     const handleExport = useCallback(
       (
@@ -1444,6 +1445,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           rowIndexes,
           columnIndexes,
           copyIncludeHeaders,
+          activeConnection?.driver,
         );
 
         if (text) {
@@ -1456,6 +1458,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         }
       },
       [
+        activeConnection?.driver,
         copyIncludeHeaders,
         pendingEdits,
         result,
