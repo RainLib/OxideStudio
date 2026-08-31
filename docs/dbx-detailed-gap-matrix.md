@@ -21,6 +21,7 @@
 | `d5f4eadf7` | 工具栏执行前冻结 SQL selection | 已对齐：pointer-down 捕获 immutable snapshot，执行目标不再受 focus transition 影响。 |
 | `e6f8b2187` | MCP 全局查询超时覆盖 | 已对齐到 Oxide 的独立公开 MCP 架构：`oxide-agent mcp stdio` 与 `tools call` 共用 `--query-timeout-secs` / `OXIDE_MCP_QUERY_TIMEOUT_SECS` 进程级策略；省略保持 30 秒，`0` 表示不自动截止。查询与 estimated EXPLAIN 共用该边界，模型不能通过工具参数扩大期限，公开 MCP 仍严格只读。 |
 | `4ac362453` | PostgreSQL 对只读用户通过 `pg_catalog` 读取外键 | 已对齐并补足旧服务端兼容：约束与反向外键均只读取 `pg_constraint`、`pg_class`、`pg_namespace`、`pg_attribute`，不依赖可能受权限过滤的 `information_schema`；PostgreSQL 9.3 及不支持 `WITH ORDINALITY` 的兼容服务端改用 `generate_subscripts` 保持复合外键列顺序。真实只读角色和 PostgreSQL 9.3/兼容服务端验证延期。 |
+| `7a4edb6c1` | PostgreSQL schema context 保留连接配置的 `search_path` | 已对齐：schema 上下文查询和事务会读取当前 `search_path`，把选中 schema 置前并保留 `$user`、extensions 等配置项；只在原路径未显式包含时追加 `pg_catalog`。读取 baseline 失败时安全回退到仅选中 schema，连接池在非事务路径仍会 `RESET search_path`。真实 PostgreSQL 的 role/database 级 path、用户 SQL 修改会话 path 与连接池复用验证延期。 |
 | `1d71a5fc2` | Schema Diff 显示比较阶段与下一步 | 已对齐到 Oxide 的 snapshot→live review 流：比较明确报告“读取 live target metadata”“分析 schema differences”“打开 migration review”三项真实阶段，Task Center 同步更新当前阶段；弹窗内显示当前阶段及确定的下一步，但不伪造百分比或对象计数。 |
 | `7ba30ae76` | SQL 文件树创建、重命名、删除 | 已有等价能力：Project Files 树支持新建文件/目录、保存、重命名和带确认删除；Rust 端规范化相对路径、限制 project root、拒绝 symlink 逃逸，并在重命名/删除后同步 tab 与 LSP 虚拟文档。 |
 | `9491ab08d` | AI 生成 SQL 追加时去重 | Oxide 的生产 Assistant 不直接追加或执行消息代码块，而是创建绑定当前 editor revision 的 patch preview，用户审阅后才应用；重复点击不能绕过 revision 校验，也不会形成 DBX 的直接 append 重复路径。 |

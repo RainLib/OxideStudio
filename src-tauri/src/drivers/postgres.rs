@@ -58,6 +58,79 @@ fn postgres_supports_with_ordinality(server_version_num: i32) -> bool {
     server_version_num >= 90_400
 }
 
+/// Keep a selected workspace schema first without discarding connection-level
+/// search-path entries such as extension schemas or `$user`. PostgreSQL adds
+/// `pg_catalog` implicitly when absent, but making it explicit preserves the
+/// same name-resolution behavior after `set_config` replaces the path.
+fn postgres_search_path_with_selected_schema(
+    configured: &str,
+    first_resolved_schema: Option<&str>,
+    has_explicit_pg_catalog: bool,
+    schema: &str,
+) -> String {
+    let selected_schema = DatabaseKind::Postgres.quote_identifier(schema);
+    let configured = configured.trim();
+    let mut path = if first_resolved_schema == Some(schema) {
+        configured.to_string()
+    } else if configured.is_empty() {
+        selected_schema.clone()
+    } else {
+        format!("{selected_schema}, {configured}")
+    };
+    if path.is_empty() {
+        path = selected_schema;
+    }
+    if !has_explicit_pg_catalog {
+        path.push_str(", pg_catalog");
+    }
+    path
+}
+
+async fn configure_postgres_search_path(
+    connection: &mut PoolConnection<Postgres>,
+    schema: &str,
+    local_to_transaction: bool,
+) -> Result<()> {
+    let selected_schema = DatabaseKind::Postgres.quote_identifier(schema);
+    let baseline: Result<(String, Option<String>, bool)> = async {
+        let row = sqlx::query(
+            "SELECT current_setting('search_path'), (current_schemas(false))[1], \
+             'pg_catalog' = ANY(current_schemas(false))",
+        )
+        .persistent(false)
+        .fetch_one(&mut **connection)
+        .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?))
+    }
+    .await;
+
+    let search_path = match baseline {
+        Ok((configured, first_resolved_schema, has_explicit_pg_catalog)) => {
+            postgres_search_path_with_selected_schema(
+                &configured,
+                first_resolved_schema.as_deref(),
+                has_explicit_pg_catalog,
+                schema,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to read PostgreSQL search_path baseline; using selected-schema fallback: {}",
+                error
+            );
+            selected_schema
+        }
+    };
+
+    sqlx::query("SELECT set_config('search_path', $1, $2)")
+        .bind(search_path)
+        .bind(local_to_transaction)
+        .persistent(false)
+        .execute(&mut **connection)
+        .await?;
+    Ok(())
+}
+
 struct PostgresMetadataPool {
     database: String,
     pool: Pool<Postgres>,
@@ -1370,12 +1443,7 @@ impl DatabaseDriver for PostgresDriver {
         }
 
         if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-            let search_path = DatabaseKind::Postgres.quote_identifier(schema);
-            sqlx::query("SELECT set_config('search_path', $1, false)")
-                .bind(search_path)
-                .persistent(false)
-                .execute(&mut *conn)
-                .await?;
+            configure_postgres_search_path(&mut conn, schema, false).await?;
         }
 
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
@@ -1579,13 +1647,7 @@ impl DatabaseDriver for PostgresDriver {
         if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
             conn.close_on_drop();
         }
-        let search_path = DatabaseKind::Postgres.quote_identifier(schema);
-
-        sqlx::query("SELECT set_config('search_path', $1, false)")
-            .bind(search_path)
-            .persistent(false)
-            .execute(&mut *conn)
-            .await?;
+        configure_postgres_search_path(&mut conn, schema, false).await?;
 
         let query_result = self.query_on_connection(sql, &mut conn).await;
 
@@ -1623,13 +1685,7 @@ impl DatabaseDriver for PostgresDriver {
         if split_sql_statements(sql, StatementScanDialect::Postgres).len() > 1 {
             conn.close_on_drop();
         }
-        let search_path = DatabaseKind::Postgres.quote_identifier(schema);
-
-        sqlx::query("SELECT set_config('search_path', $1, false)")
-            .bind(search_path)
-            .persistent(false)
-            .execute(&mut *conn)
-            .await?;
+        configure_postgres_search_path(&mut conn, schema, false).await?;
 
         let tracked_query = self.track_query_on_connection(query_id, &mut conn).await?;
         let query_result = self.query_on_connection(sql, &mut conn).await;
@@ -1671,13 +1727,7 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
 
         if let Some(schema) = schema.filter(|schema| !schema.trim().is_empty()) {
-            let search_path = DatabaseKind::Postgres.quote_identifier(schema);
-            if let Err(error) = sqlx::query("SELECT set_config('search_path', $1, true)")
-                .bind(search_path)
-                .persistent(false)
-                .execute(&mut *conn)
-                .await
-            {
+            if let Err(error) = configure_postgres_search_path(&mut conn, schema, true).await {
                 if let Err(rollback_error) = sqlx::query("ROLLBACK")
                     .persistent(false)
                     .execute(&mut *conn)
@@ -1688,7 +1738,7 @@ impl DatabaseDriver for PostgresDriver {
                         rollback_error
                     );
                 }
-                return Err(error.into());
+                return Err(error);
             }
         }
 
@@ -1744,18 +1794,12 @@ impl DatabaseDriver for PostgresDriver {
             .await?;
 
         if let Some(schema) = schema.filter(|schema| !schema.trim().is_empty()) {
-            let search_path = DatabaseKind::Postgres.quote_identifier(schema);
-            if let Err(error) = sqlx::query("SELECT set_config('search_path', $1, true)")
-                .bind(search_path)
-                .persistent(false)
-                .execute(&mut *conn)
-                .await
-            {
+            if let Err(error) = configure_postgres_search_path(&mut conn, schema, true).await {
                 let _ = sqlx::query("ROLLBACK")
                     .persistent(false)
                     .execute(&mut *conn)
                     .await;
-                return Err(error.into());
+                return Err(error);
             }
         }
 
@@ -2757,6 +2801,49 @@ mod tests {
     use crate::core::statement::has_multiple_statements;
     use dotenvy::dotenv;
     use std::env;
+
+    #[test]
+    fn postgres_search_path_keeps_configured_entries_when_schema_changes() {
+        assert_eq!(
+            postgres_search_path_with_selected_schema(
+                "\"$user\", extensions, public",
+                Some("public"),
+                false,
+                "application",
+            ),
+            "\"application\", \"$user\", extensions, public, pg_catalog",
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_existing_path_when_selected_schema_is_first() {
+        assert_eq!(
+            postgres_search_path_with_selected_schema(
+                "application, extensions, public",
+                Some("application"),
+                false,
+                "application",
+            ),
+            "application, extensions, public, pg_catalog",
+        );
+        assert_eq!(
+            postgres_search_path_with_selected_schema(
+                "extensions, pg_catalog, public",
+                Some("extensions"),
+                true,
+                "application",
+            ),
+            "\"application\", extensions, pg_catalog, public",
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_quotes_selected_schema_and_handles_an_empty_baseline() {
+        assert_eq!(
+            postgres_search_path_with_selected_schema("", None, false, "tenant\"name"),
+            "\"tenant\"\"name\", pg_catalog",
+        );
+    }
 
     #[test]
     fn empty_postgres_rows_preserve_described_columns() {
