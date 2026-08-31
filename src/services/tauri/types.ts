@@ -1562,6 +1562,8 @@ export interface SchemaRelationSnapshot {
   definition?: string | null;
   /** Direct same-schema view prerequisites used only to order reviewed DDL. */
   dependencies?: string[];
+  /** PostgreSQL sequences referenced by catalog-captured column defaults. */
+  sequenceDependencies?: string[];
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   constraints: ConstraintInfo[];

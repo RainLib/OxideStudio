@@ -204,6 +204,123 @@ fn postgres_trigger_definition_query(schema: &str) -> String {
     )
 }
 
+/// Creates reviewable sequence DDL without copying mutable last-value state.
+/// `pg_sequence` exposes only typed catalog values and identifiers are quoted
+/// by PostgreSQL itself, so no user-provided SQL fragment is interpolated.
+fn postgres_sequence_definition_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT relation.relname AS sequence_name, \
+         format('CREATE SEQUENCE %I.%I AS %s INCREMENT BY %s MINVALUE %s MAXVALUE %s START WITH %s CACHE %s %s;', \
+           namespace.nspname, relation.relname, pg_catalog.format_type(sequence.seqtypid, NULL), \
+           sequence.seqincrement, sequence.seqmin, sequence.seqmax, sequence.seqstart, \
+           sequence.seqcache, CASE WHEN sequence.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END) AS definition \
+         FROM pg_catalog.pg_class relation \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace \
+         JOIN pg_catalog.pg_sequence sequence ON sequence.seqrelid = relation.oid \
+         WHERE namespace.nspname = {schema} AND relation.relkind = 'S' \
+         ORDER BY relation.relname;"
+    )
+}
+
+async fn capture_postgres_sequence_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, String>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let sql = postgres_sequence_definition_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(definition)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let definition = definition.trim();
+        if !name.trim().is_empty() && !definition.is_empty() {
+            definitions.insert(name.to_string(), definition.to_string());
+        }
+    }
+    Ok(definitions)
+}
+
+/// Captures only direct default-expression -> sequence edges. This is enough
+/// to put a new sequence ahead of a newly-created table or added column, while
+/// deliberately avoiding mutable sequence values and ownership mutation.
+fn postgres_relation_sequence_dependency_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT relation.relname AS relation_name, sequence.relname AS sequence_name \
+         FROM pg_catalog.pg_attrdef default_expression \
+         JOIN pg_catalog.pg_class relation ON relation.oid = default_expression.adrelid \
+         JOIN pg_catalog.pg_namespace relation_namespace ON relation_namespace.oid = relation.relnamespace \
+         JOIN pg_catalog.pg_depend dependency ON dependency.classid = 'pg_catalog.pg_attrdef'::regclass \
+           AND dependency.objid = default_expression.oid AND dependency.deptype = 'n' \
+         JOIN pg_catalog.pg_class sequence ON sequence.oid = dependency.refobjid \
+         JOIN pg_catalog.pg_namespace sequence_namespace ON sequence_namespace.oid = sequence.relnamespace \
+         WHERE relation_namespace.nspname = {schema} AND sequence_namespace.nspname = {schema} \
+           AND relation.relkind IN ('r', 'p', 'f') AND sequence.relkind = 'S' \
+         ORDER BY relation.relname, sequence.relname;"
+    )
+}
+
+async fn capture_postgres_relation_sequence_dependencies(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let sql = postgres_relation_sequence_dependency_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut dependencies = HashMap::<String, Vec<String>>::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(relation), Some(sequence)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if !relation.trim().is_empty() && !sequence.trim().is_empty() {
+            dependencies
+                .entry(relation.to_string())
+                .or_default()
+                .push(sequence.to_string());
+        }
+    }
+    for relation_dependencies in dependencies.values_mut() {
+        relation_dependencies.sort();
+        relation_dependencies.dedup();
+    }
+    Ok(dependencies)
+}
+
 fn schema_object_definition_key(parent_name: Option<&str>, name: &str) -> String {
     format!("{}\u{1f}{}", parent_name.unwrap_or_default(), name)
 }
@@ -659,6 +776,27 @@ async fn capture_schema_snapshot_inner(
     } else {
         HashMap::new()
     };
+    let relation_sequence_dependencies = if capabilities.supports_table_browsing {
+        match capture_postgres_relation_sequence_dependencies(
+            manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
+                warnings.push(format!(
+                    "PostgreSQL sequence dependency metadata was unavailable; sequence DDL remains reviewable but relation ordering uses the conservative default: {error}"
+                ));
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
     let manager = manager.clone();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
@@ -671,6 +809,10 @@ async fn capture_schema_snapshot_inner(
         let schema = schema.to_string();
         let driver = snapshot_driver.clone();
         let dependencies = view_dependencies
+            .get(&relation_name)
+            .cloned()
+            .unwrap_or_default();
+        let sequence_dependencies = relation_sequence_dependencies
             .get(&relation_name)
             .cloned()
             .unwrap_or_default();
@@ -765,6 +907,7 @@ async fn capture_schema_snapshot_inner(
                         comment,
                         definition,
                         dependencies,
+                        sequence_dependencies,
                         columns: metadata.0,
                         indexes: metadata.1,
                         constraints: metadata.2,
@@ -778,6 +921,7 @@ async fn capture_schema_snapshot_inner(
                         comment,
                         definition,
                         dependencies,
+                        sequence_dependencies,
                         columns: Vec::new(),
                         indexes: Vec::new(),
                         constraints: Vec::new(),
@@ -933,6 +1077,29 @@ async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "PostgreSQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_postgres_sequence_definitions(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("sequence") {
+                        object.definition = definitions.get(&object.name).cloned();
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "PostgreSQL sequence source was unavailable; sequence drift remains review-only: {error}"
             )),
         }
     }
@@ -2599,6 +2766,7 @@ mod tests {
                 comment: None,
                 definition: None,
                 dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
                 columns: vec![ColumnInfo {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
@@ -2685,6 +2853,19 @@ mod tests {
         assert!(trigger.contains("namespace.nspname = 'public'"));
         assert!(trigger.contains("NOT trigger.tgisinternal"));
         assert!(!trigger.contains("UPDATE"));
+
+        let sequence = postgres_sequence_definition_query("public");
+        assert!(sequence.contains("pg_catalog.pg_sequence"));
+        assert!(sequence.contains("CREATE SEQUENCE"));
+        assert!(sequence.contains("namespace.nspname = 'public'"));
+        assert!(!sequence.contains("pg_sequence_last_value"));
+        assert!(!sequence.contains("setval"));
+
+        let sequence_dependency = postgres_relation_sequence_dependency_query("public");
+        assert!(sequence_dependency.contains("pg_catalog.pg_attrdef"));
+        assert!(sequence_dependency.contains("sequence.relkind = 'S'"));
+        assert!(sequence_dependency.contains("relation_namespace.nspname = 'public'"));
+        assert!(!sequence_dependency.contains("DELETE"));
         assert_eq!(
             schema_object_definition_key(Some("orders"), "orders_audit"),
             "orders\u{1f}orders_audit"

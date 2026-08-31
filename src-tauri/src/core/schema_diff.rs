@@ -33,6 +33,11 @@ pub struct SchemaRelationSnapshot {
     /// broaden the set of objects selected for a migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
+    /// Native PostgreSQL sequences referenced by this relation's defaults.
+    /// Kept separate from relation dependencies so a sequence named like a
+    /// table cannot be mistaken for a relation during planning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence_dependencies: Vec<String>,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
@@ -300,6 +305,8 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
     for relation in &mut snapshot.relations {
         relation.dependencies.sort();
         relation.dependencies.dedup();
+        relation.sequence_dependencies.sort();
+        relation.sequence_dependencies.dedup();
         relation
             .indexes
             .sort_by(|left, right| left.name.cmp(&right.name));
@@ -1987,10 +1994,19 @@ fn compare_routines(
         }
     }
     if changes.len() > change_start {
-        warnings.push(
+        let catalog_backed = source.iter().any(|routine| {
+            routine
+                .definition
+                .as_deref()
+                .is_some_and(|definition| !definition.trim().is_empty())
+        });
+        warnings.push(if catalog_backed && database_kind == Some(DatabaseKind::Postgres) {
+            "PostgreSQL catalog routine DDL is included only for create-or-replace review; routine removal remains blocked."
+                .to_string()
+        } else {
             "Routine signature drift is review-only: routine bodies and automatic routine DDL are intentionally unavailable."
-                .to_string(),
-        );
+                .to_string()
+        });
     }
 }
 
@@ -2051,14 +2067,29 @@ fn schema_object_review_change_with_definition(
     summary: String,
 ) -> SchemaChange {
     let is_trigger = object.object_type.eq_ignore_ascii_case("trigger");
+    let is_sequence = object.object_type.eq_ignore_ascii_case("sequence");
     let definition = object
         .definition
         .as_deref()
         .map(str::trim)
         .filter(|definition| !definition.is_empty());
-    let executable_definition = match (database_kind, is_trigger, definition) {
-        (Some(DatabaseKind::Postgres), true, Some(definition))
-            if definition.to_ascii_uppercase().starts_with("CREATE ") =>
+    let executable_definition = match (kind, database_kind, is_trigger, is_sequence, definition) {
+        (
+            SchemaChangeKind::SchemaObjectCreate,
+            Some(DatabaseKind::Postgres),
+            true,
+            _,
+            Some(definition),
+        ) if definition.to_ascii_uppercase().starts_with("CREATE ") => Some(definition.to_string()),
+        (
+            SchemaChangeKind::SchemaObjectCreate,
+            Some(DatabaseKind::Postgres),
+            _,
+            true,
+            Some(definition),
+        ) if definition
+            .to_ascii_uppercase()
+            .starts_with("CREATE SEQUENCE ") =>
         {
             Some(definition.to_string())
         }
@@ -2073,7 +2104,7 @@ fn schema_object_review_change_with_definition(
         object.parent_name.clone(),
         summary,
         executable_definition.into_iter().collect(),
-        false,
+        kind == SchemaChangeKind::SchemaObjectCreate && is_sequence,
         true,
     );
     if change.sql.is_empty() {
@@ -2135,10 +2166,21 @@ fn compare_schema_objects(
         }
     }
     if changes.len() > change_start {
-        warnings.push(
+        let catalog_backed = source.iter().any(|object| {
+            object
+                .definition
+                .as_deref()
+                .is_some_and(|definition| !definition.trim().is_empty())
+                && (object.object_type.eq_ignore_ascii_case("trigger")
+                    || object.object_type.eq_ignore_ascii_case("sequence"))
+        });
+        warnings.push(if catalog_backed && database_kind == Some(DatabaseKind::Postgres) {
+            "PostgreSQL catalog trigger/sequence DDL is included only for review-gated creation; object removal remains blocked."
+                .to_string()
+        } else {
             "Schema object descriptor drift is review-only: source/DDL and automatic migration are intentionally unavailable."
-                .to_string(),
-        );
+                .to_string()
+        });
     }
 }
 
@@ -3105,7 +3147,15 @@ fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<St
             column.name
         ));
     }
-    if column.is_auto_increment {
+    // A PostgreSQL serial-style column is represented by an ordinary integer
+    // plus a nextval(...) default. Preserve that default and its separately
+    // captured sequence instead of synthesizing a second identity generator.
+    let postgres_sequence_default = kind == DatabaseKind::Postgres
+        && column
+            .default_value
+            .as_deref()
+            .is_some_and(is_postgres_sequence_default);
+    if column.is_auto_increment && !postgres_sequence_default {
         match kind.auto_increment_clause_for_type(&column.data_type) {
             Ok(Some(clause)) => definition.push_str(clause),
             Ok(None) => {}
@@ -3128,6 +3178,11 @@ fn column_definition(kind: DatabaseKind, column: &ColumnInfo) -> (String, Vec<St
         }
     }
     (definition, warnings)
+}
+
+fn is_postgres_sequence_default(default_value: &str) -> bool {
+    let normalized = default_value.trim().to_ascii_lowercase();
+    normalized.starts_with("nextval(") && !normalized.contains(';')
 }
 
 fn alter_column_sql(
@@ -3500,6 +3555,18 @@ fn finalize_change_plan(
     }
 
     let relation_creates = change_id_map(&changes, SchemaChangeKind::RelationCreate);
+    let sequence_creates = changes
+        .iter()
+        .filter(|change| {
+            change.kind == SchemaChangeKind::SchemaObjectCreate
+                && change
+                    .object_type
+                    .as_deref()
+                    .is_some_and(|object_type| object_type.eq_ignore_ascii_case("sequence"))
+                && !change.sql.is_empty()
+        })
+        .map(|change| (change.relation_name.clone(), change.id.clone()))
+        .collect::<BTreeMap<_, _>>();
     let constraint_drops = child_change_id_map(&changes, SchemaChangeKind::ConstraintDrop);
     let index_drops = child_change_id_map(&changes, SchemaChangeKind::IndexDrop);
     let column_adds = child_change_id_map(&changes, SchemaChangeKind::ColumnAdd);
@@ -3516,6 +3583,13 @@ fn finalize_change_plan(
     for change in &mut changes {
         let mut dependencies = Vec::new();
         match change.kind {
+            SchemaChangeKind::RelationCreate | SchemaChangeKind::ColumnAdd => {
+                if let Some(relation) = relation_by_name(source, &change.relation_name) {
+                    for sequence in &relation.sequence_dependencies {
+                        add_dependency(&mut dependencies, sequence_creates.get(sequence));
+                    }
+                }
+            }
             SchemaChangeKind::RelationDrop => {
                 let mut unresolved = Vec::new();
                 for relation in &target.relations {
@@ -3600,6 +3674,11 @@ fn finalize_change_plan(
                 }
             }
             SchemaChangeKind::ColumnModify => {
+                if let Some(relation) = relation_by_name(source, &change.relation_name) {
+                    for sequence in &relation.sequence_dependencies {
+                        add_dependency(&mut dependencies, sequence_creates.get(sequence));
+                    }
+                }
                 if let Some(column_name) = change.child_name.as_deref() {
                     let source_column = column_by_name(source, &change.relation_name, column_name);
                     let target_column = column_by_name(target, &change.relation_name, column_name);
@@ -4405,6 +4484,7 @@ mod tests {
                 comment: None,
                 definition: None,
                 dependencies: Vec::new(),
+                sequence_dependencies: Vec::new(),
                 columns,
                 indexes: Vec::new(),
                 constraints: Vec::new(),
@@ -4537,6 +4617,7 @@ mod tests {
             comment: None,
             definition: None,
             dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4726,6 +4807,88 @@ mod tests {
         assert!(change.blocked_reason.is_none());
         assert_eq!(change.sql.len(), 1);
         assert!(change.sql[0].starts_with("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn existing_postgres_trigger_is_not_recreated_as_an_unsafe_modify() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
+                    .to_string(),
+            ),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int4", false)]);
+        target.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
+                    .to_string(),
+            ),
+        }];
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectModify)
+            .unwrap();
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
+    }
+
+    #[test]
+    fn postgres_sequence_precedes_a_table_with_its_nextval_default() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations[0].columns[0].default_value =
+            Some("nextval('public.users_id_seq'::regclass)".to_string());
+        source.relations[0].sequence_dependencies = vec!["users_id_seq".to_string()];
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "users_id_seq".to_string(),
+            object_type: "sequence".to_string(),
+            parent_name: None,
+            description: None,
+            definition: Some(
+                "CREATE SEQUENCE public.users_id_seq AS integer INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE;"
+                    .to_string(),
+            ),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", Vec::new());
+        target.relations.clear();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let sequence = plan
+            .changes
+            .iter()
+            .find(|change| {
+                change.kind == SchemaChangeKind::SchemaObjectCreate
+                    && change.object_type.as_deref() == Some("sequence")
+            })
+            .unwrap();
+        let table = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::RelationCreate)
+            .unwrap();
+
+        assert!(sequence.manual_review);
+        assert!(sequence.blocked_reason.is_none());
+        assert!(sequence.sql[0].starts_with("CREATE SEQUENCE"));
+        assert!(table.depends_on.contains(&sequence.id));
+        assert!(sequence.order < table.order);
+        assert!(table.sql[0].contains("DEFAULT nextval('public.users_id_seq'::regclass)"));
+        assert!(!table.sql[0].contains("GENERATED BY DEFAULT AS IDENTITY"));
     }
 
     #[test]
@@ -5001,6 +5164,7 @@ mod tests {
             comment: None,
             definition: None,
             dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -5126,6 +5290,7 @@ mod tests {
             comment: None,
             definition: Some("SELECT id FROM users WHERE active".to_string()),
             dependencies: vec!["users".to_string()],
+            sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -5136,6 +5301,7 @@ mod tests {
             comment: None,
             definition: Some("SELECT id FROM active_users".to_string()),
             dependencies: vec!["active_users".to_string()],
+            sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -5309,6 +5475,7 @@ mod tests {
             comment: None,
             definition: None,
             dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
