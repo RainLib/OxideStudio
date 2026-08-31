@@ -287,7 +287,10 @@ fn validated_event_body(body: &str) -> Result<&str, String> {
     Ok(statement)
 }
 
-fn create_event_sql(event: &CreateDatabaseAdminEvent) -> Result<String, String> {
+/// Reusable closed-vocabulary Event DDL builder. Schema-diff capture uses the
+/// same validation as the administration surface, so a catalog row can never
+/// become an unrestricted raw-DDL execution path.
+pub(crate) fn create_event_sql(event: &CreateDatabaseAdminEvent) -> Result<String, String> {
     let schema = validate_text(&event.schema, "Event schema", 255)?;
     let name = validate_text(&event.name, "Event name", 255)?;
     let body = validated_event_body(&event.body)?;

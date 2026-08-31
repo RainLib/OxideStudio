@@ -2078,6 +2078,7 @@ fn schema_object_review_change_with_definition(
 ) -> SchemaChange {
     let is_trigger = object.object_type.eq_ignore_ascii_case("trigger");
     let is_sequence = object.object_type.eq_ignore_ascii_case("sequence");
+    let is_event = object.object_type.eq_ignore_ascii_case("event");
     let definition = object
         .definition
         .as_deref()
@@ -2110,6 +2111,13 @@ fn schema_object_review_change_with_definition(
             _,
             Some(definition),
         ) if is_simple_mysql_trigger_definition(definition) => Some(definition.to_string()),
+        (
+            SchemaChangeKind::SchemaObjectCreate,
+            Some(DatabaseKind::Mysql),
+            _,
+            _,
+            Some(definition),
+        ) if is_event && is_safe_mysql_event_definition(definition) => Some(definition.to_string()),
         _ => None,
     };
     let mut change = change(
@@ -2143,6 +2151,20 @@ fn is_simple_mysql_trigger_definition(definition: &str) -> bool {
     normalized.starts_with("CREATE TRIGGER ")
         && !normalized.contains("DEFINER")
         && !definition.contains(';')
+}
+
+/// The snapshot command creates these definitions through the closed Event
+/// administration vocabulary. Keep an independent structural gate here so a
+/// hand-edited snapshot cannot turn an arbitrary schema object into executable
+/// MySQL DDL.
+fn is_safe_mysql_event_definition(definition: &str) -> bool {
+    let normalized = definition.trim().to_ascii_uppercase();
+    normalized.starts_with("CREATE EVENT ")
+        && normalized.contains(" ON SCHEDULE ")
+        && normalized.contains(" DO ")
+        && !normalized.contains("DEFINER")
+        && definition.matches(';').count() == 1
+        && definition.trim_end().ends_with(';')
 }
 
 fn compare_schema_objects(
@@ -2200,13 +2222,14 @@ fn compare_schema_objects(
                 .as_deref()
                 .is_some_and(|definition| !definition.trim().is_empty())
                 && (object.object_type.eq_ignore_ascii_case("trigger")
+                    || object.object_type.eq_ignore_ascii_case("event")
                     || object.object_type.eq_ignore_ascii_case("sequence"))
         });
         warnings.push(if catalog_backed && database_kind == Some(DatabaseKind::Postgres) {
             "PostgreSQL catalog trigger/sequence DDL is included only for review-gated creation; object removal remains blocked."
                 .to_string()
         } else if catalog_backed && database_kind == Some(DatabaseKind::Mysql) {
-            "MySQL catalog trigger DDL is included only for review-gated single-statement creation; compound trigger bodies and object removal remain blocked."
+            "MySQL catalog trigger/event DDL is included only for review-gated single-statement creation; compound bodies and object removal remain blocked."
                 .to_string()
         } else {
             "Schema object descriptor drift is review-only: source/DDL and automatic migration are intentionally unavailable."
@@ -4920,6 +4943,70 @@ mod tests {
             description: None,
             definition: Some(
                 "CREATE TRIGGER `orders_audit` AFTER INSERT ON `app`.`orders` FOR EACH ROW BEGIN SET @audit = NEW.id; END"
+                    .to_string(),
+            ),
+            dependencies: Vec::new(),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int", false)]);
+        target.driver = "mysql".to_string();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
+    }
+
+    #[test]
+    fn mysql_catalog_event_is_review_gated_but_executable() {
+        let mut source = snapshot("desired", vec![column("id", "int", false)]);
+        source.driver = "mysql".to_string();
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "daily_sync".to_string(),
+            object_type: "event".to_string(),
+            parent_name: None,
+            description: None,
+            definition: Some(
+                "CREATE EVENT `app`.`daily_sync` ON SCHEDULE EVERY 1 DAY ON COMPLETION NOT PRESERVE ENABLE DO CALL refresh_cache();"
+                    .to_string(),
+            ),
+            dependencies: Vec::new(),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int", false)]);
+        target.driver = "mysql".to_string();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+
+        assert!(change.manual_review);
+        assert!(change.blocked_reason.is_none());
+        assert_eq!(change.sql.len(), 1);
+        assert!(change.sql[0].starts_with("CREATE EVENT"));
+    }
+
+    #[test]
+    fn mysql_event_without_closed_vocabulary_shape_remains_blocked() {
+        let mut source = snapshot("desired", vec![column("id", "int", false)]);
+        source.driver = "mysql".to_string();
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "daily_sync".to_string(),
+            object_type: "event".to_string(),
+            parent_name: None,
+            description: None,
+            definition: Some(
+                "CREATE DEFINER=`root`@`%` EVENT `app`.`daily_sync` DO CALL refresh_cache();"
                     .to_string(),
             ),
             dependencies: Vec::new(),

@@ -1,3 +1,7 @@
+use crate::commands::database_admin::events::{
+    create_event_sql, CreateDatabaseAdminEvent, DatabaseAdminEventIntervalUnit,
+    DatabaseAdminEventSchedule,
+};
 use crate::core::{
     dialect::{database_spec_for_driver, DatabaseKind},
     manager::ConnectionManager,
@@ -206,6 +210,121 @@ fn postgres_trigger_definition_query(schema: &str) -> String {
 
 fn mysql_quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
+}
+
+fn mysql_event_interval_unit(value: &str) -> Option<DatabaseAdminEventIntervalUnit> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "SECOND" => Some(DatabaseAdminEventIntervalUnit::Second),
+        "MINUTE" => Some(DatabaseAdminEventIntervalUnit::Minute),
+        "HOUR" => Some(DatabaseAdminEventIntervalUnit::Hour),
+        "DAY" => Some(DatabaseAdminEventIntervalUnit::Day),
+        "WEEK" => Some(DatabaseAdminEventIntervalUnit::Week),
+        "MONTH" => Some(DatabaseAdminEventIntervalUnit::Month),
+        "QUARTER" => Some(DatabaseAdminEventIntervalUnit::Quarter),
+        "YEAR" => Some(DatabaseAdminEventIntervalUnit::Year),
+        _ => None,
+    }
+}
+
+fn optional_catalog_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// This intentionally selects structured schedule/body fields instead of
+/// `SHOW CREATE EVENT`: the latter copies source DEFINER and session-specific
+/// clauses. The resulting definition is rebuilt through the already-reviewed
+/// Event administration vocabulary below.
+fn mysql_event_definition_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT EVENT_NAME AS event_name, EVENT_TYPE AS event_type, EXECUTE_AT AS execute_at, \
+         INTERVAL_VALUE AS interval_value, INTERVAL_FIELD AS interval_field, STARTS AS starts, \
+         ENDS AS ends, STATUS AS status, ON_COMPLETION AS on_completion, \
+         EVENT_COMMENT AS event_comment, EVENT_DEFINITION AS event_definition, TIME_ZONE AS time_zone \
+         FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {schema} ORDER BY EVENT_NAME;"
+    )
+}
+
+fn mysql_event_definition_from_row(schema: &str, row: &[serde_json::Value]) -> Option<String> {
+    let name = optional_catalog_string(row.first())?;
+    let event_type = optional_catalog_string(row.get(1))?.to_ascii_uppercase();
+    let status = optional_catalog_string(row.get(7))?.to_ascii_uppercase();
+    let on_completion = optional_catalog_string(row.get(8))?.to_ascii_uppercase();
+    let body = optional_catalog_string(row.get(10))?;
+    // CREATE EVENT does not have a portable TIME ZONE clause. Only SYSTEM is
+    // faithfully representable by the bounded administration grammar.
+    if !optional_catalog_string(row.get(11))
+        .as_deref()
+        .is_none_or(|time_zone| time_zone.eq_ignore_ascii_case("SYSTEM"))
+    {
+        return None;
+    }
+    let schedule = match event_type.as_str() {
+        "ONE TIME" => DatabaseAdminEventSchedule::Once {
+            execute_at: optional_catalog_string(row.get(2))?,
+        },
+        "RECURRING" => DatabaseAdminEventSchedule::Interval {
+            interval_value: optional_catalog_string(row.get(3))?.parse().ok()?,
+            interval_unit: mysql_event_interval_unit(&optional_catalog_string(row.get(4))?)?,
+            starts: optional_catalog_string(row.get(5)),
+            ends: optional_catalog_string(row.get(6)),
+        },
+        _ => return None,
+    };
+    let event = CreateDatabaseAdminEvent {
+        schema: schema.to_string(),
+        name,
+        schedule,
+        preserve_after_completion: matches!(on_completion.as_str(), "PRESERVE"),
+        enabled: match status.as_str() {
+            "ENABLED" => true,
+            "DISABLED" => false,
+            _ => return None,
+        },
+        comment: optional_catalog_string(row.get(9)),
+        body,
+    };
+    // An unexpected completion spelling must not silently become NOT PRESERVE.
+    if !matches!(on_completion.as_str(), "PRESERVE" | "NOT PRESERVE") {
+        return None;
+    }
+    create_event_sql(&event).ok()
+}
+
+async fn capture_mysql_event_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, String>, String> {
+    if !driver.trim().eq_ignore_ascii_case("mysql") {
+        return Ok(HashMap::new());
+    }
+    let sql = mysql_event_definition_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let Some(name) = optional_catalog_string(row.first()) else {
+            continue;
+        };
+        if let Some(definition) = mysql_event_definition_from_row(schema, row) {
+            definitions.insert(schema_object_definition_key(None, &name), definition);
+        }
+    }
+    Ok(definitions)
 }
 
 /// MySQL's information_schema trigger catalog avoids copying source DEFINER
@@ -1236,6 +1355,33 @@ async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "MySQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_mysql_event_definitions(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("event") {
+                        if let Some(definition) =
+                            definitions.get(&schema_object_definition_key(None, &object.name))
+                        {
+                            object.definition = Some(definition.clone());
+                        }
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "MySQL event source was unavailable; event drift remains review-only: {error}"
             )),
         }
     }
@@ -3072,6 +3218,45 @@ mod tests {
         assert!(!mysql_trigger.contains("INSERT"));
         assert!(!mysql_trigger.contains("UPDATE"));
         assert_eq!(mysql_quote_identifier("order`audit"), "`order``audit`");
+
+        let mysql_event = mysql_event_definition_query("app");
+        assert!(mysql_event.contains("information_schema.EVENTS"));
+        assert!(mysql_event.contains("EVENT_SCHEMA = 'app'"));
+        assert!(mysql_event.contains("EVENT_DEFINITION"));
+        assert!(mysql_event.contains("TIME_ZONE"));
+        assert!(!mysql_event.contains("INSERT"));
+        assert!(!mysql_event.contains("UPDATE"));
+    }
+
+    #[test]
+    fn mysql_event_definition_reuses_the_reviewed_event_vocabulary() {
+        let row = vec![
+            "daily_sync".into(),
+            "RECURRING".into(),
+            serde_json::Value::Null,
+            "1".into(),
+            "DAY".into(),
+            "2026-01-01 00:00:00".into(),
+            serde_json::Value::Null,
+            "ENABLED".into(),
+            "PRESERVE".into(),
+            "sync job".into(),
+            "CALL refresh_cache()".into(),
+            "SYSTEM".into(),
+        ];
+        let definition = mysql_event_definition_from_row("app", &row).unwrap();
+        assert_eq!(
+            definition,
+            "CREATE EVENT `app`.`daily_sync` ON SCHEDULE EVERY 1 DAY STARTS '2026-01-01 00:00:00' ON COMPLETION PRESERVE ENABLE COMMENT 'sync job' DO CALL refresh_cache();"
+        );
+
+        let mut foreign_time_zone = row.clone();
+        foreign_time_zone[11] = "UTC".into();
+        assert!(mysql_event_definition_from_row("app", &foreign_time_zone).is_none());
+
+        let mut compound_body = row;
+        compound_body[10] = "BEGIN CALL refresh_cache(); CALL prune_cache(); END".into();
+        assert!(mysql_event_definition_from_row("app", &compound_body).is_none());
     }
 
     fn check(assertion: SchemaPreflightAssertion, column: Option<&str>) -> SchemaPreflightCheck {
