@@ -29,4 +29,15 @@ describe("buildDataGridVisualRows", () => {
       ]).map((row) => row.rowKey),
     ).toEqual([1, -1, -2]);
   });
+
+  it("projects large source pages without changing their order", () => {
+    const sourceRows = Array.from({ length: 50_000 }, (_, index) => index);
+    const rows = buildDataGridVisualRows(sourceRows, 1, [
+      { anchorRowKey: 25_000, position: "below" },
+    ]);
+    expect(rows).toHaveLength(50_001);
+    expect(rows[25_000]?.rowKey).toBe(25_000);
+    expect(rows[25_001]?.rowKey).toBe(-1);
+    expect(rows[rows.length - 1]?.rowKey).toBe(49_999);
+  });
 });

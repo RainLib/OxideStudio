@@ -164,6 +164,13 @@ export function TableDataToolbar({
       : editingEnabled
         ? "Editing enabled"
         : "Enable editing";
+  const actionStructureKey = [
+    hasEdits,
+    Boolean(onCloneDocument),
+    Boolean(onEditDocument),
+    Boolean(onGoToColumn),
+    Boolean(onToggleTranspose),
+  ].join(":");
 
   useEffect(() => {
     const actionList = actionListRef.current;
@@ -202,7 +209,7 @@ export function TableDataToolbar({
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
     };
-  }, [hasEdits, onCloneDocument, onEditDocument, onGoToColumn, onToggleTranspose]);
+  }, [actionStructureKey]);
 
   return (
     <div className="wb-table-commandbar h-8 border-b border-[hsl(var(--wb-border-subtle))] px-1.5">

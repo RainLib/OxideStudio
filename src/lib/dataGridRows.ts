@@ -21,7 +21,6 @@ export function buildDataGridVisualRows(
   const pendingKeys = Array.from({ length: Math.max(0, newRowsCount) }, (_, offset) =>
     -1 - offset,
   );
-  const pendingSet = new Set(pendingKeys);
   const children = new Map<number, number[]>();
 
   for (const rowKey of pendingKeys) {
@@ -36,17 +35,19 @@ export function buildDataGridVisualRows(
 
   const rows: DataGridVisualRow[] = [];
   const emitted = new Set<number>();
-  const emit = (rowKey: number, ancestry: Set<number>) => {
-    if (emitted.has(rowKey) || ancestry.has(rowKey)) return;
+  const emit = (rowKey: number, ancestry?: Set<number>) => {
+    if (emitted.has(rowKey) || ancestry?.has(rowKey)) return;
     emitted.add(rowKey);
     rows.push({ rowKey, isNew: rowKey < 0 });
+    const anchoredRows = children.get(rowKey);
+    if (!anchoredRows?.length) return;
     const nextAncestry = new Set(ancestry).add(rowKey);
-    for (const child of children.get(rowKey) || []) emit(child, nextAncestry);
+    for (const child of anchoredRows) emit(child, nextAncestry);
   };
 
-  for (const rowKey of sourceRowKeys) emit(rowKey, new Set());
+  for (const rowKey of sourceRowKeys) emit(rowKey);
   for (const rowKey of pendingKeys) {
-    if (pendingSet.has(rowKey) && !emitted.has(rowKey)) emit(rowKey, new Set());
+    if (!emitted.has(rowKey)) emit(rowKey);
   }
   return rows;
 }
