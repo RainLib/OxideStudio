@@ -43,6 +43,7 @@ import type {
   TableSort,
   TablePageResult,
   TableDataCompareRequest,
+  TableDataCompareProgress,
   TableDataCompareResult,
   TableColumnChangeResult,
   TableIndexChangeResult,
@@ -51,6 +52,8 @@ import type {
 
 export const TABLE_DATA_TRANSFER_PROGRESS_EVENT =
   "table-data-transfer://progress";
+export const TABLE_DATA_COMPARE_PROGRESS_EVENT =
+  "table-data-compare://progress";
 export const TABLE_EXPORT_PROGRESS_EVENT = "table-export://progress";
 export const TABLE_IMPORT_PROGRESS_EVENT = "table-import://progress";
 
@@ -59,6 +62,13 @@ export function createTableExportId(): string {
   return randomId
     ? `table-export-${randomId}`
     : `table-export-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function createTableDataCompareId(): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  return randomId
+    ? `table-compare-${randomId}`
+    : `table-compare-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export interface TableExportOptions {
@@ -225,6 +235,21 @@ export async function compareTableDataFull(
   return invokeWithInterceptors<TableDataCompareResult>(
     "compare_table_data_full",
     { request },
+  );
+}
+
+export async function cancelTableDataCompare(compareId: string): Promise<string> {
+  return invokeWithInterceptors<string>("cancel_table_data_compare", {
+    compareId,
+  });
+}
+
+export async function listenTableDataCompareProgress(
+  listener: (progress: TableDataCompareProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TableDataCompareProgress>(
+    TABLE_DATA_COMPARE_PROGRESS_EVENT,
+    (event) => listener(event.payload),
   );
 }
 
@@ -879,8 +904,11 @@ export async function refreshMaterializedView(
 
 export const tableService = {
   createTableExportId,
+  createTableDataCompareId,
   previewTablePage,
   compareTableDataFull,
+  cancelTableDataCompare,
+  listenTableDataCompareProgress,
   previewTableDataTransfer,
   previewTableDataTransferBatchPlan,
   executeTableDataTransferBatch,

@@ -116,6 +116,7 @@ pub fn run() {
             // Initialize SQL Parser state
             app.manage(ParserState(Mutex::new(SqlParser::new())));
             app.manage(QueryCancellationState::default());
+            app.manage(commands::table::TableDataCompareCancellationState::default());
             app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::table::TableExportCancellationState::default());
             app.manage(commands::table::TableImportCancellationState::default());
@@ -304,6 +305,7 @@ pub fn run() {
             // Table commands
             commands::table::preview_table_page,
             commands::table::compare_table_data_full,
+            commands::table::cancel_table_data_compare,
             commands::table::preview_table_data_transfer,
             commands::table::preview_table_data_transfer_batch_plan,
             commands::table::execute_table_data_transfer_batch,

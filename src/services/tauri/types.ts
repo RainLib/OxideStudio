@@ -634,6 +634,7 @@ export interface TableDataCompareEndpoint {
 }
 
 export interface TableDataCompareRequest {
+  compareId: string;
   source: TableDataCompareEndpoint;
   target: TableDataCompareEndpoint;
   columns: string[];
@@ -643,6 +644,32 @@ export interface TableDataCompareRequest {
   degradationThreshold?: TableDataCompareDegradationThreshold;
   samplingStrategy?: TableDataCompareSamplingStrategy;
   enableChecksum?: boolean;
+}
+
+export type TableDataCompareProgressStatus =
+  | "running"
+  | "done"
+  | "cancelled"
+  | "error";
+
+export type TableDataCompareProgressPhase =
+  | "validating"
+  | "counting"
+  | "selecting_sample_keys"
+  | "fetching_rows"
+  | "comparing"
+  | "completed";
+
+export interface TableDataCompareProgress {
+  compareId: string;
+  phase: TableDataCompareProgressPhase;
+  endpoint?: "source" | "target" | null;
+  processedRows: number;
+  sourceRowCount?: number | null;
+  targetRowCount?: number | null;
+  status: TableDataCompareProgressStatus;
+  terminal: boolean;
+  message?: string | null;
 }
 
 export type TableDataCompareDegradationLevel = "full" | "sample" | "skip_with_risk";

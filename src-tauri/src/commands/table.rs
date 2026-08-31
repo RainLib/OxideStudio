@@ -105,9 +105,11 @@ const MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS: usize = 800;
 /// never be silently shortened by a driver and mistaken for the final page.
 const MAX_FULL_DATA_COMPARE_BATCH_SIZE: u32 = DEFAULT_QUERY_RESULT_ROW_LIMIT as u32;
 pub const TABLE_DATA_TRANSFER_PROGRESS_EVENT: &str = "table-data-transfer://progress";
+pub const TABLE_DATA_COMPARE_PROGRESS_EVENT: &str = "table-data-compare://progress";
 pub const TABLE_EXPORT_PROGRESS_EVENT: &str = "table-export://progress";
 pub const TABLE_IMPORT_PROGRESS_EVENT: &str = "table-import://progress";
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
+const TABLE_DATA_COMPARE_CANCELLED: &str = "TABLE_DATA_COMPARE_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
 const TABLE_DATA_TRANSFER_OBJECT_REPORT_PARENT_ID: &str = "table-data-transfer-object-reports-v1";
@@ -169,6 +171,7 @@ pub struct TableDataCompareEndpoint {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataCompareRequest {
+    pub compare_id: String,
     pub source: TableDataCompareEndpoint,
     pub target: TableDataCompareEndpoint,
     pub columns: Vec<String>,
@@ -185,6 +188,93 @@ pub struct TableDataCompareRequest {
     pub sampling_strategy: Option<TableDataCompareSamplingStrategy>,
     #[serde(default)]
     pub enable_checksum: Option<bool>,
+}
+
+#[derive(Clone)]
+struct TableDataCompareCancellationHandle {
+    source_connection_id: String,
+    target_connection_id: String,
+    source_query_id: String,
+    target_query_id: String,
+    sender: watch::Sender<bool>,
+}
+
+#[derive(Default)]
+pub struct TableDataCompareCancellationState(
+    Arc<AsyncMutex<HashMap<String, TableDataCompareCancellationHandle>>>,
+);
+
+impl TableDataCompareCancellationState {
+    async fn register(
+        &self,
+        compare_id: &str,
+        source_connection_id: &str,
+        target_connection_id: &str,
+    ) -> Result<(watch::Receiver<bool>, String, String), String> {
+        validate_table_data_compare_id(compare_id)?;
+        let source_query_id = format!("{compare_id}-source");
+        let target_query_id = format!("{compare_id}-target");
+        let (sender, receiver) = watch::channel(false);
+        let mut active = self.0.lock().await;
+        if active.contains_key(compare_id) {
+            return Err(format!(
+                "Table data comparison is already active: {compare_id}"
+            ));
+        }
+        active.insert(
+            compare_id.to_string(),
+            TableDataCompareCancellationHandle {
+                source_connection_id: source_connection_id.to_string(),
+                target_connection_id: target_connection_id.to_string(),
+                source_query_id: source_query_id.clone(),
+                target_query_id: target_query_id.clone(),
+                sender,
+            },
+        );
+        Ok((receiver, source_query_id, target_query_id))
+    }
+
+    async fn request_cancel(&self, compare_id: &str) -> Option<TableDataCompareCancellationHandle> {
+        self.0.lock().await.get(compare_id).cloned()
+    }
+
+    async fn take(&self, compare_id: &str) {
+        self.0.lock().await.remove(compare_id);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataCompareProgressStatus {
+    Running,
+    Done,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TableDataCompareProgressPhase {
+    Validating,
+    Counting,
+    SelectingSampleKeys,
+    FetchingRows,
+    Comparing,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareProgress {
+    pub compare_id: String,
+    pub phase: TableDataCompareProgressPhase,
+    pub endpoint: Option<String>,
+    pub processed_rows: u64,
+    pub source_row_count: Option<u64>,
+    pub target_row_count: Option<u64>,
+    pub status: TableDataCompareProgressStatus,
+    pub terminal: bool,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6082,6 +6172,38 @@ async fn query_target(
     }
 }
 
+async fn query_data_compare_target_tracked(
+    manager: &ConnectionManager,
+    endpoint: &TableDataCompareEndpoint,
+    query_id: &str,
+    sql: &str,
+) -> Result<Vec<QueryResult>, anyhow::Error> {
+    match endpoint.database.as_deref() {
+        Some(database) => {
+            manager
+                .query_database_with_context(
+                    &endpoint.connection_id,
+                    database,
+                    sql,
+                    schema_option(&endpoint.schema),
+                    Some(query_id),
+                )
+                .await
+        }
+        None => {
+            manager
+                .query(
+                    &endpoint.connection_id,
+                    sql,
+                    schema_option(&endpoint.schema).map(str::to_string),
+                    None,
+                    Some(query_id.to_string()),
+                )
+                .await
+        }
+    }
+}
+
 async fn query_transfer_source_tracked(
     manager: &ConnectionManager,
     endpoint: &TableDataTransferEndpoint,
@@ -6193,6 +6315,65 @@ fn validate_table_data_transfer_id(transfer_id: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn validate_table_data_compare_id(compare_id: &str) -> Result<(), String> {
+    let compare_id = compare_id.trim();
+    // Leave room for the endpoint suffix used as the backend query id.
+    if !(8..=112).contains(&compare_id.len())
+        || !compare_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(
+            "Compare id must contain 8-112 ASCII letters, digits, hyphens, or underscores."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_table_data_compare_not_cancelled(
+    cancellation: &watch::Receiver<bool>,
+) -> Result<(), String> {
+    if *cancellation.borrow() {
+        Err(TABLE_DATA_COMPARE_CANCELLED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn emit_table_data_compare_progress(app: &AppHandle, progress: TableDataCompareProgress) {
+    if let Err(error) = app.emit(TABLE_DATA_COMPARE_PROGRESS_EVENT, progress) {
+        tracing::warn!("Could not emit table data compare progress: {error}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_running_table_data_compare_progress(
+    app: &AppHandle,
+    compare_id: &str,
+    phase: TableDataCompareProgressPhase,
+    endpoint: Option<&str>,
+    processed_rows: u64,
+    source_row_count: Option<u64>,
+    target_row_count: Option<u64>,
+    message: Option<&str>,
+) {
+    emit_table_data_compare_progress(
+        app,
+        TableDataCompareProgress {
+            compare_id: compare_id.to_string(),
+            phase,
+            endpoint: endpoint.map(str::to_string),
+            processed_rows,
+            source_row_count,
+            target_row_count,
+            status: TableDataCompareProgressStatus::Running,
+            terminal: false,
+            message: message.map(bounded_table_data_transfer_message),
+        },
+    );
 }
 
 fn validate_table_data_transfer_overwrite_rows(count: u64) -> Result<u64, String> {
@@ -10229,9 +10410,15 @@ fn data_compare_key_columns_are_declared_unique(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_full_data_compare_rows(
+    app: &AppHandle,
     manager: &ConnectionManager,
     endpoint: &TableDataCompareEndpoint,
+    endpoint_name: &str,
+    compare_id: &str,
+    query_id: &str,
+    cancellation: &watch::Receiver<bool>,
     kind: DatabaseKind,
     columns: &[String],
     column_metadata: &BTreeMap<String, ColumnInfo>,
@@ -10268,6 +10455,7 @@ async fn fetch_full_data_compare_rows(
     let typed_postgres_parameters =
         data_compare_uses_typed_postgres_parameters(kind, &endpoint.driver);
     loop {
+        ensure_table_data_compare_not_cancelled(cancellation)?;
         let (continuation, params) = data_compare_keyset_continuation(
             kind,
             &key_metadata,
@@ -10281,14 +10469,8 @@ async fn fetch_full_data_compare_rows(
         let sql = format!(
             "SELECT {selected} FROM {relation}{where_clause} ORDER BY {order} LIMIT {batch_size};"
         );
-        let mut result = if params.is_empty() {
-            query_target(
-                manager,
-                &endpoint.connection_id,
-                endpoint.database.as_deref(),
-                &sql,
-            )
-            .await
+        let query_result = if params.is_empty() {
+            query_data_compare_target_tracked(manager, endpoint, query_id, &sql).await
         } else {
             query_target_parameterized(
                 manager,
@@ -10298,8 +10480,9 @@ async fn fetch_full_data_compare_rows(
                 &params,
             )
             .await
-        }
-        .map_err(|error| error.to_string())?;
+        };
+        ensure_table_data_compare_not_cancelled(cancellation)?;
+        let mut result = query_result.map_err(|error| error.to_string())?;
         let page = result
             .drain(..)
             .next()
@@ -10317,6 +10500,16 @@ async fn fetch_full_data_compare_rows(
                 .collect()
         });
         rows.extend(page_values);
+        emit_running_table_data_compare_progress(
+            app,
+            compare_id,
+            TableDataCompareProgressPhase::FetchingRows,
+            Some(endpoint_name),
+            rows.len() as u64,
+            None,
+            None,
+            Some("Reading table rows with stable keyset pagination"),
+        );
         if fetched < batch_size {
             break;
         }
@@ -10465,9 +10658,15 @@ fn canonical_data_compare_key_values(values: &[Value]) -> Result<String, String>
         .map_err(|error| format!("Could not encode sampled data compare key: {error}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_data_compare_extreme_keys(
+    app: &AppHandle,
     manager: &ConnectionManager,
     endpoint: &TableDataCompareEndpoint,
+    endpoint_name: &str,
+    compare_id: &str,
+    query_id: &str,
+    cancellation: &watch::Receiver<bool>,
     kind: DatabaseKind,
     key_columns: &[String],
     sample_size: u32,
@@ -10482,6 +10681,7 @@ async fn fetch_data_compare_extreme_keys(
     let tail_count = sample_size / 2;
     let mut keys = BTreeMap::<String, Vec<Value>>::new();
     for (direction, limit) in [("ASC", head_count), ("DESC", tail_count)] {
+        ensure_table_data_compare_not_cancelled(cancellation)?;
         if limit == 0 {
             continue;
         }
@@ -10491,14 +10691,10 @@ async fn fetch_data_compare_extreme_keys(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!("SELECT {selected} FROM {relation} ORDER BY {order} LIMIT {limit};");
-        let mut result = query_target(
-            manager,
-            &endpoint.connection_id,
-            endpoint.database.as_deref(),
-            &sql,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let query_result =
+            query_data_compare_target_tracked(manager, endpoint, query_id, &sql).await;
+        ensure_table_data_compare_not_cancelled(cancellation)?;
+        let mut result = query_result.map_err(|error| error.to_string())?;
         let page = result
             .drain(..)
             .next()
@@ -10513,6 +10709,16 @@ async fn fetch_data_compare_extreme_keys(
             keys.entry(canonical_data_compare_key_values(&values)?)
                 .or_insert(values);
         }
+        emit_running_table_data_compare_progress(
+            app,
+            compare_id,
+            TableDataCompareProgressPhase::SelectingSampleKeys,
+            Some(endpoint_name),
+            keys.len() as u64,
+            None,
+            None,
+            Some("Selecting deterministic boundary keys"),
+        );
     }
     Ok(keys.into_values().collect())
 }
@@ -10568,8 +10774,12 @@ fn data_compare_sample_key_predicate(
 
 #[allow(clippy::too_many_arguments)]
 async fn fetch_sampled_data_compare_rows(
+    app: &AppHandle,
     manager: &ConnectionManager,
     endpoint: &TableDataCompareEndpoint,
+    endpoint_name: &str,
+    compare_id: &str,
+    cancellation: &watch::Receiver<bool>,
     kind: DatabaseKind,
     columns: &[String],
     column_metadata: &BTreeMap<String, ColumnInfo>,
@@ -10615,6 +10825,7 @@ async fn fetch_sampled_data_compare_rows(
         (MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS / key_columns.len()).clamp(1, 500);
     let mut rows = Vec::with_capacity(sampled_keys.len());
     for keys in sampled_keys.chunks(keys_per_batch) {
+        ensure_table_data_compare_not_cancelled(cancellation)?;
         let (predicate, params) = data_compare_sample_key_predicate(
             kind,
             &key_metadata,
@@ -10625,15 +10836,16 @@ async fn fetch_sampled_data_compare_rows(
         let sql = format!(
             "SELECT {selected} FROM {relation} WHERE {predicate} ORDER BY {order} LIMIT {limit};"
         );
-        let mut result = query_target_parameterized(
+        let query_result = query_target_parameterized(
             manager,
             &endpoint.connection_id,
             endpoint.database.as_deref(),
             &sql,
             &params,
         )
-        .await
-        .map_err(|error| error.to_string())?;
+        .await;
+        ensure_table_data_compare_not_cancelled(cancellation)?;
+        let mut result = query_result.map_err(|error| error.to_string())?;
         let page = result
             .drain(..)
             .next()
@@ -10649,6 +10861,16 @@ async fn fetch_sampled_data_compare_rows(
                 .iter()
                 .map(|row| data_compare_row_values(columns, row)),
         );
+        emit_running_table_data_compare_progress(
+            app,
+            compare_id,
+            TableDataCompareProgressPhase::FetchingRows,
+            Some(endpoint_name),
+            rows.len() as u64,
+            None,
+            None,
+            Some("Reading rows for the reviewed sample key universe"),
+        );
     }
     Ok(rows)
 }
@@ -10657,12 +10879,16 @@ fn data_compare_column_checksums(
     columns: &[String],
     ordered_keys: &[String],
     rows: &BTreeMap<String, BTreeMap<String, Value>>,
-) -> BTreeMap<String, String> {
+    cancellation: &watch::Receiver<bool>,
+) -> Result<BTreeMap<String, String>, String> {
     let mut hashers = columns
         .iter()
         .map(|column| (column.clone(), Sha256::new()))
         .collect::<BTreeMap<_, _>>();
-    for key in ordered_keys {
+    for (index, key) in ordered_keys.iter().enumerate() {
+        if index % 256 == 0 {
+            ensure_table_data_compare_not_cancelled(cancellation)?;
+        }
         for column in columns {
             let hasher = hashers
                 .get_mut(column)
@@ -10680,10 +10906,10 @@ fn data_compare_column_checksums(
             }
         }
     }
-    hashers
+    Ok(hashers
         .into_iter()
         .map(|(column, hasher)| (column, format!("{:x}", hasher.finalize())))
-        .collect()
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10701,16 +10927,23 @@ fn build_table_data_compare_result(
     confidence_score: Option<f64>,
     verification_method: &str,
     enable_checksum: bool,
+    cancellation: &watch::Receiver<bool>,
 ) -> Result<TableDataCompareResult, String> {
     let mut source = BTreeMap::new();
-    for values in source_rows {
+    for (index, values) in source_rows.into_iter().enumerate() {
+        if index % 256 == 0 {
+            ensure_table_data_compare_not_cancelled(cancellation)?;
+        }
         let key = data_compare_key(&values, key_columns);
         if source.insert(key.clone(), values).is_some() {
             return Err(format!("Duplicate source key: {key}"));
         }
     }
     let mut target = BTreeMap::new();
-    for values in target_rows {
+    for (index, values) in target_rows.into_iter().enumerate() {
+        if index % 256 == 0 {
+            ensure_table_data_compare_not_cancelled(cancellation)?;
+        }
         let key = data_compare_key(&values, key_columns);
         if target.insert(key.clone(), values).is_some() {
             return Err(format!("Duplicate target key: {key}"));
@@ -10730,7 +10963,10 @@ fn build_table_data_compare_result(
     let mut removed_count = 0_u64;
     let mut modified_count = 0_u64;
     let mut equal_count = 0_u64;
-    for key in &ordered_keys {
+    for (index, key) in ordered_keys.iter().enumerate() {
+        if index % 256 == 0 {
+            ensure_table_data_compare_not_cancelled(cancellation)?;
+        }
         match (source.get(key), target.get(key)) {
             (Some(source_values), None) => {
                 added_count += 1;
@@ -10775,8 +11011,10 @@ fn build_table_data_compare_result(
         }
     }
     let (source_checksums, target_checksums, checksums_match) = if enable_checksum {
-        let source_checksums = data_compare_column_checksums(columns, &ordered_keys, &source);
-        let target_checksums = data_compare_column_checksums(columns, &ordered_keys, &target);
+        let source_checksums =
+            data_compare_column_checksums(columns, &ordered_keys, &source, cancellation)?;
+        let target_checksums =
+            data_compare_column_checksums(columns, &ordered_keys, &target, cancellation)?;
         let checksums_match = source_checksums == target_checksums;
         (
             Some(source_checksums),
@@ -10852,10 +11090,31 @@ fn skipped_table_data_compare_result(
 
 #[tauri::command]
 pub async fn compare_table_data_full(
+    app: AppHandle,
     manager: State<'_, ConnectionManager>,
+    cancellation_state: State<'_, TableDataCompareCancellationState>,
     request: TableDataCompareRequest,
 ) -> Result<Response<TableDataCompareResult>, String> {
+    let compare_id = request.compare_id.trim().to_string();
+    let (compare_cancellation, source_query_id, target_query_id) = cancellation_state
+        .register(
+            &compare_id,
+            &request.source.connection_id,
+            &request.target.connection_id,
+        )
+        .await?;
+    emit_running_table_data_compare_progress(
+        &app,
+        &compare_id,
+        TableDataCompareProgressPhase::Validating,
+        None,
+        0,
+        None,
+        None,
+        Some("Validating table metadata and comparison keys"),
+    );
     let result: Result<TableDataCompareResult, String> = async {
+        ensure_table_data_compare_not_cancelled(&compare_cancellation)?;
         let columns = request
             .columns
             .into_iter()
@@ -10912,6 +11171,7 @@ pub async fn compare_table_data_full(
             ),
         )
         .map_err(|error| error.to_string())?;
+        ensure_table_data_compare_not_cancelled(&compare_cancellation)?;
         let source_columns = column_lookup(source_columns);
         let target_columns = column_lookup(target_columns);
         for column in &columns {
@@ -10938,21 +11198,77 @@ pub async fn compare_table_data_full(
         }
         let source_count_sql = source_kind.count_table_query(schema_option(&request.source.schema), &request.source.table, None);
         let target_count_sql = target_kind.count_table_query(schema_option(&request.target.schema), &request.target.table, None);
-        let (source_count_result, target_count_result) = tokio::try_join!(
-            query_target(&manager, &request.source.connection_id, request.source.database.as_deref(), &source_count_sql),
-            query_target(&manager, &request.target.connection_id, request.target.database.as_deref(), &target_count_sql),
-        ).map_err(|error| error.to_string())?;
+        emit_running_table_data_compare_progress(
+            &app,
+            &compare_id,
+            TableDataCompareProgressPhase::Counting,
+            None,
+            0,
+            None,
+            None,
+            Some("Counting both table endpoints"),
+        );
+        let source_count_cancellation = compare_cancellation.clone();
+        let target_count_cancellation = compare_cancellation.clone();
+        let source_count = async {
+            ensure_table_data_compare_not_cancelled(&source_count_cancellation)?;
+            let result = query_data_compare_target_tracked(
+                &manager,
+                &request.source,
+                &source_query_id,
+                &source_count_sql,
+            )
+            .await;
+            ensure_table_data_compare_not_cancelled(&source_count_cancellation)?;
+            result.map_err(|error| error.to_string())
+        };
+        let target_count = async {
+            ensure_table_data_compare_not_cancelled(&target_count_cancellation)?;
+            let result = query_data_compare_target_tracked(
+                &manager,
+                &request.target,
+                &target_query_id,
+                &target_count_sql,
+            )
+            .await;
+            ensure_table_data_compare_not_cancelled(&target_count_cancellation)?;
+            result.map_err(|error| error.to_string())
+        };
+        let (source_count_result, target_count_result) =
+            tokio::try_join!(source_count, target_count)?;
         let source_row_count = data_compare_row_count(&source_count_result)?;
         let target_row_count = data_compare_row_count(&target_count_result)?;
+        emit_running_table_data_compare_progress(
+            &app,
+            &compare_id,
+            TableDataCompareProgressPhase::Counting,
+            None,
+            source_row_count.saturating_add(target_row_count),
+            Some(source_row_count),
+            Some(target_row_count),
+            Some("Row counts captured"),
+        );
         match data_compare_degradation_level(
             source_row_count,
             target_row_count,
             &threshold,
         ) {
             TableDataCompareDegradationLevel::Full => {
+                emit_running_table_data_compare_progress(
+                    &app,
+                    &compare_id,
+                    TableDataCompareProgressPhase::FetchingRows,
+                    None,
+                    0,
+                    Some(source_row_count),
+                    Some(target_row_count),
+                    Some("Reading complete table contents"),
+                );
+                let source_fetch_cancellation = compare_cancellation.clone();
+                let target_fetch_cancellation = compare_cancellation.clone();
                 let (source_rows, target_rows) = tokio::try_join!(
-                    fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &source_columns, &key_columns, batch_size),
-                    fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &target_columns, &key_columns, batch_size),
+                    fetch_full_data_compare_rows(&app, &manager, &request.source, "source", &compare_id, &source_query_id, &source_fetch_cancellation, source_kind, &columns, &source_columns, &key_columns, batch_size),
+                    fetch_full_data_compare_rows(&app, &manager, &request.target, "target", &compare_id, &target_query_id, &target_fetch_cancellation, target_kind, &columns, &target_columns, &key_columns, batch_size),
                 )?;
                 if source_rows.len() as u64 != source_row_count
                     || target_rows.len() as u64 != target_row_count
@@ -10963,6 +11279,17 @@ pub async fn compare_table_data_full(
                         target_rows.len(),
                     ));
                 }
+                ensure_table_data_compare_not_cancelled(&compare_cancellation)?;
+                emit_running_table_data_compare_progress(
+                    &app,
+                    &compare_id,
+                    TableDataCompareProgressPhase::Comparing,
+                    None,
+                    source_rows.len().saturating_add(target_rows.len()) as u64,
+                    Some(source_row_count),
+                    Some(target_row_count),
+                    Some("Comparing keys, values, and column checksums"),
+                );
                 build_table_data_compare_result(
                     source_rows,
                     target_rows,
@@ -10977,30 +11304,60 @@ pub async fn compare_table_data_full(
                     Some(1.0),
                     "full_keyset",
                     enable_checksum,
+                    &compare_cancellation,
                 )
             }
             TableDataCompareDegradationLevel::Sample => {
+                emit_running_table_data_compare_progress(
+                    &app,
+                    &compare_id,
+                    TableDataCompareProgressPhase::SelectingSampleKeys,
+                    None,
+                    0,
+                    Some(source_row_count),
+                    Some(target_row_count),
+                    Some("Selecting the deterministic shared sample universe"),
+                );
+                let source_key_cancellation = compare_cancellation.clone();
+                let target_key_cancellation = compare_cancellation.clone();
                 let (source_keys, target_keys) = tokio::try_join!(
                     fetch_data_compare_extreme_keys(
+                        &app,
                         &manager,
                         &request.source,
+                        "source",
+                        &compare_id,
+                        &source_query_id,
+                        &source_key_cancellation,
                         source_kind,
                         &key_columns,
                         threshold.sample_size,
                     ),
                     fetch_data_compare_extreme_keys(
+                        &app,
                         &manager,
                         &request.target,
+                        "target",
+                        &compare_id,
+                        &target_query_id,
+                        &target_key_cancellation,
                         target_kind,
                         &key_columns,
                         threshold.sample_size,
                     ),
                 )?;
+                ensure_table_data_compare_not_cancelled(&compare_cancellation)?;
                 let sampled_keys = merge_data_compare_sample_keys(source_keys, target_keys)?;
+                let source_sample_cancellation = compare_cancellation.clone();
+                let target_sample_cancellation = compare_cancellation.clone();
                 let (source_rows, target_rows) = tokio::try_join!(
                     fetch_sampled_data_compare_rows(
+                        &app,
                         &manager,
                         &request.source,
+                        "source",
+                        &compare_id,
+                        &source_sample_cancellation,
                         source_kind,
                         &columns,
                         &source_columns,
@@ -11008,8 +11365,12 @@ pub async fn compare_table_data_full(
                         &sampled_keys,
                     ),
                     fetch_sampled_data_compare_rows(
+                        &app,
                         &manager,
                         &request.target,
+                        "target",
+                        &compare_id,
+                        &target_sample_cancellation,
                         target_kind,
                         &columns,
                         &target_columns,
@@ -11019,6 +11380,16 @@ pub async fn compare_table_data_full(
                 )?;
                 let maximum = source_row_count.max(target_row_count).max(1);
                 let sampling_rate = (sampled_keys.len() as f64 / maximum as f64).min(1.0);
+                emit_running_table_data_compare_progress(
+                    &app,
+                    &compare_id,
+                    TableDataCompareProgressPhase::Comparing,
+                    None,
+                    sampled_keys.len() as u64,
+                    Some(source_row_count),
+                    Some(target_row_count),
+                    Some("Comparing sampled keys, values, and column checksums"),
+                );
                 build_table_data_compare_result(
                     source_rows,
                     target_rows,
@@ -11033,6 +11404,7 @@ pub async fn compare_table_data_full(
                     None,
                     "extreme_key_sample",
                     enable_checksum,
+                    &compare_cancellation,
                 )
             }
             TableDataCompareDegradationLevel::SkipWithRisk => Ok(
@@ -11045,10 +11417,96 @@ pub async fn compare_table_data_full(
         }
     }
     .await;
+    cancellation_state.take(&compare_id).await;
     match result {
-        Ok(result) => Ok(Response::ok(result)),
-        Err(error) => Ok(Response::err("COMPARE_TABLE_DATA_FULL_ERROR", &error)),
+        Ok(result) => {
+            emit_table_data_compare_progress(
+                &app,
+                TableDataCompareProgress {
+                    compare_id,
+                    phase: TableDataCompareProgressPhase::Completed,
+                    endpoint: None,
+                    processed_rows: result.compared_key_count,
+                    source_row_count: Some(result.source_row_count),
+                    target_row_count: Some(result.target_row_count),
+                    status: TableDataCompareProgressStatus::Done,
+                    terminal: true,
+                    message: Some("Table data comparison completed".to_string()),
+                },
+            );
+            Ok(Response::ok(result))
+        }
+        Err(error) if error.contains(TABLE_DATA_COMPARE_CANCELLED) => {
+            emit_table_data_compare_progress(
+                &app,
+                TableDataCompareProgress {
+                    compare_id,
+                    phase: TableDataCompareProgressPhase::Completed,
+                    endpoint: None,
+                    processed_rows: 0,
+                    source_row_count: None,
+                    target_row_count: None,
+                    status: TableDataCompareProgressStatus::Cancelled,
+                    terminal: true,
+                    message: Some("Table data comparison cancelled".to_string()),
+                },
+            );
+            Ok(Response::err(
+                TABLE_DATA_COMPARE_CANCELLED,
+                "Table data comparison cancelled.",
+            ))
+        }
+        Err(error) => {
+            emit_table_data_compare_progress(
+                &app,
+                TableDataCompareProgress {
+                    compare_id,
+                    phase: TableDataCompareProgressPhase::Completed,
+                    endpoint: None,
+                    processed_rows: 0,
+                    source_row_count: None,
+                    target_row_count: None,
+                    status: TableDataCompareProgressStatus::Error,
+                    terminal: true,
+                    message: Some(bounded_table_data_transfer_message(&error)),
+                },
+            );
+            Ok(Response::err("COMPARE_TABLE_DATA_FULL_ERROR", &error))
+        }
     }
+}
+
+#[tauri::command]
+pub async fn cancel_table_data_compare(
+    manager: State<'_, ConnectionManager>,
+    cancellation: State<'_, TableDataCompareCancellationState>,
+    compare_id: String,
+) -> Result<Response<String>, String> {
+    validate_table_data_compare_id(&compare_id)?;
+    let Some(handle) = cancellation.request_cancel(&compare_id).await else {
+        return Ok(Response::err(
+            "TABLE_DATA_COMPARE_NOT_FOUND",
+            &format!("Table data comparison is not active: {compare_id}"),
+        ));
+    };
+
+    let source_cancelled = manager
+        .cancel_query(&handle.source_connection_id, &handle.source_query_id)
+        .await
+        .unwrap_or(false);
+    let target_cancelled = manager
+        .cancel_query(&handle.target_connection_id, &handle.target_query_id)
+        .await
+        .unwrap_or(false);
+    let _ = handle.sender.send(true);
+    Ok(Response::ok(
+        if source_cancelled || target_cancelled {
+            "Comparison cancellation requested on the database backend"
+        } else {
+            "Comparison cancellation requested"
+        }
+        .to_string(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16035,14 +16493,14 @@ mod tests {
         AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
         CreateTableColumn, ImportInferredType, RelationOperation, SqlExportDialect,
         SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareDegradationLevel,
-        TableDataCompareDegradationThreshold, TableDataCompareResult,
-        TableDataCompareSamplingStrategy, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
-        TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
-        TableDataTransferObjectKind, TableDataTransferObjectReport,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareCancellationState,
+        TableDataCompareDegradationLevel, TableDataCompareDegradationThreshold,
+        TableDataCompareResult, TableDataCompareSamplingStrategy,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConfirmationBinding, TableDataTransferConversion,
+        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
+        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
         TableDataTransferObjectSelection, TableDataTransferPreview,
         TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
@@ -21296,6 +21754,7 @@ WITH DATA;"#
     fn sampled_data_compare_reports_sample_local_counts_and_bounded_checksums() {
         let columns = vec!["id".to_string(), "score".to_string()];
         let keys = vec!["id".to_string()];
+        let (_cancel_sender, cancellation) = watch::channel(false);
         let result = build_table_data_compare_result(
             vec![
                 data_compare_row_values(&columns, &[json!(1), json!(10)]),
@@ -21316,6 +21775,7 @@ WITH DATA;"#
             None,
             "extreme_key_sample",
             true,
+            &cancellation,
         )
         .unwrap();
         assert!(!result.counts_exact);
@@ -21330,6 +21790,44 @@ WITH DATA;"#
             result.source_checksums.as_ref().map(BTreeMap::len),
             Some(columns.len())
         );
+    }
+
+    #[tokio::test]
+    async fn data_compare_cancellation_registry_binds_both_endpoint_query_ids() {
+        let cancellation = TableDataCompareCancellationState::default();
+        let (receiver, source_query_id, target_query_id) = cancellation
+            .register(
+                "compare-test-0001",
+                "source-connection",
+                "target-connection",
+            )
+            .await
+            .unwrap();
+        assert_eq!(source_query_id, "compare-test-0001-source");
+        assert_eq!(target_query_id, "compare-test-0001-target");
+        assert!(cancellation
+            .register(
+                "compare-test-0001",
+                "source-connection",
+                "target-connection"
+            )
+            .await
+            .is_err());
+
+        let handle = cancellation
+            .request_cancel("compare-test-0001")
+            .await
+            .unwrap();
+        handle.sender.send(true).unwrap();
+        assert!(*receiver.borrow());
+        assert_eq!(handle.source_connection_id, "source-connection");
+        assert_eq!(handle.target_connection_id, "target-connection");
+
+        cancellation.take("compare-test-0001").await;
+        assert!(cancellation
+            .request_cancel("compare-test-0001")
+            .await
+            .is_none());
     }
 
     #[test]

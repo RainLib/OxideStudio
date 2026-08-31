@@ -190,6 +190,78 @@ describe("DataCompareView", () => {
     compare.mockRestore();
   });
 
+  it("uses the same operation id when cancelling an active full comparison", async () => {
+    const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
+      (tab) => tab.type === "table",
+    );
+    if (!leftTab || !rightTab) throw new Error("Expected source table tabs");
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === leftTab.id
+          ? { ...tab, connectionId: "left", schemaName: "public", tableName: "users" }
+          : tab.id === rightTab.id
+            ? { ...tab, connectionId: "right", schemaName: "public", tableName: "users" }
+            : tab.type === "data_compare"
+              ? {
+                  ...tab,
+                  dataCompareLeft: tab.dataCompareLeft && {
+                    ...tab.dataCompareLeft,
+                    connectionId: "left",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                  dataCompareRight: tab.dataCompareRight && {
+                    ...tab.dataCompareRight,
+                    connectionId: "right",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                }
+              : tab,
+      ),
+    }));
+    useConnectionStore.setState({
+      connections: [
+        { id: "left", name: "Left", driver: "postgresql", connectionUrl: "postgresql://left" },
+        { id: "right", name: "Right", driver: "postgresql", connectionUrl: "postgresql://right" },
+      ] as never,
+    });
+
+    let rejectComparison: ((reason?: unknown) => void) | undefined;
+    const compare = vi
+      .spyOn(tableService, "compareTableDataFull")
+      .mockImplementation(
+        () =>
+          new Promise<TableDataCompareResult>((_resolve, reject) => {
+            rejectComparison = reject;
+          }),
+      );
+    const cancel = vi
+      .spyOn(tableService, "cancelTableDataCompare")
+      .mockResolvedValue("Comparison cancellation requested");
+
+    await act(async () => root.render(<DataCompareView />));
+    const start = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) =>
+      item.textContent?.includes("Compare table data"),
+    );
+    await act(async () => start?.click());
+    const request = compare.mock.calls[0]?.[0];
+    expect(request?.compareId).toMatch(/^table-compare-/);
+    const stop = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) =>
+      item.textContent?.includes("Cancel comparison"),
+    );
+    await act(async () => stop?.click());
+    expect(cancel).toHaveBeenCalledWith(request?.compareId);
+
+    await act(async () => {
+      rejectComparison?.(new Error("Table data comparison cancelled"));
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("Cancel comparison");
+    compare.mockRestore();
+    cancel.mockRestore();
+  });
+
   it("requires the complete shared primary key before enabling full-table compare", async () => {
     const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
       (tab) => tab.type === "table",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Rows3,
   Search,
+  Square,
 } from "lucide-react";
 import {
   compareDataSources,
@@ -18,7 +19,11 @@ import {
   type DataCompareSource,
 } from "@/lib/dataCompare";
 import { cn } from "@/lib/utils";
-import { tableService, type TableDataCompareResult } from "@/services/tauri";
+import {
+  tableService,
+  type TableDataCompareProgress,
+  type TableDataCompareResult,
+} from "@/services/tauri";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import {
   canCreateDataCompareSource,
@@ -53,13 +58,43 @@ export function DataCompareView() {
     checksumsMatch?: boolean;
   } | null>(null);
   const [isComparingFull, setIsComparingFull] = useState(false);
+  const [fullComparisonProgress, setFullComparisonProgress] =
+    useState<TableDataCompareProgress | null>(null);
   const [fullComparisonError, setFullComparisonError] = useState<string | null>(null);
+  const activeCompareIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+    void tableService
+      .listenTableDataCompareProgress((progress) => {
+        if (progress.compareId !== activeCompareIdRef.current) return;
+        setFullComparisonProgress(progress);
+      })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stopListening = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      stopListening?.();
+      const compareId = activeCompareIdRef.current;
+      activeCompareIdRef.current = null;
+      if (compareId) void tableService.cancelTableDataCompare(compareId).catch(() => undefined);
+    };
+  }, []);
 
   useEffect(() => {
     if (!left || !right) return;
+    const compareId = activeCompareIdRef.current;
+    activeCompareIdRef.current = null;
+    if (compareId) void tableService.cancelTableDataCompare(compareId).catch(() => undefined);
     setKeyColumns(suggestedDataCompareKeys(left, right));
     setFullComparison(null);
     setFullComparisonMeta(null);
+    setFullComparisonProgress(null);
+    setIsComparingFull(false);
     setFullComparisonError(null);
   }, [left, right]);
 
@@ -133,10 +168,14 @@ export function DataCompareView() {
   );
   const runFullComparison = async () => {
     if (!canCompareFull || !leftConnection || !rightConnection) return;
+    const compareId = tableService.createTableDataCompareId();
+    activeCompareIdRef.current = compareId;
     setIsComparingFull(true);
+    setFullComparisonProgress(null);
     setFullComparisonError(null);
     try {
       const result = await tableService.compareTableDataFull({
+        compareId,
         source: {
           connectionId: left.connectionId!,
           driver: leftConnection.driver,
@@ -154,6 +193,7 @@ export function DataCompareView() {
         columns: sharedColumns,
         keyColumns,
       });
+      if (activeCompareIdRef.current !== compareId) return;
       setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, sharedColumns));
       setFullComparisonMeta({
         sourceRows: result.sourceRowCount,
@@ -169,9 +209,31 @@ export function DataCompareView() {
         checksumsMatch: result.checksumsMatch,
       });
     } catch (error) {
-      setFullComparisonError(error instanceof Error ? error.message : String(error));
+      if (activeCompareIdRef.current === compareId) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes("cancel")) setFullComparisonError(message);
+      }
     } finally {
-      setIsComparingFull(false);
+      if (activeCompareIdRef.current === compareId) {
+        activeCompareIdRef.current = null;
+        setIsComparingFull(false);
+      }
+    }
+  };
+  const cancelFullComparison = async () => {
+    const compareId = activeCompareIdRef.current;
+    if (!compareId) return;
+    setFullComparisonProgress((current) =>
+      current
+        ? { ...current, message: "Cancelling table comparison…" }
+        : current,
+    );
+    try {
+      await tableService.cancelTableDataCompare(compareId);
+    } catch (error) {
+      if (activeCompareIdRef.current === compareId) {
+        setFullComparisonError(error instanceof Error ? error.message : String(error));
+      }
     }
   };
 
@@ -200,17 +262,32 @@ export function DataCompareView() {
         <button
           type="button"
           className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
-          disabled={!canCompareFull || isComparingFull}
+          disabled={!canCompareFull && !isComparingFull}
           title={
-            canCompareFull
+            isComparingFull
+              ? "Cancel the active table comparison"
+              : canCompareFull
               ? "Compare all rows up to 100,000 per table, then use a bounded extreme-key sample up to 10,000,000 rows"
               : "Table compare requires two table tabs, connections, and the complete shared primary key"
           }
-          onClick={() => void runFullComparison()}
+          onClick={() => void (isComparingFull ? cancelFullComparison() : runFullComparison())}
         >
-          <Rows3 size={11} /> {isComparingFull ? "Comparing tables…" : "Compare table data"}
+          {isComparingFull ? <Square size={10} /> : <Rows3 size={11} />}
+          {isComparingFull ? "Cancel comparison" : "Compare table data"}
         </button>
       </header>
+
+      {isComparingFull && fullComparisonProgress?.message && (
+        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.46)] px-4 text-[10px] wb-muted">
+          <RefreshCw className="animate-spin text-cyan-300" size={11} />
+          <span>{fullComparisonProgress.message}</span>
+          {fullComparisonProgress.endpoint && (
+            <span className="ml-auto tabular-nums">
+              {fullComparisonProgress.endpoint} · {fullComparisonProgress.processedRows.toLocaleString()} rows
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.62)] px-3">
         {displayedComparison && (

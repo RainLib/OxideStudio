@@ -380,6 +380,82 @@ describe("table service database scope", () => {
     expect(stop).toBe(unlisten);
   });
 
+  it("passes a stable compare id through execution, cancellation, and progress events", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          added: [],
+          removed: [],
+          modified: [],
+          addedCount: 0,
+          removedCount: 0,
+          modifiedCount: 0,
+          equalCount: 0,
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: "Comparison cancellation requested",
+      });
+    const request = {
+      compareId: "table-compare-test-0001",
+      source: {
+        connectionId: "source-1",
+        driver: "postgres" as const,
+        schema: "public",
+        table: "users",
+      },
+      target: {
+        connectionId: "target-1",
+        driver: "postgres" as const,
+        schema: "public",
+        table: "users",
+      },
+      columns: ["id"],
+      keyColumns: ["id"],
+    };
+
+    await tableService.compareTableDataFull(request);
+    await tableService.cancelTableDataCompare(request.compareId);
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "compare_table_data_full", {
+      request,
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "cancel_table_data_compare", {
+      compareId: request.compareId,
+    });
+
+    const unlisten = vi.fn();
+    mocks.listen.mockResolvedValueOnce(unlisten);
+    const progress = vi.fn();
+    const stop = await tableService.listenTableDataCompareProgress(progress);
+    expect(mocks.listen).toHaveBeenCalledWith(
+      "table-data-compare://progress",
+      expect.any(Function),
+    );
+    const eventListener = mocks.listen.mock.calls.at(-1)?.[1] as
+      | ((event: { payload: unknown }) => void)
+      | undefined;
+    eventListener?.({
+      payload: {
+        compareId: request.compareId,
+        phase: "fetching_rows",
+        endpoint: "source",
+        processedRows: 500,
+        status: "running",
+        terminal: false,
+      },
+    });
+    expect(progress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compareId: request.compareId,
+        processedRows: 500,
+      }),
+    );
+    expect(stop).toBe(unlisten);
+  });
+
   it("previews create-table SQL without a connection or execution request", async () => {
     mocks.invoke.mockResolvedValueOnce({
       success: true,
