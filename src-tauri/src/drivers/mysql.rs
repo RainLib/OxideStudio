@@ -2,7 +2,7 @@ use crate::core::driver::DatabaseDriver;
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, DatabaseInfo, ForeignKeyReferenceInfo, FunctionInfo,
     FunctionParameterInfo, IndexInfo, ParameterizedStatement, QueryParameter, QueryResult,
-    TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+    SchemaObjectInfo, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::statement::{
     classify_statement, execution_mode, execution_statement_kind, has_multiple_statements,
@@ -28,6 +28,25 @@ use tokio::time::timeout;
 type MysqlTransactionSession = Arc<Mutex<PoolConnection<MySql>>>;
 const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MYSQL_CONNECTION_ID_SQL: &str = "SELECT CAST(CONNECTION_ID() AS CHAR)";
+const MYSQL_SCHEMA_OBJECTS_SQL: &str = r#"
+    SELECT object_name, object_type, parent_name
+    FROM (
+        SELECT
+            trigger_name AS object_name,
+            'trigger' AS object_type,
+            event_object_table AS parent_name
+        FROM information_schema.triggers
+        WHERE trigger_schema = ?
+        UNION ALL
+        SELECT
+            event_name AS object_name,
+            'event' AS object_type,
+            NULL AS parent_name
+        FROM information_schema.events
+        WHERE event_schema = ?
+    ) objects
+    ORDER BY object_type, parent_name, object_name
+"#;
 
 fn parse_mysql_connection_id(value: &str) -> Option<u64> {
     value
@@ -1266,6 +1285,38 @@ impl DatabaseDriver for MysqlDriver {
         Ok(functions)
     }
 
+    async fn get_schema_objects(&self, schema: &str) -> Result<Vec<SchemaObjectInfo>> {
+        let schema = schema.trim();
+        if schema.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self.get_pool(None).await?;
+        let rows = sqlx::query(MYSQL_SCHEMA_OBJECTS_SQL)
+            .bind(schema)
+            .bind(schema)
+            .persistent(false)
+            .fetch_all(&pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name = mysql_string_by_name(row, "object_name")?;
+                let object_type = mysql_string_by_name(row, "object_type")?;
+                (!name.trim().is_empty() && !object_type.trim().is_empty()).then(|| {
+                    SchemaObjectInfo {
+                        name,
+                        schema: Some(schema.to_string()),
+                        object_type,
+                        parent_name: mysql_string_by_name(row, "parent_name")
+                            .filter(|value| !value.trim().is_empty()),
+                        comment: None,
+                        members_expandable: false,
+                    }
+                })
+            })
+            .collect())
+    }
+
     async fn set_current_schema(&self, _schema: &str) -> Result<()> {
         // With multi-pool, we don't strictly need to "set" it on the connection.
         // But we could pre-warm the pool here.
@@ -1696,6 +1747,19 @@ mod tests {
             MYSQL_CONNECTION_ID_SQL,
             "SELECT CAST(CONNECTION_ID() AS CHAR)"
         );
+    }
+
+    #[test]
+    fn schema_object_catalog_covers_triggers_and_events_without_ddl() {
+        assert!(MYSQL_SCHEMA_OBJECTS_SQL.contains("information_schema.triggers"));
+        assert!(MYSQL_SCHEMA_OBJECTS_SQL.contains("information_schema.events"));
+        assert!(MYSQL_SCHEMA_OBJECTS_SQL.contains("event_object_table AS parent_name"));
+        assert!(!MYSQL_SCHEMA_OBJECTS_SQL
+            .to_ascii_uppercase()
+            .contains("SHOW CREATE"));
+        assert!(!MYSQL_SCHEMA_OBJECTS_SQL
+            .to_ascii_uppercase()
+            .contains("INSERT"));
     }
 
     #[test]
