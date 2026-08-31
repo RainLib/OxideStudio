@@ -18,6 +18,7 @@ export type MongoDbCompletionArea =
   | "field-reference"
   | "value"
   | "shell-root"
+  | "shell-qualified"
   | "shell-method"
   | "shell-chain"
   | "shell-option"
@@ -28,6 +29,8 @@ export type MongoDbConsoleCompletion = {
   detail: string;
   documentation?: string;
   insertText: string;
+  /** Text Monaco filters against when one completion replaces a qualified prefix. */
+  filterText?: string;
   kind: "property" | "field" | "operator" | "snippet" | "value";
   sortText?: string;
 };
@@ -41,6 +44,8 @@ export type MongoDbCompletionContext = {
   /** True when the cursor is inside a JSON string value. */
   quoted?: boolean;
   syntax?: "json" | "shell";
+  /** Number of UTF-16 code units before the caret replaced by shell completion. */
+  replacementLength?: number;
 };
 
 export type MongoDbCompletionInput = {
@@ -503,10 +508,17 @@ const MONGODB_SHELL_METHOD_COMPLETIONS: MongoDbConsoleCompletion[] = [
 ];
 
 const MONGODB_SHELL_CHAIN_COMPLETIONS: MongoDbConsoleCompletion[] = [
+  { label: "limit", detail: "Limit results to 1-10000 documents", insertText: "limit(${1:100})", kind: "snippet" },
   { label: "sort", detail: "Sort find results", insertText: "sort({ ${1:field}: ${2:1} })", kind: "snippet" },
   { label: "skip", detail: "Skip a non-negative number of results", insertText: "skip(${1:0})", kind: "snippet" },
-  { label: "limit", detail: "Limit results to 1-10000 documents", insertText: "limit(${1:100})", kind: "snippet" },
 ];
+
+const MONGODB_SHELL_COUNT_COMPLETION: MongoDbConsoleCompletion = {
+  label: "count",
+  detail: "Count documents matched by find()",
+  insertText: "count()",
+  kind: "snippet",
+};
 
 const MONGODB_SHELL_ARGUMENT_ROLES: Record<string, readonly string[]> = {
   find: ["filter", "projection", "options"],
@@ -552,6 +564,53 @@ function mongodbShellCollection(beforeCursor: string) {
   );
   if (getCollection?.[2]) return getCollection[2];
   return beforeCursor.match(/\bdb\.([\p{L}\p{N}_-]+)/u)?.[1];
+}
+
+function mongodbShellCursorIsInComment(source: string) {
+  let quote: "'" | '"' | "`" | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index] || "";
+    const next = source[index + 1] || "";
+    if (lineComment) {
+      if (character === "\n" || character === "\r") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if ((character === "/" && next === "/") || (character === "-" && next === "-")) {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+    }
+  }
+  return lineComment || blockComment;
+}
+
+function mongodbShellFindChainAllowsCount(beforeCursor: string) {
+  if (!/\.find\s*\(/u.test(beforeCursor)) return false;
+  return (beforeCursor.match(/\)\s*\./gu) || []).length === 1;
 }
 
 type MongoShellCallContext = {
@@ -698,18 +757,47 @@ function mongodbShellCompletionContext(
   const trimmed = beforeCursor.trimStart();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return null;
 
+  if (mongodbShellCursorIsInComment(beforeCursor)) {
+    return { area: "unknown", typed: "", syntax: "shell" };
+  }
+
+  // Argument classification must run before the trailing `db.x.y` patterns:
+  // a method-shaped string value is data, not another MongoDB command chain.
+  const argumentContext = mongodbShellArgumentContext(
+    beforeCursor,
+    mongodbShellCollection(beforeCursor),
+  );
+  if (argumentContext) return argumentContext;
+
   const chain = beforeCursor.match(/\)\s*\.\s*([A-Za-z]*)$/u);
   if (chain) {
     return {
       area: "shell-chain",
       typed: chain[1] || "",
       collection: mongodbShellCollection(beforeCursor),
+      parentKey: mongodbShellFindChainAllowsCount(beforeCursor)
+        ? "find-countable"
+        : undefined,
+      syntax: "shell",
+    };
+  }
+
+  const qualified = beforeCursor.match(
+    /\bdb\.([\p{L}\p{N}_.-]*\.[\p{L}\p{N}_.-]*)$/u,
+  );
+  if (qualified) {
+    const typed = qualified[1] || "";
+    return {
+      area: "shell-qualified",
+      typed,
+      collection: typed.split(".", 1)[0] || undefined,
+      replacementLength: typed.length,
       syntax: "shell",
     };
   }
 
   const method = beforeCursor.match(
-    /\bdb\.(?:getCollection\(\s*(["']).*?\1\s*\)|[\p{L}\p{N}_-]+)\s*\.\s*([A-Za-z]*)$/su,
+    /\bdb\.getCollection\(\s*(["']).*?\1\s*\)\s*\.\s*([A-Za-z]*)$/su,
   );
   if (method) {
     return {
@@ -736,12 +824,6 @@ function mongodbShellCompletionContext(
       syntax: "shell",
     };
   }
-
-  const argumentContext = mongodbShellArgumentContext(
-    beforeCursor,
-    mongodbShellCollection(beforeCursor),
-  );
-  if (argumentContext) return argumentContext;
 
   return trimmed.startsWith("db.")
     ? {
@@ -1009,6 +1091,37 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
         matches(item.label, context.typed),
       );
       break;
+    case "shell-qualified": {
+      const dot = context.typed.lastIndexOf(".");
+      const collectionPrefix = context.typed.slice(0, dot);
+      const methodPrefix = context.typed.slice(dot + 1);
+      const exactCollection = (input.collections || []).some(
+        (name) => name.toLocaleLowerCase() === collectionPrefix.toLocaleLowerCase(),
+      );
+      const qualifiedCollections = [...new Set(input.collections || [])]
+        .filter((name) =>
+          name.toLocaleLowerCase().startsWith(context.typed.toLocaleLowerCase()),
+        )
+        .sort((left, right) => left.localeCompare(right))
+        .map((name) => ({
+          label: name,
+          detail: "MongoDB collection",
+          insertText: `getCollection(${JSON.stringify(name)})`,
+          filterText: name,
+          kind: "value" as const,
+        }));
+      const qualifiedMethods = MONGODB_SHELL_METHOD_COMPLETIONS
+        .filter((item) => matches(item.label, methodPrefix))
+        .map((item) => ({
+          ...item,
+          insertText: `${collectionPrefix}.${item.insertText}`,
+          filterText: `${collectionPrefix}.${item.label}`,
+        }));
+      items = exactCollection
+        ? [...qualifiedMethods, ...qualifiedCollections]
+        : [...qualifiedCollections, ...qualifiedMethods];
+      break;
+    }
     case "shell-method":
       items = MONGODB_SHELL_METHOD_COMPLETIONS.filter((item) =>
         matches(item.label, context.typed),
@@ -1018,6 +1131,12 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
       items = MONGODB_SHELL_CHAIN_COMPLETIONS.filter((item) =>
         matches(item.label, context.typed),
       );
+      if (
+        context.parentKey === "find-countable" &&
+        matches(MONGODB_SHELL_COUNT_COMPLETION.label, context.typed)
+      ) {
+        items.push(MONGODB_SHELL_COUNT_COMPLETION);
+      }
       break;
     case "shell-option":
       items = shellOptionItems(context.parentKey, context.typed);
@@ -1087,7 +1206,7 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
 /** Compatibility shape used by the auto-suggest lifecycle. */
 export function mongodbCompletionArea(source: string, cursorOffset: number): MongoDbCompletionArea | "unknown" {
   const area = mongodbConsoleCompletionContext(source, cursorOffset).area;
-  if (area === "root" || area === "shell-root" || area === "shell-method" || area === "shell-chain") return "key";
+  if (area === "root" || area === "shell-root" || area === "shell-qualified" || area === "shell-method" || area === "shell-chain") return "key";
   if (
     area === "field" ||
     area === "query-operator" ||

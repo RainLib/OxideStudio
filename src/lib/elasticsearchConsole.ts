@@ -1892,6 +1892,7 @@ function currentLineAtOffset(source: string, offset: number) {
   const nextNewline = source.indexOf("\n", boundedOffset);
   const lineEnd = nextNewline === -1 ? source.length : nextNewline;
   return {
+    lineStart,
     beforeCursor: source.slice(lineStart, boundedOffset),
     text: source.slice(lineStart, lineEnd),
   };
@@ -2074,13 +2075,28 @@ export function elasticsearchConsoleCompletionContext(
       requestHeaderEnd >= request.startOffset &&
       boundedOffset > requestHeaderEnd,
   );
+  const previousLines = source.slice(0, line.lineStart);
+  const hasRequestHeaderBeforeLine = lineSpans(
+    maskElasticsearchConsoleComments(previousLines),
+  ).some((candidate) => REQUEST_LINE.test(candidate.text));
+  const completedBodyBeforeLine = (() => {
+    if (!request || requestHeaderEnd < request.startOffset) return false;
+    const body = maskElasticsearchConsoleComments(
+      source.slice(requestHeaderEnd + 1, line.lineStart),
+    ).trim();
+    if (!body) return false;
+    const scan = scanJsonCompletionContext(body);
+    return scan.frames.length === 0 && !scan.inString;
+  })();
 
   // A blank body line after `METHOD /path` belongs to that request. Treating
   // it as a new method line is what previously produced a stray `GET` ghost
   // suggestion below a valid `_search` request.
   if (
     (!beforeCursor || /^[A-Za-z]*$/.test(beforeCursor)) &&
-    !cursorIsInRequestBody
+    (!cursorIsInRequestBody ||
+      !hasRequestHeaderBeforeLine ||
+      completedBodyBeforeLine)
   ) {
     return { area: "method", typed: beforeCursor };
   }

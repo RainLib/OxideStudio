@@ -179,6 +179,42 @@ describe("Elasticsearch Console completion contract", () => {
     );
   });
 
+  it("continues method and endpoint completion after comments and prior requests", () => {
+    const afterComment = "# inspect indices\npo";
+    expect(
+      elasticsearchConsoleCompletionContext(
+        afterComment,
+        afterComment.length,
+      ),
+    ).toMatchObject({ area: "method", typed: "po" });
+    expect(labels(afterComment)).toContain("POST");
+
+    const laterRequest = [
+      "GET /orders/_search",
+      '{"query":{"match_all":{}}}',
+      "",
+      "de",
+    ].join("\n");
+    expect(
+      elasticsearchConsoleCompletionContext(
+        laterRequest,
+        laterRequest.length,
+      ),
+    ).toMatchObject({ area: "method", typed: "de" });
+    expect(labels(laterRequest)).toContain("DELETE");
+
+    expect(labels("GET /orders/_co")).toContain("_count");
+  });
+
+  it("does not offer JSON keys in scalar value slots", () => {
+    const source = 'GET /orders/_search\n{"sort":["fi';
+    expect(
+      elasticsearchConsoleCompletionContext(source, source.length),
+    ).toMatchObject({ area: "value" });
+    expect(labels(source)).not.toContain("bool");
+    expect(labels(source)).not.toContain("fields");
+  });
+
   it("does not open a second method popup on a blank request body line", () => {
     const bodyStart = "GET /orders/_search\n";
     expect(

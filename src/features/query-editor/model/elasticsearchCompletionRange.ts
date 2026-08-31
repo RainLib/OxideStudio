@@ -35,3 +35,31 @@ export function elasticsearchJsonStringCompletionRange(
     word.endColumn,
   );
 }
+
+/**
+ * Replaces the exact REST path prefix before the caret while preserving any
+ * endpoint suffix after it. Schema index items include their leading slash,
+ * so using Monaco's word range here would turn `GET /ord/_search` into
+ * `GET //orders/_search`.
+ */
+export function elasticsearchPathCompletionRange(
+  monaco: any,
+  model: any,
+  position: any,
+) {
+  const lineBeforeCursor = model
+    .getLineContent(position.lineNumber)
+    .slice(0, position.column - 1);
+  const request = lineBeforeCursor.match(
+    /^(\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+)(\S*)$/iu,
+  );
+  if (!request) {
+    return elasticsearchJsonStringCompletionRange(monaco, model, position);
+  }
+  return new monaco.Range(
+    position.lineNumber,
+    (request[1]?.length || 0) + 1,
+    position.lineNumber,
+    position.column,
+  );
+}

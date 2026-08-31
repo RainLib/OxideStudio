@@ -173,8 +173,8 @@ describe("MongoDB shell completion", () => {
     const source = "db.orders.fi";
     const result = buildMongoDbConsoleCompletions(source, source.length, {});
     expect(result.context).toMatchObject({
-      area: "shell-method",
-      typed: "fi",
+      area: "shell-qualified",
+      typed: "orders.fi",
       collection: "orders",
       syntax: "shell",
     });
@@ -204,7 +204,14 @@ describe("MongoDB shell completion", () => {
       buildMongoDbConsoleCompletions(chain, chain.length).items.map(
         (item) => item.label,
       ),
-    ).toEqual(["sort", "skip", "limit"]);
+    ).toEqual(["limit", "sort", "skip", "count"]);
+
+    const chained = "db.orders.find({}).sort({createdAt: -1}).";
+    expect(
+      buildMongoDbConsoleCompletions(chained, chained.length).items.map(
+        (item) => item.label,
+      ),
+    ).toEqual(["limit", "sort", "skip"]);
 
     const collection = "db.aud";
     const result = buildMongoDbConsoleCompletions(collection, collection.length, {
@@ -216,6 +223,62 @@ describe("MongoDB shell completion", () => {
         insertText: 'getCollection("audit.logs")',
       }),
     );
+  });
+
+  it("resolves dotted collection names before direct collection methods", () => {
+    const dotted = "db.audit.";
+    const dottedResult = buildMongoDbConsoleCompletions(
+      dotted,
+      dotted.length,
+      { collections: ["audit.logs", "users"] },
+    );
+    expect(dottedResult.context).toMatchObject({
+      area: "shell-qualified",
+      typed: "audit.",
+      replacementLength: "audit.".length,
+    });
+    expect(dottedResult.items[0]).toMatchObject({
+      label: "audit.logs",
+      insertText: 'getCollection("audit.logs")',
+      filterText: "audit.logs",
+    });
+
+    const direct = "db.users.fi";
+    const directResult = buildMongoDbConsoleCompletions(
+      direct,
+      direct.length,
+      { collections: ["audit.logs", "users"] },
+    );
+    expect(directResult.items[0]).toMatchObject({
+      label: "find",
+      insertText: expect.stringMatching(/^users\.find\(/u),
+      filterText: "users.find",
+    });
+  });
+
+  it("does not complete method-shaped text inside comments or string values", () => {
+    for (const source of [
+      "// db.users.fi",
+      "-- db.users.fi",
+      "/* db.users.fi",
+      "db.users.find({ // db.orders.fi",
+    ]) {
+      expect(buildMongoDbConsoleCompletions(source, source.length).items).toEqual(
+        [],
+      );
+    }
+
+    const stringValue = 'db.users.find({note: "db.orders.fi';
+    expect(
+      buildMongoDbConsoleCompletions(stringValue, stringValue.length).items,
+    ).toEqual([]);
+
+    const afterComment = "db.users.find({ /* db.orders.fi */ na";
+    expect(
+      buildMongoDbConsoleCompletions(afterComment, afterComment.length, {
+        fields: [{ name: "name" }],
+      }).items,
+    ).toContainEqual(expect.objectContaining({ label: "name" }));
   });
 
   it("keeps native JSON context routing unchanged", () => {

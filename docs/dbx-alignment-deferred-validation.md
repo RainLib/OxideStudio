@@ -1609,3 +1609,22 @@ explicit deferred validation task rather than an implicit release check.
   user-message isolation and unchanged Chat/Plan/Agent permission manifests.
   This phase adds pure payload/store tests, full Assistant UI coverage and a
   production frontend build; it opens no live database.
+
+## MongoDB and Elasticsearch Console completion parity
+
+- In packaged Monaco, verify MongoDB `db.audit.` against both an exact `audit`
+  collection and dotted `audit.logs`, then accept a direct method and a dotted
+  collection from the same popup. The accepted edit must replace the complete
+  prefix after `db.`, remain one undo step, and never leave a duplicated segment.
+- Verify `find().count()` is offered only as the sole Host-supported chain;
+  comments, unterminated block comments, quoted method-shaped values and a
+  second chain must not leak candidates. Repeat with Unicode collection names.
+- In Elasticsearch Console, accept an index while the caret is inside
+  `GET /ord/_search`; the suffix must survive and the result must contain one
+  slash. Verify method prefixes after comments/completed prior requests, while
+  the first empty request-body line remains body completion.
+- Repeat with real MongoDB 4.4–8 and Elasticsearch 6/7/8/OpenSearch/EasySearch
+  metadata plus IME, Tab, Escape, cancellation and background metadata refresh.
+  This phase has 304 green frontend files / 1,608 tests, 3 MongoDB and 6
+  Elasticsearch bundled-LSP dialect tests, and a production frontend build; no
+  live database was opened.

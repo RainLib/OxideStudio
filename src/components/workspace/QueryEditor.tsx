@@ -193,6 +193,7 @@ import {
   appendSqlCompletionSpace,
   boundedSqlCompletionTextBeforeCursor,
   elasticsearchJsonStringCompletionRange,
+  elasticsearchPathCompletionRange,
   editorDocumentIdentity,
   completionLabelForMonaco,
   completionResolveRequestContext,
@@ -1344,7 +1345,9 @@ export function QueryEditor({
           const offset = model.getOffsetAt(position);
           const initialVersion = model.getVersionId();
           const context = mongodbConsoleCompletionContext(source, offset);
-          const needsCollections = context.area === "collection";
+          const needsCollections =
+            context.area === "collection" ||
+            context.area === "shell-qualified";
           const needsFields =
             context.area === "field" || context.area === "field-reference";
           let refreshQueued = false;
@@ -1380,7 +1383,11 @@ export function QueryEditor({
             context.syntax === "shell"
               ? new monaco.Range(
                   position.lineNumber,
-                  Math.max(1, position.column - context.typed.length),
+                  Math.max(
+                    1,
+                    position.column -
+                      (context.replacementLength ?? context.typed.length),
+                  ),
                   position.lineNumber,
                   position.column,
                 )
@@ -1405,7 +1412,7 @@ export function QueryEditor({
               insertTextRules: mongodbCompletionUsesSnippetSyntax(item)
                 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
                 : undefined,
-              filterText: item.label,
+              filterText: item.filterText || item.label,
               sortText: item.sortText || String(index).padStart(3, "0"),
               range,
             })),
@@ -1603,11 +1610,9 @@ export function QueryEditor({
             return { suggestions: [] };
           }
 
-          const range = elasticsearchJsonStringCompletionRange(
-            monaco,
-            model,
-            position,
-          );
+          const range = isIndexPath
+            ? elasticsearchPathCompletionRange(monaco, model, position)
+            : elasticsearchJsonStringCompletionRange(monaco, model, position);
           // Keep the already-synchronized LSP catalog as a fallback when live
           // index/mapping metadata is unavailable (for example during a brief
           // reconnect). This provider owns Console path and field positions,

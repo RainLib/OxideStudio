@@ -107,7 +107,10 @@ export {
   type CurrentStatementRangeCache,
   type OffsetPositionModel,
 } from "./model/currentStatementDecoration";
-export { elasticsearchJsonStringCompletionRange } from "./model/elasticsearchCompletionRange";
+export {
+  elasticsearchJsonStringCompletionRange,
+  elasticsearchPathCompletionRange,
+} from "./model/elasticsearchCompletionRange";
 export { parseElasticsearchConsoleServerVersion } from "./model/elasticsearchConsoleVersion";
 export {
   quoteSqlIdentifierSelection,
