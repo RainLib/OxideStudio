@@ -1,12 +1,20 @@
-use crate::core::{
-    dialect::{canonical_driver_name, database_spec_for_driver, DatabaseKind},
-    manager::ConnectionManager,
-    protocol::{
-        ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-        QueryResult, Response, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+use crate::{
+    commands::schema_diff::capture_schema_snapshot_inner,
+    core::{
+        dialect::{canonical_driver_name, database_spec_for_driver, DatabaseKind},
+        manager::ConnectionManager,
+        protocol::{
+            ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement,
+            QueryParameter, QueryResult, Response, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+        },
+        schema_diff::{
+            compare_schema_snapshots, finalize_schema_snapshot, SchemaChange, SchemaChangeKind,
+            SchemaDiffPlan, SchemaObjectSnapshot, SchemaRelationSnapshot, SchemaRoutineSnapshot,
+            SchemaSnapshot,
+        },
+        statement::{validate_sql_filter_expression, StatementScanDialect},
+        store::{MetaStore, Resource},
     },
-    statement::{validate_sql_filter_expression, StatementScanDialect},
-    store::{MetaStore, Resource},
 };
 use arrow_array::{
     builder::BinaryBuilder, ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array,
@@ -92,6 +100,8 @@ pub const TABLE_IMPORT_PROGRESS_EVENT: &str = "table-import://progress";
 const TABLE_DATA_TRANSFER_CANCELLED: &str = "TABLE_DATA_TRANSFER_CANCELLED";
 const TABLE_DATA_TRANSFER_REPORT_PARENT_ID: &str = "table-data-transfer-reports-v1";
 const TABLE_DATA_TRANSFER_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_REPORT";
+const TABLE_DATA_TRANSFER_OBJECT_REPORT_PARENT_ID: &str = "table-data-transfer-object-reports-v1";
+const TABLE_DATA_TRANSFER_OBJECT_REPORT_KIND: &str = "TABLE_DATA_TRANSFER_OBJECT_REPORT";
 const TABLE_EXPORT_CANCELLED: &str = "TABLE_EXPORT_CANCELLED";
 const TABLE_IMPORT_CANCELLED: &str = "TABLE_IMPORT_CANCELLED";
 const TABLE_EXPORT_WRITER_CLOSED: &str = "TABLE_EXPORT_WRITER_CLOSED";
@@ -828,12 +838,65 @@ pub struct TableDataTransferBatchPlanRequest {
     pub target_database: Option<String>,
     pub target_schema: String,
     pub tables: Vec<String>,
+    /// Optional non-table schema objects selected from the same source
+    /// namespace. These are never inferred from the selected tables.
+    #[serde(default)]
+    pub objects: Vec<TableDataTransferObjectSelection>,
     #[serde(default = "default_table_data_transfer_mode")]
     pub mode: TableDataTransferMode,
     pub max_rows: Option<u32>,
     pub batch_size: Option<u32>,
     #[serde(default)]
     pub reseed_identity: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TableDataTransferObjectKind {
+    View,
+    MaterializedView,
+    Function,
+    Procedure,
+    Trigger,
+    Sequence,
+    Event,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferObjectSelection {
+    pub object_type: TableDataTransferObjectKind,
+    pub name: String,
+    /// Required when the database permits duplicate object names below
+    /// different parent relations (for example PostgreSQL triggers).
+    #[serde(default)]
+    pub parent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferObjectAction {
+    Create,
+    SkipExisting,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferObjectPreflight {
+    pub object_type: TableDataTransferObjectKind,
+    pub name: String,
+    pub parent_name: Option<String>,
+    pub action: TableDataTransferObjectAction,
+    pub can_execute: bool,
+    /// Ordered, catalog-built DDL shown for review. It is empty for skipped
+    /// and blocked objects and is bound by `plan_digest` when present.
+    #[serde(default)]
+    pub statements: Vec<String>,
+    pub plan_digest: Option<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// Executes a previously reviewed multi-table plan as one target transaction.
@@ -869,6 +932,10 @@ pub struct TableDataTransferBatchPlan {
     /// target mapping work is attempted before a reviewed cycle policy exists.
     #[serde(default)]
     pub table_preflights: Vec<TableDataTransferBatchTablePreflight>,
+    /// Explicit non-table selection in executable dependency order. Existing
+    /// target objects remain visible as skipped entries and are never replaced.
+    #[serde(default)]
+    pub object_preflights: Vec<TableDataTransferObjectPreflight>,
     pub can_execute: bool,
     pub confirmation_token: String,
     pub warnings: Vec<String>,
@@ -916,6 +983,44 @@ pub struct TableDataTransferBatchResult {
     pub batches: u64,
     pub limit_reached: bool,
     pub tables: Vec<TableDataTransferBatchTableResult>,
+    #[serde(default)]
+    pub objects: Vec<TableDataTransferObjectResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferObjectResult {
+    pub object_type: TableDataTransferObjectKind,
+    pub name: String,
+    pub parent_name: Option<String>,
+    pub action: TableDataTransferObjectAction,
+    #[serde(default)]
+    pub report_id: Option<String>,
+}
+
+/// Privacy-bounded terminal audit for one explicitly selected schema object.
+/// Object DDL and database errors are deliberately excluded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferObjectReport {
+    pub id: String,
+    pub project_id: String,
+    pub transfer_id: String,
+    pub source_connection_id: String,
+    pub source_database: Option<String>,
+    pub source_schema: String,
+    pub target_connection_id: String,
+    pub target_database: Option<String>,
+    pub target_schema: String,
+    pub object_type: TableDataTransferObjectKind,
+    pub name: String,
+    pub parent_name: Option<String>,
+    pub action: TableDataTransferObjectAction,
+    pub plan_digest: String,
+    pub status: TableDataTransferProgressStatus,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub error: Option<String>,
 }
 
 fn default_table_data_transfer_mode() -> TableDataTransferMode {
@@ -6358,6 +6463,33 @@ async fn persist_table_data_transfer_report(
         .map_err(|error| format!("Could not persist table transfer report: {error}"))
 }
 
+async fn persist_table_data_transfer_object_report(
+    meta_store: &MetaStore,
+    report: &TableDataTransferObjectReport,
+) -> Result<(), String> {
+    let metadata = serde_json::to_value(report)
+        .map_err(|error| format!("Could not serialize schema object transfer report: {error}"))?;
+    let resource = Resource {
+        id: report.id.clone(),
+        project_id: report.project_id.clone(),
+        connection_id: report.target_connection_id.clone(),
+        parent_id: Some(TABLE_DATA_TRANSFER_OBJECT_REPORT_PARENT_ID.to_string()),
+        kind: TABLE_DATA_TRANSFER_OBJECT_REPORT_KIND.to_string(),
+        name: format!(
+            "{}:{}:{}",
+            report.started_at,
+            table_data_transfer_object_kind_label(report.object_type),
+            report.name
+        ),
+        metadata,
+        last_updated: current_table_timestamp_millis(),
+    };
+    meta_store
+        .save_resources(&report.project_id, &[resource])
+        .await
+        .map_err(|error| format!("Could not persist schema object transfer report: {error}"))
+}
+
 fn normalized_table_export_project_id(project_id: Option<&str>) -> Option<String> {
     let project_id = project_id?.trim();
     if project_id.is_empty()
@@ -7919,11 +8051,664 @@ fn map_transfer_result_rows(
 }
 
 const MAX_TABLE_DATA_TRANSFER_BATCH_TABLES: usize = 100;
+const MAX_TABLE_DATA_TRANSFER_BATCH_OBJECTS: usize = 200;
+
+#[derive(Debug, Clone)]
+struct ResolvedTableDataTransferObjectPlan {
+    preflights: Vec<TableDataTransferObjectPreflight>,
+    statements: Vec<ParameterizedStatement>,
+    results: Vec<TableDataTransferObjectResult>,
+}
+
+fn table_data_transfer_object_kind_label(kind: TableDataTransferObjectKind) -> &'static str {
+    match kind {
+        TableDataTransferObjectKind::View => "VIEW",
+        TableDataTransferObjectKind::MaterializedView => "MATERIALIZED_VIEW",
+        TableDataTransferObjectKind::Function => "FUNCTION",
+        TableDataTransferObjectKind::Procedure => "PROCEDURE",
+        TableDataTransferObjectKind::Trigger => "TRIGGER",
+        TableDataTransferObjectKind::Sequence => "SEQUENCE",
+        TableDataTransferObjectKind::Event => "EVENT",
+    }
+}
+
+fn normalized_table_data_transfer_objects(
+    objects: &[TableDataTransferObjectSelection],
+) -> Result<Vec<TableDataTransferObjectSelection>, String> {
+    if objects.len() > MAX_TABLE_DATA_TRANSFER_BATCH_OBJECTS {
+        return Err(format!(
+            "Select at most {MAX_TABLE_DATA_TRANSFER_BATCH_OBJECTS} schema objects for one transfer plan."
+        ));
+    }
+    let mut normalized = Vec::with_capacity(objects.len());
+    let mut seen = HashSet::new();
+    for object in objects {
+        let name = object.name.trim();
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            return Err("Schema object names must be non-empty bounded identifiers.".to_string());
+        }
+        let parent_name = object
+            .parent_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        if parent_name
+            .as_deref()
+            .is_some_and(|value| value.len() > 256 || value.chars().any(char::is_control))
+        {
+            return Err("Schema object parent names must be bounded identifiers.".to_string());
+        }
+        let key = format!(
+            "{}:{}:{}",
+            table_data_transfer_object_kind_label(object.object_type),
+            parent_name
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            name.to_ascii_lowercase(),
+        );
+        if !seen.insert(key) {
+            return Err(format!(
+                "Schema object selection contains duplicate {} {}.",
+                table_data_transfer_object_kind_label(object.object_type),
+                name
+            ));
+        }
+        normalized.push(TableDataTransferObjectSelection {
+            object_type: object.object_type,
+            name: name.to_string(),
+            parent_name,
+        });
+    }
+    normalized.sort_by(|left, right| {
+        (
+            table_data_transfer_object_kind_label(left.object_type),
+            left.parent_name.as_deref().unwrap_or_default(),
+            left.name.as_str(),
+        )
+            .cmp(&(
+                table_data_transfer_object_kind_label(right.object_type),
+                right.parent_name.as_deref().unwrap_or_default(),
+                right.name.as_str(),
+            ))
+    });
+    Ok(normalized)
+}
+
+fn relation_matches_transfer_object(
+    relation: &SchemaRelationSnapshot,
+    selection: &TableDataTransferObjectSelection,
+) -> bool {
+    if !relation.name.eq_ignore_ascii_case(&selection.name) {
+        return false;
+    }
+    let object_type = relation
+        .object_type
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    match selection.object_type {
+        TableDataTransferObjectKind::View => {
+            object_type.contains("VIEW") && !object_type.contains("MATERIALIZED")
+        }
+        TableDataTransferObjectKind::MaterializedView => {
+            object_type.contains("MATERIALIZED") && object_type.contains("VIEW")
+        }
+        _ => false,
+    }
+}
+
+fn routine_matches_transfer_object(
+    routine: &SchemaRoutineSnapshot,
+    selection: &TableDataTransferObjectSelection,
+) -> bool {
+    if !routine.name.eq_ignore_ascii_case(&selection.name) {
+        return false;
+    }
+    let routine_type = routine.routine_type.as_deref().unwrap_or("function").trim();
+    match selection.object_type {
+        TableDataTransferObjectKind::Function => routine_type.eq_ignore_ascii_case("function"),
+        TableDataTransferObjectKind::Procedure => routine_type.eq_ignore_ascii_case("procedure"),
+        _ => false,
+    }
+}
+
+fn schema_object_matches_transfer_object(
+    object: &SchemaObjectSnapshot,
+    selection: &TableDataTransferObjectSelection,
+) -> bool {
+    object.name.eq_ignore_ascii_case(&selection.name)
+        && object
+            .object_type
+            .eq_ignore_ascii_case(table_data_transfer_object_kind_label(selection.object_type))
+        && selection.parent_name.as_deref().is_none_or(|parent| {
+            object
+                .parent_name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(parent))
+        })
+}
+
+fn transfer_object_exists_in_snapshot(
+    snapshot: &SchemaSnapshot,
+    selection: &TableDataTransferObjectSelection,
+) -> bool {
+    snapshot
+        .relations
+        .iter()
+        .any(|relation| relation_matches_transfer_object(relation, selection))
+        || snapshot
+            .routines
+            .iter()
+            .any(|routine| routine_matches_transfer_object(routine, selection))
+        || snapshot
+            .schema_objects
+            .iter()
+            .any(|object| schema_object_matches_transfer_object(object, selection))
+}
+
+fn transfer_object_change_matches(
+    selection: &TableDataTransferObjectSelection,
+    change: &SchemaChange,
+) -> bool {
+    if !change.relation_name.eq_ignore_ascii_case(&selection.name) {
+        return false;
+    }
+    match selection.object_type {
+        TableDataTransferObjectKind::View | TableDataTransferObjectKind::MaterializedView => {
+            if change.kind == SchemaChangeKind::RelationCreate {
+                change.object_type.as_deref().is_some_and(|object_type| {
+                    let relation = SchemaRelationSnapshot {
+                        name: selection.name.clone(),
+                        object_type: Some(object_type.to_string()),
+                        comment: None,
+                        definition: None,
+                        materialized_view_populated: None,
+                        dependencies: Vec::new(),
+                        external_dependencies: Vec::new(),
+                        sequence_dependencies: Vec::new(),
+                        columns: Vec::new(),
+                        indexes: Vec::new(),
+                        constraints: Vec::new(),
+                    };
+                    relation_matches_transfer_object(&relation, selection)
+                })
+            } else {
+                matches!(
+                    change.kind,
+                    SchemaChangeKind::ColumnAdd
+                        | SchemaChangeKind::IndexAdd
+                        | SchemaChangeKind::ConstraintAdd
+                )
+            }
+        }
+        TableDataTransferObjectKind::Function | TableDataTransferObjectKind::Procedure => {
+            change.kind == SchemaChangeKind::RoutineCreate
+                && change.object_type.as_deref().is_some_and(|object_type| {
+                    match selection.object_type {
+                        TableDataTransferObjectKind::Function => {
+                            object_type.eq_ignore_ascii_case("function")
+                        }
+                        TableDataTransferObjectKind::Procedure => {
+                            object_type.eq_ignore_ascii_case("procedure")
+                        }
+                        _ => false,
+                    }
+                })
+        }
+        _ => {
+            matches!(
+                change.kind,
+                SchemaChangeKind::SchemaObjectCreate | SchemaChangeKind::SchemaObjectModify
+            ) && change.object_type.as_deref().is_some_and(|object_type| {
+                object_type.eq_ignore_ascii_case(table_data_transfer_object_kind_label(
+                    selection.object_type,
+                ))
+            }) && (selection.parent_name.is_none()
+                || change.child_name == selection.parent_name
+                || change.child_name.as_deref() == Some("ownership/state"))
+        }
+    }
+}
+
+fn empty_transfer_snapshot_like(snapshot: &SchemaSnapshot) -> Result<SchemaSnapshot, String> {
+    let mut snapshot = snapshot.clone();
+    snapshot.id.clear();
+    snapshot.fingerprint.clear();
+    snapshot.relations.clear();
+    snapshot.routines.clear();
+    snapshot.schema_objects.clear();
+    snapshot.warnings.clear();
+    finalize_schema_snapshot(snapshot).map_err(|error| error.to_string())
+}
+
+fn transfer_object_plan_digest(
+    selection: &TableDataTransferObjectSelection,
+    statements: &[String],
+    depends_on: &[String],
+) -> Result<String, String> {
+    let payload = serde_json::to_vec(&(selection, statements, depends_on))
+        .map_err(|error| format!("Could not bind schema object plan: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(payload)))
+}
+
+fn snapshot_has_relation(snapshot: &SchemaSnapshot, name: &str) -> bool {
+    snapshot
+        .relations
+        .iter()
+        .any(|relation| relation.name.eq_ignore_ascii_case(name))
+}
+
+fn snapshot_has_routine(snapshot: &SchemaSnapshot, name: &str) -> bool {
+    snapshot
+        .routines
+        .iter()
+        .any(|routine| routine.name.eq_ignore_ascii_case(name))
+}
+
+fn snapshot_has_sequence(snapshot: &SchemaSnapshot, name: &str) -> bool {
+    snapshot.schema_objects.iter().any(|object| {
+        object.object_type.eq_ignore_ascii_case("sequence")
+            && object.name.eq_ignore_ascii_case(name)
+    })
+}
+
+fn selected_transfer_object(
+    selections: &[TableDataTransferObjectSelection],
+    kind: TableDataTransferObjectKind,
+    name: &str,
+) -> bool {
+    selections
+        .iter()
+        .any(|selection| selection.object_type == kind && selection.name.eq_ignore_ascii_case(name))
+}
+
+fn transfer_object_dependency_review(
+    relations: &[SchemaRelationSnapshot],
+    schema_objects: &[SchemaObjectSnapshot],
+    target: &SchemaSnapshot,
+    selections: &[TableDataTransferObjectSelection],
+) -> (Vec<String>, Vec<String>) {
+    let mut dependencies = BTreeSet::new();
+    let mut blockers = Vec::new();
+    for relation in relations {
+        for dependency in &relation.dependencies {
+            dependencies.insert(format!("RELATION:{dependency}"));
+            if !snapshot_has_relation(target, dependency)
+                && !selected_transfer_object(
+                    selections,
+                    TableDataTransferObjectKind::View,
+                    dependency,
+                )
+                && !selected_transfer_object(
+                    selections,
+                    TableDataTransferObjectKind::MaterializedView,
+                    dependency,
+                )
+            {
+                blockers.push(format!(
+                    "Required relation {dependency} is not present on the target or selected for transfer."
+                ));
+            }
+        }
+        for dependency in &relation.sequence_dependencies {
+            dependencies.insert(format!("SEQUENCE:{dependency}"));
+            if !snapshot_has_sequence(target, dependency)
+                && !selected_transfer_object(
+                    selections,
+                    TableDataTransferObjectKind::Sequence,
+                    dependency,
+                )
+            {
+                blockers.push(format!(
+                    "Required sequence {dependency} is not present on the target or selected for transfer."
+                ));
+            }
+        }
+        if !relation.external_dependencies.is_empty() {
+            dependencies.extend(
+                relation
+                    .external_dependencies
+                    .iter()
+                    .map(|dependency| format!("EXTERNAL:{dependency}")),
+            );
+            blockers.push(format!(
+                "External dependencies cannot be proven inside this schema-scoped transfer: {}.",
+                relation.external_dependencies.join(", ")
+            ));
+        }
+    }
+    for object in schema_objects {
+        if let Some(parent) = object.parent_name.as_deref() {
+            dependencies.insert(format!("RELATION:{parent}"));
+            if !snapshot_has_relation(target, parent) {
+                blockers.push(format!(
+                    "Parent relation {parent} is not present on the target."
+                ));
+            }
+        }
+        for routine in &object.dependencies {
+            dependencies.insert(format!("ROUTINE:{routine}"));
+            if !snapshot_has_routine(target, routine)
+                && !selected_transfer_object(
+                    selections,
+                    TableDataTransferObjectKind::Function,
+                    routine,
+                )
+                && !selected_transfer_object(
+                    selections,
+                    TableDataTransferObjectKind::Procedure,
+                    routine,
+                )
+            {
+                blockers.push(format!(
+                    "Trigger routine {routine} is not present on the target or selected for transfer."
+                ));
+            }
+        }
+        if let Some(owner) = object.sequence_owner.as_ref() {
+            dependencies.insert(format!("RELATION:{}", owner.table_name));
+            if !snapshot_has_relation(target, &owner.table_name) {
+                blockers.push(format!(
+                    "Sequence owner relation {} is not present on the target.",
+                    owner.table_name
+                ));
+            }
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    (dependencies.into_iter().collect(), blockers)
+}
+
+fn snapshot_fragment(
+    snapshot: &SchemaSnapshot,
+    relations: Vec<SchemaRelationSnapshot>,
+    routines: Vec<SchemaRoutineSnapshot>,
+    schema_objects: Vec<SchemaObjectSnapshot>,
+) -> Result<SchemaSnapshot, String> {
+    let mut fragment = snapshot.clone();
+    fragment.id.clear();
+    fragment.fingerprint.clear();
+    fragment.relations = relations;
+    fragment.routines = routines;
+    fragment.schema_objects = schema_objects;
+    // Full-snapshot coverage warnings are still useful during review, but
+    // they would make otherwise identical selection plans noisy and unstable.
+    fragment.warnings.clear();
+    finalize_schema_snapshot(fragment).map_err(|error| error.to_string())
+}
+
+fn blocked_transfer_object_preflight(
+    selection: &TableDataTransferObjectSelection,
+    warnings: Vec<String>,
+) -> TableDataTransferObjectPreflight {
+    TableDataTransferObjectPreflight {
+        object_type: selection.object_type,
+        name: selection.name.clone(),
+        parent_name: selection.parent_name.clone(),
+        action: TableDataTransferObjectAction::Blocked,
+        can_execute: false,
+        statements: Vec::new(),
+        plan_digest: None,
+        depends_on: Vec::new(),
+        warnings,
+    }
+}
+
+fn build_table_data_transfer_object_plan(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    selections: &[TableDataTransferObjectSelection],
+) -> Result<ResolvedTableDataTransferObjectPlan, String> {
+    if selections.is_empty() {
+        return Ok(ResolvedTableDataTransferObjectPlan {
+            preflights: Vec::new(),
+            statements: Vec::new(),
+            results: Vec::new(),
+        });
+    }
+    if !source.driver.eq_ignore_ascii_case("postgres")
+        || !target.driver.eq_ignore_ascii_case("postgres")
+    {
+        let preflights = selections
+            .iter()
+            .map(|selection| {
+                blocked_transfer_object_preflight(
+                    selection,
+                    vec![
+                        "Automatic schema-object transfer currently requires native PostgreSQL catalog DDL on both endpoints. Other drivers remain review-only until their exact DDL and transaction policy is verified."
+                            .to_string(),
+                    ],
+                )
+            })
+            .collect();
+        return Ok(ResolvedTableDataTransferObjectPlan {
+            preflights,
+            statements: Vec::new(),
+            results: Vec::new(),
+        });
+    }
+
+    let mut selected_relations = Vec::new();
+    let mut selected_routines = Vec::new();
+    let mut selected_schema_objects = Vec::new();
+    let mut pending = Vec::<(TableDataTransferObjectSelection, Vec<String>)>::new();
+    let mut preflights = Vec::with_capacity(selections.len());
+    let mut results = Vec::with_capacity(selections.len());
+
+    for selection in selections {
+        let relations = source
+            .relations
+            .iter()
+            .filter(|relation| relation_matches_transfer_object(relation, selection))
+            .cloned()
+            .collect::<Vec<_>>();
+        let routines = source
+            .routines
+            .iter()
+            .filter(|routine| routine_matches_transfer_object(routine, selection))
+            .cloned()
+            .collect::<Vec<_>>();
+        let schema_objects = source
+            .schema_objects
+            .iter()
+            .filter(|object| schema_object_matches_transfer_object(object, selection))
+            .cloned()
+            .collect::<Vec<_>>();
+        let match_count = relations.len() + routines.len() + schema_objects.len();
+        if match_count == 0 {
+            preflights.push(blocked_transfer_object_preflight(
+                selection,
+                vec![format!(
+                    "The selected {} {} was not found in the fresh source catalog.",
+                    table_data_transfer_object_kind_label(selection.object_type),
+                    selection.name
+                )],
+            ));
+            continue;
+        }
+        if routines.is_empty() && match_count > 1 {
+            preflights.push(blocked_transfer_object_preflight(
+                selection,
+                vec![format!(
+                    "The selected object identity is ambiguous. Include its parent relation: {} {}.",
+                    table_data_transfer_object_kind_label(selection.object_type),
+                    selection.name
+                )],
+            ));
+            continue;
+        }
+        if transfer_object_exists_in_snapshot(target, selection) {
+            preflights.push(TableDataTransferObjectPreflight {
+                object_type: selection.object_type,
+                name: selection.name.clone(),
+                parent_name: selection.parent_name.clone(),
+                action: TableDataTransferObjectAction::SkipExisting,
+                can_execute: true,
+                statements: Vec::new(),
+                plan_digest: None,
+                depends_on: Vec::new(),
+                warnings: vec![
+                    "An object with this catalog identity already exists on the target and will not be replaced."
+                        .to_string(),
+                ],
+            });
+            results.push(TableDataTransferObjectResult {
+                object_type: selection.object_type,
+                name: selection.name.clone(),
+                parent_name: selection.parent_name.clone(),
+                action: TableDataTransferObjectAction::SkipExisting,
+                report_id: None,
+            });
+            continue;
+        }
+        let (depends_on, blockers) =
+            transfer_object_dependency_review(&relations, &schema_objects, target, selections);
+        if !blockers.is_empty() {
+            let mut preflight = blocked_transfer_object_preflight(selection, blockers);
+            preflight.depends_on = depends_on;
+            preflights.push(preflight);
+            continue;
+        }
+        selected_relations.extend(relations);
+        selected_routines.extend(routines);
+        selected_schema_objects.extend(schema_objects);
+        pending.push((selection.clone(), depends_on));
+    }
+
+    if pending.is_empty() {
+        return Ok(ResolvedTableDataTransferObjectPlan {
+            preflights,
+            statements: Vec::new(),
+            results,
+        });
+    }
+    let source_fragment = snapshot_fragment(
+        source,
+        selected_relations,
+        selected_routines,
+        selected_schema_objects,
+    )?;
+    let target_fragment = empty_transfer_snapshot_like(target)?;
+    let schema_plan = compare_schema_snapshots(
+        &source_fragment,
+        &target_fragment,
+        current_table_timestamp_millis(),
+    )
+    .map_err(|error| format!("Could not build selected schema-object plan: {error}"))?;
+    append_transfer_object_plan(&schema_plan, pending, &mut preflights, &mut results)?;
+    let statements = preflights
+        .iter()
+        .filter(|preflight| preflight.action == TableDataTransferObjectAction::Create)
+        .flat_map(|preflight| preflight.statements.iter())
+        .map(|sql| ParameterizedStatement {
+            sql: sql.clone(),
+            params: Vec::new(),
+        })
+        .collect();
+    Ok(ResolvedTableDataTransferObjectPlan {
+        preflights,
+        statements,
+        results,
+    })
+}
+
+fn append_transfer_object_plan(
+    schema_plan: &SchemaDiffPlan,
+    pending: Vec<(TableDataTransferObjectSelection, Vec<String>)>,
+    preflights: &mut Vec<TableDataTransferObjectPreflight>,
+    results: &mut Vec<TableDataTransferObjectResult>,
+) -> Result<(), String> {
+    for (selection, depends_on) in pending {
+        let changes = schema_plan
+            .changes
+            .iter()
+            .filter(|change| transfer_object_change_matches(&selection, change))
+            .collect::<Vec<_>>();
+        let statements = changes
+            .iter()
+            .flat_map(|change| change.sql.iter().cloned())
+            .filter(|sql| !sql.trim().is_empty())
+            .collect::<Vec<_>>();
+        let blockers = changes
+            .iter()
+            .filter_map(|change| {
+                change.blocked_reason.clone().or_else(|| {
+                    change
+                        .sql
+                        .is_empty()
+                        .then(|| format!("{} has no reviewed executable DDL.", change.summary))
+                })
+            })
+            .collect::<Vec<_>>();
+        if changes.is_empty() || statements.is_empty() || !blockers.is_empty() {
+            let mut warnings = blockers;
+            if changes.is_empty() {
+                warnings.push(
+                    "The selected object produced no catalog-backed creation change.".to_string(),
+                );
+            }
+            let mut preflight = blocked_transfer_object_preflight(&selection, warnings);
+            preflight.depends_on = depends_on;
+            preflights.push(preflight);
+            continue;
+        }
+        let plan_digest = transfer_object_plan_digest(&selection, &statements, &depends_on)?;
+        preflights.push(TableDataTransferObjectPreflight {
+            object_type: selection.object_type,
+            name: selection.name.clone(),
+            parent_name: selection.parent_name.clone(),
+            action: TableDataTransferObjectAction::Create,
+            can_execute: true,
+            statements,
+            plan_digest: Some(plan_digest),
+            depends_on,
+            warnings: changes
+                .iter()
+                .map(|change| change.summary.clone())
+                .collect(),
+        });
+        results.push(TableDataTransferObjectResult {
+            object_type: selection.object_type,
+            name: selection.name,
+            parent_name: selection.parent_name,
+            action: TableDataTransferObjectAction::Create,
+            report_id: None,
+        });
+    }
+    preflights.sort_by(|left, right| {
+        let left_order = schema_plan.changes.iter().position(|change| {
+            transfer_object_change_matches(
+                &TableDataTransferObjectSelection {
+                    object_type: left.object_type,
+                    name: left.name.clone(),
+                    parent_name: left.parent_name.clone(),
+                },
+                change,
+            )
+        });
+        let right_order = schema_plan.changes.iter().position(|change| {
+            transfer_object_change_matches(
+                &TableDataTransferObjectSelection {
+                    object_type: right.object_type,
+                    name: right.name.clone(),
+                    parent_name: right.parent_name.clone(),
+                },
+                change,
+            )
+        });
+        (left_order.unwrap_or(usize::MAX), &left.name)
+            .cmp(&(right_order.unwrap_or(usize::MAX), &right.name))
+    });
+    Ok(())
+}
 
 fn normalized_table_data_transfer_batch_tables(tables: &[String]) -> Result<Vec<String>, String> {
-    if tables.is_empty() || tables.len() > MAX_TABLE_DATA_TRANSFER_BATCH_TABLES {
+    if tables.len() > MAX_TABLE_DATA_TRANSFER_BATCH_TABLES {
         return Err(format!(
-            "Select between 1 and {MAX_TABLE_DATA_TRANSFER_BATCH_TABLES} tables for a batch transfer plan."
+            "Select at most {MAX_TABLE_DATA_TRANSFER_BATCH_TABLES} tables for a batch transfer plan."
         ));
     }
     let mut seen = HashSet::new();
@@ -7967,6 +8752,7 @@ fn finalize_table_data_transfer_batch_confirmation(
         "dependencies": &plan.dependencies,
         "cyclicTables": &plan.cyclic_tables,
         "preflights": &plan.table_preflights,
+        "objectPreflights": &plan.object_preflights,
     });
     let encoded = serde_json::to_vec(&binding)
         .map_err(|error| format!("Could not encode batch transfer confirmation: {error}"))?;
@@ -8090,10 +8876,13 @@ fn table_data_transfer_batch_plan(
     } else {
         Vec::new()
     };
-    let mut warnings = vec![
-        "The reviewed dependency order and each table mapping are bound into one confirmation token. Execution writes all selected tables in one target transaction."
-            .to_string(),
-    ];
+    let mut warnings = Vec::new();
+    if !tables.is_empty() {
+        warnings.push(
+            "The reviewed dependency order and each table mapping are bound into one confirmation token. Execution writes all selected tables in one target transaction."
+                .to_string(),
+        );
+    }
     if !cyclic_tables.is_empty() {
         warnings.push(
             "Selected tables contain a foreign-key cycle. No automatic copy order is safe until the target driver declares a reviewed defer/disable-constraints policy."
@@ -8111,17 +8900,110 @@ fn table_data_transfer_batch_plan(
         dependencies,
         cyclic_tables: cyclic_tables.clone(),
         table_preflights: Vec::new(),
+        object_preflights: Vec::new(),
         can_execute: cyclic_tables.is_empty(),
         confirmation_token: String::new(),
         warnings,
     })
 }
 
+async fn resolve_table_data_transfer_object_plan(
+    manager: &ConnectionManager,
+    request: &TableDataTransferBatchPlanRequest,
+    objects: &[TableDataTransferObjectSelection],
+) -> Result<ResolvedTableDataTransferObjectPlan, String> {
+    if objects.is_empty() {
+        return build_table_data_transfer_object_plan(
+            &empty_transfer_context_snapshot(
+                &request.source_connection_id,
+                &request.source_driver,
+                request.source_database.clone(),
+                &request.source_schema,
+            )?,
+            &empty_transfer_context_snapshot(
+                &request.target_connection_id,
+                &request.target_driver,
+                request.target_database.clone(),
+                &request.target_schema,
+            )?,
+            objects,
+        );
+    }
+    let source_capture = || {
+        capture_schema_snapshot_inner(
+            manager,
+            "table-transfer-preview".to_string(),
+            request.source_connection_id.clone(),
+            request.source_connection_id.clone(),
+            request.source_driver.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            false,
+        )
+    };
+    let same_namespace = request.source_connection_id == request.target_connection_id
+        && request.source_database == request.target_database
+        && request.source_schema == request.target_schema;
+    let (source, target) = if same_namespace {
+        let snapshot = source_capture().await?;
+        (snapshot.clone(), snapshot)
+    } else {
+        let target_capture = capture_schema_snapshot_inner(
+            manager,
+            "table-transfer-preview".to_string(),
+            request.target_connection_id.clone(),
+            request.target_connection_id.clone(),
+            request.target_driver.clone(),
+            request.target_database.clone(),
+            request.target_schema.clone(),
+            false,
+        );
+        tokio::try_join!(source_capture(), target_capture)?
+    };
+    build_table_data_transfer_object_plan(&source, &target, objects)
+}
+
+fn empty_transfer_context_snapshot(
+    connection_id: &str,
+    driver: &str,
+    database_name: Option<String>,
+    schema_name: &str,
+) -> Result<SchemaSnapshot, String> {
+    finalize_schema_snapshot(SchemaSnapshot {
+        version: crate::core::schema_diff::SCHEMA_SNAPSHOT_VERSION,
+        id: String::new(),
+        fingerprint: String::new(),
+        project_id: "table-transfer-preview".to_string(),
+        connection_id: connection_id.to_string(),
+        connection_name: connection_id.to_string(),
+        driver: driver.to_string(),
+        database_name,
+        schema_name: schema_name.to_string(),
+        captured_at: current_table_timestamp_millis(),
+        relations: Vec::new(),
+        routines: Vec::new(),
+        schema_objects: Vec::new(),
+        warnings: Vec::new(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+struct ResolvedTableDataTransferBatchPlan {
+    plan: TableDataTransferBatchPlan,
+    object_plan: ResolvedTableDataTransferObjectPlan,
+}
+
 async fn resolve_table_data_transfer_batch_plan(
     manager: &ConnectionManager,
     request: TableDataTransferBatchPlanRequest,
-) -> Result<TableDataTransferBatchPlan, String> {
+) -> Result<ResolvedTableDataTransferBatchPlan, String> {
     let tables = normalized_table_data_transfer_batch_tables(&request.tables)?;
+    let objects = normalized_table_data_transfer_objects(&request.objects)?;
+    if tables.is_empty() && objects.is_empty() {
+        return Err(
+            "Select at least one table or schema object for a batch transfer plan.".to_string(),
+        );
+    }
     if request.source_connection_id.trim().is_empty()
         || request.target_connection_id.trim().is_empty()
         || request.source_schema.trim().is_empty()
@@ -8132,7 +9014,11 @@ async fn resolve_table_data_transfer_batch_plan(
                 .to_string(),
         );
     }
-    let sample_table = tables.first().expect("validated non-empty tables").clone();
+    let sample_table = tables
+        .first()
+        .cloned()
+        .or_else(|| objects.first().map(|object| object.name.clone()))
+        .expect("validated non-empty transfer selection");
     let source = TableDataTransferEndpoint {
         connection_id: request.source_connection_id.clone(),
         driver: request.source_driver.clone(),
@@ -8244,8 +9130,27 @@ async fn resolve_table_data_transfer_batch_plan(
                 );
         }
     }
+    let object_plan = resolve_table_data_transfer_object_plan(manager, &request, &objects).await?;
+    plan.object_preflights = object_plan.preflights.clone();
+    if plan
+        .object_preflights
+        .iter()
+        .any(|preflight| !preflight.can_execute)
+    {
+        plan.can_execute = false;
+        plan.warnings.push(
+            "At least one selected schema object is blocked because its source DDL or dependencies could not be proven."
+                .to_string(),
+        );
+    }
+    if !plan.object_preflights.is_empty() {
+        plan.warnings.push(
+            "Selected PostgreSQL schema objects are created before row copies inside the same reviewed target transaction; existing objects are skipped and never replaced."
+                .to_string(),
+        );
+    }
     finalize_table_data_transfer_batch_confirmation(&request, &mut plan)?;
-    Ok(plan)
+    Ok(ResolvedTableDataTransferBatchPlan { plan, object_plan })
 }
 
 #[tauri::command]
@@ -8254,7 +9159,7 @@ pub async fn preview_table_data_transfer_batch_plan(
     request: TableDataTransferBatchPlanRequest,
 ) -> Result<Response<TableDataTransferBatchPlan>, String> {
     match resolve_table_data_transfer_batch_plan(&manager, request).await {
-        Ok(plan) => Ok(Response::ok(plan)),
+        Ok(resolved) => Ok(Response::ok(resolved.plan)),
         Err(error) => Ok(Response::err(
             "PREVIEW_TABLE_DATA_TRANSFER_BATCH_PLAN_ERROR",
             &error,
@@ -8783,8 +9688,13 @@ pub async fn execute_table_data_transfer_batch(
     // the shared target transaction starts. Reports remain useful if a later
     // table fails and the entire batch rolls back.
     let mut reviewed_target_rows_before = Vec::<Option<u64>>::new();
+    let mut expected_objects = Vec::<TableDataTransferObjectResult>::new();
     let result: Result<TableDataTransferBatchResult, String> = async {
-        let batch_plan = resolve_table_data_transfer_batch_plan(&manager, request.plan.clone()).await?;
+        let resolved_batch_plan =
+            resolve_table_data_transfer_batch_plan(&manager, request.plan.clone()).await?;
+        let batch_plan = resolved_batch_plan.plan;
+        let object_plan = resolved_batch_plan.object_plan;
+        expected_objects = object_plan.results.clone();
         if confirmation_token.trim() != batch_plan.confirmation_token {
             return Err("Batch transfer plan changed or the confirmation token is invalid. Preview again before copying rows.".to_string());
         }
@@ -8893,7 +9803,31 @@ pub async fn execute_table_data_transfer_batch(
                     identity_reseed_columns: table_plan.identity_reseed_columns.clone(), report_id: None,
                 });
             }
-            Ok(TableDataTransferBatchResult { rows_transferred, batches, limit_reached, tables })
+            // Non-table objects run after all table data so triggers cannot
+            // observe the copy and materialized views populated WITH DATA see
+            // the reviewed final rows. PostgreSQL keeps this DDL in the same
+            // target transaction as the table writes.
+            if !object_plan.statements.is_empty() {
+                manager
+                    .execute_parameterized_transaction(
+                        &request.plan.target_connection_id,
+                        &transaction_id,
+                        &object_plan.statements,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Could not create the reviewed schema objects; the target batch transaction will be rolled back: {error}"
+                        )
+                    })?;
+            }
+            Ok(TableDataTransferBatchResult {
+                rows_transferred,
+                batches,
+                limit_reached,
+                tables,
+                objects: object_plan.results,
+            })
         }.await;
 
         match execution {
@@ -9028,6 +9962,57 @@ pub async fn execute_table_data_transfer_batch(
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "batch table data transfer report was not persisted")
+                }
+            }
+        }
+        for (index, object) in expected_objects.iter().enumerate() {
+            let object_identity = format!(
+                "{}:{}:{}:{}",
+                table_data_transfer_object_kind_label(object.object_type),
+                request.plan.target_schema,
+                object.parent_name.as_deref().unwrap_or_default(),
+                object.name
+            );
+            let object_digest = Sha256::digest(object_identity.as_bytes());
+            let report_id = format!(
+                "table-transfer-object-report-{}-{:X}",
+                transfer_id,
+                u64::from_be_bytes(object_digest[..8].try_into().expect("sha256 prefix"))
+            );
+            let report = TableDataTransferObjectReport {
+                id: report_id.clone(),
+                project_id: project_id.clone(),
+                transfer_id: format!("{transfer_id}-object-{index}"),
+                source_connection_id: request.plan.source_connection_id.clone(),
+                source_database: request.plan.source_database.clone(),
+                source_schema: request.plan.source_schema.clone(),
+                target_connection_id: request.plan.target_connection_id.clone(),
+                target_database: request.plan.target_database.clone(),
+                target_schema: request.plan.target_schema.clone(),
+                object_type: object.object_type,
+                name: object.name.clone(),
+                parent_name: object.parent_name.clone(),
+                action: object.action,
+                plan_digest: table_data_transfer_plan_digest(&confirmation_token),
+                status,
+                started_at,
+                finished_at: current_table_timestamp_millis(),
+                error: error.clone(),
+            };
+            match persist_table_data_transfer_object_report(meta_store.inner(), &report).await {
+                Ok(()) => {
+                    if let Ok(summary) = result.as_mut() {
+                        if let Some(result_object) = summary.objects.iter_mut().find(|candidate| {
+                            candidate.object_type == object.object_type
+                                && candidate.name == object.name
+                                && candidate.parent_name == object.parent_name
+                        }) {
+                            result_object.report_id = Some(report_id);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "schema object transfer report was not persisted")
                 }
             }
         }
@@ -14433,10 +15418,11 @@ mod tests {
         build_rename_table_column_statement, build_rename_table_index_statement,
         build_sqlite_add_column_statements, build_sqlite_create_index_statement,
         build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
-        build_sqlite_drop_index_statement, build_structured_filter_where, build_table_order_by,
-        build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
-        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_import_reader,
-        csv_import_row_selected, csv_import_source_columns, csv_record_values, data_compare_key,
+        build_sqlite_drop_index_statement, build_structured_filter_where,
+        build_table_data_transfer_object_plan, build_table_order_by, build_transfer_target_columns,
+        build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
+        csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
+        csv_import_source_columns, csv_record_values, data_compare_key,
         data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
         data_compare_row_values, delete_table_data_transfer_target_for_overwrite,
         ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
@@ -14447,20 +15433,20 @@ mod tests {
         generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
         infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
-        json_import_rows_with_cancel, normalized_table_data_transfer_project_id,
-        object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
-        object_type_is_view, order_postgres_views, overwrite_transfer_verification,
-        postgres_backup_index_definitions, postgres_backup_routine_definitions,
-        postgres_backup_routine_definitions_query, postgres_identity_reseed_plan_from_results,
-        postgres_identity_reseed_plan_query, postgres_identity_reseed_statements,
-        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
-        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
-        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
-        postgres_sequence_setval_sql, postgres_view_definition_query,
-        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
-        query_target, query_target_parameterized, read_csv_import_preview,
-        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_csv_import_row_range, resolve_csv_text_encoding,
+        json_import_rows_with_cancel, normalized_table_data_transfer_objects,
+        normalized_table_data_transfer_project_id, object_label_from_type,
+        object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
+        order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
+        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
+        postgres_identity_reseed_plan_from_results, postgres_identity_reseed_plan_query,
+        postgres_identity_reseed_statements, postgres_identity_reseed_verification_query,
+        postgres_materialized_view_populated_query, postgres_multirange_type_names,
+        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
+        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
+        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
+        push_delimited_export_row, query_target, query_target_parameterized,
+        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
+        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
         summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
@@ -14480,7 +15466,9 @@ mod tests {
         TableDataTransferColumnMapping, TableDataTransferCompatibility,
         TableDataTransferConfirmationBinding, TableDataTransferConversion,
         TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
-        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
+        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
+        TableDataTransferObjectSelection, TableDataTransferPreview,
+        TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
         TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
         TableExportWriterContext, TableExportWriterMessage, TableFilter,
@@ -14497,6 +15485,11 @@ mod tests {
         protocol::{
             ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement,
             QueryParameter, QueryResult, TableInfo,
+        },
+        schema_diff::{
+            finalize_schema_snapshot, SchemaObjectSnapshot, SchemaRelationSnapshot,
+            SchemaRoutineSnapshot, SchemaSequenceOwnerSnapshot, SchemaSnapshot,
+            SCHEMA_SNAPSHOT_VERSION,
         },
     };
     use anyhow::Result;
@@ -16346,6 +17339,285 @@ mod tests {
             table_data_transfer_report_id("transfer-test-0001"),
             "table-transfer-report-transfer-test-0001"
         );
+
+        let object_report = TableDataTransferObjectReport {
+            id: "object-report".to_string(),
+            project_id: "project-a".to_string(),
+            transfer_id: "transfer-test-0001-object-0".to_string(),
+            source_connection_id: "source".to_string(),
+            source_database: Some("app".to_string()),
+            source_schema: "public".to_string(),
+            target_connection_id: "target".to_string(),
+            target_database: Some("archive".to_string()),
+            target_schema: "public".to_string(),
+            object_type: TableDataTransferObjectKind::View,
+            name: "active_users".to_string(),
+            parent_name: None,
+            action: TableDataTransferObjectAction::Create,
+            plan_digest: digest,
+            status: TableDataTransferProgressStatus::Done,
+            started_at: 1,
+            finished_at: 2,
+            error: None,
+        };
+        let serialized = serde_json::to_value(object_report).unwrap();
+        assert!(serialized.get("statements").is_none());
+        assert!(serialized.get("sql").is_none());
+        assert!(serialized.get("parameters").is_none());
+    }
+
+    fn transfer_object_snapshot(
+        connection_id: &str,
+        schema: &str,
+        relations: Vec<SchemaRelationSnapshot>,
+        routines: Vec<SchemaRoutineSnapshot>,
+        schema_objects: Vec<SchemaObjectSnapshot>,
+    ) -> SchemaSnapshot {
+        finalize_schema_snapshot(SchemaSnapshot {
+            version: SCHEMA_SNAPSHOT_VERSION,
+            id: String::new(),
+            fingerprint: String::new(),
+            project_id: "project".to_string(),
+            connection_id: connection_id.to_string(),
+            connection_name: connection_id.to_string(),
+            driver: "postgres".to_string(),
+            database_name: Some("app".to_string()),
+            schema_name: schema.to_string(),
+            captured_at: 1,
+            relations,
+            routines,
+            schema_objects,
+            warnings: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    fn transfer_object_relation(
+        name: &str,
+        object_type: &str,
+        definition: Option<&str>,
+        dependencies: &[&str],
+    ) -> SchemaRelationSnapshot {
+        SchemaRelationSnapshot {
+            name: name.to_string(),
+            object_type: Some(object_type.to_string()),
+            comment: None,
+            definition: definition.map(ToString::to_string),
+            materialized_view_populated: None,
+            dependencies: dependencies
+                .iter()
+                .map(|dependency| dependency.to_string())
+                .collect(),
+            external_dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn schema_object_transfer_selection_is_bounded_and_parent_scoped() {
+        let triggers = normalized_table_data_transfer_objects(&[
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::Trigger,
+                name: "audit".to_string(),
+                parent_name: Some("users".to_string()),
+            },
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::Trigger,
+                name: "audit".to_string(),
+                parent_name: Some("orders".to_string()),
+            },
+        ])
+        .unwrap();
+        assert_eq!(triggers.len(), 2);
+        assert!(normalized_table_data_transfer_objects(&[
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::View,
+                name: "Active_Users".to_string(),
+                parent_name: None,
+            },
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::View,
+                name: "active_users".to_string(),
+                parent_name: None,
+            },
+        ])
+        .unwrap_err()
+        .contains("duplicate"));
+    }
+
+    #[test]
+    fn schema_object_transfer_builds_reviewed_postgres_view_and_sequence_ddl() {
+        let source = transfer_object_snapshot(
+            "source",
+            "app",
+            vec![
+                transfer_object_relation("users", "BASE TABLE", None, &[]),
+                transfer_object_relation(
+                    "active_users",
+                    "VIEW",
+                    Some("SELECT id FROM app.users"),
+                    &["users"],
+                ),
+            ],
+            Vec::new(),
+            vec![SchemaObjectSnapshot {
+                name: "users_id_seq".to_string(),
+                object_type: "SEQUENCE".to_string(),
+                parent_name: None,
+                description: None,
+                definition: Some(
+                    "CREATE SEQUENCE app.users_id_seq AS bigint INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1 NO CYCLE;"
+                        .to_string(),
+                ),
+                sequence_owner: Some(SchemaSequenceOwnerSnapshot {
+                    table_name: "users".to_string(),
+                    column_name: "id".to_string(),
+                }),
+                sequence_last_value: Some("41".to_string()),
+                dependencies: Vec::new(),
+            }],
+        );
+        let target = transfer_object_snapshot(
+            "target",
+            "archive",
+            vec![transfer_object_relation("users", "BASE TABLE", None, &[])],
+            Vec::new(),
+            Vec::new(),
+        );
+        let selections = vec![
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::Sequence,
+                name: "users_id_seq".to_string(),
+                parent_name: None,
+            },
+            TableDataTransferObjectSelection {
+                object_type: TableDataTransferObjectKind::View,
+                name: "active_users".to_string(),
+                parent_name: None,
+            },
+        ];
+
+        let plan = build_table_data_transfer_object_plan(&source, &target, &selections).unwrap();
+
+        assert_eq!(plan.preflights.len(), 2);
+        assert!(plan
+            .preflights
+            .iter()
+            .all(|preflight| preflight.can_execute));
+        let view = plan
+            .preflights
+            .iter()
+            .find(|preflight| preflight.name == "active_users")
+            .unwrap();
+        assert_eq!(view.action, TableDataTransferObjectAction::Create);
+        assert_eq!(view.depends_on, vec!["RELATION:users"]);
+        assert!(view
+            .statements
+            .iter()
+            .any(|sql| sql.contains("CREATE VIEW \"archive\".\"active_users\"")));
+        let sequence = plan
+            .preflights
+            .iter()
+            .find(|preflight| preflight.name == "users_id_seq")
+            .unwrap();
+        assert!(sequence
+            .statements
+            .iter()
+            .any(|sql| sql.contains("CREATE SEQUENCE")
+                && sql.contains("archive")
+                && sql.contains("users_id_seq")));
+        assert!(sequence
+            .statements
+            .iter()
+            .any(|sql| sql.contains("OWNED BY \"archive\".\"users\".\"id\"")));
+        assert!(sequence
+            .statements
+            .iter()
+            .any(|sql| sql.contains("setval") && sql.contains("41")));
+        assert_eq!(
+            plan.statements.len(),
+            view.statements.len() + sequence.statements.len()
+        );
+    }
+
+    #[test]
+    fn schema_object_transfer_skips_existing_and_blocks_unproven_dependencies() {
+        let existing_view = transfer_object_relation(
+            "active_users",
+            "VIEW",
+            Some("SELECT id FROM app.users"),
+            &["users"],
+        );
+        let source = transfer_object_snapshot(
+            "source",
+            "app",
+            vec![
+                transfer_object_relation("users", "BASE TABLE", None, &[]),
+                existing_view.clone(),
+            ],
+            Vec::new(),
+            vec![SchemaObjectSnapshot {
+                name: "audit".to_string(),
+                object_type: "TRIGGER".to_string(),
+                parent_name: Some("users".to_string()),
+                description: None,
+                definition: Some(
+                    "CREATE TRIGGER audit BEFORE UPDATE ON app.users FOR EACH ROW EXECUTE FUNCTION app.touch()"
+                        .to_string(),
+                ),
+                sequence_owner: None,
+                sequence_last_value: None,
+                dependencies: vec!["touch".to_string()],
+            }],
+        );
+        let target = transfer_object_snapshot(
+            "target",
+            "archive",
+            vec![
+                transfer_object_relation("users", "BASE TABLE", None, &[]),
+                existing_view,
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let plan = build_table_data_transfer_object_plan(
+            &source,
+            &target,
+            &[
+                TableDataTransferObjectSelection {
+                    object_type: TableDataTransferObjectKind::View,
+                    name: "active_users".to_string(),
+                    parent_name: None,
+                },
+                TableDataTransferObjectSelection {
+                    object_type: TableDataTransferObjectKind::Trigger,
+                    name: "audit".to_string(),
+                    parent_name: Some("users".to_string()),
+                },
+            ],
+        )
+        .unwrap();
+
+        let existing = plan
+            .preflights
+            .iter()
+            .find(|preflight| preflight.name == "active_users")
+            .unwrap();
+        assert_eq!(existing.action, TableDataTransferObjectAction::SkipExisting);
+        let trigger = plan
+            .preflights
+            .iter()
+            .find(|preflight| preflight.name == "audit")
+            .unwrap();
+        assert_eq!(trigger.action, TableDataTransferObjectAction::Blocked);
+        assert!(trigger
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("touch")));
+        assert!(plan.statements.is_empty());
     }
 
     #[test]
@@ -16360,6 +17632,7 @@ mod tests {
             target_database: None,
             target_schema: "public".to_string(),
             tables: vec!["orders".to_string(), "users".to_string()],
+            objects: Vec::new(),
             mode: TableDataTransferMode::Append,
             max_rows: None,
             batch_size: None,

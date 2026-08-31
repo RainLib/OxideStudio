@@ -31,15 +31,20 @@ import { ensureConnectionReady, type ConnectionConfig } from "@/store/useConnect
 import { databaseService, schemaService, tableService } from "@/services/tauri";
 import type {
   DatabaseCapabilities,
+  FunctionInfo,
+  SchemaObjectInfo,
   TableDataTransferBatchExecuteRequest,
   TableDataTransferBatchPlan,
   TableDataTransferEndpoint,
   TableDataTransferMode,
+  TableDataTransferObjectKind,
+  TableDataTransferObjectSelection,
   TableDataTransferProgress,
   TableDataTransferPreview,
   TableDataTransferReport,
   TableDataTransferTargetPlan,
   TableDataTransferTargetPlanRequest,
+  TableInfo,
 } from "@/services/tauri/types";
 
 interface TableDataTransferDialogProps {
@@ -141,6 +146,71 @@ function supportsPostgresIdentityReseed(driver: string | undefined) {
   );
 }
 
+const transferObjectKindOrder: TableDataTransferObjectKind[] = [
+  "SEQUENCE",
+  "VIEW",
+  "MATERIALIZED_VIEW",
+  "FUNCTION",
+  "PROCEDURE",
+  "TRIGGER",
+  "EVENT",
+];
+
+function transferObjectKey(object: TableDataTransferObjectSelection) {
+  return `${object.objectType}:${object.parentName || ""}:${object.name}`;
+}
+
+export function buildTransferObjectInventory(
+  relations: TableInfo[],
+  routines: FunctionInfo[],
+  descriptors: SchemaObjectInfo[],
+): TableDataTransferObjectSelection[] {
+  const inventory: TableDataTransferObjectSelection[] = [];
+  for (const relation of relations) {
+    const objectType = relation.type?.trim().toLocaleUpperCase() || "";
+    if (objectType.includes("MATERIALIZED") && objectType.includes("VIEW")) {
+      inventory.push({ objectType: "MATERIALIZED_VIEW", name: relation.name });
+    } else if (objectType.includes("VIEW")) {
+      inventory.push({ objectType: "VIEW", name: relation.name });
+    }
+  }
+  for (const routine of routines) {
+    inventory.push({
+      objectType: routine.routine_type?.toLocaleLowerCase() === "procedure"
+        ? "PROCEDURE"
+        : "FUNCTION",
+      name: routine.name,
+    });
+  }
+  const descriptorKinds = new Map<string, TableDataTransferObjectKind>([
+    ["TRIGGER", "TRIGGER"],
+    ["SEQUENCE", "SEQUENCE"],
+    ["EVENT", "EVENT"],
+  ]);
+  for (const descriptor of descriptors) {
+    const objectType = descriptorKinds.get(
+      descriptor.objectType.trim().toLocaleUpperCase().replace(/ /g, "_"),
+    );
+    if (!objectType) continue;
+    inventory.push({
+      objectType,
+      name: descriptor.name,
+      parentName: descriptor.parentName || undefined,
+    });
+  }
+  const unique = new Map(
+    inventory.map((object) => [transferObjectKey(object), object]),
+  );
+  return [...unique.values()].sort((left, right) => {
+    const kindOrder = transferObjectKindOrder.indexOf(left.objectType) -
+      transferObjectKindOrder.indexOf(right.objectType);
+    if (kindOrder !== 0) return kindOrder;
+    return `${left.parentName || ""}:${left.name}`.localeCompare(
+      `${right.parentName || ""}:${right.name}`,
+    );
+  });
+}
+
 /**
  * A transfer report is deliberately not an executable job. It can only seed a
  * fresh review when this dialog is still opened for the same source relation;
@@ -197,6 +267,13 @@ export function TableDataTransferDialog({
   const [isSchemasLoading, setIsSchemasLoading] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
+  const [sourceTransferObjects, setSourceTransferObjects] = useState<
+    TableDataTransferObjectSelection[]
+  >([]);
+  const [selectedTransferObjectKeys, setSelectedTransferObjectKeys] = useState<
+    Set<string>
+  >(() => new Set());
+  const [isSourceObjectsLoading, setIsSourceObjectsLoading] = useState(false);
   const [activeSourceSchema, setActiveSourceSchema] = useState(source.schema);
   const [selectedSourceTables, setSelectedSourceTables] = useState<Set<string>>(
     () =>
@@ -261,22 +338,73 @@ export function TableDataTransferDialog({
     () => ({ ...source, schema: activeSourceSchema, table: selectedSourceTable }),
     [activeSourceSchema, selectedSourceTable, source],
   );
-  const isBatchTransfer = selectedSourceTables.size > 1;
+  const selectedTransferObjects = useMemo(
+    () => sourceTransferObjects.filter((object) =>
+      selectedTransferObjectKeys.has(transferObjectKey(object))),
+    [selectedTransferObjectKeys, sourceTransferObjects],
+  );
+  const isBatchTransfer =
+    selectedSourceTables.size > 1 || selectedTransferObjects.length > 0;
+  const sourceTransferObjectGroups = useMemo(
+    () => transferObjectKindOrder
+      .map((kind) => ({
+        kind,
+        objects: sourceTransferObjects.filter(
+          (object) => object.objectType === kind,
+        ),
+      }))
+      .filter((group) => group.objects.length > 0),
+    [sourceTransferObjects],
+  );
 
   useEffect(() => {
     if (!open || !sourceSupportsTransfer) return;
     let cancelled = false;
+    setIsSourceObjectsLoading(true);
     void (async () => {
       try {
         const readiness = await ensureConnectionReady(source.connectionId);
         if (readiness.status !== "ready" || cancelled) return;
-        const items = source.database
-          ? await schemaService.getDatabaseTables(
+        const relationRequest = source.database
+          ? schemaService.getDatabaseTables(
               source.connectionId,
               source.database,
               activeSourceSchema,
             )
-          : await schemaService.getTables(source.connectionId, activeSourceSchema);
+          : schemaService.getTables(source.connectionId, activeSourceSchema);
+        const routineRequest = source.database &&
+          typeof schemaService.getDatabaseFunctions === "function"
+          ? schemaService
+              .getDatabaseFunctions(
+                source.connectionId,
+                source.database,
+                activeSourceSchema,
+              )
+              .catch(() => [])
+          : typeof schemaService.getFunctions === "function"
+            ? schemaService
+                .getFunctions(source.connectionId, activeSourceSchema)
+                .catch(() => [])
+            : Promise.resolve([] as FunctionInfo[]);
+        const descriptorRequest = source.database &&
+          typeof schemaService.getDatabaseSchemaObjects === "function"
+          ? schemaService
+              .getDatabaseSchemaObjects(
+                source.connectionId,
+                source.database,
+                activeSourceSchema,
+              )
+              .catch(() => [])
+          : typeof schemaService.getSchemaObjects === "function"
+            ? schemaService
+                .getSchemaObjects(source.connectionId, activeSourceSchema)
+                .catch(() => [])
+            : Promise.resolve([] as SchemaObjectInfo[]);
+        const [items, routines, descriptors] = await Promise.all([
+          relationRequest,
+          routineRequest,
+          descriptorRequest,
+        ]);
         if (cancelled) return;
         const names = items
           .filter((item) => !item.type?.toUpperCase().includes("VIEW"))
@@ -287,6 +415,16 @@ export function TableDataTransferDialog({
             ? source.table
             : names[0];
         setSourceTables(names);
+        const nextObjects = buildTransferObjectInventory(
+          items,
+          routines,
+          descriptors,
+        );
+        setSourceTransferObjects(nextObjects);
+        setSelectedTransferObjectKeys((current) => {
+          const available = new Set(nextObjects.map(transferObjectKey));
+          return new Set([...current].filter((key) => available.has(key)));
+        });
         setSelectedSourceTables((current) => {
           return resolveInitialTransferTableSelection({
             availableTables: names,
@@ -303,7 +441,11 @@ export function TableDataTransferDialog({
         if (!cancelled && activeSourceSchema === source.schema) {
           setSourceTables([source.table]);
           setSelectedSourceTables(new Set([source.table]));
+          setSourceTransferObjects([]);
+          setSelectedTransferObjectKeys(new Set());
         }
+      } finally {
+        if (!cancelled) setIsSourceObjectsLoading(false);
       }
     })();
     return () => {
@@ -371,7 +513,10 @@ export function TableDataTransferDialog({
     targetTable,
   ]);
   const batchRequest = useMemo<TableDataTransferBatchExecuteRequest | null>(() => {
-    if (!targetConnection || selectedSourceTables.size < 2) return null;
+    if (
+      !targetConnection ||
+      (selectedSourceTables.size < 2 && selectedTransferObjects.length === 0)
+    ) return null;
     return {
       projectId: projectId || undefined,
       transferId,
@@ -387,6 +532,7 @@ export function TableDataTransferDialog({
         tables: [...selectedSourceTables].sort((left, right) =>
           left.localeCompare(right),
         ),
+        objects: selectedTransferObjects,
         mode,
         maxRows: Number.parseInt(maxRows, 10) || undefined,
         batchSize: Number.parseInt(batchSize, 10) || undefined,
@@ -400,6 +546,7 @@ export function TableDataTransferDialog({
     reseedIdentity,
     projectId,
     selectedSourceTables,
+    selectedTransferObjects,
     effectiveSource,
     targetConnection,
     targetDatabase,
@@ -479,6 +626,8 @@ export function TableDataTransferDialog({
     setTargetDistribution(null);
     setTables([]);
     setSourceTables([]);
+    setSourceTransferObjects([]);
+    setSelectedTransferObjectKeys(new Set());
     setSelectedSourceTables(
       new Set(initialSourceTables?.length ? initialSourceTables : [source.table]),
     );
@@ -943,7 +1092,28 @@ export function TableDataTransferDialog({
     setSelectedSourceTables((current) => {
       const next = new Set(current);
       if (checked) next.add(table);
-      else if (next.size > 1) next.delete(table);
+      else if (next.size > 1 || selectedTransferObjects.length > 0) {
+        next.delete(table);
+      }
+      return next;
+    });
+    resetTransferReview();
+    setError(null);
+  };
+
+  const toggleTransferObject = (
+    object: TableDataTransferObjectSelection,
+    checked: boolean,
+  ) => {
+    setTargetTableMode("existing");
+    setTargetPlan(null);
+    setTargetPlanPreviewKey("");
+    setTargetPlanConfirmation("");
+    setSelectedTransferObjectKeys((current) => {
+      const key = transferObjectKey(object);
+      const next = new Set(current);
+      if (checked) next.add(key);
+      else if (next.size > 1 || selectedSourceTables.size > 0) next.delete(key);
       return next;
     });
     resetTransferReview();
@@ -1174,6 +1344,8 @@ export function TableDataTransferDialog({
                     setActiveSourceSchema(nextSchema);
                     setSourceTables([]);
                     setSelectedSourceTables(new Set());
+                    setSourceTransferObjects([]);
+                    setSelectedTransferObjectKeys(new Set());
                     resetTransferReview();
                     setError(null);
                   }}
@@ -1212,12 +1384,89 @@ export function TableDataTransferDialog({
                         onCheckedChange={(checked) =>
                           toggleSourceTable(table, checked === true)
                         }
-                        disabled={isSubmitting || (selectedSourceTables.size === 1 && selectedSourceTables.has(table))}
+                        disabled={
+                          isSubmitting ||
+                          (selectedSourceTables.size === 1 &&
+                            selectedSourceTables.has(table) &&
+                            selectedTransferObjects.length === 0)
+                        }
                       />
                       <span className="truncate" title={table}>{table}</span>
                     </label>
                   ))}
                 </div>
+              </div>
+            )}
+            {(isSourceObjectsLoading || sourceTransferObjectGroups.length > 0) && (
+              <div
+                className="space-y-2 border-b border-[hsl(var(--wb-border-subtle))] pb-3"
+                data-transfer-object-selector
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[10px] font-medium">Schema objects</div>
+                    <p className="mt-0.5 text-[9px] leading-4 wb-muted">
+                      Optional, explicit selection. Existing target objects are
+                      skipped; they are never silently replaced.
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-[9px] wb-muted">
+                    {selectedTransferObjects.length} selected
+                  </span>
+                </div>
+                {isSourceObjectsLoading && sourceTransferObjectGroups.length === 0 ? (
+                  <div className="flex items-center gap-1.5 text-[9px] wb-muted">
+                    <Loader2 size={11} className="animate-spin" />
+                    Reading object catalog…
+                  </div>
+                ) : (
+                  <div className="custom-scrollbar max-h-40 space-y-2 overflow-auto pr-1">
+                    {sourceTransferObjectGroups.map((group) => (
+                      <div key={group.kind} className="space-y-1">
+                        <div className="text-[9px] font-medium tracking-wide wb-muted">
+                          {group.kind.replace(/_/g, " ")}
+                        </div>
+                        {group.objects.map((object) => {
+                          const key = transferObjectKey(object);
+                          const checked = selectedTransferObjectKeys.has(key);
+                          return (
+                            <label
+                              key={key}
+                              className="flex cursor-pointer items-center gap-1.5 text-[10px]"
+                            >
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={(nextChecked) =>
+                                  toggleTransferObject(
+                                    object,
+                                    nextChecked === true,
+                                  )
+                                }
+                                disabled={
+                                  isSubmitting ||
+                                  (checked &&
+                                    selectedTransferObjects.length === 1 &&
+                                    selectedSourceTables.size === 0)
+                                }
+                              />
+                              <span className="min-w-0 truncate" title={key}>
+                                {object.parentName
+                                  ? `${object.parentName}.${object.name}`
+                                  : object.name}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[9px] leading-4 wb-muted">
+                  Native PostgreSQL objects use catalog-built DDL and the same
+                  transaction as table data. Other driver families remain
+                  visible in review but are blocked until their DDL execution
+                  contract is verified.
+                </p>
               </div>
             )}
             <label className={settingsRowClass}>
@@ -1638,6 +1887,66 @@ export function TableDataTransferDialog({
                       })}
                     </div>
                   </div>
+                  {(batchPlan.objectPreflights?.length || 0) > 0 && (
+                    <div
+                      className="rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2"
+                      data-transfer-object-review
+                    >
+                      <div className="mb-1 font-medium">
+                        {batchPlan.objectPreflights?.length} schema object(s)
+                      </div>
+                      <div className="custom-scrollbar max-h-56 space-y-1 overflow-auto font-mono leading-4">
+                        {batchPlan.objectPreflights?.map((object) => (
+                          <div
+                            key={`${object.objectType}:${object.parentName || ""}:${object.name}`}
+                            className="border-b border-[hsl(var(--wb-border-subtle))] py-1.5 last:border-b-0"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate">
+                                {object.objectType.replace(/_/g, " ")} · {object.parentName ? `${object.parentName}.` : ""}{object.name}
+                              </span>
+                              <span
+                                className={
+                                  object.action === "create"
+                                    ? "text-[hsl(var(--wb-success))]"
+                                    : object.action === "skipExisting"
+                                      ? "wb-muted"
+                                      : "text-[hsl(var(--destructive))]"
+                                }
+                              >
+                                {object.action === "skipExisting"
+                                  ? "skip existing"
+                                  : object.action}
+                              </span>
+                            </div>
+                            {object.dependsOn.length > 0 && (
+                              <div className="truncate text-[9px] wb-muted">
+                                depends on {object.dependsOn.join(", ")}
+                              </div>
+                            )}
+                            {object.statements.length > 0 && (
+                              <details className="mt-1 text-[9px] wb-muted">
+                                <summary className="cursor-pointer select-none">
+                                  Review {object.statements.length} DDL statement(s)
+                                </summary>
+                                <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded-[3px] bg-[hsl(var(--wb-panel))] p-1.5">
+                                  {object.statements.join("\n\n")}
+                                </pre>
+                              </details>
+                            )}
+                            {object.warnings.map((warning) => (
+                              <div
+                                key={warning}
+                                className={object.canExecute ? "text-[9px] wb-muted" : "text-[9px] text-[hsl(var(--destructive))]"}
+                              >
+                                {warning}
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {batchPlan.cyclicTables.length > 0 && (
                     <p className="leading-4 text-[hsl(var(--destructive))]">
                       Foreign-key cycle: {batchPlan.cyclicTables.join(", ")}. This target driver has no reviewed deferred-constraints policy.
@@ -1830,7 +2139,7 @@ export function TableDataTransferDialog({
             </Button>
           ) : (
             <Button type="button" size="sm" className="h-7 text-[11px]" onClick={() => void handleTransfer()} disabled={!canExecute}>
-              {isSubmitting ? <Loader2 size={13} className="animate-spin" /> : isBatchTransfer ? "Transfer selected tables" : mode === "overwrite" ? "Replace target rows" : mode === "upsert" ? "Upsert rows" : "Append rows"}
+              {isSubmitting ? <Loader2 size={13} className="animate-spin" /> : isBatchTransfer ? "Transfer selected items" : mode === "overwrite" ? "Replace target rows" : mode === "upsert" ? "Upsert rows" : "Append rows"}
             </Button>
           )}
           </div>

@@ -988,10 +988,42 @@ export interface TableDataTransferBatchPlanRequest {
   targetDatabase?: string;
   targetSchema: string;
   tables: string[];
+  /** Explicit non-table objects; tables remain in the separate ordered list. */
+  objects?: TableDataTransferObjectSelection[];
   mode?: TableDataTransferMode;
   maxRows?: number;
   batchSize?: number;
   reseedIdentity?: boolean;
+}
+
+export type TableDataTransferObjectKind =
+  | "VIEW"
+  | "MATERIALIZED_VIEW"
+  | "FUNCTION"
+  | "PROCEDURE"
+  | "TRIGGER"
+  | "SEQUENCE"
+  | "EVENT";
+
+export interface TableDataTransferObjectSelection {
+  objectType: TableDataTransferObjectKind;
+  name: string;
+  parentName?: string | null;
+}
+
+export type TableDataTransferObjectAction =
+  | "create"
+  | "skipExisting"
+  | "blocked";
+
+export interface TableDataTransferObjectPreflight
+  extends TableDataTransferObjectSelection {
+  action: TableDataTransferObjectAction;
+  canExecute: boolean;
+  statements: string[];
+  planDigest?: string | null;
+  dependsOn: string[];
+  warnings: string[];
 }
 
 export interface TableDataTransferDependency {
@@ -1016,6 +1048,7 @@ export interface TableDataTransferBatchPlan {
   dependencies: TableDataTransferDependency[];
   cyclicTables: string[];
   tablePreflights: TableDataTransferBatchTablePreflight[];
+  objectPreflights?: TableDataTransferObjectPreflight[];
   /**
    * True only when the FK graph and every table mapping are executable. The
    * native executor still rebuilds this plan before opening its transaction.
@@ -1048,6 +1081,10 @@ export interface TableDataTransferBatchResult {
   batches: number;
   limitReached: boolean;
   tables: TableDataTransferBatchTableResult[];
+  objects?: Array<TableDataTransferObjectSelection & {
+    action: TableDataTransferObjectAction;
+    reportId?: string | null;
+  }>;
 }
 
 export type TableDataTransferCompatibility =

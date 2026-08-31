@@ -225,6 +225,16 @@ explicit deferred validation task rather than an implicit release check.
 - Verify per-table terminal reports contain only endpoint identifiers,
   counts, status, and plan digests; they must never persist credentials, URLs,
   SQL, bound parameters, or row values.
+- For PostgreSQL, select sequences, views, materialized views, routines and
+  triggers with both complete and missing dependencies. Verify the preview
+  order, existing-target `skipExisting` behavior, stale snapshot rejection,
+  and that object DDL executes after row copy but before the shared commit.
+  Inject object-DDL failure and confirm all copied rows and newly created
+  objects roll back together.
+- Verify every selected object receives a terminal report ID and the durable
+  report contains only namespace/object identities, action, status and plan
+  digest. It must not contain generated DDL, driver error text, parameters,
+  credentials or copied values.
 - Verify progress totals, cancellation propagation to the source query, and
   Explorer batch-selection behavior (including a target schema with one
   missing same-named table and a selection changed after preview).
@@ -260,9 +270,9 @@ explicit deferred validation task rather than an implicit release check.
 - Run append baseline and overwrite post-commit verification tests under
   concurrent target writers; append must remain `needs review` until a stable
   baseline is implemented.
-- Test identity/sequence reseed planning and schema-object transfer only after
-  a product-specific capability contract and source-DDL conformance fixture
-  exist.
+- Extend schema-object transfer beyond native PostgreSQL only after each
+  product has a source-DDL conformance fixture, dependency contract and an
+  explicit transactional or compensating execution policy.
 
 ## Connection configuration import
 

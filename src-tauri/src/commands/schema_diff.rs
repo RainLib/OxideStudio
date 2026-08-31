@@ -1105,7 +1105,7 @@ pub async fn capture_schema_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn capture_schema_snapshot_inner(
+pub(crate) async fn capture_schema_snapshot_inner(
     manager: &ConnectionManager,
     project_id: String,
     connection_id: String,

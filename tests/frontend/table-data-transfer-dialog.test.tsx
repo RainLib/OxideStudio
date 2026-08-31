@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildTransferObjectInventory,
   canRetryTableDataTransferReport,
   canExecuteTableDataTransfer,
   supportsBoundedTableDataTransfer,
@@ -26,10 +27,16 @@ const mocks = vi.hoisted(() => ({
   getDatabaseSchemas: vi.fn(),
   getTables: vi.fn(),
   getDatabaseTables: vi.fn(),
+  getFunctions: vi.fn(),
+  getDatabaseFunctions: vi.fn(),
+  getSchemaObjects: vi.fn(),
+  getDatabaseSchemaObjects: vi.fn(),
   previewTableDataTransfer: vi.fn(),
+  previewTableDataTransferBatchPlan: vi.fn(),
   previewTableDataTransferTarget: vi.fn(),
   createTableDataTransferTarget: vi.fn(),
   executeTableDataTransfer: vi.fn(),
+  executeTableDataTransferBatch: vi.fn(),
   cancelTableDataTransfer: vi.fn(),
   listTableDataTransferReports: vi.fn(),
   listenTableDataTransferProgress: vi.fn(),
@@ -49,12 +56,18 @@ vi.mock("@/services/tauri", () => ({
     getDatabaseSchemas: mocks.getDatabaseSchemas,
     getTables: mocks.getTables,
     getDatabaseTables: mocks.getDatabaseTables,
+    getFunctions: mocks.getFunctions,
+    getDatabaseFunctions: mocks.getDatabaseFunctions,
+    getSchemaObjects: mocks.getSchemaObjects,
+    getDatabaseSchemaObjects: mocks.getDatabaseSchemaObjects,
   },
   tableService: {
     previewTableDataTransfer: mocks.previewTableDataTransfer,
+    previewTableDataTransferBatchPlan: mocks.previewTableDataTransferBatchPlan,
     previewTableDataTransferTarget: mocks.previewTableDataTransferTarget,
     createTableDataTransferTarget: mocks.createTableDataTransferTarget,
     executeTableDataTransfer: mocks.executeTableDataTransfer,
+    executeTableDataTransferBatch: mocks.executeTableDataTransferBatch,
     cancelTableDataTransfer: mocks.cancelTableDataTransfer,
     listTableDataTransferReports: mocks.listTableDataTransferReports,
     listenTableDataTransferProgress: mocks.listenTableDataTransferProgress,
@@ -77,10 +90,57 @@ describe("TableDataTransferDialog", () => {
     ]);
     mocks.getSchemas.mockResolvedValue(["public"]);
     mocks.getTables.mockResolvedValue([{ name: "users_copy", type: "BASE TABLE" }]);
+    mocks.getFunctions.mockResolvedValue([]);
+    mocks.getDatabaseFunctions.mockResolvedValue([]);
+    mocks.getSchemaObjects.mockResolvedValue([]);
+    mocks.getDatabaseSchemaObjects.mockResolvedValue([]);
     mocks.listenTableDataTransferProgress.mockResolvedValue(vi.fn());
     mocks.listTableDataTransferReports.mockResolvedValue([]);
     container = document.createElement("div");
     document.body.append(container);
+  });
+
+  it("builds a stable dependency-first schema-object inventory", () => {
+    expect(
+      buildTransferObjectInventory(
+        [
+          { name: "users", type: "BASE TABLE" },
+          { name: "active_users", type: "VIEW" },
+          { name: "daily_users", type: "MATERIALIZED VIEW" },
+        ],
+        [
+          {
+            name: "refresh_users",
+            routine_type: "procedure",
+            parameters: [],
+            return_type: "void",
+          },
+          {
+            name: "normalize_user",
+            routine_type: "function",
+            parameters: [],
+            return_type: "text",
+          },
+        ],
+        [
+          { name: "users_id_seq", objectType: "SEQUENCE" },
+          {
+            name: "users_audit",
+            objectType: "TRIGGER",
+            parentName: "users",
+          },
+          { name: "users_id_seq", objectType: "SEQUENCE" },
+          { name: "ignored", objectType: "DOMAIN" },
+        ],
+      ),
+    ).toEqual([
+      { objectType: "SEQUENCE", name: "users_id_seq", parentName: undefined },
+      { objectType: "VIEW", name: "active_users" },
+      { objectType: "MATERIALIZED_VIEW", name: "daily_users" },
+      { objectType: "FUNCTION", name: "normalize_user" },
+      { objectType: "PROCEDURE", name: "refresh_users" },
+      { objectType: "TRIGGER", name: "users_audit", parentName: "users" },
+    ]);
   });
 
   afterEach(() => {
@@ -545,7 +605,12 @@ describe("TableDataTransferDialog", () => {
       expect(document.body.textContent).toContain("Transfer schema data");
       expect(document.body.textContent).toContain("2 selected");
     });
-    expect(document.body.textContent).not.toContain("users_view");
+    expect(
+      document.body.querySelector("[data-transfer-object-selector]")?.textContent,
+    ).toContain("users_view");
+    expect(
+      document.body.querySelector("[data-transfer-object-selector]")?.textContent,
+    ).toContain("0 selected");
   });
 
   it("keeps database-level transfer scoped to one explicitly selected source schema", async () => {
