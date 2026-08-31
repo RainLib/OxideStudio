@@ -61,3 +61,52 @@ describe("MongoDB shell query safety", () => {
     expect(classifyAiQuerySafety(source, "mongodb")).toBe("read");
   });
 });
+
+describe("Elasticsearch Console query safety", () => {
+  it("recognizes the complete read-only REST endpoint set", () => {
+    for (const request of [
+      "POST /orders/_field_caps",
+      "POST /orders/_terms_enum",
+      "POST /orders/_validate/query",
+      "POST /orders/_explain/42",
+      "POST /orders/_rank_eval",
+      "POST /orders/_search_shards",
+      "POST /_sql/translate",
+      "POST /orders/_eql/search",
+      "OPTIONS /orders/_search",
+    ]) {
+      expect(classifyAiQuerySafety(request, "elasticsearch"), request).toBe(
+        "read",
+      );
+    }
+  });
+
+  it("uses the highest risk across multiple Console requests", () => {
+    expect(
+      classifyAiQuerySafety(
+        "GET /orders/_search\n{}\n\nPOST /orders/_update/42\n{\"doc\":{\"active\":true}}",
+        "elasticsearch",
+      ),
+    ).toBe("write");
+    expect(
+      classifyAiQuerySafety(
+        "GET /orders/_search\n{}\n\nPOST /orders/_delete_by_query\n{\"query\":{\"match_all\":{}}}",
+        "elasticsearch",
+      ),
+    ).toBe("destructive");
+  });
+
+  it("ignores commented request lines and fails closed for unknown POST actions", () => {
+    const source = `
+      /* POST /orders/_delete_by_query */
+      // DELETE /orders
+      # POST /_bulk
+      POST /orders/_search
+      {"query":{"match":{"note":"POST /_bulk"}}}
+    `;
+    expect(classifyAiQuerySafety(source, "elasticsearch")).toBe("read");
+    expect(
+      classifyAiQuerySafety("POST /_cluster/reroute\n{}", "elasticsearch"),
+    ).toBe("destructive");
+  });
+});

@@ -40,6 +40,7 @@ export interface ElasticsearchConsoleCompletionContext {
   operation?: string;
   ownerKey?: string;
   valueKey?: string;
+  hasKeySeparator?: boolean;
 }
 
 export interface ElasticsearchConsoleRequestContext {
@@ -87,6 +88,50 @@ type ElasticsearchHttpMethod = (typeof HTTP_METHODS)[number];
 type ElasticsearchOperationCompletion = ElasticsearchConsoleCompletion & {
   methods: readonly ElasticsearchHttpMethod[];
 };
+
+export interface ElasticsearchCompletionReplacementRange {
+  startOffset: number;
+  endOffset: number;
+  quoted: boolean;
+}
+
+/**
+ * Returns the complete JSON key token around the caret, including an
+ * auto-closed or existing suffix quote. Monaco can then replace the key as one
+ * unit instead of leaving a duplicate quote or half of the old identifier.
+ */
+export function elasticsearchJsonKeyReplacementRange(
+  source: string,
+  cursorOffset: number,
+): ElasticsearchCompletionReplacementRange | null {
+  const cursor = Math.max(0, Math.min(cursorOffset, source.length));
+  const lineStart = source.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
+  const lineEndIndex = source.indexOf("\n", cursor);
+  const lineEnd = lineEndIndex === -1 ? source.length : lineEndIndex;
+  const beforeCursor = source.slice(lineStart, cursor);
+  const fragment = beforeCursor.match(/"[\w.@*-]*$|[\w.@*-]+$/u)?.[0];
+  if (!fragment) return null;
+
+  let endOffset = cursor;
+  while (endOffset < lineEnd && /[\w.@*-]/u.test(source[endOffset] || "")) {
+    endOffset += 1;
+  }
+  const quoted = fragment.startsWith('"');
+  if (quoted && source[endOffset] === '"') endOffset += 1;
+  return {
+    startOffset: cursor - fragment.length,
+    endOffset,
+    quoted,
+  };
+}
+
+function hasElasticsearchJsonKeySeparator(source: string, cursorOffset: number) {
+  const range = elasticsearchJsonKeyReplacementRange(source, cursorOffset);
+  if (!range?.quoted) return false;
+  let offset = range.endOffset;
+  while (source[offset] === " " || source[offset] === "\t") offset += 1;
+  return source[offset] === ":";
+}
 
 const SEARCH_REQUEST_BODY = `{
   "query": {
@@ -998,7 +1043,7 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
     | { version: number; disposables: Array<{ dispose: () => void }> }
     | Array<{ dispose: () => void }>
     | undefined;
-  const registrationVersion = 3;
+  const registrationVersion = 4;
   if (
     !Array.isArray(previousRegistration) &&
     previousRegistration?.version === registrationVersion
@@ -1088,10 +1133,22 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
         const pathMatch = lineBeforeCursor.match(
           /^(\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+)(.*)$/i,
         );
-        const lineAfterCursor = model
-          .getLineContent(position.lineNumber)
-          .slice(position.column - 1);
         const keyFragment = lineBeforeCursor.match(/"[\w.@*-]*"?$/u)?.[0];
+        const keyReplacement = elasticsearchJsonKeyReplacementRange(
+          model.getValue(),
+          offset,
+        );
+        const keyReplacementRange = keyReplacement
+          ? {
+              startLineNumber: model.getPositionAt(keyReplacement.startOffset)
+                .lineNumber,
+              startColumn: model.getPositionAt(keyReplacement.startOffset)
+                .column,
+              endLineNumber: model.getPositionAt(keyReplacement.endOffset)
+                .lineNumber,
+              endColumn: model.getPositionAt(keyReplacement.endOffset).column,
+            }
+          : null;
         const completionContext = elasticsearchConsoleCompletionContext(
           model.getValue(),
           offset,
@@ -1134,23 +1191,16 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
                   startColumn: pathMatch[1]!.length + 1,
                   endColumn: position.column,
                 }
-              : completion.kind === "property" && keyFragment
-                ? {
-                    ...defaultRange,
-                    startColumn:
-                      lineBeforeCursor.length - keyFragment.length + 1,
-                    endColumn:
-                      !keyFragment.endsWith('"') &&
-                      lineAfterCursor.startsWith('"')
-                        ? position.column + 1
-                        : position.column,
-                  }
+              : completion.kind === "property" && keyReplacementRange
+                ? keyReplacementRange
                 : defaultRange,
             sortText: String(index).padStart(3, "0"),
             filterText:
               completionContext.area === "path"
                 ? `${pathText}${completion.label}`
-                : completion.label,
+                : keyFragment?.startsWith('"')
+                  ? `"${completion.label}"`
+                  : completion.label,
             insertTextRules:
               monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
           })),
@@ -2089,6 +2139,9 @@ export function elasticsearchConsoleCompletionContext(
     !scan.inString && scan.previous === '"' && scan.lastClosedStringWasKey
       ? currentObject?.lastKey || scan.typed
       : scan.typed;
+  const hasKeySeparator = keyPosition
+    ? hasElasticsearchJsonKeySeparator(source, boundedOffset)
+    : false;
 
   if (!keyPosition) {
     return {
@@ -2099,27 +2152,27 @@ export function elasticsearchConsoleCompletionContext(
     };
   }
   if (!ownerKey) {
-    return { area: "top-level", typed };
+    return { area: "top-level", typed, hasKeySeparator };
   }
   if (ownerKey === "query" || QUERY_ARRAY_KEYS.has(ownerKey)) {
-    return { area: "query-clause", typed, ownerKey };
+    return { area: "query-clause", typed, ownerKey, hasKeySeparator };
   }
   if (ownerKey === "bool") {
-    return { area: "bool-clause", typed, ownerKey };
+    return { area: "bool-clause", typed, ownerKey, hasKeySeparator };
   }
   if (ownerKey === "aggs" || ownerKey === "aggregations") {
-    return { area: "aggregation-name", typed, ownerKey };
+    return { area: "aggregation-name", typed, ownerKey, hasKeySeparator };
   }
   if (
     parentObject?.ownerKey === "aggs" ||
     parentObject?.ownerKey === "aggregations"
   ) {
-    return { area: "aggregation-type", typed, ownerKey };
+    return { area: "aggregation-type", typed, ownerKey, hasKeySeparator };
   }
   if (FIELD_OBJECT_KEYS.has(ownerKey)) {
-    return { area: "field-name", typed, ownerKey };
+    return { area: "field-name", typed, ownerKey, hasKeySeparator };
   }
-  return { area: "unknown", typed, ownerKey };
+  return { area: "unknown", typed, ownerKey, hasKeySeparator };
 }
 
 /**
@@ -2222,16 +2275,25 @@ function elasticsearchConsoleCompletionsForContext(
     );
   }
   if (context.area === "query-clause") {
-    return filterVersionedQueryCompletions(QUERY_CLAUSE_COMPLETIONS, version);
+    return withoutExistingElasticsearchKeyValue(
+      filterVersionedQueryCompletions(QUERY_CLAUSE_COMPLETIONS, version),
+      context,
+    );
   }
   if (context.area === "bool-clause") {
-    return BOOL_CLAUSE_COMPLETIONS;
+    return withoutExistingElasticsearchKeyValue(
+      BOOL_CLAUSE_COMPLETIONS,
+      context,
+    );
   }
   if (context.area === "aggregation-name") {
     return AGGREGATION_NAME_COMPLETIONS;
   }
   if (context.area === "aggregation-type") {
-    return AGGREGATION_TYPE_COMPLETIONS;
+    return withoutExistingElasticsearchKeyValue(
+      AGGREGATION_TYPE_COMPLETIONS,
+      context,
+    );
   }
   if (context.area === "top-level") {
     const request = elasticsearchRequestNearOffset(source, cursorOffset);
@@ -2242,7 +2304,13 @@ function elasticsearchConsoleCompletionsForContext(
         : request.text.indexOf("\n"),
     );
     return /\/(?:_search|_count)(?:[/?]|$)/i.test(requestLine || "")
-      ? filterVersionedSearchBodyCompletions(SEARCH_BODY_COMPLETIONS, version)
+      ? withoutExistingElasticsearchKeyValue(
+          filterVersionedSearchBodyCompletions(
+            SEARCH_BODY_COMPLETIONS,
+            version,
+          ),
+          context,
+        )
       : [];
   }
   if (context.area === "value" && context.valueKey === "_source") {
@@ -2250,6 +2318,18 @@ function elasticsearchConsoleCompletionsForContext(
   }
 
   return [];
+}
+
+function withoutExistingElasticsearchKeyValue(
+  completions: readonly ElasticsearchConsoleCompletion[],
+  context: ElasticsearchConsoleCompletionContext,
+) {
+  if (!context.hasKeySeparator) return [...completions];
+  return completions.map((completion) =>
+    completion.kind === "property"
+      ? { ...completion, insertText: JSON.stringify(completion.label) }
+      : completion,
+  );
 }
 
 function plainElasticsearchSnippet(value: string) {

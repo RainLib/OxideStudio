@@ -1,13 +1,20 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`f075caef2`
+> DBX 参考提交：`d69cf9da7`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`f075caef2` → `d69cf9da7`，进行中）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `d411f0497` | Elasticsearch REST 请求风险按 method/path 分类，读请求不再被误判为 mutation | 已对齐并保持更严格删除策略：前端与应用内 Agent Host 现在共同接受 GET/HEAD/OPTIONS，以及 POST `_search/_count/_sql/_msearch/_field_caps/_terms_enum/_validate/_explain/_rank_eval/_search_shards`、EQL/async search/scroll；多请求取最高风险，未知 POST fail closed。`#`、`//` 和跨行块注释中的伪请求不参与分类。DELETE 仍按 Oxide 的 destructive confirmation 处理，不因 DBX 把单文档删除列为普通 write 而削弱确认。 |
+| `cb3de0ef4` | Elasticsearch JSON key completion 不遗留自动闭合引号，并区分已有 `:` 的 key | Oxide 原 Monaco provider 已能覆盖紧邻 closing quote，本阶段把逻辑抽成 UTF-16 model offset 可验证的完整 key replacement：同时替换旧 key 后缀与 closing quote；若右侧已有 `:`，只替换 key，不再插入第二份 value scaffold。quoted filter text 与纯逻辑回归保证首次、再次补全和 key 中间光标一致。 |
 
 ### 当前差距补齐记录（2026-09-01）
 

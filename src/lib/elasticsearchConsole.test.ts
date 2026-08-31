@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   elasticsearchConsoleCompletionContext,
   elasticsearchConsoleCompletions,
+  elasticsearchJsonKeyReplacementRange,
   elasticsearchMappingFieldCompletions,
   elasticsearchSchemaCompletionsForContext,
   maskElasticsearchConsoleComments,
@@ -187,5 +188,39 @@ describe("Elasticsearch Console completion contract", () => {
       true,
     );
     expect(labels(bodyStart)).toContain("search body");
+  });
+
+  it("replaces the complete auto-closed JSON key without duplicating quotes", () => {
+    const source = 'POST /orders/_search\n{\n  "qu"\n}';
+    const cursor = source.indexOf('"qu"') + 3;
+    const range = elasticsearchJsonKeyReplacementRange(source, cursor);
+    const completion = elasticsearchConsoleCompletions(source, cursor).find(
+      (item) => item.label === "query",
+    );
+
+    expect(range).toEqual({
+      startOffset: source.indexOf('"qu"'),
+      endOffset: source.indexOf('"qu"') + 4,
+      quoted: true,
+    });
+    const applied = `${source.slice(0, range!.startOffset)}${completion!.insertText}${source.slice(range!.endOffset)}`;
+    expect(applied).toContain('"query": {');
+    expect(applied).not.toContain('""');
+  });
+
+  it("keeps an existing JSON value when completing inside its key", () => {
+    const source = 'POST /orders/_search\n{\n  "size": 10\n}';
+    const cursor = source.indexOf("size") + 2;
+    const context = elasticsearchConsoleCompletionContext(source, cursor);
+    const range = elasticsearchJsonKeyReplacementRange(source, cursor)!;
+    const completion = elasticsearchConsoleCompletions(source, cursor).find(
+      (item) => item.label === "size",
+    );
+
+    expect(context.hasKeySeparator).toBe(true);
+    expect(completion?.insertText).toBe('"size"');
+    const applied = `${source.slice(0, range.startOffset)}${completion!.insertText}${source.slice(range.endOffset)}`;
+    expect(applied).toContain('"size": 10');
+    expect(applied).not.toContain(": 100: 10");
   });
 });

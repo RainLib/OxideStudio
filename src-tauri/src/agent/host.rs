@@ -6134,16 +6134,12 @@ fn validate_elasticsearch_read_only_query(query: &str) -> std::result::Result<()
     }
 
     let mut request_count = 0usize;
-    for line in query.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+    for line in uncommented_elasticsearch_lines(query) {
         let mut parts = line.split_whitespace();
         let method = parts.next().unwrap_or_default().to_ascii_uppercase();
         if !matches!(
             method.as_str(),
-            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
+            "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "PATCH" | "DELETE"
         ) {
             if request_count == 0 {
                 return Err(
@@ -6164,7 +6160,7 @@ fn validate_elasticsearch_read_only_query(query: &str) -> std::result::Result<()
             return Err("Elasticsearch read request exceeds 20 operations".to_string());
         }
         match method.as_str() {
-            "GET" | "HEAD" => {}
+            "GET" | "HEAD" | "OPTIONS" => {}
             "POST" if is_elasticsearch_read_only_post_path(path) => {}
             _ => {
                 return Err(format!(
@@ -6186,20 +6182,58 @@ fn is_elasticsearch_read_only_post_path(path: &str) -> bool {
         .unwrap_or(path)
         .trim_start_matches('/')
         .to_ascii_lowercase();
-    matches!(
-        path.as_str(),
-        "_search"
-            | "_msearch"
-            | "_count"
-            | "_sql"
-            | "_eql/search"
-            | "_async_search"
-            | "_search/scroll"
-    ) || path.ends_with("/_search")
-        || path.ends_with("/_msearch")
-        || path.ends_with("/_count")
-        || path.ends_with("/_eql/search")
-        || path.ends_with("/_async_search")
+    let segments = path.split('/').collect::<Vec<_>>();
+    segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "_search"
+                | "_msearch"
+                | "_count"
+                | "_sql"
+                | "_field_caps"
+                | "_terms_enum"
+                | "_validate"
+                | "_explain"
+                | "_rank_eval"
+                | "_search_shards"
+        )
+    }) || path.contains("/_eql/search")
+        || path.contains("/_async_search")
+        || path.contains("/_search/scroll")
+}
+
+fn uncommented_elasticsearch_lines(source: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut in_block_comment = false;
+    for raw_line in source.lines() {
+        let mut offset = 0usize;
+        while offset < raw_line.len() {
+            if in_block_comment {
+                let Some(close) = raw_line[offset..].find("*/") else {
+                    break;
+                };
+                in_block_comment = false;
+                offset += close + 2;
+                continue;
+            }
+            let rest = raw_line[offset..].trim_start();
+            offset = raw_line.len() - rest.len();
+            if rest.is_empty() {
+                break;
+            }
+            if rest.starts_with("/*") {
+                in_block_comment = true;
+                offset += 2;
+                continue;
+            }
+            if rest.starts_with('#') || rest.starts_with("//") {
+                break;
+            }
+            lines.push(rest.to_string());
+            break;
+        }
+    }
+    lines
 }
 
 fn validate_mongodb_read_only_query(query: &str) -> std::result::Result<(), String> {
@@ -7523,6 +7557,14 @@ mod tests {
             "POST articles/_search\n{\"query\":{\"match\":{\"title\":\"rust\"}}}",
             "POST /articles/_count\n{\"query\":{\"term\":{\"published\":true}}}",
             "GET /articles/_mapping",
+            "POST /articles/_field_caps\n{\"fields\":[\"title\"]}",
+            "POST /articles/_terms_enum\n{\"field\":\"tags\"}",
+            "POST /articles/_validate/query\n{\"query\":{\"match_all\":{}}}",
+            "POST /articles/_explain/42\n{\"query\":{\"match_all\":{}}}",
+            "POST /articles/_rank_eval\n{\"requests\":[]}",
+            "POST /articles/_search_shards",
+            "OPTIONS /articles/_search",
+            "/* POST /articles/_delete_by_query */\n// DELETE /articles\nPOST /articles/_search\n{}",
         ] {
             assert!(
                 validate_native_read_only_query("elasticsearch", query).is_ok(),
