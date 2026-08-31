@@ -13,6 +13,11 @@ export {
 } from "./model/completionFallback";
 export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";
 export {
+  buildOracleSyntaxDiagnostics,
+  supportsOracleSyntaxDiagnostics,
+  type OracleSyntaxDiagnostic,
+} from "./model/oracleSyntaxDiagnostics";
+export {
   DEFAULT_SQL_COMMAND_SNIPPETS,
   MANTICORE_SQL_COMMAND_SNIPPETS,
   sqlCommandSnippetCompletions,

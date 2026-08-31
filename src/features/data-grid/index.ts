@@ -24,6 +24,13 @@ export {
   type DataGridSortDirection,
 } from "./model/dataGridSort";
 export {
+  adjacentDataGridDetailIndex,
+  dataGridDetailNavigationDelta,
+  dataGridDetailNavigationUsesNativeKeys,
+  type DataGridDetailNavigationAxis,
+  type DataGridDetailNavigationDelta,
+} from "./model/dataGridDetailNavigation";
+export {
   dataGridConditionHistoryScopeKey,
   isDataGridConditionUndoRedoShortcut,
   loadDataGridConditionHistory,

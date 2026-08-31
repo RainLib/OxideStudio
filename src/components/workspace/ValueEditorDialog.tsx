@@ -1,5 +1,9 @@
 import Editor from "@monaco-editor/react";
 import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   Binary,
   Braces,
   CalendarClock,
@@ -54,6 +58,12 @@ import {
   valueEditorStateButtonVariants,
 } from "@/styles/variants";
 import { useTheme } from "@/theme/useTheme";
+import {
+  dataGridDetailNavigationDelta,
+  dataGridDetailNavigationUsesNativeKeys,
+  type DataGridDetailNavigationAxis,
+  type DataGridDetailNavigationDelta,
+} from "@/features/data-grid/model/dataGridDetailNavigation";
 
 export interface ValueEditorTarget {
   key: string;
@@ -80,6 +90,11 @@ interface ValueEditorDialogProps {
   target: ValueEditorTarget | null;
   onOpenChange: (open: boolean) => void;
   onStageValue: (value: unknown) => void;
+  navigation?: Partial<Record<"up" | "down" | "left" | "right", boolean>>;
+  onNavigate?: (
+    axis: DataGridDetailNavigationAxis,
+    delta: DataGridDetailNavigationDelta,
+  ) => void;
 }
 
 const editorOptions = {
@@ -172,6 +187,8 @@ export function ValueEditorDialog({
   target,
   onOpenChange,
   onStageValue,
+  navigation,
+  onNavigate,
 }: ValueEditorDialogProps) {
   const { mode } = useTheme();
   const kind = useMemo(
@@ -289,6 +306,17 @@ export function ValueEditorDialog({
   if (!target) return null;
 
   const isReadOnly = !target.editable;
+  const canNavigate = (
+    axis: DataGridDetailNavigationAxis,
+    delta: DataGridDetailNavigationDelta,
+  ) => navigation?.[axis === "row" ? (delta < 0 ? "up" : "down") : delta < 0 ? "left" : "right"] === true;
+  const navigate = (
+    axis: DataGridDetailNavigationAxis,
+    delta: DataGridDetailNavigationDelta,
+  ) => {
+    if (!isReadOnly || !onNavigate || !canNavigate(axis, delta)) return;
+    onNavigate(axis, delta);
+  };
   const readOnlyMessage =
     target.readOnlyReason === "generated-column"
       ? "Generated database columns are computed and cannot be edited."
@@ -361,6 +389,25 @@ export function ValueEditorDialog({
         className="flex h-[min(700px,calc(100vh-32px))] w-[min(980px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[hsl(var(--wb-text))] shadow-[0_24px_72px_rgba(0,0,0,0.52)] [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]"
         onKeyDown={(event) => {
           if (
+            isReadOnly &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey &&
+            !dataGridDetailNavigationUsesNativeKeys(event.target)
+          ) {
+            const detailNavigation = dataGridDetailNavigationDelta(event.key);
+            if (
+              detailNavigation &&
+              canNavigate(detailNavigation.axis, detailNavigation.delta)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              navigate(detailNavigation.axis, detailNavigation.delta);
+              return;
+            }
+          }
+          if (
             !isReadOnly &&
             (event.metaKey || event.ctrlKey) &&
             event.key === "Enter"
@@ -387,6 +434,28 @@ export function ValueEditorDialog({
               <span className="ml-1 rounded-[3px] border border-[hsl(var(--wb-accent))] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[hsl(var(--wb-accent))]">
                 Draft
               </span>
+            )}
+            {isReadOnly && navigation && onNavigate && (
+              <div className="ml-auto mr-5 flex shrink-0 items-center gap-0.5" aria-label="Navigate result details">
+                {([
+                  ["row", -1, ArrowUp, "Previous row"],
+                  ["row", 1, ArrowDown, "Next row"],
+                  ["column", -1, ArrowLeft, "Previous column"],
+                  ["column", 1, ArrowRight, "Next column"],
+                ] as const).map(([axis, delta, Icon, label]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    className={toolbarButtonVariants({ size: "sm" })}
+                    disabled={!canNavigate(axis, delta)}
+                    title={`${label} · ${axis === "row" ? delta < 0 ? "↑" : "↓" : delta < 0 ? "←" : "→"}`}
+                    aria-label={label}
+                    onClick={() => navigate(axis, delta)}
+                  >
+                    <Icon size={12} />
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         </DialogHeader>

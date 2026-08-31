@@ -92,6 +92,7 @@ import {
   transposeQueryResult,
   filterDataGridColumnLookupItems,
   dataGridCellUsesFullValueEditor,
+  adjacentDataGridDetailIndex,
   normalizeDataGridNumericInput,
   gridLayoutKey,
   loadGridLayout,
@@ -99,6 +100,8 @@ import {
   type DataGridContextMenuItem,
   type DataGridHoverTooltipState,
   type DataGridColumnLookupItem,
+  type DataGridDetailNavigationAxis,
+  type DataGridDetailNavigationDelta,
 } from "@/features/data-grid";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
 import { isTableCellExpression } from "@/lib/tableCellExpression";
@@ -1361,6 +1364,67 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         overrideColumns,
         result,
         visualColumnIndexToResultIndex,
+      ],
+    );
+
+    const valueEditorNavigation = useMemo(() => {
+      if (!valueEditorTarget || valueEditorTarget.editable || isTransposed) {
+        return undefined;
+      }
+      const rowPosition = visualRows.findIndex(
+        (row) => row.rowKey === valueEditorTarget.rowIndex,
+      );
+      const columnPosition = columns.findIndex(
+        (_, visualColumnIndex) =>
+          visualColumnIndexToResultIndex(visualColumnIndex) ===
+          valueEditorTarget.columnIndex,
+      );
+      return {
+        up: adjacentDataGridDetailIndex(rowPosition, -1, visualRows.length) !== null,
+        down: adjacentDataGridDetailIndex(rowPosition, 1, visualRows.length) !== null,
+        left: adjacentDataGridDetailIndex(columnPosition, -1, columns.length) !== null,
+        right: adjacentDataGridDetailIndex(columnPosition, 1, columns.length) !== null,
+      };
+    }, [
+      columns,
+      isTransposed,
+      valueEditorTarget,
+      visualColumnIndexToResultIndex,
+      visualRows,
+    ]);
+
+    const navigateValueEditor = useCallback(
+      (
+        axis: DataGridDetailNavigationAxis,
+        delta: DataGridDetailNavigationDelta,
+      ) => {
+        if (!valueEditorTarget || valueEditorTarget.editable || isTransposed) return;
+        const rowPosition = visualRows.findIndex(
+          (row) => row.rowKey === valueEditorTarget.rowIndex,
+        );
+        const columnPosition = columns.findIndex(
+          (_, visualColumnIndex) =>
+            visualColumnIndexToResultIndex(visualColumnIndex) ===
+            valueEditorTarget.columnIndex,
+        );
+        const nextRowPosition =
+          axis === "row"
+            ? adjacentDataGridDetailIndex(rowPosition, delta, visualRows.length)
+            : rowPosition;
+        const nextColumnPosition =
+          axis === "column"
+            ? adjacentDataGridDetailIndex(columnPosition, delta, columns.length)
+            : columnPosition;
+        if (nextRowPosition === null || nextColumnPosition === null) return;
+        openValueEditor([nextColumnPosition, nextRowPosition]);
+      },
+      [
+        columns,
+        isTransposed,
+        openValueEditor,
+        valueEditorTarget,
+        visualColumnIndexToResultIndex,
+        visualRows,
       ],
     );
 
@@ -2801,6 +2865,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               value,
             );
           }}
+          navigation={valueEditorNavigation}
+          onNavigate={navigateValueEditor}
         />
       </div>
     );

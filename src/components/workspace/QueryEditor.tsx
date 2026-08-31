@@ -181,6 +181,7 @@ import {
 import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   buildQueryEditorOptions,
+  buildOracleSyntaxDiagnostics,
   appendSqlCompletionSpace,
   boundedSqlCompletionTextBeforeCursor,
   elasticsearchJsonStringCompletionRange,
@@ -3071,6 +3072,33 @@ export function QueryEditor({
     monaco,
     mountedEditor,
   ]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor) return;
+    const model = mountedEditor.getModel();
+    if (!model) return;
+    const owner = "oracle-syntax";
+    const diagnostics = buildOracleSyntaxDiagnostics(model.getValue(), driver);
+    monaco.editor.setModelMarkers(
+      model,
+      owner,
+      diagnostics.map((diagnostic) => {
+        const start = model.getPositionAt(diagnostic.startOffset);
+        const end = model.getPositionAt(diagnostic.endOffset);
+        return {
+          severity: monaco.MarkerSeverity.Error,
+          message: diagnostic.message,
+          source: "oxide-oracle-syntax",
+          code: diagnostic.code,
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        };
+      }),
+    );
+    return () => monaco.editor.setModelMarkers(model, owner, []);
+  }, [activeTab?.sql, driver, monaco, mountedEditor]);
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {
