@@ -300,15 +300,15 @@ describe("DataCompareView", () => {
     });
     const comparison: TableDataCompareResult = {
       added: [{ key: "2", values: { id: 2, score: 20 } }],
-      removed: [],
+      removed: [{ key: "3", values: { id: 3, score: 30 } }],
       modified: [],
       addedCount: 1,
-      removedCount: 0,
+      removedCount: 1,
       modifiedCount: 0,
       equalCount: 1,
       sourceRowCount: 2,
-      targetRowCount: 1,
-      comparedKeyCount: 2,
+      targetRowCount: 2,
+      comparedKeyCount: 3,
       batchSize: 1_000,
       detailLimitPerStatus: 1_000,
       detailsTruncated: false,
@@ -317,7 +317,7 @@ describe("DataCompareView", () => {
       confidenceScore: 1,
       verificationMethod: "full_keyset",
       countsExact: true,
-      sampledKeyCount: 2,
+      sampledKeyCount: 3,
     };
     const compare = vi
       .spyOn(tableService, "compareTableDataFull")
@@ -357,6 +357,13 @@ describe("DataCompareView", () => {
       compareButton?.click();
       await Promise.resolve();
     });
+    expect(container.textContent).toContain("2 selected for sync");
+    const removedSelection = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Include rightOnly row id=3 in synchronization"]',
+    );
+    expect(removedSelection?.checked).toBe(true);
+    await act(async () => removedSelection?.click());
+    expect(container.textContent).toContain("1 selected for sync");
     const previewButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.includes("Preview sync SQL"),
     );
@@ -367,7 +374,17 @@ describe("DataCompareView", () => {
     });
 
     expect(preview).toHaveBeenCalledWith(
-      expect.objectContaining({ comparison, keyColumns: ["id"] }),
+      expect.objectContaining({
+        comparison: expect.objectContaining({
+          added: comparison.added,
+          removed: [],
+          modified: [],
+          addedCount: 1,
+          removedCount: 0,
+          modifiedCount: 0,
+        }),
+        keyColumns: ["id"],
+      }),
     );
     expect(
       container.querySelector<HTMLTextAreaElement>(
@@ -375,6 +392,18 @@ describe("DataCompareView", () => {
       )?.value,
     ).toContain("INSERT INTO");
     expect(container.textContent).toContain("Synchronization plan");
+    await act(async () => removedSelection?.click());
+    expect(
+      container.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Data compare synchronization SQL"]',
+      ),
+    ).toBeNull();
+    await act(async () => removedSelection?.click());
+    await act(async () => {
+      previewButton?.click();
+      await Promise.resolve();
+    });
+    expect(preview).toHaveBeenCalledTimes(2);
     const apply = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.includes("Apply atomically"),
     );

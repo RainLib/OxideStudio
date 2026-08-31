@@ -73,6 +73,7 @@ export function DataCompareView() {
   const [syncConfirmation, setSyncConfirmation] = useState("");
   const [isExecutingSync, setIsExecutingSync] = useState(false);
   const [syncReceipt, setSyncReceipt] = useState<TableDataCompareSyncReceipt | null>(null);
+  const [selectedSyncRows, setSelectedSyncRows] = useState<Set<string>>(() => new Set());
   const activeCompareIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -113,6 +114,7 @@ export function DataCompareView() {
     setSyncPreviewError(null);
     setSyncConfirmation("");
     setSyncReceipt(null);
+    setSelectedSyncRows(new Set());
   }, [left, right]);
 
   const comparison = useMemo(() => {
@@ -167,6 +169,7 @@ export function DataCompareView() {
     setSyncPreviewError(null);
     setSyncConfirmation("");
     setSyncReceipt(null);
+    setSelectedSyncRows(new Set());
     setKeyColumns((current) =>
       current.includes(column)
         ? current.filter((candidate) => candidate !== column)
@@ -221,6 +224,7 @@ export function DataCompareView() {
       });
       if (activeCompareIdRef.current !== compareId) return;
       setFullComparisonPayload(result);
+      setSelectedSyncRows(allSyncRowIds(result));
       setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, sharedColumns));
       setFullComparisonMeta({
         sourceRows: result.sourceRowCount,
@@ -263,19 +267,44 @@ export function DataCompareView() {
       }
     }
   };
-  const canPreviewSync = Boolean(
+  const canSelectSyncRows = Boolean(
     fullComparisonPayload &&
       fullComparisonPayload.degradationLevel === "full" &&
       fullComparisonPayload.countsExact &&
-      !fullComparisonPayload.detailsTruncated &&
-      fullComparisonPayload.addedCount +
-        fullComparisonPayload.removedCount +
-        fullComparisonPayload.modifiedCount >
-        0 &&
-      rightConnection,
+      !fullComparisonPayload.detailsTruncated,
   );
+  const canPreviewSync = Boolean(
+    canSelectSyncRows && selectedSyncRows.size > 0 && rightConnection,
+  );
+  const selectedComparisonPayload = fullComparisonPayload
+    ? selectSyncRows(fullComparisonPayload, selectedSyncRows)
+    : null;
+  const invalidateSyncPlan = () => {
+    setSyncPreview(null);
+    setSyncPreviewError(null);
+    setSyncConfirmation("");
+    setSyncReceipt(null);
+  };
+  const toggleSyncRow = (rowId: string) => {
+    invalidateSyncPlan();
+    setSelectedSyncRows((current) => {
+      const next = new Set(current);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  };
+  const selectAllSyncRows = () => {
+    if (!fullComparisonPayload) return;
+    invalidateSyncPlan();
+    setSelectedSyncRows(allSyncRowIds(fullComparisonPayload));
+  };
+  const clearSyncRows = () => {
+    invalidateSyncPlan();
+    setSelectedSyncRows(new Set());
+  };
   const previewSync = async () => {
-    if (!canPreviewSync || !fullComparisonPayload || !rightConnection) return;
+    if (!canPreviewSync || !selectedComparisonPayload || !rightConnection) return;
     setIsPlanningSync(true);
     setSyncPreviewError(null);
     try {
@@ -289,7 +318,7 @@ export function DataCompareView() {
         },
         columns: sharedColumns,
         keyColumns,
-        comparison: fullComparisonPayload,
+        comparison: selectedComparisonPayload,
       });
       setSyncPreview(preview);
       setSyncConfirmation("");
@@ -331,6 +360,7 @@ export function DataCompareView() {
       setFullComparisonPayload(null);
       setFullComparisonMeta(null);
       setFullComparisonProgress(null);
+      setSelectedSyncRows(new Set());
     } catch (error) {
       setSyncPreview(null);
       setSyncConfirmation("");
@@ -416,6 +446,25 @@ export function DataCompareView() {
             <SummaryBadge label="Duplicate" value={displayedComparison.counts.duplicate} tone="warning" />
             <SummaryBadge label="Equal" value={displayedComparison.counts.equal} />
           </>
+        )}
+        {canSelectSyncRows && (
+          <div className="flex items-center gap-1.5 text-[9px] wb-muted">
+            <span>{selectedSyncRows.size.toLocaleString()} selected for sync</span>
+            <button
+              type="button"
+              className="wb-text-button h-6 px-1.5 text-[8px]"
+              onClick={selectAllSyncRows}
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              className="wb-text-button h-6 px-1.5 text-[8px]"
+              onClick={clearSyncRows}
+            >
+              Clear
+            </button>
+          </div>
         )}
         <label className="ml-auto flex items-center gap-1.5 text-[9px] wb-muted">
           <input
@@ -663,6 +712,9 @@ export function DataCompareView() {
               <table className="w-full table-fixed border-collapse text-[9px]">
                 <thead className="sticky top-0 z-10 bg-[hsl(var(--wb-toolbar))] text-left wb-muted">
                   <tr>
+                    {canSelectSyncRows && (
+                      <th className="w-14 border-b border-r border-[hsl(var(--wb-border-subtle))] px-2 py-2 text-center font-medium">Sync</th>
+                    )}
                     <th className="w-24 border-b border-r border-[hsl(var(--wb-border-subtle))] px-3 py-2 font-medium">Status</th>
                     <th className="w-52 border-b border-r border-[hsl(var(--wb-border-subtle))] px-3 py-2 font-medium">Key</th>
                     <th className="w-36 border-b border-r border-[hsl(var(--wb-border-subtle))] px-3 py-2 font-medium">Column</th>
@@ -672,7 +724,13 @@ export function DataCompareView() {
                 </thead>
                 <tbody>
                   {displayedRows.map((row) => (
-                    <CompareLine key={row.id} row={row} />
+                    <CompareLine
+                      key={row.id}
+                      row={row}
+                      showSyncSelection={canSelectSyncRows}
+                      selected={selectedSyncRows.has(row.logicalRowId)}
+                      onToggleSync={toggleSyncRow}
+                    />
                   ))}
                 </tbody>
               </table>
@@ -696,6 +754,8 @@ export function DataCompareView() {
 
 interface FlatCompareLine {
   id: string;
+  logicalRowId: string;
+  firstForLogicalRow: boolean;
   status: DataCompareRowStatus;
   key: string;
   column: string;
@@ -719,12 +779,14 @@ function flattenRows(
     if (row.status === "changed") {
       return row.fields
         .filter((field) => !field.equal)
-        .map((field) => fieldLine(row, key, field));
+        .map((field, index) => fieldLine(row, key, field, index === 0));
     }
     if (row.status === "equal") {
       const tolerant = row.fields.filter((field) => field.toleranceMatched);
       return [{
         id: `${row.id}:equal`,
+        logicalRowId: row.id,
+        firstForLogicalRow: true,
         status: row.status,
         key,
         column: tolerant.length > 0 ? `${tolerant.length} within tolerance` : "All shared fields",
@@ -736,6 +798,8 @@ function flattenRows(
     if (row.status === "duplicate") {
       return [{
         id: `${row.id}:duplicate`,
+        logicalRowId: row.id,
+        firstForLogicalRow: true,
         status: row.status,
         key,
         column: "Ambiguous key",
@@ -746,6 +810,8 @@ function flattenRows(
     }
     return [{
       id: `${row.id}:${row.status}`,
+      logicalRowId: row.id,
+      firstForLogicalRow: true,
       status: row.status,
       key,
       column: "Loaded row",
@@ -768,9 +834,12 @@ function fieldLine(
   row: DataCompareRow,
   key: string,
   field: DataCompareFieldDifference,
+  firstForLogicalRow: boolean,
 ): FlatCompareLine {
   return {
     id: `${row.id}:${field.column}`,
+    logicalRowId: row.id,
+    firstForLogicalRow,
     status: row.status,
     key,
     column: field.column,
@@ -780,9 +849,31 @@ function fieldLine(
   };
 }
 
-function CompareLine({ row }: { row: FlatCompareLine }) {
+function CompareLine({
+  row,
+  showSyncSelection,
+  selected,
+  onToggleSync,
+}: {
+  row: FlatCompareLine;
+  showSyncSelection: boolean;
+  selected: boolean;
+  onToggleSync: (rowId: string) => void;
+}) {
   return (
     <tr className="hover:bg-[hsl(var(--wb-hover)/0.72)]">
+      {showSyncSelection && (
+        <td className="border-b border-r border-[hsl(var(--wb-border-subtle))] px-2 py-2 text-center align-top">
+          {row.firstForLogicalRow && isSyncStatus(row.status) ? (
+            <input
+              type="checkbox"
+              aria-label={`Include ${row.status} row ${row.key} in synchronization`}
+              checked={selected}
+              onChange={() => onToggleSync(row.logicalRowId)}
+            />
+          ) : null}
+        </td>
+      )}
       <td className="border-b border-r border-[hsl(var(--wb-border-subtle))] px-3 py-2 align-top">
         <StatusLabel status={row.status} />
       </td>
@@ -817,6 +908,48 @@ function StatusLabel({ status }: { status: DataCompareRowStatus }) {
       {labels[status]}
     </span>
   );
+}
+
+function isSyncStatus(status: DataCompareRowStatus) {
+  return status === "leftOnly" || status === "rightOnly" || status === "changed";
+}
+
+function syncRowId(kind: "added" | "removed" | "modified", key: string) {
+  if (kind === "added") return `full:left:${key}`;
+  if (kind === "removed") return `full:right:${key}`;
+  return `full:changed:${key}`;
+}
+
+function allSyncRowIds(comparison: TableDataCompareResult) {
+  return new Set([
+    ...comparison.added.map((row) => syncRowId("added", row.key)),
+    ...comparison.removed.map((row) => syncRowId("removed", row.key)),
+    ...comparison.modified.map((row) => syncRowId("modified", row.key)),
+  ]);
+}
+
+function selectSyncRows(
+  comparison: TableDataCompareResult,
+  selectedRows: ReadonlySet<string>,
+): TableDataCompareResult {
+  const added = comparison.added.filter((row) =>
+    selectedRows.has(syncRowId("added", row.key)),
+  );
+  const removed = comparison.removed.filter((row) =>
+    selectedRows.has(syncRowId("removed", row.key)),
+  );
+  const modified = comparison.modified.filter((row) =>
+    selectedRows.has(syncRowId("modified", row.key)),
+  );
+  return {
+    ...comparison,
+    added,
+    removed,
+    modified,
+    addedCount: added.length,
+    removedCount: removed.length,
+    modifiedCount: modified.length,
+  };
 }
 
 function SourceIdentity({
