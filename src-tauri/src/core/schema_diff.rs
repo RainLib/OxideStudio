@@ -2599,6 +2599,52 @@ fn compare_relation(
                 return;
             }
         }
+        if source.object_type == target.object_type
+            && source_flags.is_materialized_view
+            && target_flags.is_materialized_view
+            && kind == DatabaseKind::Postgres
+            && (source.definition != target.definition
+                || source.materialized_view_populated != target.materialized_view_populated)
+        {
+            if let Some(definition) = normalized_view_select_definition(source.definition.as_deref()) {
+                let with_data = source.materialized_view_populated.unwrap_or(false);
+                let create_sql = kind.create_materialized_view_query(
+                    Some(target_schema),
+                    &source.name,
+                    &definition,
+                    with_data,
+                );
+                if let Some(create_sql) = create_sql {
+                    warnings.push(format!(
+                        "Materialized view {} changes are represented as a destructive, review-required DROP/CREATE without CASCADE; dependent target views must be handled explicitly.",
+                        source.name
+                    ));
+                    changes.push(change(
+                        SchemaChangeKind::RelationModify,
+                        SchemaChangeRisk::Destructive,
+                        target_schema,
+                        &source.name,
+                        source.object_type.clone(),
+                        None,
+                        format!("Recreate materialized view {}", source.name),
+                        vec![
+                            kind.drop_relation_query_with_kind(
+                                Some(target_schema),
+                                &source.name,
+                                true,
+                                true,
+                                false,
+                                false,
+                            ),
+                            create_sql,
+                        ],
+                        false,
+                        true,
+                    ));
+                    return;
+                }
+            }
+        }
         if source != target {
             warnings.push(format!(
                 "Relation {} requires manual review because its view or foreign-table definition is not available for a safe replacement.",
@@ -5820,6 +5866,55 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn changed_postgres_materialized_view_is_a_destructive_reviewed_recreation() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.push(SchemaRelationSnapshot {
+            name: "active_users_mv".to_string(),
+            object_type: Some("MATERIALIZED VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM users WHERE active".to_string()),
+            materialized_view_populated: Some(false),
+            dependencies: vec!["users".to_string()],
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        let mut target = source.clone();
+        let target_view = target
+            .relations
+            .iter_mut()
+            .find(|relation| relation.name == "active_users_mv")
+            .expect("target materialized view");
+        target_view.definition = Some("SELECT id FROM users WHERE NOT active".to_string());
+        target_view.materialized_view_populated = Some(true);
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users_mv")
+            .expect("materialized view recreation should be planned");
+
+        assert_eq!(change.kind, SchemaChangeKind::RelationModify);
+        assert_eq!(change.risk, SchemaChangeRisk::Destructive);
+        assert!(change.manual_review);
+        assert!(!change.reversible);
+        assert_eq!(
+            change.sql,
+            vec![
+                "DROP MATERIALIZED VIEW \"public\".\"active_users_mv\";".to_string(),
+                "CREATE MATERIALIZED VIEW \"public\".\"active_users_mv\" AS\nSELECT id FROM users WHERE active\nWITH NO DATA;"
+                    .to_string(),
+            ]
+        );
+        assert!(plan.requires_destructive_approval);
+        assert!(!change.sql.join("\n").contains("CASCADE"));
     }
 
     #[test]

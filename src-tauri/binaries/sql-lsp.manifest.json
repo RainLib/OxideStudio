@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "sourceRevision": "812302883407a421b182eb1119672246852709a7",
   "sourceDirty": false,
-  "sha256": "1c779f7fd9ad4760cf3baa1875a83c189e95ecc0b56c0081cddc31e246d480e9",
-  "platform": "darwin",
+  "sha256": "8b8011517f368aa2b695e438ac41ecfc713f584f1f839c7cc231f90e4f171dbe",
+  "platform": "win32",
   "architecture": "x64",
   "profile": "release"
 }
