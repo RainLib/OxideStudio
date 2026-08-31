@@ -90,6 +90,16 @@ const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
 /// response must not materialize every difference in the renderer. Totals are
 /// always exact; this only bounds the row-level preview returned to the UI.
 const MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS: usize = 1_000;
+const DEFAULT_FULL_DATA_COMPARE_MAX_ROWS: u64 = 100_000;
+const MAX_FULL_DATA_COMPARE_ROWS: u64 = 100_000;
+const DEFAULT_SAMPLED_DATA_COMPARE_MAX_ROWS: u64 = 10_000_000;
+const MAX_SAMPLED_DATA_COMPARE_MAX_ROWS: u64 = 10_000_000;
+const DEFAULT_DATA_COMPARE_SAMPLE_SIZE: u32 = 10_000;
+const MAX_DATA_COMPARE_SAMPLE_SIZE: u32 = 10_000;
+/// SQLite defaults to 999 bind variables and external PostgreSQL-compatible
+/// packages may enforce similarly conservative limits. Keep sampled key lookup
+/// batches below that boundary even for composite keys.
+const MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS: usize = 800;
 /// Parameterized query drivers deliberately cap a result set at this value.
 /// Keep full-compare pages within that contract so a 5,000-row request can
 /// never be silently shortened by a driver and mistaken for the final page.
@@ -165,10 +175,48 @@ pub struct TableDataCompareRequest {
     pub key_columns: Vec<String>,
     #[serde(default)]
     pub batch_size: Option<u32>,
-    /// Hard safety ceiling for each side. Larger relations must use a future
-    /// sampled/checksum compare rather than silently producing a partial diff.
+    /// Legacy full-compare ceiling. Larger relations automatically use the
+    /// bounded sampled/checksum path unless an explicit threshold is supplied.
     #[serde(default)]
     pub max_rows: Option<u32>,
+    #[serde(default)]
+    pub degradation_threshold: Option<TableDataCompareDegradationThreshold>,
+    #[serde(default)]
+    pub sampling_strategy: Option<TableDataCompareSamplingStrategy>,
+    #[serde(default)]
+    pub enable_checksum: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TableDataCompareDegradationLevel {
+    Full,
+    Sample,
+    SkipWithRisk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataCompareSamplingStrategy {
+    ExtremeValues,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareDegradationThreshold {
+    pub full_compare_max_rows: u64,
+    pub sample_max_rows: u64,
+    pub sample_size: u32,
+}
+
+impl Default for TableDataCompareDegradationThreshold {
+    fn default() -> Self {
+        Self {
+            full_compare_max_rows: DEFAULT_FULL_DATA_COMPARE_MAX_ROWS,
+            sample_max_rows: DEFAULT_SAMPLED_DATA_COMPARE_MAX_ROWS,
+            sample_size: DEFAULT_DATA_COMPARE_SAMPLE_SIZE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,7 +241,8 @@ pub struct TableDataCompareResult {
     pub added: Vec<TableDataCompareRow>,
     pub removed: Vec<TableDataCompareRow>,
     pub modified: Vec<TableDataCompareModifiedRow>,
-    /// Exact totals. The corresponding arrays above are bounded previews.
+    /// Totals across the inspected key universe. They are exact for `full`
+    /// comparisons and sample-local for `sample` comparisons.
     pub added_count: u64,
     pub removed_count: u64,
     pub modified_count: u64,
@@ -204,6 +253,21 @@ pub struct TableDataCompareResult {
     pub batch_size: u32,
     pub detail_limit_per_status: u32,
     pub details_truncated: bool,
+    pub degradation_level: TableDataCompareDegradationLevel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_strategy: Option<TableDataCompareSamplingStrategy>,
+    pub sampling_rate: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<f64>,
+    pub verification_method: String,
+    pub counts_exact: bool,
+    pub sampled_key_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_checksums: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_checksums: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksums_match: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -10201,9 +10265,15 @@ async fn fetch_full_data_compare_rows(
     }
     let mut cursor: Option<Vec<Value>> = None;
     let mut rows = Vec::new();
+    let typed_postgres_parameters =
+        data_compare_uses_typed_postgres_parameters(kind, &endpoint.driver);
     loop {
-        let (continuation, params) =
-            data_compare_keyset_continuation(kind, &key_metadata, cursor.as_deref())?;
+        let (continuation, params) = data_compare_keyset_continuation(
+            kind,
+            &key_metadata,
+            cursor.as_deref(),
+            typed_postgres_parameters,
+        )?;
         let where_clause = continuation
             .as_deref()
             .map(|condition| format!(" WHERE {condition}"))
@@ -10261,6 +10331,7 @@ fn data_compare_keyset_continuation(
     kind: DatabaseKind,
     key_columns: &[ColumnInfo],
     cursor: Option<&[Value]>,
+    typed_postgres_parameters: bool,
 ) -> Result<(Option<String>, Vec<QueryParameter>), String> {
     let Some(cursor) = cursor else {
         return Ok((None, Vec::new()));
@@ -10283,7 +10354,12 @@ fn data_compare_keyset_continuation(
             comparisons.push(format!(
                 "{} = {}",
                 kind.quote_identifier(&column.name),
-                kind.parameter_placeholder(params.len(), &column.data_type),
+                data_compare_parameter_placeholder(
+                    kind,
+                    params.len(),
+                    &column.data_type,
+                    typed_postgres_parameters,
+                ),
             ));
         }
         let column = &key_columns[index];
@@ -10291,11 +10367,487 @@ fn data_compare_keyset_continuation(
         comparisons.push(format!(
             "{} > {}",
             kind.quote_identifier(&column.name),
-            kind.parameter_placeholder(params.len(), &column.data_type),
+            data_compare_parameter_placeholder(
+                kind,
+                params.len(),
+                &column.data_type,
+                typed_postgres_parameters,
+            ),
         ));
         clauses.push(format!("({})", comparisons.join(" AND ")));
     }
     Ok((Some(format!("({})", clauses.join(" OR "))), params))
+}
+
+fn data_compare_uses_typed_postgres_parameters(kind: DatabaseKind, driver: &str) -> bool {
+    kind == DatabaseKind::Postgres
+        && !matches!(
+            driver.trim().to_ascii_lowercase().as_str(),
+            "sqlite" | "sqlite3" | "rqlite"
+        )
+}
+
+fn data_compare_parameter_placeholder(
+    kind: DatabaseKind,
+    index: usize,
+    data_type: &str,
+    typed_postgres_parameters: bool,
+) -> String {
+    if kind == DatabaseKind::Postgres && !typed_postgres_parameters {
+        format!("${index}")
+    } else {
+        kind.parameter_placeholder(index, data_type)
+    }
+}
+
+fn normalized_data_compare_threshold(
+    legacy_max_rows: Option<u32>,
+    threshold: Option<TableDataCompareDegradationThreshold>,
+) -> Result<TableDataCompareDegradationThreshold, String> {
+    if legacy_max_rows.is_some() && threshold.is_some() {
+        return Err(
+            "Use either maxRows or degradationThreshold for data comparison, not both".to_string(),
+        );
+    }
+    let threshold = threshold.unwrap_or_else(|| {
+        let mut threshold = TableDataCompareDegradationThreshold::default();
+        if let Some(max_rows) = legacy_max_rows {
+            threshold.full_compare_max_rows = u64::from(max_rows.clamp(1, 100_000));
+        }
+        threshold
+    });
+    if threshold.full_compare_max_rows == 0
+        || threshold.full_compare_max_rows > MAX_FULL_DATA_COMPARE_ROWS
+    {
+        return Err(format!(
+            "Full data compare row threshold must be between 1 and {MAX_FULL_DATA_COMPARE_ROWS}"
+        ));
+    }
+    if threshold.sample_max_rows < threshold.full_compare_max_rows
+        || threshold.sample_max_rows > MAX_SAMPLED_DATA_COMPARE_MAX_ROWS
+    {
+        return Err(format!(
+            "Sampled data compare row threshold must be between the full threshold and {MAX_SAMPLED_DATA_COMPARE_MAX_ROWS}"
+        ));
+    }
+    if threshold.sample_size == 0 || threshold.sample_size > MAX_DATA_COMPARE_SAMPLE_SIZE {
+        return Err(format!(
+            "Data compare sample size must be between 1 and {MAX_DATA_COMPARE_SAMPLE_SIZE}"
+        ));
+    }
+    Ok(threshold)
+}
+
+fn data_compare_degradation_level(
+    source_row_count: u64,
+    target_row_count: u64,
+    threshold: &TableDataCompareDegradationThreshold,
+) -> TableDataCompareDegradationLevel {
+    let maximum = source_row_count.max(target_row_count);
+    if maximum <= threshold.full_compare_max_rows {
+        TableDataCompareDegradationLevel::Full
+    } else if maximum <= threshold.sample_max_rows {
+        TableDataCompareDegradationLevel::Sample
+    } else {
+        TableDataCompareDegradationLevel::SkipWithRisk
+    }
+}
+
+fn data_compare_key_values(key_columns: &[String], row: &[Value]) -> Result<Vec<Value>, String> {
+    if row.len() < key_columns.len() {
+        return Err("Sampled data compare key query returned an incomplete row".to_string());
+    }
+    Ok(row.iter().take(key_columns.len()).cloned().collect())
+}
+
+fn canonical_data_compare_key_values(values: &[Value]) -> Result<String, String> {
+    serde_json::to_string(values)
+        .map_err(|error| format!("Could not encode sampled data compare key: {error}"))
+}
+
+async fn fetch_data_compare_extreme_keys(
+    manager: &ConnectionManager,
+    endpoint: &TableDataCompareEndpoint,
+    kind: DatabaseKind,
+    key_columns: &[String],
+    sample_size: u32,
+) -> Result<Vec<Vec<Value>>, String> {
+    let selected = key_columns
+        .iter()
+        .map(|column| kind.quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let relation = kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
+    let head_count = sample_size.div_ceil(2);
+    let tail_count = sample_size / 2;
+    let mut keys = BTreeMap::<String, Vec<Value>>::new();
+    for (direction, limit) in [("ASC", head_count), ("DESC", tail_count)] {
+        if limit == 0 {
+            continue;
+        }
+        let order = key_columns
+            .iter()
+            .map(|column| format!("{} {direction}", kind.quote_identifier(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT {selected} FROM {relation} ORDER BY {order} LIMIT {limit};");
+        let mut result = query_target(
+            manager,
+            &endpoint.connection_id,
+            endpoint.database.as_deref(),
+            &sql,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let page = result
+            .drain(..)
+            .next()
+            .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+        for row in page.rows {
+            let values = data_compare_key_values(key_columns, &row)?;
+            if values.iter().any(Value::is_null) {
+                return Err(
+                    "Sampled data compare cannot continue from a NULL key value".to_string()
+                );
+            }
+            keys.entry(canonical_data_compare_key_values(&values)?)
+                .or_insert(values);
+        }
+    }
+    Ok(keys.into_values().collect())
+}
+
+fn merge_data_compare_sample_keys(
+    source: Vec<Vec<Value>>,
+    target: Vec<Vec<Value>>,
+) -> Result<Vec<Vec<Value>>, String> {
+    let mut keys = BTreeMap::<String, Vec<Value>>::new();
+    for values in source.into_iter().chain(target) {
+        keys.entry(canonical_data_compare_key_values(&values)?)
+            .or_insert(values);
+    }
+    Ok(keys.into_values().collect())
+}
+
+fn data_compare_sample_key_predicate(
+    kind: DatabaseKind,
+    key_columns: &[ColumnInfo],
+    sampled_keys: &[Vec<Value>],
+    typed_postgres_parameters: bool,
+) -> Result<(String, Vec<QueryParameter>), String> {
+    if key_columns.is_empty() || sampled_keys.is_empty() {
+        return Err("Sampled data compare requires key columns and sampled keys".to_string());
+    }
+    let mut clauses = Vec::with_capacity(sampled_keys.len());
+    let mut params = Vec::with_capacity(sampled_keys.len() * key_columns.len());
+    for values in sampled_keys {
+        if values.len() != key_columns.len() {
+            return Err("Sampled data compare key does not match selected key columns".to_string());
+        }
+        if values.iter().any(Value::is_null) {
+            return Err("Sampled data compare key cannot contain NULL".to_string());
+        }
+        let mut comparisons = Vec::with_capacity(key_columns.len());
+        for (column, value) in key_columns.iter().zip(values) {
+            params.push(query_parameter(column, value));
+            comparisons.push(format!(
+                "{} = {}",
+                kind.quote_identifier(&column.name),
+                data_compare_parameter_placeholder(
+                    kind,
+                    params.len(),
+                    &column.data_type,
+                    typed_postgres_parameters,
+                ),
+            ));
+        }
+        clauses.push(format!("({})", comparisons.join(" AND ")));
+    }
+    Ok((format!("({})", clauses.join(" OR ")), params))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_sampled_data_compare_rows(
+    manager: &ConnectionManager,
+    endpoint: &TableDataCompareEndpoint,
+    kind: DatabaseKind,
+    columns: &[String],
+    column_metadata: &BTreeMap<String, ColumnInfo>,
+    key_columns: &[String],
+    sampled_keys: &[Vec<Value>],
+) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    if sampled_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    if key_columns.len() > MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS {
+        return Err(format!(
+            "Sampled data compare supports at most {MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS} key columns"
+        ));
+    }
+    let key_metadata = key_columns
+        .iter()
+        .map(|column| {
+            column_metadata.get(column).cloned().ok_or_else(|| {
+                format!("Missing metadata for sampled data compare key column {column}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(column) = key_metadata.iter().find(|column| column.is_nullable) {
+        return Err(format!(
+            "Sampled data compare key column {} must be NOT NULL",
+            column.name
+        ));
+    }
+    let selected = columns
+        .iter()
+        .map(|column| kind.quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let relation = kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
+    let order = key_columns
+        .iter()
+        .map(|column| format!("{} ASC", kind.quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let typed_postgres_parameters =
+        data_compare_uses_typed_postgres_parameters(kind, &endpoint.driver);
+    let keys_per_batch =
+        (MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS / key_columns.len()).clamp(1, 500);
+    let mut rows = Vec::with_capacity(sampled_keys.len());
+    for keys in sampled_keys.chunks(keys_per_batch) {
+        let (predicate, params) = data_compare_sample_key_predicate(
+            kind,
+            &key_metadata,
+            keys,
+            typed_postgres_parameters,
+        )?;
+        let limit = keys.len() + 1;
+        let sql = format!(
+            "SELECT {selected} FROM {relation} WHERE {predicate} ORDER BY {order} LIMIT {limit};"
+        );
+        let mut result = query_target_parameterized(
+            manager,
+            &endpoint.connection_id,
+            endpoint.database.as_deref(),
+            &sql,
+            &params,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let page = result
+            .drain(..)
+            .next()
+            .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+        if page.rows.len() > keys.len() {
+            return Err(
+                "Sampled data compare observed duplicate rows for a declared unique key"
+                    .to_string(),
+            );
+        }
+        rows.extend(
+            page.rows
+                .iter()
+                .map(|row| data_compare_row_values(columns, row)),
+        );
+    }
+    Ok(rows)
+}
+
+fn data_compare_column_checksums(
+    columns: &[String],
+    ordered_keys: &[String],
+    rows: &BTreeMap<String, BTreeMap<String, Value>>,
+) -> BTreeMap<String, String> {
+    let mut hashers = columns
+        .iter()
+        .map(|column| (column.clone(), Sha256::new()))
+        .collect::<BTreeMap<_, _>>();
+    for key in ordered_keys {
+        for column in columns {
+            let hasher = hashers
+                .get_mut(column)
+                .expect("checksum hasher exists for every selected column");
+            hasher.update((key.len() as u64).to_be_bytes());
+            hasher.update(key.as_bytes());
+            if let Some(row) = rows.get(key) {
+                hasher.update([1]);
+                let encoded = serde_json::to_vec(row.get(column).unwrap_or(&Value::Null))
+                    .unwrap_or_else(|_| b"null".to_vec());
+                hasher.update((encoded.len() as u64).to_be_bytes());
+                hasher.update(encoded);
+            } else {
+                hasher.update([0]);
+            }
+        }
+    }
+    hashers
+        .into_iter()
+        .map(|(column, hasher)| (column, format!("{:x}", hasher.finalize())))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_table_data_compare_result(
+    source_rows: Vec<BTreeMap<String, Value>>,
+    target_rows: Vec<BTreeMap<String, Value>>,
+    columns: &[String],
+    key_columns: &[String],
+    source_row_count: u64,
+    target_row_count: u64,
+    batch_size: u32,
+    degradation_level: TableDataCompareDegradationLevel,
+    sampling_strategy: Option<TableDataCompareSamplingStrategy>,
+    sampling_rate: f64,
+    confidence_score: Option<f64>,
+    verification_method: &str,
+    enable_checksum: bool,
+) -> Result<TableDataCompareResult, String> {
+    let mut source = BTreeMap::new();
+    for values in source_rows {
+        let key = data_compare_key(&values, key_columns);
+        if source.insert(key.clone(), values).is_some() {
+            return Err(format!("Duplicate source key: {key}"));
+        }
+    }
+    let mut target = BTreeMap::new();
+    for values in target_rows {
+        let key = data_compare_key(&values, key_columns);
+        if target.insert(key.clone(), values).is_some() {
+            return Err(format!("Duplicate target key: {key}"));
+        }
+    }
+    let ordered_keys = source
+        .keys()
+        .chain(target.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+    let mut added_count = 0_u64;
+    let mut removed_count = 0_u64;
+    let mut modified_count = 0_u64;
+    let mut equal_count = 0_u64;
+    for key in &ordered_keys {
+        match (source.get(key), target.get(key)) {
+            (Some(source_values), None) => {
+                added_count += 1;
+                if added.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                    added.push(TableDataCompareRow {
+                        key: key.clone(),
+                        values: source_values.clone(),
+                    });
+                }
+            }
+            (None, Some(target_values)) => {
+                removed_count += 1;
+                if removed.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                    removed.push(TableDataCompareRow {
+                        key: key.clone(),
+                        values: target_values.clone(),
+                    });
+                }
+            }
+            (Some(source_values), Some(target_values)) => {
+                let changed_columns = columns
+                    .iter()
+                    .filter(|column| !key_columns.contains(column))
+                    .filter(|column| source_values.get(*column) != target_values.get(*column))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if changed_columns.is_empty() {
+                    equal_count += 1;
+                } else {
+                    modified_count += 1;
+                    if modified.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
+                        modified.push(TableDataCompareModifiedRow {
+                            key: key.clone(),
+                            source_values: source_values.clone(),
+                            target_values: target_values.clone(),
+                            changed_columns,
+                        });
+                    }
+                }
+            }
+            (None, None) => unreachable!("key union contains at least one row"),
+        }
+    }
+    let (source_checksums, target_checksums, checksums_match) = if enable_checksum {
+        let source_checksums = data_compare_column_checksums(columns, &ordered_keys, &source);
+        let target_checksums = data_compare_column_checksums(columns, &ordered_keys, &target);
+        let checksums_match = source_checksums == target_checksums;
+        (
+            Some(source_checksums),
+            Some(target_checksums),
+            Some(checksums_match),
+        )
+    } else {
+        (None, None, None)
+    };
+    let detail_limit_per_status = MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS as u32;
+    let details_truncated = added_count > added.len() as u64
+        || removed_count > removed.len() as u64
+        || modified_count > modified.len() as u64;
+    let counts_exact = degradation_level == TableDataCompareDegradationLevel::Full;
+    Ok(TableDataCompareResult {
+        added,
+        removed,
+        modified,
+        added_count,
+        removed_count,
+        modified_count,
+        equal_count,
+        source_row_count,
+        target_row_count,
+        compared_key_count: ordered_keys.len() as u64,
+        batch_size,
+        detail_limit_per_status,
+        details_truncated,
+        degradation_level,
+        sampling_strategy,
+        sampling_rate,
+        confidence_score,
+        verification_method: verification_method.to_string(),
+        counts_exact,
+        sampled_key_count: ordered_keys.len() as u64,
+        source_checksums,
+        target_checksums,
+        checksums_match,
+    })
+}
+
+fn skipped_table_data_compare_result(
+    source_row_count: u64,
+    target_row_count: u64,
+    batch_size: u32,
+) -> TableDataCompareResult {
+    TableDataCompareResult {
+        added: Vec::new(),
+        removed: Vec::new(),
+        modified: Vec::new(),
+        added_count: 0,
+        removed_count: 0,
+        modified_count: 0,
+        equal_count: 0,
+        source_row_count,
+        target_row_count,
+        compared_key_count: 0,
+        batch_size,
+        detail_limit_per_status: MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS as u32,
+        details_truncated: false,
+        degradation_level: TableDataCompareDegradationLevel::SkipWithRisk,
+        sampling_strategy: None,
+        sampling_rate: 0.0,
+        confidence_score: None,
+        verification_method: "skipped_size_limit".to_string(),
+        counts_exact: false,
+        sampled_key_count: 0,
+        source_checksums: None,
+        target_checksums: None,
+        checksums_match: None,
+    }
 }
 
 #[tauri::command]
@@ -10335,7 +10887,14 @@ pub async fn compare_table_data_full(
             .batch_size
             .unwrap_or(1_000)
             .clamp(100, MAX_FULL_DATA_COMPARE_BATCH_SIZE);
-        let max_rows = request.max_rows.unwrap_or(100_000).clamp(1, 100_000) as u64;
+        let threshold = normalized_data_compare_threshold(
+            request.max_rows,
+            request.degradation_threshold,
+        )?;
+        let sampling_strategy = request
+            .sampling_strategy
+            .unwrap_or(TableDataCompareSamplingStrategy::ExtremeValues);
+        let enable_checksum = request.enable_checksum.unwrap_or(true);
         let (source_columns, target_columns) = tokio::try_join!(
             get_target_columns(
                 &manager,
@@ -10355,6 +10914,13 @@ pub async fn compare_table_data_full(
         .map_err(|error| error.to_string())?;
         let source_columns = column_lookup(source_columns);
         let target_columns = column_lookup(target_columns);
+        for column in &columns {
+            if !source_columns.contains_key(column) || !target_columns.contains_key(column) {
+                return Err(format!(
+                    "Data compare column {column} is not available on both table endpoints"
+                ));
+            }
+        }
         for key in &key_columns {
             if !source_columns.contains_key(key) || !target_columns.contains_key(key) {
                 return Err(format!(
@@ -10378,99 +10944,105 @@ pub async fn compare_table_data_full(
         ).map_err(|error| error.to_string())?;
         let source_row_count = data_compare_row_count(&source_count_result)?;
         let target_row_count = data_compare_row_count(&target_count_result)?;
-        if source_row_count > max_rows || target_row_count > max_rows {
-            return Err(format!(
-                "Full data compare is limited to {max_rows} rows per table (source: {source_row_count}, target: {target_row_count}). Use a sampled/checksum compare when available."
-            ));
-        }
-        let (source_rows, target_rows) = tokio::try_join!(
-            fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &source_columns, &key_columns, batch_size),
-            fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &target_columns, &key_columns, batch_size),
-        )?;
-        let mut source = HashMap::with_capacity(source_rows.len());
-        for values in source_rows {
-            let key = data_compare_key(&values, &key_columns);
-            if source.insert(key.clone(), values).is_some() {
-                return Err(format!("Duplicate source key: {key}"));
-            }
-        }
-        let mut target = HashMap::with_capacity(target_rows.len());
-        for values in target_rows {
-            let key = data_compare_key(&values, &key_columns);
-            if target.insert(key.clone(), values).is_some() {
-                return Err(format!("Duplicate target key: {key}"));
-            }
-        }
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
-        let mut modified = Vec::new();
-        let mut added_count = 0_u64;
-        let mut removed_count = 0_u64;
-        let mut modified_count = 0_u64;
-        let mut equal_count = 0_u64;
-        let mut source_entries = source.iter().collect::<Vec<_>>();
-        source_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-        for (key, source_values) in source_entries {
-            let Some(target_values) = target.get(key) else {
-                added_count += 1;
-                if added.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
-                    added.push(TableDataCompareRow { key: key.clone(), values: source_values.clone() });
-                }
-                continue;
-            };
-            let changed_columns = columns
-                .iter()
-                .filter(|column| !key_columns.contains(column))
-                .filter(|column| source_values.get(*column) != target_values.get(*column))
-                .cloned()
-                .collect::<Vec<_>>();
-            if changed_columns.is_empty() {
-                equal_count += 1;
-            } else {
-                modified_count += 1;
-                if modified.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
-                    modified.push(TableDataCompareModifiedRow {
-                        key: key.clone(),
-                        source_values: source_values.clone(),
-                        target_values: target_values.clone(),
-                        changed_columns,
-                    });
-                }
-            }
-        }
-        let mut target_entries = target.iter().collect::<Vec<_>>();
-        target_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-        for (key, values) in target_entries {
-            if !source.contains_key(key) {
-                removed_count += 1;
-                if removed.len() < MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS {
-                    removed.push(TableDataCompareRow { key: key.clone(), values: values.clone() });
-                }
-            }
-        }
-        let compared_key_count = (source.len() + target.len() - equal_count as usize - modified_count as usize) as u64;
-        let detail_limit_per_status = MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS as u32;
-        let details_truncated = added_count > added.len() as u64
-            || removed_count > removed.len() as u64
-            || modified_count > modified.len() as u64;
-        // HashMap is only used for efficient key matching. Entries are sorted
-        // before the bounded preview is selected so repeated runs keep the
-        // same review sample even when the host hash seed changes.
-        Ok(TableDataCompareResult {
-            added,
-            removed,
-            modified,
-            added_count,
-            removed_count,
-            modified_count,
-            equal_count,
+        match data_compare_degradation_level(
             source_row_count,
             target_row_count,
-            compared_key_count,
-            batch_size,
-            detail_limit_per_status,
-            details_truncated,
-        })
+            &threshold,
+        ) {
+            TableDataCompareDegradationLevel::Full => {
+                let (source_rows, target_rows) = tokio::try_join!(
+                    fetch_full_data_compare_rows(&manager, &request.source, source_kind, &columns, &source_columns, &key_columns, batch_size),
+                    fetch_full_data_compare_rows(&manager, &request.target, target_kind, &columns, &target_columns, &key_columns, batch_size),
+                )?;
+                if source_rows.len() as u64 != source_row_count
+                    || target_rows.len() as u64 != target_row_count
+                {
+                    return Err(format!(
+                        "Full data compare did not fetch every counted row (source: {}/{source_row_count}, target: {}/{target_row_count})",
+                        source_rows.len(),
+                        target_rows.len(),
+                    ));
+                }
+                build_table_data_compare_result(
+                    source_rows,
+                    target_rows,
+                    &columns,
+                    &key_columns,
+                    source_row_count,
+                    target_row_count,
+                    batch_size,
+                    TableDataCompareDegradationLevel::Full,
+                    None,
+                    1.0,
+                    Some(1.0),
+                    "full_keyset",
+                    enable_checksum,
+                )
+            }
+            TableDataCompareDegradationLevel::Sample => {
+                let (source_keys, target_keys) = tokio::try_join!(
+                    fetch_data_compare_extreme_keys(
+                        &manager,
+                        &request.source,
+                        source_kind,
+                        &key_columns,
+                        threshold.sample_size,
+                    ),
+                    fetch_data_compare_extreme_keys(
+                        &manager,
+                        &request.target,
+                        target_kind,
+                        &key_columns,
+                        threshold.sample_size,
+                    ),
+                )?;
+                let sampled_keys = merge_data_compare_sample_keys(source_keys, target_keys)?;
+                let (source_rows, target_rows) = tokio::try_join!(
+                    fetch_sampled_data_compare_rows(
+                        &manager,
+                        &request.source,
+                        source_kind,
+                        &columns,
+                        &source_columns,
+                        &key_columns,
+                        &sampled_keys,
+                    ),
+                    fetch_sampled_data_compare_rows(
+                        &manager,
+                        &request.target,
+                        target_kind,
+                        &columns,
+                        &target_columns,
+                        &key_columns,
+                        &sampled_keys,
+                    ),
+                )?;
+                let maximum = source_row_count.max(target_row_count).max(1);
+                let sampling_rate = (sampled_keys.len() as f64 / maximum as f64).min(1.0);
+                build_table_data_compare_result(
+                    source_rows,
+                    target_rows,
+                    &columns,
+                    &key_columns,
+                    source_row_count,
+                    target_row_count,
+                    batch_size,
+                    TableDataCompareDegradationLevel::Sample,
+                    Some(sampling_strategy),
+                    sampling_rate,
+                    None,
+                    "extreme_key_sample",
+                    enable_checksum,
+                )
+            }
+            TableDataCompareDegradationLevel::SkipWithRisk => Ok(
+                skipped_table_data_compare_result(
+                    source_row_count,
+                    target_row_count,
+                    batch_size,
+                ),
+            ),
+        }
     }
     .await;
     match result {
@@ -15419,21 +15991,23 @@ mod tests {
         build_sqlite_add_column_statements, build_sqlite_create_index_statement,
         build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
         build_sqlite_drop_index_statement, build_structured_filter_where,
-        build_table_data_transfer_object_plan, build_table_order_by, build_transfer_target_columns,
-        build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
-        csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
-        csv_import_source_columns, csv_record_values, data_compare_key,
+        build_table_data_compare_result, build_table_data_transfer_object_plan,
+        build_table_order_by, build_transfer_target_columns, build_update_mutation,
+        build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
+        csv_import_reader, csv_import_row_selected, csv_import_source_columns, csv_record_values,
+        data_compare_degradation_level, data_compare_key,
         data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
-        data_compare_row_values, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
-        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
-        execute_target_parameterized_batch, filter_sql_export_batch,
-        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
-        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
-        infer_csv_import_columns, infer_json_lines_import_columns,
+        data_compare_row_values, data_compare_sample_key_predicate,
+        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
+        ensure_sql_insert_conflict_policy, ensure_table_export_format,
+        ensure_transfer_endpoint_driver_matches_connection, execute_target_parameterized_batch,
+        filter_sql_export_batch, finish_table_data_transfer_transaction,
+        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        import_string_inferred_type, infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
-        json_import_rows_with_cancel, normalized_table_data_transfer_objects,
+        json_import_rows_with_cancel, merge_data_compare_sample_keys,
+        normalized_data_compare_threshold, normalized_table_data_transfer_objects,
         normalized_table_data_transfer_project_id, object_label_from_type,
         object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
         order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
@@ -15461,12 +16035,14 @@ mod tests {
         AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
         CreateTableColumn, ImportInferredType, RelationOperation, SqlExportDialect,
         SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConfirmationBinding, TableDataTransferConversion,
-        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
-        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareDegradationLevel,
+        TableDataCompareDegradationThreshold, TableDataCompareResult,
+        TableDataCompareSamplingStrategy, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
+        TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
+        TableDataTransferObjectKind, TableDataTransferObjectReport,
         TableDataTransferObjectSelection, TableDataTransferPreview,
         TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
@@ -20584,6 +21160,13 @@ WITH DATA;"#
         assert_eq!(result.modified_count, 1_400);
         assert_eq!(result.detail_limit_per_status, 1_000);
         assert!(result.details_truncated);
+        assert_eq!(
+            result.degradation_level,
+            TableDataCompareDegradationLevel::Full
+        );
+        assert!(result.counts_exact);
+        assert_eq!(result.sampling_rate, 1.0);
+        assert_eq!(result.confidence_score, Some(1.0));
         assert_eq!(result.added.len(), 1);
         assert_eq!(result.modified.len(), 1);
         assert!(result.added.len() < result.added_count as usize);
@@ -20624,6 +21207,7 @@ WITH DATA;"#
             DatabaseKind::Postgres,
             &keys,
             Some(&[json!(7), json!(42)]),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -20641,9 +21225,111 @@ WITH DATA;"#
             DatabaseKind::Mysql,
             &keys,
             Some(&[Value::Null, json!(42)]),
+            false,
         )
         .unwrap_err()
         .contains("NULL key"));
+    }
+
+    #[test]
+    fn sampled_data_compare_thresholds_degrade_without_silently_raising_limits() {
+        let threshold = TableDataCompareDegradationThreshold::default();
+        assert_eq!(
+            data_compare_degradation_level(100_000, 99_999, &threshold),
+            TableDataCompareDegradationLevel::Full
+        );
+        assert_eq!(
+            data_compare_degradation_level(100_001, 100_000, &threshold),
+            TableDataCompareDegradationLevel::Sample
+        );
+        assert_eq!(
+            data_compare_degradation_level(10_000_001, 1, &threshold),
+            TableDataCompareDegradationLevel::SkipWithRisk
+        );
+        assert!(normalized_data_compare_threshold(
+            None,
+            Some(TableDataCompareDegradationThreshold {
+                full_compare_max_rows: 100_001,
+                ..threshold.clone()
+            }),
+        )
+        .unwrap_err()
+        .contains("Full data compare row threshold"));
+        assert!(
+            normalized_data_compare_threshold(Some(100_000), Some(threshold),)
+                .unwrap_err()
+                .contains("either maxRows or degradationThreshold")
+        );
+    }
+
+    #[test]
+    fn sampled_data_compare_uses_one_bound_key_universe_on_both_sides() {
+        let merged = merge_data_compare_sample_keys(
+            vec![vec![json!(1)], vec![json!(5)]],
+            vec![vec![json!(1)], vec![json!(9)]],
+        )
+        .unwrap();
+        assert_eq!(merged, vec![vec![json!(1)], vec![json!(5)], vec![json!(9)]]);
+
+        let mut id = target_column("id");
+        id.is_nullable = false;
+        id.data_type = "integer".to_string();
+        let (postgres_predicate, postgres_params) =
+            data_compare_sample_key_predicate(DatabaseKind::Postgres, &[id.clone()], &merged, true)
+                .unwrap();
+        assert_eq!(
+            postgres_predicate,
+            "((\"id\" = $1::integer) OR (\"id\" = $2::integer) OR (\"id\" = $3::integer))"
+        );
+        assert_eq!(postgres_params.len(), 3);
+
+        let (sqlite_predicate, _) =
+            data_compare_sample_key_predicate(DatabaseKind::Postgres, &[id], &merged, false)
+                .unwrap();
+        assert_eq!(
+            sqlite_predicate,
+            "((\"id\" = $1) OR (\"id\" = $2) OR (\"id\" = $3))"
+        );
+    }
+
+    #[test]
+    fn sampled_data_compare_reports_sample_local_counts_and_bounded_checksums() {
+        let columns = vec!["id".to_string(), "score".to_string()];
+        let keys = vec!["id".to_string()];
+        let result = build_table_data_compare_result(
+            vec![
+                data_compare_row_values(&columns, &[json!(1), json!(10)]),
+                data_compare_row_values(&columns, &[json!(2), json!(20)]),
+            ],
+            vec![
+                data_compare_row_values(&columns, &[json!(1), json!(11)]),
+                data_compare_row_values(&columns, &[json!(3), json!(30)]),
+            ],
+            &columns,
+            &keys,
+            1_000_000,
+            1_000_000,
+            1_000,
+            TableDataCompareDegradationLevel::Sample,
+            Some(TableDataCompareSamplingStrategy::ExtremeValues),
+            0.000_003,
+            None,
+            "extreme_key_sample",
+            true,
+        )
+        .unwrap();
+        assert!(!result.counts_exact);
+        assert_eq!(result.sampled_key_count, 3);
+        assert_eq!(result.added_count, 1);
+        assert_eq!(result.removed_count, 1);
+        assert_eq!(result.modified_count, 1);
+        assert_eq!(result.equal_count, 0);
+        assert_eq!(result.checksums_match, Some(false));
+        assert!(result.confidence_score.is_none());
+        assert_eq!(
+            result.source_checksums.as_ref().map(BTreeMap::len),
+            Some(columns.len())
+        );
     }
 
     #[test]

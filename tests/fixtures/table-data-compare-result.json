@@ -20,5 +20,11 @@
   "comparedKeyCount": 3945,
   "batchSize": 1000,
   "detailLimitPerStatus": 1000,
-  "detailsTruncated": true
+  "detailsTruncated": true,
+  "degradationLevel": "full",
+  "samplingRate": 1,
+  "confidenceScore": 1,
+  "verificationMethod": "full_keyset",
+  "countsExact": true,
+  "sampledKeyCount": 3945
 }

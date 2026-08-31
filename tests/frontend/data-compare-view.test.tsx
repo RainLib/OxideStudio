@@ -105,6 +105,8 @@ describe("DataCompareView", () => {
     expect(result.modifiedCount).toBe(1_400);
     expect(result.detailLimitPerStatus).toBe(1_000);
     expect(result.detailsTruncated).toBe(true);
+    expect(result.degradationLevel).toBe("full");
+    expect(result.countsExact).toBe(true);
     expect(result.added).toHaveLength(1);
     expect(result.modified).toHaveLength(1);
   });
@@ -161,13 +163,20 @@ describe("DataCompareView", () => {
       batchSize: 1_000,
       detailLimitPerStatus: 1_000,
       detailsTruncated: true,
+      degradationLevel: "full",
+      samplingRate: 1,
+      confidenceScore: 1,
+      verificationMethod: "full_keyset",
+      countsExact: true,
+      sampledKeyCount: 2_542,
+      checksumsMatch: false,
     });
 
     await act(async () => {
       root.render(<DataCompareView />);
     });
     const button = [...container.querySelectorAll("button")].find((item) =>
-      item.textContent?.includes("Compare full tables"),
+      item.textContent?.includes("Compare table data"),
     );
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -211,7 +220,7 @@ describe("DataCompareView", () => {
       root.render(<DataCompareView />);
     });
     const fullCompare = () => [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((item) => item.textContent?.includes("Compare full tables"));
+      .find((item) => item.textContent?.includes("Compare table data"));
     expect(fullCompare()?.disabled).toBe(false);
 
     const key = container.querySelector<HTMLInputElement>(
@@ -220,5 +229,70 @@ describe("DataCompareView", () => {
     await act(async () => key?.click());
     expect(fullCompare()?.disabled).toBe(true);
     expect(container.textContent).toContain("complete shared primary key");
+  });
+
+  it("labels degraded results as deterministic samples without claiming exact totals", async () => {
+    const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
+      (tab) => tab.type === "table",
+    );
+    if (!leftTab || !rightTab) throw new Error("Expected source table tabs");
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === leftTab.id
+          ? { ...tab, connectionId: "left", databaseName: "app", schemaName: "public", tableName: "users" }
+          : tab.id === rightTab.id
+            ? { ...tab, connectionId: "right", databaseName: "app", schemaName: "public", tableName: "users" }
+            : tab.type === "data_compare"
+              ? {
+                  ...tab,
+                  dataCompareLeft: tab.dataCompareLeft && { ...tab.dataCompareLeft, connectionId: "left", databaseName: "app", schemaName: "public", objectName: "users" },
+                  dataCompareRight: tab.dataCompareRight && { ...tab.dataCompareRight, connectionId: "right", databaseName: "app", schemaName: "public", objectName: "users" },
+                }
+              : tab,
+      ),
+    }));
+    useConnectionStore.setState({
+      connections: [
+        { id: "left", name: "Left", driver: "postgresql", connectionUrl: "postgresql://left" },
+        { id: "right", name: "Right", driver: "postgresql", connectionUrl: "postgresql://right" },
+      ] as never,
+    });
+    const compare = vi.spyOn(tableService, "compareTableDataFull").mockResolvedValue({
+      added: [],
+      removed: [],
+      modified: [],
+      addedCount: 0,
+      removedCount: 0,
+      modifiedCount: 0,
+      equalCount: 20_000,
+      sourceRowCount: 2_000_000,
+      targetRowCount: 2_000_000,
+      comparedKeyCount: 20_000,
+      batchSize: 1_000,
+      detailLimitPerStatus: 1_000,
+      detailsTruncated: false,
+      degradationLevel: "sample",
+      samplingStrategy: "extremeValues",
+      samplingRate: 0.01,
+      verificationMethod: "extreme_key_sample",
+      countsExact: false,
+      sampledKeyCount: 20_000,
+      checksumsMatch: true,
+    });
+
+    await act(async () => root.render(<DataCompareView />));
+    const button = [...container.querySelectorAll("button")].find((item) =>
+      item.textContent?.includes("Compare table data"),
+    );
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("20,000 deterministic extreme keys inspected");
+    expect(container.textContent).toContain("1.00% key coverage · sampled counts only");
+    expect(container.textContent).toContain("does not claim a statistical confidence score");
+    expect(container.textContent).toContain("Inspected-column checksums match");
+    compare.mockRestore();
   });
 });

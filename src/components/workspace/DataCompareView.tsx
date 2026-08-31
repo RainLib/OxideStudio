@@ -45,6 +45,12 @@ export function DataCompareView() {
     batchSize: number;
     detailLimitPerStatus: number;
     detailsTruncated: boolean;
+    degradationLevel: TableDataCompareResult["degradationLevel"];
+    samplingRate: number;
+    verificationMethod: TableDataCompareResult["verificationMethod"];
+    countsExact: boolean;
+    sampledKeyCount: number;
+    checksumsMatch?: boolean;
   } | null>(null);
   const [isComparingFull, setIsComparingFull] = useState(false);
   const [fullComparisonError, setFullComparisonError] = useState<string | null>(null);
@@ -155,6 +161,12 @@ export function DataCompareView() {
         batchSize: result.batchSize,
         detailLimitPerStatus: result.detailLimitPerStatus,
         detailsTruncated: result.detailsTruncated,
+        degradationLevel: result.degradationLevel,
+        samplingRate: result.samplingRate,
+        verificationMethod: result.verificationMethod,
+        countsExact: result.countsExact,
+        sampledKeyCount: result.sampledKeyCount,
+        checksumsMatch: result.checksumsMatch,
       });
     } catch (error) {
       setFullComparisonError(error instanceof Error ? error.message : String(error));
@@ -191,12 +203,12 @@ export function DataCompareView() {
           disabled={!canCompareFull || isComparingFull}
           title={
             canCompareFull
-              ? "Compare all rows on the host, up to 100,000 rows per table"
-              : "Full compare requires two table tabs, connections, and the complete shared primary key"
+              ? "Compare all rows up to 100,000 per table, then use a bounded extreme-key sample up to 10,000,000 rows"
+              : "Table compare requires two table tabs, connections, and the complete shared primary key"
           }
           onClick={() => void runFullComparison()}
         >
-          <Rows3 size={11} /> {isComparingFull ? "Comparing tables…" : "Compare full tables"}
+          <Rows3 size={11} /> {isComparingFull ? "Comparing tables…" : "Compare table data"}
         </button>
       </header>
 
@@ -305,7 +317,25 @@ export function DataCompareView() {
                 <>
                   <div>{fullComparisonMeta.sourceRows.toLocaleString()} full left rows</div>
                   <div>{fullComparisonMeta.targetRows.toLocaleString()} full right rows</div>
-                  <div>{fullComparisonMeta.batchSize.toLocaleString()} rows per host batch</div>
+                  {fullComparisonMeta.degradationLevel === "full" ? (
+                    <div>Exact full-key comparison · {fullComparisonMeta.batchSize.toLocaleString()} rows per host batch</div>
+                  ) : fullComparisonMeta.degradationLevel === "sample" ? (
+                    <>
+                      <div>
+                        {fullComparisonMeta.sampledKeyCount.toLocaleString()} deterministic extreme keys inspected
+                      </div>
+                      <div>
+                        {(fullComparisonMeta.samplingRate * 100).toFixed(2)}% key coverage · sampled counts only
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-amber-200">Comparison skipped above the safe sampling ceiling</div>
+                  )}
+                  {fullComparisonMeta.checksumsMatch !== undefined ? (
+                    <div>
+                      Inspected-column checksums {fullComparisonMeta.checksumsMatch ? "match" : "differ"}
+                    </div>
+                  ) : null}
                   {fullComparisonMeta.detailsTruncated && (
                     <div className="mt-1 text-amber-200">
                       Showing up to {fullComparisonMeta.detailLimitPerStatus.toLocaleString()} details per status; totals remain exact.
@@ -645,9 +675,18 @@ function fullComparisonFromServer(
     },
     comparedKeyCount: result.comparedKeyCount,
     warnings: [
-      "Full table comparison ran in the host process. Equal rows are counted but not materialized in the result list.",
+      ...(result.degradationLevel === "full"
+        ? ["Full table comparison ran in the host process. Counts are exact; equal rows are counted but not materialized in the result list."]
+        : result.degradationLevel === "sample"
+          ? [
+              `The tables exceeded the full-compare ceiling. Oxide inspected ${result.sampledKeyCount.toLocaleString()} deterministic first/last keys (${(result.samplingRate * 100).toFixed(2)}% coverage); difference counts and checksums describe only that sampled key universe.`,
+              "Extreme-key sampling is deterministic but not random, so Oxide does not claim a statistical confidence score or whole-table equality.",
+            ]
+          : [
+              "The tables exceed the safe sampling ceiling. Only exact row counts were read; no row-level comparison or equality claim was produced.",
+            ]),
       ...(result.detailsTruncated
-        ? [`Difference details are limited to ${result.detailLimitPerStatus.toLocaleString()} rows per status. Counts above remain exact.`]
+        ? [`Difference details are limited to ${result.detailLimitPerStatus.toLocaleString()} rows per status. ${result.countsExact ? "Counts above remain exact." : "Sample-local counts above remain complete for the inspected keys."}`]
         : []),
     ],
   };

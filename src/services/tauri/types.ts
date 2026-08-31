@@ -640,6 +640,18 @@ export interface TableDataCompareRequest {
   keyColumns: string[];
   batchSize?: number;
   maxRows?: number;
+  degradationThreshold?: TableDataCompareDegradationThreshold;
+  samplingStrategy?: TableDataCompareSamplingStrategy;
+  enableChecksum?: boolean;
+}
+
+export type TableDataCompareDegradationLevel = "full" | "sample" | "skip_with_risk";
+export type TableDataCompareSamplingStrategy = "extremeValues";
+
+export interface TableDataCompareDegradationThreshold {
+  fullCompareMaxRows: number;
+  sampleMaxRows: number;
+  sampleSize: number;
 }
 
 export interface TableDataCompareRow {
@@ -658,7 +670,7 @@ export interface TableDataCompareResult {
   added: TableDataCompareRow[];
   removed: TableDataCompareRow[];
   modified: TableDataCompareModifiedRow[];
-  /** Exact totals; row arrays are a bounded preview for the renderer. */
+  /** Exact for full comparison, sample-local when countsExact is false. */
   addedCount: number;
   removedCount: number;
   modifiedCount: number;
@@ -669,6 +681,17 @@ export interface TableDataCompareResult {
   batchSize: number;
   detailLimitPerStatus: number;
   detailsTruncated: boolean;
+  degradationLevel: TableDataCompareDegradationLevel;
+  samplingStrategy?: TableDataCompareSamplingStrategy;
+  samplingRate: number;
+  /** Omitted for deterministic extreme sampling, which has no statistical confidence claim. */
+  confidenceScore?: number;
+  verificationMethod: "full_keyset" | "extreme_key_sample" | "skipped_size_limit";
+  countsExact: boolean;
+  sampledKeyCount: number;
+  sourceChecksums?: Record<string, string>;
+  targetChecksums?: Record<string, string>;
+  checksumsMatch?: boolean;
 }
 
 export interface TableExportResult {

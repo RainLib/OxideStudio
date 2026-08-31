@@ -99,7 +99,9 @@ build. No database was opened.
 ## Phase 125 -- full table data compare
 
 - Exercise `compare_table_data_full` against PostgreSQL, MySQL, SQLite/DuckDB and every explicitly opted-in external table-data-transfer package. Verify the count query, deterministic key ordering, null/composite keys, duplicate-key rejection, empty schema handling and independent source/target databases.
-- Confirm the 100,000-row ceiling rejects rather than degrades to an incomplete diff. Add sampled/checksum degradation only after a result contract can surface method, confidence and coverage exactly as DBX does.
+- Confirm up to 100,000 rows uses the exact keyset path and rejects any driver-side silent truncation. For 100,001–10,000,000 rows, verify both endpoints contribute first/last keys, the union is queried on both sides with bound parameters, SQLite/rqlite placeholders contain no PostgreSQL casts, and difference totals are explicitly sample-local. Compare the returned per-column checksums with an independently encoded fixture and confirm extreme sampling never displays a statistical confidence or whole-table equality claim.
+- Above 10,000,000 rows, confirm only exact row counts and `skip_with_risk` are returned. Record query count, peak Host memory, sample coverage and wall time for narrow/wide rows and composite keys. Random/hybrid sampling remains unavailable until it can reuse one key universe on both endpoints and support a defensible confidence contract.
+- Process interruption still has no resumable checkpoint artifact. Verify an interrupted compare publishes no partial result, then design a project-scoped, identity/digest-bound checkpoint that stores cursors/counts only and never row values, SQL, URLs or credentials before enabling resume.
 - Verify a full comparison does not block the workbench, that cancellation/progress is added before raising the cap, and that comparison results never expose source values through durable reports or logs.
 
 Implementation work is intentionally being completed before these checks run.
