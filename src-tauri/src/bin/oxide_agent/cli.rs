@@ -1,6 +1,6 @@
 use crate::oxide_agent::{
     bridge_mcp, catalog, mcp,
-    policy::Grant,
+    policy::{DatabaseScope, Grant},
     runtime::ToolRuntime,
     store::{resolve_data_dir, HeadlessStore},
 };
@@ -69,6 +69,14 @@ pub struct ScopeArgs {
     /// Optional immutable connection grant. Omitting it grants project-scoped connection selection.
     #[arg(long, env = "OXIDE_CONNECTION_ID")]
     connection: Option<String>,
+    /// Optional immutable database allowlist. Repeat the flag or use a comma-separated environment value.
+    #[arg(
+        long = "database",
+        env = "OXIDE_DATABASE",
+        value_name = "DATABASE",
+        value_delimiter = ','
+    )]
+    databases: Vec<String>,
     /// Override OxideStudio's application-data directory.
     #[arg(long, env = "OXIDE_DATA_DIR")]
     data_dir: Option<PathBuf>,
@@ -121,11 +129,17 @@ impl Cli {
 
 impl ScopeArgs {
     async fn runtime(self) -> Result<Arc<ToolRuntime>> {
-        let grant = Grant::new(
+        let database_scope = if self.databases.is_empty() {
+            DatabaseScope::All
+        } else {
+            DatabaseScope::Selected(self.databases)
+        };
+        let grant = Grant::new_with_database_scope(
             self.project,
             self.connection,
             self.max_rows,
             self.max_result_bytes,
+            database_scope,
         )?;
         let data_dir = resolve_data_dir(self.data_dir)?;
         let store = HeadlessStore::open(&data_dir).await?;
@@ -271,5 +285,28 @@ mod tests {
             "-1",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn database_flags_form_an_immutable_allowlist() {
+        let cli = Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "stdio",
+            "--project",
+            "p",
+            "--database",
+            "reporting,analytics",
+            "--database",
+            "archive",
+        ])
+        .unwrap();
+        let databases = match cli.command {
+            Command::Mcp {
+                command: McpCommand::Stdio(scope),
+            } => scope.databases,
+            _ => panic!("expected MCP stdio command"),
+        };
+        assert_eq!(databases, ["reporting", "analytics", "archive"]);
     }
 }

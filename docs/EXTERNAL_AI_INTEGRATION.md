@@ -100,6 +100,8 @@ printf '{}' > /tmp/oxide-input.json
         "pencil-7ef0839d",
         "--connection",
         "<connection-id>",
+        "--database",
+        "reporting",
         "--max-rows",
         "100",
         "--max-result-bytes",
@@ -116,15 +118,17 @@ printf '{}' > /tmp/oxide-input.json
 
 - `--project` 固定可访问的项目；
 - `--connection` 固定可访问的连接；
+- `--database` 固定可访问的数据库，可重复传入或使用逗号分隔；一旦设置，工具输入中的 `database` 不能越界；
 - `--max-rows` 限制单次查询可返回的最大行数；
 - `--max-result-bytes` 限制单次工具结果的序列化大小；
 - `--query-timeout-secs` 为该 MCP 进程的所有数据库查询和 EXPLAIN 设置统一超时；省略时为 30 秒，设为 `0` 表示不设置自动截止时间；
 - AI 即使在工具参数中传入其他项目或连接 ID，也会被拒绝；
+- 数据库范围启用后，Rust 还会扫描只读 SQL 中的 `FROM`、`JOIN`、逗号连接、SQL Server `APPLY` 与三/四段式对象名；跨库引用或无法可靠判断的派生关系会 fail closed；
 - 调用方不能通过 `approved`、`approvalLease` 或 `--approve` 自行提升权限。
 
 如果项目只有一个连接，可以不传工具级 `connectionId`。如果项目有多个连接且启动时未使用 `--connection` 固定范围，调用工具时必须显式传入 `connectionId`。
 
-也可以使用 `OXIDE_MCP_QUERY_TIMEOUT_SECS` 环境变量设置同一全局超时。命令参数优先于环境变量；该值不会进入工具 Schema，模型不能在单次调用中扩大期限。
+也可以使用 `OXIDE_DATABASE`（逗号分隔）和 `OXIDE_MCP_QUERY_TIMEOUT_SECS` 环境变量设置数据库范围与全局超时。命令参数优先于环境变量；这些值不会进入工具 Schema，模型不能在单次调用中扩大范围或期限。
 
 ### 3.2 MCP 协议要求
 
@@ -173,7 +177,7 @@ printf '%s\n' '{
   --input @/tmp/oxide-query.json
 ```
 
-`database`、`schema` 和工具输入中的 `connectionId` 都是可选的范围参数；是否需要填写取决于连接类型和项目中的连接数量。使用 `--connection` 固定连接后，可以省略输入中的 `connectionId`，但如果同时提供，两者必须一致。
+`database`、`schema` 和工具输入中的 `connectionId` 都是可选的范围参数；是否需要填写取决于连接类型和项目中的连接数量。使用 `--connection` 固定连接后，可以省略输入中的 `connectionId`，但如果同时提供，两者必须一致。使用一个 `--database` 时可以省略工具输入中的 `database`，Host 会选择唯一授权数据库；多个数据库被授权时必须显式选择其中一个。
 
 `tools call` 强制使用 `--input @file`，不能把 JSON 直接放进命令参数。这可以避免 SQL 和其他输入内容暴露在系统进程列表中。输入文件最大为 512 KiB。
 
@@ -184,6 +188,7 @@ printf '%s\n' '{
 ```bash
 export OXIDE_PROJECT_ID="pencil-7ef0839d"
 export OXIDE_CONNECTION_ID="<connection-id>"
+export OXIDE_DATABASE="reporting,analytics"
 export OXIDE_DATA_DIR="$HOME/Library/Application Support/com.houshuai.oxide-studio"
 
 "$BIN" tools call connection.listSummaries \

@@ -227,7 +227,7 @@ range。`Export JSON` 必须由 Rust 打开原生保存对话框，选定路径�
 外部入口的目标是 Rust 原生 `oxide-agent`：
 
 ```text
-oxide-agent mcp stdio --project <id> [--connection <id>]
+oxide-agent mcp stdio --project <id> [--connection <id>] [--database <name> ...]
 oxide-agent tools list
 oxide-agent tools inspect <name>
 oxide-agent tools call <name> --input @file

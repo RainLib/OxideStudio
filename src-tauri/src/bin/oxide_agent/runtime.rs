@@ -12,6 +12,7 @@ use oxide_studio_lib::{
         manager::ConnectionManager,
         parser::{SqlParser, SuggestionType},
         protocol::{ExplainPlanMode, QueryResult},
+        query_scope::sql_references_disallowed_database,
         ssh::SshTunnel,
         statement::{
             execution_statement_kind, split_leading_execution_hint, split_sql_statements,
@@ -174,6 +175,8 @@ impl ToolRuntime {
             .await?;
         let dialect = dialect_for_driver(&connection.stored.driver)?;
         validate_read_only_sql(&input.sql, dialect).map_err(anyhow::Error::msg)?;
+        let database = self.resolve_query_database(&connection, input.database.as_deref())?;
+        self.enforce_query_database_scope(&input.sql, dialect, database.as_deref())?;
         let statement = split_sql_statements(&input.sql, dialect)
             .into_iter()
             .next()
@@ -206,7 +209,7 @@ impl ToolRuntime {
             .execute_sql(
                 &connection,
                 &script,
-                input.database.as_deref(),
+                database.as_deref(),
                 input.schema.as_deref(),
             )
             .await?;
@@ -228,6 +231,7 @@ impl ToolRuntime {
         }
         Ok(json!({
             "connectionId": connection.stored.id,
+            "database": database,
             "rowCount": original_rows.min(max_rows),
             "truncated": truncated,
             "results": results,
@@ -242,6 +246,9 @@ impl ToolRuntime {
             .resolve_connection(input.connection_id.as_deref())
             .await?;
         let dialect = dialect_for_driver(&connection.stored.driver)?;
+        validate_read_only_sql(&input.sql, dialect).map_err(anyhow::Error::msg)?;
+        let database = self.resolve_query_database(&connection, input.database.as_deref())?;
+        self.enforce_query_database_scope(&input.sql, dialect, database.as_deref())?;
         let kind = kind_for_dialect(dialect)?;
         let (statement, format) =
             build_explain_statement(&input.sql, kind, ExplainPlanMode::Estimate)?;
@@ -256,7 +263,7 @@ impl ToolRuntime {
             .execute_sql(
                 &connection,
                 &script,
-                input.database.as_deref(),
+                database.as_deref(),
                 input.schema.as_deref(),
             )
             .await?;
@@ -273,6 +280,7 @@ impl ToolRuntime {
         )?;
         Ok(json!({
             "connectionId": connection.stored.id,
+            "database": database,
             "plan": plan,
         }))
     }
@@ -356,6 +364,36 @@ impl ToolRuntime {
             ));
         }
         Ok(ResolvedConnection { stored, config })
+    }
+
+    fn resolve_query_database(
+        &self,
+        connection: &ResolvedConnection,
+        requested: Option<&str>,
+    ) -> Result<Option<String>> {
+        self.grant
+            .resolve_database(requested, connection.config.database.as_deref())
+            .map_err(anyhow::Error::from)
+    }
+
+    fn enforce_query_database_scope(
+        &self,
+        sql: &str,
+        dialect: StatementScanDialect,
+        active_database: Option<&str>,
+    ) -> Result<()> {
+        let Some(allowed_databases) = self.grant.allowed_databases() else {
+            return Ok(());
+        };
+        let active_database = active_database.ok_or_else(|| {
+            anyhow!("database selection is required by the restricted database grant")
+        })?;
+        if sql_references_disallowed_database(sql, dialect, active_database, allowed_databases) {
+            return Err(anyhow!(
+                "SQL references a database outside the granted scope or contains an ambiguous relation target"
+            ));
+        }
+        Ok(())
     }
 
     async fn execute_sql(

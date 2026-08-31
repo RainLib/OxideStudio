@@ -12,6 +12,7 @@ pub mod parser;
 pub(crate) mod private_file;
 pub mod protocol;
 pub mod provider_secret;
+pub mod query_scope;
 pub mod redaction;
 pub mod schema_diff;
 pub mod sqlite_worker_artifact;
