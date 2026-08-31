@@ -1,4 +1,9 @@
-@import "tailwindcss";
+/* Tailwind v4 otherwise auto-detects classes across the repository. Keep the
+ * generated stylesheet bounded to the application source: `sources/` holds
+ * large read-only reference projects and must never affect desktop build time
+ * or CSS output. */
+@import "tailwindcss" source(none);
+@source ".";
 
 @theme {
   --color-background: hsl(var(--background));
@@ -41,10 +46,6 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
 }
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 
 @layer base {
   :root {
