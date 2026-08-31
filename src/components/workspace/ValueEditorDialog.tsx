@@ -17,7 +17,7 @@ import {
   ToggleLeft,
   Type,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -796,92 +796,310 @@ function StatePlaceholder({
   );
 }
 
-const JSON_TREE_CHILD_LIMIT = 500;
+const JSON_TREE_ROW_HEIGHT = 24;
+const JSON_TREE_OVERSCAN_ROWS = 20;
+const JSON_TREE_MAX_ROWS = 100_000;
+const JSON_TREE_SUMMARY_COUNT_LIMIT = 10_000;
+
+type JsonTreeParentKind = "root" | "array" | "object";
+
+export interface JsonTreeRow {
+  path: string;
+  label: string;
+  value: unknown;
+  depth: number;
+  parentKind: JsonTreeParentKind;
+  closing?: boolean;
+  truncated?: boolean;
+}
+
+function isJsonTreeContainer(value: unknown): value is unknown[] | Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function escapeJsonPointerSegment(segment: string) {
+  return segment.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
+function appendJsonPointer(path: string, segment: string | number) {
+  return `${path}/${escapeJsonPointerSegment(String(segment))}`;
+}
+
+/**
+ * Iterative traversal avoids recursive call-stack growth. Only expanded
+ * containers enumerate children; the hard row bound prevents a hostile JSON
+ * cell from turning the tree preview into an unbounded renderer allocation.
+ */
+export function flattenJsonTreeRows(
+  value: unknown,
+  expandedPaths: ReadonlySet<string>,
+  maxRows = JSON_TREE_MAX_ROWS,
+): JsonTreeRow[] {
+  const rows: JsonTreeRow[] = [];
+  const pending: JsonTreeRow[] = [
+    { path: "", label: "$", value, depth: 0, parentKind: "root" },
+  ];
+  const boundedMaxRows = Math.max(1, Math.floor(maxRows));
+  let omittedRows = false;
+
+  while (pending.length > 0 && rows.length < boundedMaxRows) {
+    const row = pending.pop();
+    if (!row) break;
+    rows.push(row);
+    if (
+      row.closing ||
+      row.truncated ||
+      !isJsonTreeContainer(row.value) ||
+      !expandedPaths.has(row.path)
+    ) {
+      continue;
+    }
+    pending.push({
+      ...row,
+      path: `${row.path}/$close\u0000`,
+      label: "",
+      closing: true,
+    });
+    // Account for rows already rendered and queued before enumerating a wide
+    // container. This bounds both the returned list and the traversal stack;
+    // virtualization alone would not protect memory from a million-key object.
+    const availableChildren = boundedMaxRows - rows.length - pending.length;
+    if (availableChildren <= 0) {
+      omittedRows = true;
+      continue;
+    }
+    if (Array.isArray(row.value)) {
+      const visibleLength = Math.min(row.value.length, availableChildren);
+      omittedRows ||= visibleLength < row.value.length;
+      for (let index = visibleLength - 1; index >= 0; index -= 1) {
+        pending.push({
+          path: appendJsonPointer(row.path, index),
+          label: String(index),
+          value: row.value[index],
+          depth: row.depth + 1,
+          parentKind: "array",
+        });
+      }
+    } else {
+      const entries: Array<[string, unknown]> = [];
+      for (const label in row.value) {
+        if (!Object.prototype.hasOwnProperty.call(row.value, label)) continue;
+        if (entries.length >= availableChildren) {
+          omittedRows = true;
+          break;
+        }
+        entries.push([label, row.value[label]]);
+      }
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const [label, child] = entries[index]!;
+        pending.push({
+          path: appendJsonPointer(row.path, label),
+          label,
+          value: child,
+          depth: row.depth + 1,
+          parentKind: "object",
+        });
+      }
+    }
+  }
+  if (pending.length > 0 || omittedRows) {
+    rows.push({
+      path: "/$truncated\u0000",
+      label: "",
+      value: pending.length,
+      depth: 0,
+      parentKind: "root",
+      truncated: true,
+    });
+  }
+  return rows;
+}
 
 function JsonTreePreview({ value }: { value: unknown }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
+    () => new Set([""]),
+  );
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 480 });
+  const rows = useMemo(
+    () => flattenJsonTreeRows(value, expandedPaths),
+    [expandedPaths, value],
+  );
+  const start = Math.max(
+    0,
+    Math.floor(viewport.scrollTop / JSON_TREE_ROW_HEIGHT) -
+      JSON_TREE_OVERSCAN_ROWS,
+  );
+  const end = Math.min(
+    rows.length,
+    Math.ceil((viewport.scrollTop + viewport.height) / JSON_TREE_ROW_HEIGHT) +
+      JSON_TREE_OVERSCAN_ROWS,
+  );
+
+  useEffect(() => {
+    setExpandedPaths(new Set([""]));
+    setViewport((current) => ({ ...current, scrollTop: 0 }));
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [value]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const updateHeight = () => {
+      if (element.clientHeight > 0) {
+        setViewport((current) => ({
+          ...current,
+          height: element.clientHeight,
+        }));
+      }
+    };
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const togglePath = (path: string) => {
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
   return (
-    <div className="h-full overflow-auto px-3 py-3 font-mono text-[11px] leading-5 text-[hsl(var(--wb-text))]">
-      <JsonTreeNode label="$" value={value} depth={0} />
+    <div
+      ref={scrollRef}
+      className="h-full overflow-auto px-3 py-3 font-mono text-[11px] text-[hsl(var(--wb-text))]"
+      data-json-tree-virtualized="true"
+      onScroll={(event) =>
+        setViewport({
+          scrollTop: event.currentTarget.scrollTop,
+          height: event.currentTarget.clientHeight || viewport.height,
+        })
+      }
+    >
+      <div
+        className="relative min-w-max"
+        style={{ height: rows.length * JSON_TREE_ROW_HEIGHT }}
+      >
+        {rows.slice(start, end).map((row, index) => (
+          <JsonTreeVirtualRow
+            key={row.path}
+            row={row}
+            expanded={expandedPaths.has(row.path)}
+            top={(start + index) * JSON_TREE_ROW_HEIGHT}
+            onToggle={togglePath}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-function JsonTreeNode({
-  label,
-  value,
-  depth,
+function JsonTreeVirtualRow({
+  row,
+  expanded,
+  top,
+  onToggle,
 }: {
-  label: string;
-  value: unknown;
-  depth: number;
+  row: JsonTreeRow;
+  expanded: boolean;
+  top: number;
+  onToggle: (path: string) => void;
 }) {
-  const entries = jsonTreeEntries(value);
-  const expandable = entries !== null;
-  const [expanded, setExpanded] = useState(depth < 1);
-
-  if (!expandable) {
+  if (row.truncated) {
     return (
-      <div className="break-all" style={{ paddingLeft: depth * 14 }}>
-        <span className="text-[hsl(var(--wb-text-muted))]">{label}: </span>
-        <span className={jsonPrimitiveClass(value)}>{jsonPrimitiveText(value)}</span>
+      <div
+        className="absolute left-0 flex h-6 items-center text-[hsl(var(--wb-text-muted))]"
+        style={{ top }}
+      >
+        Tree preview reached its {JSON_TREE_MAX_ROWS.toLocaleString()} row safety
+        limit. Use the text view to inspect the complete value.
       </div>
     );
   }
-
-  const summary = Array.isArray(value)
-    ? `[${entries.length}${entries.length === 1 ? " item" : " items"}]`
-    : `{${entries.length}${entries.length === 1 ? " property" : " properties"}}`;
-  const visibleEntries = entries.slice(0, JSON_TREE_CHILD_LIMIT);
-
+  const expandable = isJsonTreeContainer(row.value);
+  const summary = expandable ? jsonTreeContainerSummary(row.value) : "";
   return (
-    <div>
-      <button
-        type="button"
-        className="flex min-h-5 items-center gap-1 break-all text-left hover:text-[hsl(var(--wb-accent))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
-        style={{ paddingLeft: depth * 14 }}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((current) => !current)}
-      >
-        {expanded ? (
-          <ChevronDown size={12} aria-hidden="true" />
-        ) : (
-          <ChevronRight size={12} aria-hidden="true" />
-        )}
-        <span className="text-[hsl(var(--wb-text-muted))]">{label}</span>
-        <span className="text-[hsl(var(--wb-text-secondary))]">{summary}</span>
-      </button>
-      {expanded && (
-        <div>
-          {visibleEntries.map(([key, child]) => (
-            <JsonTreeNode
-              key={key}
-              label={key}
-              value={child}
-              depth={depth + 1}
-            />
-          ))}
-          {entries.length > JSON_TREE_CHILD_LIMIT && (
-            <div
-              className="text-[hsl(var(--wb-text-muted))]"
-              style={{ paddingLeft: (depth + 1) * 14 }}
+    <div
+      className="absolute left-0 flex h-6 min-w-full items-center gap-1 whitespace-nowrap rounded-[3px] hover:bg-[hsl(var(--wb-hover))]"
+      data-json-path={row.path}
+      style={{ top, paddingLeft: row.depth * 14 }}
+    >
+      {row.closing ? (
+        <span className="text-[hsl(var(--wb-text-secondary))]">
+          {Array.isArray(row.value) ? "]" : "}"}
+        </span>
+      ) : (
+        <>
+          {expandable ? (
+            <button
+              type="button"
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[3px] text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-accent))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
+              aria-expanded={expanded}
+              aria-label={row.path || "$"}
+              onClick={() => onToggle(row.path)}
             >
-              {entries.length - JSON_TREE_CHILD_LIMIT} more items. Use the text view to inspect all values.
-            </div>
+              {expanded ? (
+                <ChevronDown size={12} aria-hidden="true" />
+              ) : (
+                <ChevronRight size={12} aria-hidden="true" />
+              )}
+            </button>
+          ) : (
+            <span className="inline-block w-5 shrink-0" aria-hidden="true" />
           )}
-        </div>
+          {row.parentKind !== "root" && (
+            <span className="text-[hsl(var(--wb-text-muted))]">
+              {row.parentKind === "array" ? `[${row.label}]` : row.label}:
+            </span>
+          )}
+          {row.parentKind === "root" && (
+            <span className="text-[hsl(var(--wb-text-muted))]">{row.label}</span>
+          )}
+          {expandable ? (
+            <>
+              <span className="text-[hsl(var(--wb-text-secondary))]">
+                {Array.isArray(row.value) ? "[" : "{"}
+              </span>
+              {!expanded && (
+                <>
+                  <span className="text-[hsl(var(--wb-text-muted))]">{summary}</span>
+                  <span className="text-[hsl(var(--wb-text-secondary))]">
+                    {Array.isArray(row.value) ? "]" : "}"}
+                  </span>
+                </>
+              )}
+            </>
+          ) : (
+            <span className={jsonPrimitiveClass(row.value)} title={jsonPrimitiveText(row.value)}>
+              {jsonPrimitiveText(row.value)}
+            </span>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function jsonTreeEntries(value: unknown): Array<[string, unknown]> | null {
+function jsonTreeContainerSummary(value: unknown) {
   if (Array.isArray(value)) {
-    return value.map((item, index) => [String(index), item]);
+    return `[${value.length}${value.length === 1 ? " item" : " items"}]`;
   }
-  if (value && typeof value === "object") {
-    return Object.entries(value as Record<string, unknown>);
+  if (!value || typeof value !== "object") return "";
+  const object = value as Record<string, unknown>;
+  let count = 0;
+  for (const label in object) {
+    if (!Object.prototype.hasOwnProperty.call(object, label)) continue;
+    count += 1;
+    if (count > JSON_TREE_SUMMARY_COUNT_LIMIT) {
+      return `{${JSON_TREE_SUMMARY_COUNT_LIMIT.toLocaleString()}+ properties}`;
+    }
   }
-  return null;
+  return `{${count}${count === 1 ? " property" : " properties"}}`;
 }
 
 function jsonPrimitiveText(value: unknown) {

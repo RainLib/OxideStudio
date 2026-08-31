@@ -447,7 +447,7 @@ export function SchemaDiffView() {
         >
           <ShieldAlert size={12} className="mt-0.5 shrink-0 text-sky-300" />
           <span>
-            {descriptorOnlyObjectChanges.length} schema object change{descriptorOnlyObjectChanges.length === 1 ? " is" : "s are"} descriptor-only. No executable source DDL was captured, so these objects are excluded from generated migration SQL and must be reviewed and applied manually.
+            {descriptorOnlyObjectChanges.length} schema object change{descriptorOnlyObjectChanges.length === 1 ? " is" : "s are"} descriptor-only. Source DDL is not captured, so these objects are excluded from generated migration SQL and must be reviewed and applied manually.
           </span>
         </div>
       )}

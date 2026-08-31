@@ -1,5 +1,36 @@
 # DBX alignment: deferred validation queue
 
+## Phase 135 -- WebView delta batching and large JSON virtualization
+
+- In a packaged Tauri WebView, stream slow and bursty Codex/CodeBuddy/HTTP
+  answers while approvals, tool activity, project-file changes, cancellation and
+  terminal events interleave. Confirm every held delta flushes before the next
+  non-delta event, `reset` replaces prior text exactly, the final tail is visible,
+  and switching/closing the shared Assistant panel cannot reorder or lose events.
+- Record renderer IPC event rate, serialization CPU and time-to-first/last token
+  before and after the 100 ms/64 KiB gate. Verify no provider can exceed the
+  bounded event payload and no raw reasoning, environment value or credential is
+  introduced into diagnostics.
+- Open JSON values with 100,000+ shallow properties and deeply nested arrays in
+  the Value Editor. Exercise expand/collapse, rapid wheel/trackpad scrolling,
+  resize, text/tree switching, long strings, escaped `/` and `~` keys, zoom and
+  light/dark themes. Confirm mounted row count remains viewport-bounded and the
+  complete text view remains available after the logical-row safety limit.
+
+Static coverage completed with the three Rust delta-batch unit tests, the
+5,000-field virtual-tree frontend test, strict TypeScript and a production Vite
+build. No database was opened.
+
+## Phase 136 -- Oracle-family login schema presentation
+
+- With signed Oracle, Dameng and OceanBase Oracle packages, connect as a lower-,
+  upper- and mixed-case user and verify only the matching user-schema node is
+  emphasized. Repeat with quoted/case-sensitive accounts and names containing
+  non-ASCII text before claiming exact identifier semantics.
+- Confirm PostgreSQL, MySQL/MariaDB and compatibility products never highlight a
+  coincidentally equal schema. Static unit coverage currently proves the product
+  allowlist and ordinary case-insensitive behavior only.
+
 ## Phase 130 -- Versioned LSP diagnostics
 
 - In a real Monaco session, issue rapid edits while the LSP publishes delayed diagnostics and confirm diagnostics for an earlier synchronized LSP document version never replace markers or tab diagnostics for the current model.

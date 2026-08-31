@@ -403,6 +403,7 @@ export interface SqliteBackupExecutionReceipt {
 }
 
 export type SqliteBackupScheduleFrequency = "hourly" | "daily" | "weekly";
+export type SqliteBackupCompression = "none" | "gzip";
 export type SqliteBackupRunStatus =
   | "running"
   | "success"
@@ -423,6 +424,8 @@ export interface SaveSqliteBackupScheduleRequest {
   /** Sunday = 0 through Saturday = 6. */
   weekday: number;
   retentionCount: number;
+  /** Missing values from older renderer builds are treated as uncompressed. */
+  compression?: SqliteBackupCompression;
   enabled: boolean;
 }
 
@@ -437,6 +440,7 @@ export interface SqliteBackupSchedule {
   timeOfDay: string;
   weekday: number;
   retentionCount: number;
+  compression: SqliteBackupCompression;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -452,6 +456,7 @@ export interface SqliteBackupRun {
   projectId: string;
   connectionId: string;
   destinationDirectory: string;
+  compression: SqliteBackupCompression;
   trigger: SqliteBackupRunTrigger;
   status: SqliteBackupRunStatus;
   startedAt: string;

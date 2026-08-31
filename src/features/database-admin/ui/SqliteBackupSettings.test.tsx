@@ -162,6 +162,16 @@ describe("SqliteBackupSettings", () => {
       multiple: false,
     });
 
+    const compressionSelect = Array.from(document.body.querySelectorAll("label"))
+      .find((item) => item.textContent?.includes("Compression"))
+      ?.querySelector("select");
+    expect(compressionSelect).not.toBeNull();
+    await act(async () => {
+      if (!compressionSelect) return;
+      compressionSelect.value = "gzip";
+      compressionSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
     await act(async () => button("Save schedule")?.click());
     await flush();
     expect(mocks.ensureConnection).toHaveBeenCalledWith("sqlite-1");
@@ -172,7 +182,71 @@ describe("SqliteBackupSettings", () => {
         destinationDirectory: "C:/backups",
         frequency: "daily",
         retentionCount: 7,
+        compression: "gzip",
       }),
+    );
+  });
+
+  it("filters backup history by status and text without discarding records", async () => {
+    mocks.listRuns.mockResolvedValue([
+      {
+        id: "run-success",
+        scheduleId: "schedule-1",
+        scheduleName: "Nightly analytics",
+        projectId: "project-1",
+        connectionId: "sqlite-1",
+        destinationDirectory: "C:/backups",
+        compression: "gzip",
+        trigger: "scheduled",
+        status: "success",
+        startedAt: "2026-08-31T00:00:00Z",
+        filePath: "C:/backups/nightly.sqlite.gz",
+        byteLen: 42,
+        progressPercent: 100,
+      },
+      {
+        id: "run-failed",
+        scheduleId: "schedule-2",
+        scheduleName: "Hourly cache",
+        projectId: "project-1",
+        connectionId: "sqlite-1",
+        destinationDirectory: "C:/backups",
+        compression: "none",
+        trigger: "manual",
+        status: "failed",
+        startedAt: "2026-08-31T01:00:00Z",
+        error: "Disk full",
+        progressPercent: 80,
+      },
+    ]);
+
+    await act(async () => root.render(<SqliteBackupSettings />));
+    await flush();
+    expect(document.body.textContent).toContain("Nightly analytics");
+    expect(document.body.textContent).toContain("Hourly cache");
+
+    const status = document.body.querySelector(
+      'select[aria-label="Filter backup status"]',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      status.value = "failed";
+      status.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.body.textContent).not.toContain("Nightly analytics");
+    expect(document.body.textContent).toContain("Hourly cache");
+
+    const search = document.body.querySelector(
+      'input[aria-label="Filter backup history"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        search,
+        "nightly",
+      );
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain(
+      "No backup runs match the current filters.",
     );
   });
 });

@@ -10,8 +10,10 @@ use crate::core::{
     private_file::replace_private_file, protocol::Response,
 };
 use chrono::{DateTime, Datelike, Duration, Local, LocalResult, TimeZone, Utc};
+use flate2::{write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
@@ -27,6 +29,14 @@ pub enum SqliteBackupScheduleFrequency {
     Hourly,
     Daily,
     Weekly,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SqliteBackupCompression {
+    #[default]
+    None,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -52,6 +62,8 @@ pub struct SaveSqliteBackupScheduleRequest {
     pub time_of_day: String,
     pub weekday: u8,
     pub retention_count: u16,
+    #[serde(default)]
+    pub compression: SqliteBackupCompression,
     pub enabled: bool,
 }
 
@@ -91,6 +103,8 @@ pub struct SqliteBackupSchedule {
     pub time_of_day: String,
     pub weekday: u8,
     pub retention_count: u16,
+    #[serde(default)]
+    pub compression: SqliteBackupCompression,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -113,6 +127,8 @@ pub struct SqliteBackupRun {
     /// its Host-owned backup files impossible to prune safely.
     #[serde(default)]
     pub destination_directory: String,
+    #[serde(default)]
+    pub compression: SqliteBackupCompression,
     pub trigger: SqliteBackupRunTrigger,
     pub status: SqliteBackupRunStatus,
     pub started_at: String,
@@ -338,10 +354,90 @@ fn backup_file_path(schedule: &SqliteBackupSchedule, run_id: &str, now: DateTime
     ))
 }
 
+fn compressed_backup_file_path(path: &std::path::Path) -> PathBuf {
+    path.with_extension("sqlite.gz")
+}
+
+fn compress_backup_file(
+    source: &std::path::Path,
+    control: &LocalDatabaseBackupControl,
+    source_integrity_check: &str,
+) -> Result<crate::core::driver::LocalDatabaseFileReceipt, String> {
+    let destination = compressed_backup_file_path(source);
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The compressed backup path is invalid".to_string())?;
+    let temporary =
+        destination.with_file_name(format!(".{file_name}.partial-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut input = std::fs::File::open(source)
+            .map_err(|error| format!("Cannot open the completed SQLite backup: {error}"))?;
+        let source_len = input
+            .metadata()
+            .map_err(|error| format!("Cannot inspect the completed SQLite backup: {error}"))?
+            .len()
+            .max(1);
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("Cannot stage the compressed SQLite backup: {error}"))?;
+        let mut encoder = GzEncoder::new(output, Compression::default());
+        let mut buffer = [0_u8; 1024 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            if control.is_cancelled() {
+                return Err("SQLite backup compression was cancelled".to_string());
+            }
+            let read = input
+                .read(&mut buffer)
+                .map_err(|error| format!("Cannot read the completed SQLite backup: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            encoder
+                .write_all(&buffer[..read])
+                .map_err(|error| format!("Cannot compress the SQLite backup: {error}"))?;
+            copied = copied.saturating_add(read as u64);
+            let compression_progress = 90_u64.saturating_add(copied.saturating_mul(9) / source_len);
+            control.set_progress_percent(compression_progress.min(99) as u8);
+        }
+        let output = encoder
+            .finish()
+            .map_err(|error| format!("Cannot finalize the compressed SQLite backup: {error}"))?;
+        output
+            .sync_all()
+            .map_err(|error| format!("Cannot sync the compressed SQLite backup: {error}"))?;
+        std::fs::rename(&temporary, &destination)
+            .map_err(|error| format!("Cannot publish the compressed SQLite backup: {error}"))?;
+        // The gzip stream is already durably published. Failure to remove the
+        // uncompressed recovery point must not make the valid result disappear;
+        // retention only tracks the published .sqlite.gz path.
+        let _ = std::fs::remove_file(source);
+        let byte_len = std::fs::metadata(&destination)
+            .map_err(|error| format!("Cannot inspect the compressed SQLite backup: {error}"))?
+            .len();
+        control.set_progress_percent(100);
+        Ok(crate::core::driver::LocalDatabaseFileReceipt {
+            byte_len,
+            integrity_check: format!(
+                "{source_integrity_check}; gzip stream finalized after integrity check"
+            ),
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn safe_run_file(run: &SqliteBackupRun) -> Option<PathBuf> {
     let path = PathBuf::from(run.file_path.as_deref()?);
     let file_name = path.file_name()?.to_str()?;
-    if !file_name.starts_with(BACKUP_FILE_PREFIX) || !file_name.ends_with(".sqlite") {
+    if !file_name.starts_with(BACKUP_FILE_PREFIX)
+        || !(file_name.ends_with(".sqlite") || file_name.ends_with(".sqlite.gz"))
+    {
         return None;
     }
     let parent = path.parent()?.canonicalize().ok()?;
@@ -384,6 +480,7 @@ async fn finish_run(
     run_id: &str,
     status: SqliteBackupRunStatus,
     receipt: Option<crate::core::driver::LocalDatabaseFileReceipt>,
+    published_path: Option<&std::path::Path>,
     error: Option<String>,
 ) -> Result<SqliteBackupRun, String> {
     let completed = Utc::now();
@@ -402,6 +499,9 @@ async fn finish_run(
         data.runs[run_index].progress_percent.min(99)
     };
     data.runs[run_index].error = error;
+    if let Some(path) = published_path {
+        data.runs[run_index].file_path = Some(path.to_string_lossy().into_owned());
+    }
     if let Some(receipt) = receipt {
         data.runs[run_index].byte_len = Some(receipt.byte_len);
         data.runs[run_index].integrity_check = Some(receipt.integrity_check);
@@ -512,6 +612,7 @@ async fn run_schedule(
         project_id: schedule.project_id.clone(),
         connection_id: schedule.connection_id.clone(),
         destination_directory: schedule.destination_directory.clone(),
+        compression: schedule.compression,
         trigger,
         status: SqliteBackupRunStatus::Running,
         started_at: started.to_rfc3339(),
@@ -546,13 +647,37 @@ async fn run_schedule(
     }
     .await;
 
-    let finished_result = match result {
-        Ok(receipt) => {
+    let published = match result {
+        Ok(receipt) if schedule.compression == SqliteBackupCompression::Gzip => {
+            control.set_progress_percent(90);
+            let compression_path = compressed_backup_file_path(&path);
+            let compression_control = control.clone();
+            let compression_source = path.clone();
+            let source_integrity_check = receipt.integrity_check;
+            tokio::task::spawn_blocking(move || {
+                compress_backup_file(
+                    &compression_source,
+                    &compression_control,
+                    &source_integrity_check,
+                )
+            })
+            .await
+            .map_err(|error| format!("SQLite backup compression task failed: {error}"))
+            .and_then(|receipt| receipt)
+            .map(|receipt| (receipt, compression_path))
+        }
+        Ok(receipt) => Ok((receipt, path.clone())),
+        Err(error) => Err(error),
+    };
+
+    let finished_result = match published {
+        Ok((receipt, published_path)) => {
             finish_run(
                 state,
                 &run_id,
                 SqliteBackupRunStatus::Success,
                 Some(receipt),
+                Some(&published_path),
                 None,
             )
             .await
@@ -569,6 +694,7 @@ async fn run_schedule(
                 } else {
                     SqliteBackupRunStatus::Failed
                 },
+                None,
                 None,
                 Some(safe_run_error(&error, cancelled)),
             )
@@ -672,6 +798,7 @@ pub async fn save_sqlite_backup_schedule(
             time_of_day,
             weekday: request.weekday,
             retention_count: request.retention_count,
+            compression: request.compression,
             enabled: request.enabled,
             created_at,
             updated_at: now.to_rfc3339(),
@@ -848,6 +975,7 @@ mod tests {
             time_of_day: "02:00".to_string(),
             weekday: 1,
             retention_count: 2,
+            compression: SqliteBackupCompression::None,
             enabled: true,
             created_at: "2026-08-31T00:00:00Z".to_string(),
             updated_at: "2026-08-31T00:00:00Z".to_string(),
@@ -864,6 +992,25 @@ mod tests {
         assert!(validate_time_of_day("2:00").is_err());
         assert!(validate_schedule_name("").is_err());
         assert!(validate_identity("bad\nvalue", "identity").is_err());
+    }
+
+    #[test]
+    fn legacy_schedule_requests_default_to_uncompressed() {
+        let request: SaveSqliteBackupScheduleRequest = serde_json::from_value(serde_json::json!({
+            "name": "Legacy",
+            "projectId": "project-1",
+            "connectionId": "sqlite-1",
+            "destinationDirectory": "C:/backups",
+            "frequency": "daily",
+            "intervalHours": 24,
+            "timeOfDay": "02:00",
+            "weekday": 1,
+            "retentionCount": 7,
+            "enabled": true
+        }))
+        .unwrap();
+
+        assert_eq!(request.compression, SqliteBackupCompression::None);
     }
 
     #[test]
@@ -911,6 +1058,7 @@ mod tests {
             project_id: schedule.project_id.clone(),
             connection_id: schedule.connection_id.clone(),
             destination_directory: schedule.destination_directory.clone(),
+            compression: SqliteBackupCompression::None,
             trigger: SqliteBackupRunTrigger::Manual,
             status: SqliteBackupRunStatus::Success,
             started_at: "2026-08-31T00:00:00Z".to_string(),
@@ -947,6 +1095,55 @@ mod tests {
                 .into_owned(),
         );
         assert!(safe_run_file(&run).is_none());
+    }
+
+    #[test]
+    fn gzip_backup_is_published_with_round_trip_content_and_safe_retention_path() {
+        use flate2::read::GzDecoder;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("oxide-sqlite-backup__safe.sqlite");
+        let payload = b"SQLite format 3\0fixture payload".repeat(4_096);
+        std::fs::write(&source, &payload).unwrap();
+        let control = LocalDatabaseBackupControl::default();
+        let receipt = compress_backup_file(&source, &control, "ok").unwrap();
+        let compressed = compressed_backup_file_path(&source);
+
+        assert!(!source.exists());
+        assert!(compressed.is_file());
+        assert_eq!(
+            receipt.byte_len,
+            std::fs::metadata(&compressed).unwrap().len()
+        );
+        assert!(receipt.integrity_check.contains("gzip stream finalized"));
+        assert_eq!(control.progress_percent(), 100);
+
+        let mut decoded = Vec::new();
+        GzDecoder::new(std::fs::File::open(&compressed).unwrap())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, payload);
+
+        let schedule = schedule(directory.path());
+        let run = SqliteBackupRun {
+            id: "run-gzip".to_string(),
+            schedule_id: schedule.id,
+            schedule_name: schedule.name,
+            project_id: schedule.project_id,
+            connection_id: schedule.connection_id,
+            destination_directory: schedule.destination_directory,
+            compression: SqliteBackupCompression::Gzip,
+            trigger: SqliteBackupRunTrigger::Manual,
+            status: SqliteBackupRunStatus::Success,
+            started_at: "2026-08-31T00:00:00Z".to_string(),
+            completed_at: Some("2026-08-31T00:01:00Z".to_string()),
+            file_path: Some(compressed.to_string_lossy().into_owned()),
+            byte_len: Some(receipt.byte_len),
+            integrity_check: Some(receipt.integrity_check),
+            progress_percent: 100,
+            error: None,
+        };
+        assert_eq!(safe_run_file(&run), Some(compressed));
     }
 
     #[test]

@@ -259,6 +259,7 @@ struct AgentHostInner {
     turns: RwLock<HashMap<TurnKey, ActiveTurn>>,
     cli_turns: Mutex<HashMap<TurnKey, CliTurnHandle>>,
     event_sequences: RwLock<HashMap<TurnKey, u64>>,
+    event_delta_batches: Mutex<HashMap<TurnKey, AgentEventDeltaBatch>>,
     turn_journals: RwLock<HashMap<TurnKey, TurnJournalBuffer>>,
     clarifications: RwLock<HashMap<String, PendingClarification>>,
     approvals: RwLock<HashMap<String, PendingApproval>>,
@@ -342,6 +343,98 @@ impl LifecycleState {
 struct TurnKey {
     thread_id: String,
     turn_id: String,
+}
+
+/// Streaming providers can produce dozens of answer events per second. Each
+/// Tauri emission serializes JSON and crosses the WebView IPC boundary, so
+/// coalesce only consecutive answer deltas while keeping interaction events
+/// ordered and visually responsive.
+const AGENT_DELTA_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_AGENT_DELTA_BATCH_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct AgentEventDeltaBatch {
+    pending: Option<Value>,
+    last_emit: Option<Instant>,
+}
+
+impl AgentEventDeltaBatch {
+    fn push(&mut self, event: Value, now: Instant) -> Option<Value> {
+        if let Some(pending) = self.pending.as_mut() {
+            merge_answer_delta_event(pending, event);
+        } else {
+            self.pending = Some(event);
+        }
+        let reached_size_limit = self
+            .pending
+            .as_ref()
+            .and_then(|event| event.get("content"))
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.len() >= MAX_AGENT_DELTA_BATCH_BYTES);
+        if reached_size_limit
+            || self
+                .last_emit
+                .is_none_or(|last_emit| now.duration_since(last_emit) >= AGENT_DELTA_EMIT_INTERVAL)
+        {
+            return self.flush(now);
+        }
+        None
+    }
+
+    fn flush(&mut self, now: Instant) -> Option<Value> {
+        let pending = self.pending.take();
+        if pending.is_some() {
+            self.last_emit = Some(now);
+        }
+        pending
+    }
+}
+
+fn is_batchable_answer_delta(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("answer.delta")
+        && event.get("content").and_then(Value::as_str).is_some()
+        && event.get("reset").and_then(Value::as_bool).is_some()
+}
+
+/// Preserve the exact reducer semantics of a sequence of answer deltas. A
+/// reset discards unflushed content; appends concatenate after either a reset
+/// or another append. Metadata comes from the newest event so stale sequence
+/// filtering continues to work after intermediate sequences are coalesced.
+fn merge_answer_delta_event(pending: &mut Value, next: Value) {
+    let Some(next_object) = next.as_object() else {
+        *pending = next;
+        return;
+    };
+    let Some(next_content) = next_object.get("content").and_then(Value::as_str) else {
+        *pending = next;
+        return;
+    };
+    let Some(next_reset) = next_object.get("reset").and_then(Value::as_bool) else {
+        *pending = next;
+        return;
+    };
+    if next_reset {
+        *pending = next;
+        return;
+    }
+    let Some(pending_object) = pending.as_object() else {
+        *pending = next;
+        return;
+    };
+    let Some(pending_content) = pending_object.get("content").and_then(Value::as_str) else {
+        *pending = next;
+        return;
+    };
+    let pending_reset = pending_object
+        .get("reset")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let merged_content = format!("{pending_content}{next_content}");
+    *pending = next;
+    if let Some(object) = pending.as_object_mut() {
+        object.insert("content".to_string(), Value::String(merged_content));
+        object.insert("reset".to_string(), Value::Bool(pending_reset));
+    }
 }
 
 const MAX_TURN_JOURNAL_EVENTS: usize = 160;
@@ -519,6 +612,7 @@ impl AgentHostManager {
                 turns: RwLock::new(HashMap::new()),
                 cli_turns: Mutex::new(HashMap::new()),
                 event_sequences: RwLock::new(HashMap::new()),
+                event_delta_batches: Mutex::new(HashMap::new()),
                 turn_journals: RwLock::new(HashMap::new()),
                 clarifications: RwLock::new(HashMap::new()),
                 approvals: RwLock::new(HashMap::new()),
@@ -1210,6 +1304,44 @@ impl AgentHostInner {
             .await;
     }
 
+    async fn emit_webview_agent_event(&self, key: &TurnKey, event: Value) {
+        let now = Instant::now();
+        let mut batches = self.event_delta_batches.lock().await;
+        let mut events = Vec::with_capacity(2);
+        if is_batchable_answer_delta(&event) {
+            if let Some(event) = batches.entry(key.clone()).or_default().push(event, now) {
+                events.push(event);
+            }
+        } else {
+            if let Some(event) = batches.entry(key.clone()).or_default().flush(now) {
+                events.push(event);
+            }
+            events.push(event);
+        }
+        // AppHandle::emit is synchronous. Keep the batch lock through these
+        // emissions so concurrent private-bridge and provider events cannot
+        // overtake the delta they are required to flush.
+        for event in events {
+            if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
+                tracing::warn!("failed to emit agent event: {error}");
+            }
+        }
+    }
+
+    async fn flush_webview_agent_event(&self, key: &TurnKey) {
+        let event = self
+            .event_delta_batches
+            .lock()
+            .await
+            .remove(key)
+            .and_then(|mut batch| batch.flush(Instant::now()));
+        if let Some(event) = event {
+            if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
+                tracing::warn!("failed to flush agent answer delta: {error}");
+            }
+        }
+    }
+
     async fn emit_cli_event_at(
         &self,
         key: &TurnKey,
@@ -1240,12 +1372,8 @@ impl AgentHostInner {
             self.persist_turn_journal_event(key, &active.project_id, &Value::Object(event.clone()))
                 .await;
         }
-        if let Err(error) = self
-            .app
-            .emit(AGENT_HOST_EVENT_CHANNEL, Value::Object(event))
-        {
-            tracing::warn!("failed to emit CLI agent event: {error}");
-        }
+        self.emit_webview_agent_event(key, Value::Object(event))
+            .await;
     }
 
     async fn cancel_turn(
@@ -2170,9 +2298,7 @@ impl AgentHostInner {
             self.persist_turn_journal_event(&key, &active.project_id, &event)
                 .await;
         }
-        if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
-            tracing::warn!("failed to emit private bridge approval: {error}");
-        }
+        self.emit_webview_agent_event(&key, event).await;
     }
 
     async fn extend_active_deadline(&self, metadata: &RequestMetadata) -> Result<ActiveTurn> {
@@ -2725,7 +2851,7 @@ impl AgentHostInner {
         let key = TurnKey::from_metadata(metadata);
         let sequence = {
             let mut sequences = self.event_sequences.write().await;
-            let sequence = sequences.entry(key).or_insert(0);
+            let sequence = sequences.entry(key.clone()).or_insert(0);
             *sequence = sequence.saturating_add(1);
             *sequence
         };
@@ -2737,9 +2863,7 @@ impl AgentHostInner {
             sequence,
             now_millis(),
         );
-        if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event) {
-            tracing::warn!("failed to emit trusted project file change: {error}");
-        }
+        self.emit_webview_agent_event(&key, event).await;
     }
 
     async fn handle_tool_preflight(
@@ -4883,9 +5007,7 @@ impl AgentHostInner {
 
         self.persist_turn_journal_event(&key, &active.project_id, &event)
             .await;
-        if let Err(error) = self.app.emit(AGENT_HOST_EVENT_CHANNEL, event.clone()) {
-            tracing::warn!("failed to emit agent event: {error}");
-        }
+        self.emit_webview_agent_event(&key, event.clone()).await;
 
         if terminal {
             self.clear_turn(&key).await;
@@ -4983,6 +5105,7 @@ impl AgentHostInner {
     }
 
     async fn clear_turn(&self, key: &TurnKey) {
+        self.flush_webview_agent_event(key).await;
         if let Some(handle) = self.cli_turns.lock().await.remove(key) {
             let _ = handle.cancellation.send(true);
         }
@@ -7429,6 +7552,116 @@ mod tests {
             "unknown.event",
             valid.as_object().unwrap()
         ));
+    }
+
+    #[test]
+    fn answer_delta_batch_coalesces_by_interval_and_keeps_latest_sequence() {
+        let started_at = Instant::now();
+        let mut batch = AgentEventDeltaBatch::default();
+        let event = |sequence: u64, content: &str, reset: bool| {
+            json!({
+                "type":"answer.delta",
+                "threadId":"thread-1",
+                "turnId":"turn-1",
+                "sequence":sequence,
+                "occurredAt":sequence as i64,
+                "content":content,
+                "reset":reset,
+            })
+        };
+
+        assert_eq!(
+            batch
+                .push(event(1, "a", false), started_at)
+                .and_then(|value| value.get("content").cloned()),
+            Some(json!("a"))
+        );
+        assert!(batch
+            .push(event(2, "b", false), started_at + Duration::from_millis(10))
+            .is_none());
+        let emitted = batch
+            .push(event(3, "c", false), started_at + AGENT_DELTA_EMIT_INTERVAL)
+            .unwrap();
+        assert_eq!(emitted.get("content"), Some(&json!("bc")));
+        assert_eq!(emitted.get("sequence"), Some(&json!(3)));
+        assert_eq!(emitted.get("occurredAt"), Some(&json!(3)));
+        assert_eq!(emitted.get("reset"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn answer_delta_batch_preserves_reset_semantics_and_flushes_tail() {
+        let started_at = Instant::now();
+        let mut batch = AgentEventDeltaBatch::default();
+        let event = |sequence: u64, content: &str, reset: bool| {
+            json!({
+                "type":"answer.delta",
+                "threadId":"thread-1",
+                "turnId":"turn-1",
+                "sequence":sequence,
+                "occurredAt":sequence as i64,
+                "content":content,
+                "reset":reset,
+            })
+        };
+        assert!(batch.push(event(1, "visible", false), started_at).is_some());
+        assert!(batch
+            .push(
+                event(2, " discarded", false),
+                started_at + Duration::from_millis(10)
+            )
+            .is_none());
+        assert!(batch
+            .push(
+                event(3, "replacement", true),
+                started_at + Duration::from_millis(20)
+            )
+            .is_none());
+        assert!(batch
+            .push(
+                event(4, " tail", false),
+                started_at + Duration::from_millis(30)
+            )
+            .is_none());
+
+        let emitted = batch.flush(started_at + Duration::from_millis(40)).unwrap();
+        assert_eq!(emitted.get("content"), Some(&json!("replacement tail")));
+        assert_eq!(emitted.get("reset"), Some(&json!(true)));
+        assert_eq!(emitted.get("sequence"), Some(&json!(4)));
+        assert!(batch
+            .flush(started_at + Duration::from_millis(50))
+            .is_none());
+    }
+
+    #[test]
+    fn answer_delta_batch_flushes_at_the_byte_boundary() {
+        let started_at = Instant::now();
+        let mut batch = AgentEventDeltaBatch::default();
+        let base = json!({
+            "type":"answer.delta",
+            "threadId":"thread-1",
+            "turnId":"turn-1",
+            "sequence":1,
+            "occurredAt":1,
+            "content":"seed",
+            "reset":false,
+        });
+        assert!(batch.push(base, started_at).is_some());
+        let bounded = json!({
+            "type":"answer.delta",
+            "threadId":"thread-1",
+            "turnId":"turn-1",
+            "sequence":2,
+            "occurredAt":2,
+            "content":"x".repeat(MAX_AGENT_DELTA_BATCH_BYTES),
+            "reset":false,
+        });
+        let emitted = batch
+            .push(bounded, started_at + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            emitted.get("content").and_then(Value::as_str).map(str::len),
+            Some(MAX_AGENT_DELTA_BATCH_BYTES)
+        );
     }
 
     #[test]

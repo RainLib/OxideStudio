@@ -1,13 +1,31 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
-> 审计基线：2026-08-30
-> DBX 参考提交：`9190554e5`
+> 审计基线：2026-08-31
+> DBX 参考提交：`eba4e95a0`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`9190554e5` → `eba4e95a0`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `d424ea38f` | AI 流式 delta 在发送到 WebView 前合批 | 本阶段对齐：`src-tauri/src/agent/host.rs` 对连续 `answer.delta` 使用 100ms/64KiB 有界批次；非 delta 与 turn 清理会先 flush，reset 语义、最新 sequence 和尾批次有单元测试。原始 reasoning 与环境变量仍不进入 renderer。 |
+| `c305325e3` | Agent/JDBC 制品下载按整百分比或时间节流进度事件 | Oxide 的签名 driver package 下载目前不向 WebView 逐 HTTP chunk 发事件，CLI 托管安装只报告阶段，因此不存在同类 IPC 洪泛；若后续增加字节进度，必须复用 1%/500ms/未知总长 1MiB 的门禁。 |
+| `b3fcb3a6f` | 定时备份增加 gzip 与历史过滤 | 本阶段对齐到 Oxide 的 Host-owned SQLite schedule：旧计划默认 `none`，用户可选 `gzip`；SQLite 完整性校验后在 blocking worker 中以 1MiB 缓冲压缩、协作取消、临时文件+原子发布，持久报告只记录最终路径/压缩后大小/安全校验摘要。保留和删除门禁同时接受 `.sqlite`/`.sqlite.gz`；前端按状态、名称、路径、错误或触发方式筛选最近 50 条。真实大文件、磁盘不足和多平台恢复验证延期。 |
+| `0a239bddb`、`a849979dd` | Xugu public synonym scope 与 scheduler job 浏览/管理 | 仍是 D02/D04 的产品运行时缺口：Oxide 只有 Xugu 候选身份和 LSP compatibility route，没有已签名 Xugu package，不能暴露未验证的 synonym/job mutation。DBX 位置：`agents/drivers/xugu/main.go`、`lib/database/xuguSchedulerJobSql.ts`、`lib/sidebar/xuguPublicSynonyms.ts`。 |
+| `8da9905ed` | OceanBase Oracle view DDL 预览复用 Oracle formatter | 编辑器格式化已由 bundled LSP 统一提供，`oceanbase-oracle` 保留产品 identity 并进入 SQL formatter/preferences 路径；Oxide 当前没有 DBX 同类 hover DDL formatter surface。正式 OceanBase package 仍需用真实 view DDL 证明 Oracle 语法保真，不能用 PostgreSQL compatibility parser 冒充产品 conformance。 |
+| `8e2e8c1b8` | 连接关闭后同步 flush 已持久化 tab，避免旧 tab 立即恢复 | 不适用当前 Oxide：`useTabStore` 是非持久化运行时 Store，断开连接不会从磁盘恢复旧 tab；没有可 flush 的 tab storage。将来若恢复 tab persistence，必须把 close/disconnect 与 durable flush 绑定并移植 DBX 的 immediate-restore regression。 |
+| `d1046d54f` | 导出核心移入 blocking pool | 已有等价/更细边界：`commands/table.rs` 使用容量 2 的 page channel，并以 `spawn_blocking(write_table_export_stream)` 执行 CSV/JSON/XLSX/Parquet 等同步编码和文件 I/O；异步 producer 保持查询分页、取消和 backpressure。 |
+| `b7d33e375` | InfluxDB 合并 compat query series，并引用显式列 | 仍是外置产品 package 缺口；Oxide 没有 ready InfluxDB runtime，不能在 Host 层猜测 series 合并/quoting。DBX 位置：`crates/dbx-core/src/db/influxdb_driver.rs`、`sql_dialect/table_select.rs`。 |
+| `1c0e97b52` | Oracle routine 参数 metadata alias 使用双引号 | Oxide 的 Oracle/Dameng/OceanBase routine metadata 由外置 driver descriptor 提供，Host 不执行 `ALL_ARGUMENTS` 查询；对应修复必须进入该产品 package 和 conformance fixture。未发布 package 前入口保持不可用。 |
+| `0c8b796c8` | Oracle-family schema 树突出当前登录用户 | 本阶段对齐：`src/lib/loginUserSchema.ts` 仅对 Oracle、Dameng、OceanBase Oracle mode 做大小写不敏感匹配，Explorer 将对应 schema 加粗并标注 current login user；PostgreSQL/MySQL 的同名 schema 不会误判。 |
+| `d45962814`、`eba4e95a0` | GBase JDBC 与 Doris-family MySQL transfer 可选择、方言映射 | Oxide transfer 入口由 live signed capability `supportsTableDataTransfer` 控制，不靠产品名 allowlist，因此 package 一旦通过 transaction/transfer conformance 即自动可选；目前 GBase/Doris 只有候选/LSP route，没有正式签名运行包和 server evidence，继续保持不可执行。 |
+| `d96da5dec` | SQL Server trigger 支持多事件、AFTER/INSTEAD OF 与 disabled state 编辑 | 未对齐的明确产品差距：Oxide 没有 ready SQL Server package，也没有 DBX 的 table-structure trigger editor；需要 package 输出结构化 event/timing/enabled metadata，并在受审 DDL/事务或补偿策略下编辑。DBX 位置：`crates/dbx-core/src/db/sqlserver.rs`、`table_structure_sql/triggers.rs`、`TableStructureEditor.vue`。 |
+| `e690298dc` | 大型 JSON Tree 使用虚拟列表 | 本阶段对齐并加强：Value Editor 使用 iterative flatten、RFC 6901 稳定 path、24px 固定行和 overscan，只挂载视口行；100,000 logical row 硬上限提示切换完整 text view，避免深层递归栈和宽对象 DOM 爆炸。5,000 字段 fixture 验证挂载节点少于 100。 |
 
 ### 最新增量审计（`cd78c0ae1` → `9190554e5`）
 

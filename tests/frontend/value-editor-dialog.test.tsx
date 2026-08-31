@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  flattenJsonTreeRows,
   ValueEditorDialog,
   type ValueEditorTarget,
 } from "@/components/workspace/ValueEditorDialog";
@@ -187,6 +188,56 @@ describe("ValueEditorDialog", () => {
 
     await act(async () => button("Stage change").click());
     expect(onStageValue).toHaveBeenCalledWith({ role: "admin" });
+  });
+
+  it("flattens expanded JSON iteratively with stable pointer paths and closing rows", () => {
+    const rows = flattenJsonTreeRows(
+      { "a/b": { "x~y": 1 } },
+      new Set(["", "/a~1b"]),
+    );
+
+    expect(rows.map((row) => row.path)).toEqual([
+      "",
+      "/a~1b",
+      "/a~1b/x~0y",
+      "/a~1b/$close\u0000",
+      "/$close\u0000",
+    ]);
+    expect(rows.filter((row) => row.closing)).toHaveLength(2);
+  });
+
+  it("bounds the traversal stack as well as the rendered JSON rows", () => {
+    const value = Object.fromEntries(
+      Array.from({ length: 5_000 }, (_, index) => [`key_${index}`, index]),
+    );
+    const rows = flattenJsonTreeRows(value, new Set([""]), 20);
+
+    expect(rows.length).toBeLessThanOrEqual(21);
+    expect(rows.at(-1)?.truncated).toBe(true);
+    expect(rows.some((row) => row.path === "/key_4999")).toBe(false);
+  });
+
+  it("virtualizes wide JSON trees instead of mounting every row", async () => {
+    const value = Object.fromEntries(
+      Array.from({ length: 5_000 }, (_, index) => [`key_${index}`, index]),
+    );
+    await renderDialog({
+      ...baseTarget,
+      value,
+      originalValue: value,
+    });
+    await act(async () => button("Tree").click());
+
+    expect(
+      document.body.querySelector('[data-json-tree-virtualized="true"]'),
+    ).not.toBeNull();
+    expect(document.body.querySelectorAll("[data-json-path]").length).toBeLessThan(
+      100,
+    );
+    expect(document.body.textContent).toContain("key_0");
+    expect(
+      document.body.querySelector('[data-json-path="/key_4999"]'),
+    ).toBeNull();
   });
 
   it("offers an XML tree preview while preserving the staged XML source", async () => {

@@ -57,6 +57,18 @@ desktop/filesystem checks:
   `running` run is converted to `interrupted` atomically.
 - Measure a multi-gigabyte backup while editing/querying another connection. Track
   WebView frame time, Rust memory, IPC polling volume and cancellation latency.
+- Run the same retention and restore matrix with `none` and `gzip`. For gzip,
+  cancel during the first, middle and final compression chunks; terminate the app
+  between gzip finalization and publication; exhaust disk space; and verify no
+  `.partial-*` artifact is treated as a completed recovery point.
+- Decompress every produced `.sqlite.gz`, run `PRAGMA integrity_check`, restore it
+  through the documented recovery workflow, and compare schema/data/user version.
+  Record compression ratio, CPU time, peak memory and foreground editor frame
+  time for 1 MB, 1 GB and the supported upper-size boundary on Windows, macOS and
+  Linux.
+- Exercise history filters with hundreds of mixed terminal/running records,
+  deleted schedules, Unicode names and long canonical paths. Filtering must not
+  delete or mutate Host history, and clearing filters must restore the same order.
 
 PostgreSQL/MySQL scheduled exports remain outside this completed SQLite schedule
 contract. Remote SQLite-over-SSH logic is implemented, but the real-host matrix

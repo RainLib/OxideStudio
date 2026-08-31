@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { databaseService } from "@/services/tauri/database.service";
 import type {
   SaveSqliteBackupScheduleRequest,
+  SqliteBackupCompression,
   SqliteBackupRun,
   SqliteBackupRunStatus,
   SqliteBackupSchedule,
@@ -51,6 +52,7 @@ interface ScheduleDraft {
   timeOfDay: string;
   weekday: number;
   retentionCount: number;
+  compression: SqliteBackupCompression;
   enabled: boolean;
 }
 
@@ -74,6 +76,7 @@ function newDraft(connectionId = ""): ScheduleDraft {
     timeOfDay: "02:00",
     weekday: 1,
     retentionCount: 7,
+    compression: "none",
     enabled: true,
   };
 }
@@ -89,6 +92,7 @@ function scheduleDraft(schedule: SqliteBackupSchedule): ScheduleDraft {
     timeOfDay: schedule.timeOfDay,
     weekday: schedule.weekday,
     retentionCount: schedule.retentionCount,
+    compression: schedule.compression ?? "none",
     enabled: schedule.enabled,
   };
 }
@@ -183,6 +187,10 @@ export function SqliteBackupSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [busyScheduleId, setBusyScheduleId] = useState<string | null>(null);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyStatus, setHistoryStatus] = useState<"all" | SqliteBackupRunStatus>(
+    "all",
+  );
   const [error, setError] = useState<string | null>(null);
   const loadRevision = useRef(0);
 
@@ -222,6 +230,18 @@ export function SqliteBackupSettings() {
     }
     return active;
   }, [runs]);
+  const visibleRuns = useMemo(() => {
+    const query = historyQuery.trim().toLocaleLowerCase();
+    return runs
+      .filter((run) => historyStatus === "all" || run.status === historyStatus)
+      .filter((run) => {
+        if (!query) return true;
+        return [run.scheduleName, run.filePath, run.error, run.trigger]
+          .filter((value): value is string => Boolean(value))
+          .some((value) => value.toLocaleLowerCase().includes(query));
+      })
+      .slice(0, 50);
+  }, [historyQuery, historyStatus, runs]);
   useEffect(() => {
     const timer = window.setInterval(
       () => void refresh(),
@@ -430,6 +450,7 @@ export function SqliteBackupSettings() {
                         <span>{frequencyLabel(schedule)}</span>
                         <span>Next {schedule.enabled ? displayDate(schedule.nextRunAt) : "paused"}</span>
                         <span>Keep {schedule.retentionCount}</span>
+                        <span>{(schedule.compression ?? "none") === "gzip" ? "Gzip" : "Uncompressed"}</span>
                       </div>
                       <div title={schedule.destinationDirectory} className="mt-1 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
                         {schedule.destinationDirectory}
@@ -459,15 +480,43 @@ export function SqliteBackupSettings() {
       </section>
 
       <section aria-labelledby="backup-history-heading" className="mt-6">
-        <div className="mb-2 flex items-center gap-2">
-          <History size={13} className="text-[hsl(var(--wb-text-muted))]" />
-          <h3 id="backup-history-heading" className="text-[11px] font-semibold uppercase tracking-[0.09em] text-[hsl(var(--wb-text-muted))]">Recent runs</h3>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div className="mr-auto flex items-center gap-2">
+            <History size={13} className="text-[hsl(var(--wb-text-muted))]" />
+            <h3 id="backup-history-heading" className="text-[11px] font-semibold uppercase tracking-[0.09em] text-[hsl(var(--wb-text-muted))]">Recent runs</h3>
+          </div>
+          <Input
+            aria-label="Filter backup history"
+            className={cn(inputClass, "w-44")}
+            value={historyQuery}
+            placeholder="Filter name or path"
+            onChange={(event) => setHistoryQuery(event.target.value)}
+          />
+          <select
+            aria-label="Filter backup status"
+            className={cn(selectClass, "w-28")}
+            value={historyStatus}
+            onChange={(event) =>
+              setHistoryStatus(event.target.value as "all" | SqliteBackupRunStatus)
+            }
+          >
+            <option value="all">All statuses</option>
+            <option value="success">Completed</option>
+            <option value="running">Running</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="interrupted">Interrupted</option>
+          </select>
         </div>
         <div className="overflow-hidden rounded-[5px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))]">
-          {!runs.length ? (
-            <div className="px-4 py-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">No backup runs recorded for this project.</div>
+          {!visibleRuns.length ? (
+            <div className="px-4 py-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
+              {runs.length
+                ? "No backup runs match the current filters."
+                : "No backup runs recorded for this project."}
+            </div>
           ) : (
-            runs.slice(0, 20).map((run, index) => (
+            visibleRuns.map((run, index) => (
               <div key={run.id} className={cn("grid grid-cols-[18px_minmax(0,1fr)_100px_72px_28px] items-center gap-2 px-3 py-2", index > 0 && "border-t border-[hsl(var(--wb-border-subtle))]")}>
                 <span className={cn("h-2 w-2 rounded-full", run.status === "success" ? "bg-emerald-400" : run.status === "running" ? "bg-[hsl(var(--wb-accent))] animate-pulse" : run.status === "failed" ? "bg-[hsl(var(--destructive))]" : "bg-amber-400")} />
                 <div className="min-w-0">
@@ -526,6 +575,7 @@ function ScheduleEditor({
         )}
         {draft.frequency === "weekly" && <Field label="Day"><select className={selectClass} value={draft.weekday} onChange={(event) => onChange({ ...draft, weekday: Number(event.target.value) })}>{["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((day, index) => <option key={day} value={index}>{day}</option>)}</select></Field>}
         <Field label="Keep successful backups"><Input className={inputClass} type="number" min={1} max={100} value={draft.retentionCount} onChange={(event) => onChange({ ...draft, retentionCount: Number(event.target.value) || 1 })} /></Field>
+        <Field label="Compression"><select className={selectClass} value={draft.compression} onChange={(event) => onChange({ ...draft, compression: event.target.value as SqliteBackupCompression })}><option value="none">None · fastest restore</option><option value="gzip">Gzip · smaller files</option></select></Field>
       </div>
       <div className="mt-4 flex items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] pt-3">
         <label className="flex items-center gap-2 text-[11px]"><Switch checked={draft.enabled} onCheckedChange={(enabled) => onChange({ ...draft, enabled })} className="h-4 w-7 data-[state=checked]:bg-emerald-500 [&>span]:h-3 [&>span]:w-3 [&>span]:data-[state=checked]:translate-x-3" />Run automatically while OxideStudio is open</label>

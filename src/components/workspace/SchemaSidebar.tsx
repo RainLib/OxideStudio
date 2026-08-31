@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { isLoginUserSchema } from "@/lib/loginUserSchema";
 import {
   APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
   APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
@@ -5828,6 +5829,10 @@ export function SchemaSidebar() {
                           renderedConnectionSchemas.map((schema) => {
                             const isCurrentSchema =
                               isActive && schema === currentSchema;
+                            const isLoginSchema = isLoginUserSchema(
+                              connection,
+                              schema,
+                            );
                             const schemaKey = schemaTreeKey(
                               connection.id,
                               connection.driver,
@@ -5866,10 +5871,16 @@ export function SchemaSidebar() {
                                       )}
                                       className={cn(
                                         "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
+                                        isLoginSchema && "font-semibold",
                                         isCurrentSchema
                                           ? "wb-tree-row-selected font-medium text-[hsl(var(--wb-text))]"
                                           : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                                       )}
+                                      title={
+                                        isLoginSchema
+                                          ? `${schema} · current login user`
+                                          : schema
+                                      }
                                       onClick={() => {
                                         void handleSchemaRowClick(
                                           connection.id,
