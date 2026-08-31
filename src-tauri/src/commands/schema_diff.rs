@@ -10,8 +10,8 @@ use crate::core::{
         compare_schema_snapshots as build_schema_diff, finalize_schema_snapshot, SchemaChange,
         SchemaChangeKind, SchemaChangePhase, SchemaChangeRisk, SchemaDiffExecutionOwner,
         SchemaDiffPlan, SchemaDiffSummary, SchemaObjectSnapshot, SchemaPreflightAssertion,
-        SchemaPreflightCheck, SchemaRelationSnapshot, SchemaRoutineSnapshot, SchemaSnapshot,
-        SCHEMA_SNAPSHOT_VERSION,
+        SchemaPreflightCheck, SchemaRelationSnapshot, SchemaRoutineSnapshot,
+        SchemaSequenceOwnerSnapshot, SchemaSnapshot, SCHEMA_SNAPSHOT_VERSION,
     },
     store::{MetaStore, Resource},
 };
@@ -453,9 +453,134 @@ async fn capture_postgres_sequence_definitions(
     Ok(definitions)
 }
 
-/// Captures only direct default-expression -> sequence edges. This is enough
-/// to put a new sequence ahead of a newly-created table or added column, while
-/// deliberately avoiding mutable sequence values and ownership mutation.
+#[derive(Debug, Clone, Default)]
+struct PostgresSequenceState {
+    owner: Option<SchemaSequenceOwnerSnapshot>,
+    last_value: Option<String>,
+}
+
+fn postgres_sequence_owner_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT sequence.relname AS sequence_name, owner_table.relname AS owner_table, \
+         owner_column.attname AS owner_column \
+         FROM pg_catalog.pg_class sequence \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = sequence.relnamespace \
+         LEFT JOIN pg_catalog.pg_depend ownership \
+           ON ownership.classid = 'pg_catalog.pg_class'::regclass \
+          AND ownership.objid = sequence.oid \
+          AND ownership.refclassid = 'pg_catalog.pg_class'::regclass \
+          AND ownership.deptype IN ('a', 'i') \
+         LEFT JOIN pg_catalog.pg_class owner_table ON owner_table.oid = ownership.refobjid \
+         LEFT JOIN pg_catalog.pg_attribute owner_column \
+           ON owner_column.attrelid = owner_table.oid AND owner_column.attnum = ownership.refobjsubid \
+         WHERE namespace.nspname = {schema} AND sequence.relkind = 'S' \
+         ORDER BY sequence.relname;"
+    )
+}
+
+fn postgres_sequence_last_value_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT sequence.relname AS sequence_name, pg_catalog.pg_sequence_last_value(sequence.oid)::text AS last_value \
+         FROM pg_catalog.pg_class sequence \
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = sequence.relnamespace \
+         WHERE namespace.nspname = {schema} AND sequence.relkind = 'S' \
+         ORDER BY sequence.relname;"
+    )
+}
+
+async fn capture_postgres_sequence_state(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, PostgresSequenceState>, String> {
+    if !driver.trim().eq_ignore_ascii_case("postgres") {
+        return Ok(HashMap::new());
+    }
+    let owner_sql = postgres_sequence_owner_query(schema);
+    let owner_results = match database {
+        Some(database) => {
+            manager
+                .query_database(connection_id, database, &owner_sql)
+                .await
+        }
+        None => {
+            manager
+                .query(
+                    connection_id,
+                    &owner_sql,
+                    Some(schema.to_string()),
+                    None,
+                    None,
+                )
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut state: HashMap<String, PostgresSequenceState> = HashMap::new();
+    for row in owner_results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(table_name), Some(column_name)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+            row.get(2).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if !name.trim().is_empty()
+            && !table_name.trim().is_empty()
+            && !column_name.trim().is_empty()
+        {
+            state.entry(name.to_string()).or_default().owner = Some(SchemaSequenceOwnerSnapshot {
+                table_name: table_name.to_string(),
+                column_name: column_name.to_string(),
+            });
+        }
+    }
+    // Restricted users sometimes cannot read last values even though ownership
+    // metadata is visible. In that case callers keep the independently
+    // captured structural sequence definition and surface a warning instead
+    // of manufacturing a partial ownership/state migration.
+    let value_sql = postgres_sequence_last_value_query(schema);
+    let value_results = match database {
+        Some(database) => {
+            manager
+                .query_database(connection_id, database, &value_sql)
+                .await
+        }
+        None => {
+            manager
+                .query(
+                    connection_id,
+                    &value_sql,
+                    Some(schema.to_string()),
+                    None,
+                    None,
+                )
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    for row in value_results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(last_value)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if last_value.trim().parse::<i64>().is_ok() {
+            state.entry(name.to_string()).or_default().last_value =
+                Some(last_value.trim().to_string());
+        }
+    }
+    Ok(state)
+}
+
+/// Captures direct default-expression -> sequence edges. This puts a new
+/// sequence ahead of a newly-created table or added column; ownership/state is
+/// captured separately and scheduled only after the owning relation exists.
 fn postgres_relation_sequence_dependency_query(schema: &str) -> String {
     let schema = sql_string_literal(schema);
     format!(
@@ -1434,6 +1559,32 @@ async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "PostgreSQL sequence source was unavailable; sequence drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_postgres_sequence_state(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(states) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("sequence") {
+                        if let Some(state) = states.get(&object.name) {
+                            object.sequence_owner = state.owner.clone();
+                            object.sequence_last_value = state.last_value.clone();
+                        }
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "PostgreSQL sequence ownership/state source was unavailable; sequence migration keeps only its structural definition: {error}"
             )),
         }
     }
@@ -3192,8 +3343,17 @@ mod tests {
         assert!(sequence.contains("pg_catalog.pg_sequence"));
         assert!(sequence.contains("CREATE SEQUENCE"));
         assert!(sequence.contains("namespace.nspname = 'public'"));
-        assert!(!sequence.contains("pg_sequence_last_value"));
-        assert!(!sequence.contains("setval"));
+
+        let sequence_owner = postgres_sequence_owner_query("public");
+        assert!(sequence_owner.contains("pg_catalog.pg_depend"));
+        assert!(sequence_owner.contains("ownership.deptype IN ('a', 'i')"));
+        assert!(sequence_owner.contains("namespace.nspname = 'public'"));
+        assert!(!sequence_owner.contains("ALTER SEQUENCE"));
+
+        let sequence_last_value = postgres_sequence_last_value_query("public");
+        assert!(sequence_last_value.contains("pg_catalog.pg_sequence_last_value"));
+        assert!(sequence_last_value.contains("namespace.nspname = 'public'"));
+        assert!(!sequence_last_value.contains("setval"));
 
         let sequence_dependency = postgres_relation_sequence_dependency_query("public");
         assert!(sequence_dependency.contains("pg_catalog.pg_attrdef"));

@@ -1593,6 +1593,13 @@ export interface SchemaObjectSnapshot {
   parentName?: string | null;
   description?: string | null;
   definition?: string | null;
+  /** PostgreSQL sequence ownership, restored only after the owning relation exists. */
+  sequenceOwner?: {
+    tableName: string;
+    columnName: string;
+  } | null;
+  /** Last readable PostgreSQL sequence value; absent when catalog access is restricted. */
+  sequenceLastValue?: string | null;
   /** Native prerequisite names, currently PostgreSQL trigger callback routines. */
   dependencies?: string[];
 }

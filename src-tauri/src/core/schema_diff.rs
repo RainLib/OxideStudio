@@ -76,8 +76,17 @@ impl From<FunctionInfo> for SchemaRoutineSnapshot {
     }
 }
 
-/// Schema object metadata. Native PostgreSQL triggers may carry their exact
-/// catalog DDL; every other descriptor remains review-only without source.
+/// Ownership metadata for a PostgreSQL sequence. The sequence itself remains
+/// the schema object; this is only the relation column it is attached to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaSequenceOwnerSnapshot {
+    pub table_name: String,
+    pub column_name: String,
+}
+
+/// Schema object metadata. Catalog-backed native objects carry their source
+/// only when the planner has a reviewed, driver-specific execution contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaObjectSnapshot {
@@ -89,6 +98,14 @@ pub struct SchemaObjectSnapshot {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// PostgreSQL sequence ownership is applied only after the owning relation
+    /// exists. Legacy snapshots leave this absent and preserve old behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_owner: Option<SchemaSequenceOwnerSnapshot>,
+    /// Last observed PostgreSQL sequence value. This remains optional because
+    /// `pg_sequence_last_value` can be unavailable to a restricted role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_last_value: Option<String>,
     /// Direct native object prerequisites. PostgreSQL currently captures the
     /// trigger callback routine name; the planner turns it into an exact
     /// dependency only when the corresponding routine create is unambiguous.
@@ -104,6 +121,8 @@ impl From<SchemaObjectInfo> for SchemaObjectSnapshot {
             parent_name: object.parent_name,
             description: object.comment,
             definition: None,
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }
     }
@@ -325,6 +344,22 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
     for object in &mut snapshot.schema_objects {
         object.dependencies.sort();
         object.dependencies.dedup();
+        object.sequence_owner = object.sequence_owner.take().and_then(|owner| {
+            let table_name = owner.table_name.trim();
+            let column_name = owner.column_name.trim();
+            (!table_name.is_empty() && !column_name.is_empty()).then(|| {
+                SchemaSequenceOwnerSnapshot {
+                    table_name: table_name.to_string(),
+                    column_name: column_name.to_string(),
+                }
+            })
+        });
+        object.sequence_last_value = object
+            .sequence_last_value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| value.parse::<i64>().is_ok())
+            .map(ToString::to_string);
     }
     snapshot.warnings.sort();
     snapshot.warnings.dedup();
@@ -2120,6 +2155,7 @@ fn schema_object_review_change_with_definition(
         ) if is_event && is_safe_mysql_event_definition(definition) => Some(definition.to_string()),
         _ => None,
     };
+    let sql = executable_definition.into_iter().collect::<Vec<_>>();
     let mut change = change(
         kind,
         SchemaChangeRisk::Review,
@@ -2128,7 +2164,7 @@ fn schema_object_review_change_with_definition(
         Some(object.object_type.clone()),
         object.parent_name.clone(),
         summary,
-        executable_definition.into_iter().collect(),
+        sql,
         kind == SchemaChangeKind::SchemaObjectCreate && is_sequence,
         true,
     );
@@ -2140,6 +2176,77 @@ fn schema_object_review_change_with_definition(
         );
     }
     change
+}
+
+fn postgres_sequence_owner_ddl(
+    schema_name: &str,
+    sequence_name: &str,
+    owner: &SchemaSequenceOwnerSnapshot,
+) -> String {
+    format!(
+        "ALTER SEQUENCE {} OWNED BY {}.{};",
+        DatabaseKind::Postgres.qualified_table(Some(schema_name), sequence_name),
+        DatabaseKind::Postgres.qualified_table(Some(schema_name), &owner.table_name),
+        DatabaseKind::Postgres.quote_identifier(&owner.column_name),
+    )
+}
+
+fn postgres_sequence_setval_ddl(
+    schema_name: &str,
+    sequence_name: &str,
+    last_value: &str,
+) -> String {
+    let qualified = DatabaseKind::Postgres.qualified_table(Some(schema_name), sequence_name);
+    let literal = format!("'{}'", qualified.replace('\'', "''"));
+    format!("SELECT pg_catalog.setval({literal}::regclass, {last_value}, true);")
+}
+
+/// Keep state restoration distinct from CREATE SEQUENCE: new relations that
+/// use `nextval()` depend on sequence creation, while `OWNED BY table.column`
+/// must run only after the relation has been created.
+fn postgres_sequence_state_change(
+    schema_name: &str,
+    object: &SchemaObjectSnapshot,
+) -> Option<SchemaChange> {
+    if !object.object_type.eq_ignore_ascii_case("sequence") {
+        return None;
+    }
+    let mut sql = Vec::new();
+    if let Some(owner) = object.sequence_owner.as_ref() {
+        sql.push(postgres_sequence_owner_ddl(
+            schema_name,
+            &object.name,
+            owner,
+        ));
+    }
+    if let Some(last_value) = object
+        .sequence_last_value
+        .as_deref()
+        .filter(|value| value.parse::<i64>().is_ok())
+    {
+        sql.push(postgres_sequence_setval_ddl(
+            schema_name,
+            &object.name,
+            last_value,
+        ));
+    }
+    if sql.is_empty() {
+        return None;
+    }
+    let mut change = change(
+        SchemaChangeKind::SchemaObjectModify,
+        SchemaChangeRisk::Review,
+        schema_name,
+        &object.name,
+        Some(object.object_type.clone()),
+        Some("ownership/state".to_string()),
+        format!("Restore ownership/state for sequence {}", object.name),
+        sql,
+        false,
+        true,
+    );
+    change.phase = SchemaChangePhase::ManualReview;
+    Some(change)
 }
 
 /// MySQL compound triggers require a client-side delimiter protocol, which a
@@ -2195,7 +2302,14 @@ fn compare_schema_objects(
                     schema_name,
                     source_object,
                     format!("Review creation of {}", schema_object_label(source_object)),
-                ))
+                ));
+                if database_kind == Some(DatabaseKind::Postgres) {
+                    if let Some(state_change) =
+                        postgres_sequence_state_change(schema_name, source_object)
+                    {
+                        changes.push(state_change);
+                    }
+                }
             }
             (None, Some(target_object)) => changes.push(schema_object_review_change(
                 SchemaChangeKind::SchemaObjectDrop,
@@ -3875,6 +3989,30 @@ fn finalize_change_plan(
                 }
             }
         }
+        if change.kind == SchemaChangeKind::SchemaObjectModify
+            && change
+                .object_type
+                .as_deref()
+                .is_some_and(|object_type| object_type.eq_ignore_ascii_case("sequence"))
+            && change.child_name.as_deref() == Some("ownership/state")
+        {
+            add_dependency(
+                &mut dependencies,
+                sequence_creates.get(&change.relation_name),
+            );
+            if let Some(owner_table) = source
+                .schema_objects
+                .iter()
+                .find(|object| {
+                    object.name == change.relation_name
+                        && object.object_type.eq_ignore_ascii_case("sequence")
+                })
+                .and_then(|object| object.sequence_owner.as_ref())
+                .map(|owner| owner.table_name.as_str())
+            {
+                add_dependency(&mut dependencies, relation_creates.get(owner_table));
+            }
+        }
         let is_view_definition_change = change.kind == SchemaChangeKind::RelationCreate
             || (change.kind == SchemaChangeKind::RelationModify
                 && relation_flags(change.object_type.as_deref()).is_view);
@@ -4841,6 +4979,8 @@ mod tests {
             parent_name: Some("orders".to_string()),
             description: Some("Primary-key generator".to_string()),
             definition: None,
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -4877,6 +5017,8 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -4908,6 +5050,8 @@ mod tests {
                 "CREATE TRIGGER `orders_audit` AFTER INSERT ON `app`.`orders` FOR EACH ROW SET NEW.updated_at = NOW()"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -4945,6 +5089,8 @@ mod tests {
                 "CREATE TRIGGER `orders_audit` AFTER INSERT ON `app`.`orders` FOR EACH ROW BEGIN SET @audit = NEW.id; END"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -4976,6 +5122,8 @@ mod tests {
                 "CREATE EVENT `app`.`daily_sync` ON SCHEDULE EVERY 1 DAY ON COMPLETION NOT PRESERVE ENABLE DO CALL refresh_cache();"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5009,6 +5157,8 @@ mod tests {
                 "CREATE DEFINER=`root`@`%` EVENT `app`.`daily_sync` DO CALL refresh_cache();"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5039,6 +5189,8 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5052,6 +5204,8 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: Vec::new(),
         }];
         let target = finalize_schema_snapshot(target).unwrap();
@@ -5081,6 +5235,11 @@ mod tests {
                 "CREATE SEQUENCE public.users_id_seq AS integer INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE;"
                     .to_string(),
             ),
+            sequence_owner: Some(SchemaSequenceOwnerSnapshot {
+                table_name: "users".to_string(),
+                column_name: "id".to_string(),
+            }),
+            sequence_last_value: Some("42".to_string()),
             dependencies: Vec::new(),
         }];
         let source = finalize_schema_snapshot(source).unwrap();
@@ -5102,12 +5261,27 @@ mod tests {
             .iter()
             .find(|change| change.kind == SchemaChangeKind::RelationCreate)
             .unwrap();
+        let state = plan
+            .changes
+            .iter()
+            .find(|change| {
+                change.kind == SchemaChangeKind::SchemaObjectModify
+                    && change.object_type.as_deref() == Some("sequence")
+                    && change.child_name.as_deref() == Some("ownership/state")
+            })
+            .unwrap();
 
         assert!(sequence.manual_review);
         assert!(sequence.blocked_reason.is_none());
         assert!(sequence.sql[0].starts_with("CREATE SEQUENCE"));
         assert!(table.depends_on.contains(&sequence.id));
         assert!(sequence.order < table.order);
+        assert!(state.depends_on.contains(&sequence.id));
+        assert!(state.depends_on.contains(&table.id));
+        assert!(table.order < state.order);
+        assert_eq!(state.sql.len(), 2);
+        assert!(state.sql[0].starts_with("ALTER SEQUENCE"));
+        assert!(state.sql[1].contains("pg_catalog.setval"));
         assert!(table.sql[0].contains("DEFAULT nextval('public.users_id_seq'::regclass)"));
         assert!(!table.sql[0].contains("GENERATED BY DEFAULT AS IDENTITY"));
     }
@@ -5130,6 +5304,8 @@ mod tests {
                 "CREATE TRIGGER orders_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.audit_order()"
                     .to_string(),
             ),
+            sequence_owner: None,
+            sequence_last_value: None,
             dependencies: vec!["audit_order".to_string()],
         }];
         let source = finalize_schema_snapshot(source).unwrap();

@@ -459,7 +459,7 @@ export function SchemaDiffView() {
         >
           <ShieldAlert size={12} className="mt-0.5 shrink-0 text-violet-300" />
           <span>
-            {catalogBackedObjectChanges.length} catalog-backed routine, trigger, or event change{catalogBackedObjectChanges.length === 1 ? " has" : "s have"} DDL in this preview. It remains review-gated and is applied only after target confirmation; delete operations are never generated automatically.
+            {catalogBackedObjectChanges.length} catalog-backed routine, trigger, event, or sequence change{catalogBackedObjectChanges.length === 1 ? " has" : "s have"} DDL in this preview. It remains review-gated and is applied only after target confirmation; delete operations are never generated automatically.
           </span>
         </div>
       )}
