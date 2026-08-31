@@ -52,6 +52,12 @@ fn parse_postgres_backend_pid(value: &str) -> Option<i32> {
         .filter(|backend_pid| *backend_pid > 0)
 }
 
+/// PostgreSQL added `WITH ORDINALITY` in 9.4. Keep the boundary in one
+/// testable place because catalog metadata must remain readable on 9.3.
+fn postgres_supports_with_ordinality(server_version_num: i32) -> bool {
+    server_version_num >= 90_400
+}
+
 struct PostgresMetadataPool {
     database: String,
     pool: Pool<Postgres>,
@@ -608,7 +614,8 @@ impl PostgresDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        let rows = sqlx::query(
+        let supports_with_ordinality = Self::supports_with_ordinality(pool).await?;
+        let sql = if supports_with_ordinality {
             r#"
             SELECT
                 c.conname AS constraint_name,
@@ -644,13 +651,55 @@ impl PostgresDriver {
             LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
             WHERE n.nspname = $1 AND t.relname = $2
             ORDER BY c.contype, c.conname
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(pool)
-        .await?;
+            "#
+        } else {
+            // PostgreSQL 9.3 and a few compatible servers do not support
+            // WITH ORDINALITY. Generate array positions explicitly so an
+            // otherwise read-only metadata lookup never falls back to
+            // information_schema visibility rules.
+            r#"
+            SELECT
+                c.conname AS constraint_name,
+                CASE c.contype
+                    WHEN 'p' THEN 'PRIMARY KEY'
+                    WHEN 'f' THEN 'FOREIGN KEY'
+                    WHEN 'u' THEN 'UNIQUE'
+                    WHEN 'c' THEN 'CHECK'
+                    WHEN 'x' THEN 'EXCLUDE'
+                    ELSE c.contype::text
+                END AS constraint_type,
+                pg_get_constraintdef(c.oid) AS definition,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM generate_subscripts(c.conkey, 1) AS keys(ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = c.conkey[keys.ordinality]
+                ), ARRAY[]::text[]) AS columns,
+                ref_ns.nspname AS referenced_schema,
+                ref_table.relname AS referenced_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM generate_subscripts(c.confkey, 1) AS keys(ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.confrelid
+                     AND a.attnum = c.confkey[keys.ordinality]
+                ), ARRAY[]::text[]) AS referenced_columns
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            LEFT JOIN pg_class ref_table ON ref_table.oid = c.confrelid
+            LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
+            WHERE n.nspname = $1 AND t.relname = $2
+            ORDER BY c.contype, c.conname
+            "#
+        };
+        let rows = sqlx::query(sql)
+            .bind(schema)
+            .bind(table)
+            .persistent(false)
+            .fetch_all(pool)
+            .await?;
 
         Ok(rows
             .iter()
@@ -666,12 +715,24 @@ impl PostgresDriver {
             .collect())
     }
 
+    async fn supports_with_ordinality(pool: &Pool<Postgres>) -> Result<bool> {
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+                .persistent(false)
+                .fetch_one(pool)
+                .await?;
+        // WITH ORDINALITY landed in PostgreSQL 9.4. Keep the catalog route
+        // for read-only users on 9.3 instead of depending on information_schema.
+        Ok(postgres_supports_with_ordinality(server_version_num))
+    }
+
     async fn referencing_foreign_keys_on_pool(
         pool: &Pool<Postgres>,
         schema: &str,
         table: &str,
     ) -> Result<Vec<ForeignKeyReferenceInfo>> {
-        let rows = sqlx::query(
+        let supports_with_ordinality = Self::supports_with_ordinality(pool).await?;
+        let sql = if supports_with_ordinality {
             r#"
             SELECT
                 c.conname AS constraint_name,
@@ -702,13 +763,46 @@ impl PostgresDriver {
               AND ref_ns.nspname = $1
               AND ref_table.relname = $2
             ORDER BY owner_ns.nspname, owner_table.relname, c.conname
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(pool)
-        .await?;
+            "#
+        } else {
+            r#"
+            SELECT
+                c.conname AS constraint_name,
+                owner_ns.nspname AS owner_schema,
+                owner_table.relname AS owner_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM generate_subscripts(c.conkey, 1) AS keys(ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = c.conkey[keys.ordinality]
+                ), ARRAY[]::text[]) AS columns,
+                ref_ns.nspname AS referenced_schema,
+                ref_table.relname AS referenced_table,
+                COALESCE((
+                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
+                    FROM generate_subscripts(c.confkey, 1) AS keys(ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.confrelid
+                     AND a.attnum = c.confkey[keys.ordinality]
+                ), ARRAY[]::text[]) AS referenced_columns
+            FROM pg_constraint c
+            JOIN pg_class owner_table ON owner_table.oid = c.conrelid
+            JOIN pg_namespace owner_ns ON owner_ns.oid = owner_table.relnamespace
+            JOIN pg_class ref_table ON ref_table.oid = c.confrelid
+            JOIN pg_namespace ref_ns ON ref_ns.oid = ref_table.relnamespace
+            WHERE c.contype = 'f'
+              AND ref_ns.nspname = $1
+              AND ref_table.relname = $2
+            ORDER BY owner_ns.nspname, owner_table.relname, c.conname
+            "#
+        };
+        let rows = sqlx::query(sql)
+            .bind(schema)
+            .bind(table)
+            .persistent(false)
+            .fetch_all(pool)
+            .await?;
 
         Ok(rows
             .iter()
@@ -2786,6 +2880,13 @@ mod tests {
             POSTGRES_BACKEND_PID_SQL,
             "SELECT CAST(pg_backend_pid() AS TEXT)"
         );
+    }
+
+    #[test]
+    fn postgres_catalog_metadata_uses_legacy_ordinality_route_before_94() {
+        assert!(!postgres_supports_with_ordinality(90_300));
+        assert!(postgres_supports_with_ordinality(90_400));
+        assert!(postgres_supports_with_ordinality(160_000));
     }
 
     #[test]
