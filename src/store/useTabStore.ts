@@ -20,6 +20,7 @@ import type {
   TableFilter,
   TableSort,
 } from "@/services/tauri/types";
+import type { NewGridRowPlacement } from "@/lib/dataGridRows";
 import {
   loadTableMetadata,
   type TableMetadataSnapshot,
@@ -272,6 +273,8 @@ export interface TabData {
   };
   pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex" or "new-N:colIndex", value: new value
   newRowsCount?: number;
+  /** Parallel to pending new-row offsets; cloned rows carry a stable display anchor. */
+  newRowPlacements?: Array<NewGridRowPlacement | null>;
   // Filter UI state (per-tab)
   filterMode?: "visual" | "sql";
   visualFilters?: Array<{
@@ -405,7 +408,12 @@ function confirmDiscardTabChanges(tabs: TabData[], action: string) {
 
 function tableTabAfterDiscardingDrafts(tab: TabData) {
   const discarded = hasPendingTableChanges(tab)
-    ? { ...tab, pendingEdits: new Map<string, any>(), newRowsCount: 0 }
+    ? {
+        ...tab,
+        pendingEdits: new Map<string, any>(),
+        newRowsCount: 0,
+        newRowPlacements: [],
+      }
     : tab;
   return discarded.documentPageCursors?.some(Boolean)
     ? {
@@ -679,9 +687,28 @@ function pendingEditsAfterRowDeletion(
   return nextEdits;
 }
 
+function newRowPlacementsAfterRowDeletion(
+  placements: Array<NewGridRowPlacement | null> | undefined,
+  deletedRowIndexes: number[],
+) {
+  const deletedRows = new Set(deletedRowIndexes);
+  return (placements || []).map((placement) => {
+    if (!placement || placement.anchorRowKey < 0) return placement || null;
+    if (deletedRows.has(placement.anchorRowKey)) return null;
+    const precedingDeletedRows = deletedRowIndexes.filter(
+      (deletedRowIndex) => deletedRowIndex < placement.anchorRowKey,
+    ).length;
+    return {
+      ...placement,
+      anchorRowKey: placement.anchorRowKey - precedingDeletedRows,
+    };
+  });
+}
+
 function tableDraftsAfterSuccessfulSave(
   pendingEdits: Map<string, any> | undefined,
   newRowsCount: number | undefined,
+  newRowPlacements: Array<NewGridRowPlacement | null> | undefined,
   submittedEdits: Map<string, any>,
   insertedRowIndexes: Set<number>,
 ) {
@@ -725,9 +752,26 @@ function tableDraftsAfterSuccessfulSave(
     );
   }
 
+  const nextPlacements = (newRowPlacements || [])
+    .map((placement, offset) => ({ placement, offset }))
+    .filter(({ offset }) => !insertedOffsetSet.has(offset))
+    .map(({ placement }) => {
+      if (!placement || placement.anchorRowKey >= 0) return placement || null;
+      const anchorOffset = -placement.anchorRowKey - 1;
+      if (insertedOffsetSet.has(anchorOffset)) return null;
+      const precedingInsertedRows = insertedOffsets.filter(
+        (insertedOffset) => insertedOffset < anchorOffset,
+      ).length;
+      return {
+        ...placement,
+        anchorRowKey: -1 - (anchorOffset - precedingInsertedRows),
+      };
+    });
+
   return {
     pendingEdits: nextEdits,
     newRowsCount: Math.max(0, (newRowsCount || 0) - insertedOffsets.length),
+    newRowPlacements: nextPlacements,
   };
 }
 
@@ -928,6 +972,7 @@ interface TabState {
   cancelEdits: (tabId: string) => void;
   // Filter UI methods
   addNewRow: (tabId: string) => void;
+  cloneRows: (tabId: string, rowIndexes: number[]) => void;
   setFilterMode: (tabId: string, mode: "visual" | "sql") => void;
   setVisualFilters: (
     tabId: string,
@@ -1083,6 +1128,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       error: null,
       isPinned: false,
       newRowsCount: 0,
+      newRowPlacements: [],
       ...metadata,
     };
 
@@ -1295,6 +1341,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       error: null,
       isPinned: false,
       newRowsCount: 0,
+      newRowPlacements: [],
       targetSchema: schemaName,
     };
 
@@ -1584,6 +1631,7 @@ export const useTabStore = create<TabState>((set, get) => ({
               error: null,
               pendingEdits: new Map(),
               newRowsCount: 0,
+              newRowPlacements: [],
               tablePage: 0,
               tableTotalRows: null,
             }
@@ -2895,6 +2943,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         const remainingDrafts = tableDraftsAfterSuccessfulSave(
           t.pendingEdits,
           t.newRowsCount,
+          t.newRowPlacements,
           submittedEdits,
           insertedRowIndexes,
         );
@@ -3092,6 +3141,10 @@ export const useTabStore = create<TabState>((set, get) => ({
           results: nextResults ?? t.results,
           pendingEdits: pendingEditsAfterRowDeletion(
             t.pendingEdits,
+            deletedRowIndexes,
+          ),
+          newRowPlacements: newRowPlacementsAfterRowDeletion(
+            t.newRowPlacements,
             deletedRowIndexes,
           ),
           tableTotalRows:
@@ -3435,6 +3488,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tableFilters: nextFilters || null,
                 pendingEdits: new Map(),
                 newRowsCount: 0,
+                newRowPlacements: [],
                 ...(hasSortOverride
                   ? {
                       gridState: {
@@ -3590,6 +3644,7 @@ export const useTabStore = create<TabState>((set, get) => ({
             documentSort: nextSort || null,
             pendingEdits: new Map(),
             newRowsCount: 0,
+            newRowPlacements: [],
           };
         }),
       }));
@@ -3617,18 +3672,90 @@ export const useTabStore = create<TabState>((set, get) => ({
   cancelEdits: (tabId) => {
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.id === tabId ? { ...t, pendingEdits: new Map(), newRowsCount: 0 } : t,
+        t.id === tabId
+          ? {
+              ...t,
+              pendingEdits: new Map(),
+              newRowsCount: 0,
+              newRowPlacements: [],
+            }
+          : t,
       ),
     }));
   },
 
   addNewRow: (tabId) => {
     set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === tabId && !t.isExecuting
-          ? { ...t, newRowsCount: (t.newRowsCount || 0) + 1 }
-          : t,
-      ),
+      tabs: state.tabs.map((t) => {
+        if (t.id !== tabId || t.isExecuting) return t;
+        const currentCount = t.newRowsCount || 0;
+        const placements = Array.from(
+          { length: currentCount },
+          (_, offset) => t.newRowPlacements?.[offset] || null,
+        );
+        return {
+          ...t,
+          newRowsCount: currentCount + 1,
+          newRowPlacements: [...placements, null],
+        };
+      }),
+    }));
+  },
+
+  cloneRows: (tabId, rowIndexes) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== tabId || tab.isExecuting || tab.type !== "table") return tab;
+        const result = tab.results?.[0];
+        if (!result) return tab;
+        const sources = [...new Set(rowIndexes)].filter(
+          (rowIndex) =>
+            Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < result.rows.length,
+        );
+        if (sources.length === 0) return tab;
+
+        const pendingEdits = new Map(tab.pendingEdits || new Map());
+        let newRowsCount = tab.newRowsCount || 0;
+        const placements = Array.from(
+          { length: newRowsCount },
+          (_, offset) => tab.newRowPlacements?.[offset] || null,
+        );
+        const metadataByName = new Map(
+          (tab.tableColumns || []).map((column) => [column.name, column]),
+        );
+
+        for (const sourceRowIndex of sources) {
+          const sourceRow = result.rows[sourceRowIndex];
+          if (!sourceRow) continue;
+          const rowKey = -1 - newRowsCount;
+          for (
+            let columnIndex = 0;
+            columnIndex < result.columns.length;
+            columnIndex += 1
+          ) {
+            const resultColumn = result.columns[columnIndex];
+            if (!resultColumn) continue;
+            const metadata = metadataByName.get(resultColumn.name);
+            if (metadata?.is_auto_increment || metadata?.is_generated) continue;
+            const sourceEditKey = `${sourceRowIndex}:${columnIndex}`;
+            const value = pendingEdits.has(sourceEditKey)
+              ? pendingEdits.get(sourceEditKey)
+              : sourceRow[columnIndex];
+            if (!isTableCellExpression(value)) {
+              pendingEdits.set(`${rowKey}:${columnIndex}`, value);
+            }
+          }
+          placements.push({ anchorRowKey: sourceRowIndex, position: "below" });
+          newRowsCount += 1;
+        }
+
+        return {
+          ...tab,
+          pendingEdits,
+          newRowsCount,
+          newRowPlacements: placements,
+        };
+      }),
     }));
   },
 

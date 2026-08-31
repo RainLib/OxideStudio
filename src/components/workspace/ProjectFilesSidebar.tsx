@@ -31,6 +31,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { supportsProjectFilePreview } from "@/services/tauri/project-files.service";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
 import {
+  compileProjectFileFilter,
+  DEFAULT_PROJECT_FILE_FILTER,
+} from "@/lib/projectFileFilter";
+import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
@@ -44,6 +48,7 @@ import {
   LoaderCircle,
   MoreHorizontal,
   RefreshCw,
+  Settings,
   Trash2,
   X,
 } from "lucide-react";
@@ -72,6 +77,28 @@ function joinPath(directoryPath: string, name: string) {
 
 function isSqlFile(name: string) {
   return /\.(sql|psql|mysql|pgsql)$/i.test(name);
+}
+
+const PROJECT_FILE_FILTER_STORAGE_KEY = "oxide-project-file-filter";
+
+function storedProjectFileFilter() {
+  try {
+    return localStorage.getItem(PROJECT_FILE_FILTER_STORAGE_KEY) || DEFAULT_PROJECT_FILE_FILTER;
+  } catch {
+    return DEFAULT_PROJECT_FILE_FILTER;
+  }
+}
+
+function filterProjectFileTree(
+  nodes: ProjectFileTreeNode[],
+  fileFilter: RegExp,
+): ProjectFileTreeNode[] {
+  return nodes.flatMap((node) => {
+    if (node.kind === "file") return fileFilter.test(node.name) ? [node] : [];
+    return [
+      { ...node, children: filterProjectFileTree(node.children || [], fileFilter) },
+    ];
+  });
 }
 
 function projectRootName(rootPath: string, fallback: string) {
@@ -281,6 +308,18 @@ export function ProjectFilesSidebar() {
       fileState.loadingDirectories,
     ]
   );
+  const [fileFilter, setFileFilter] = useState(storedProjectFileFilter);
+  const [fileFilterDraft, setFileFilterDraft] = useState(fileFilter);
+  const [fileFilterDialogOpen, setFileFilterDialogOpen] = useState(false);
+  const [fileFilterError, setFileFilterError] = useState<string | null>(null);
+  const compiledFileFilter = useMemo(
+    () => compileProjectFileFilter(fileFilter),
+    [fileFilter],
+  );
+  const visibleTree = useMemo(
+    () => filterProjectFileTree(tree, compiledFileFilter),
+    [compiledFileFilter, tree],
+  );
   const [selectedEntry, setSelectedEntry] = useState<SelectedEntry | null>(null);
   const [entryDialog, setEntryDialog] = useState<EntryDialogState | null>(null);
   const [entryName, setEntryName] = useState("");
@@ -290,6 +329,20 @@ export function ProjectFilesSidebar() {
   );
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isMutating, setIsMutating] = useState(false);
+
+  const saveFileFilter = () => {
+    try {
+      const normalized = fileFilterDraft.trim() || DEFAULT_PROJECT_FILE_FILTER;
+      compileProjectFileFilter(normalized);
+      localStorage.setItem(PROJECT_FILE_FILTER_STORAGE_KEY, normalized);
+      setFileFilter(normalized);
+      setFileFilterDraft(normalized);
+      setFileFilterError(null);
+      setFileFilterDialogOpen(false);
+    } catch (cause) {
+      setFileFilterError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   useEffect(() => {
     syncActiveProject();
@@ -570,6 +623,20 @@ export function ProjectFilesSidebar() {
           <button
             type="button"
             className="wb-icon-button h-6 w-6"
+            onClick={() => {
+              setFileFilterDraft(fileFilter);
+              setFileFilterError(null);
+              setFileFilterDialogOpen(true);
+            }}
+            disabled={!rootPath}
+            title={`File name filter: ${fileFilter}`}
+            aria-label="Configure file name filter"
+          >
+            <Settings size={12} />
+          </button>
+          <button
+            type="button"
+            className="wb-icon-button h-6 w-6"
             onClick={() => void chooseProjectDirectory()}
             disabled={isLoading || isMutating}
             title={rootPath ? "Change Project Directory" : "Choose Project Directory"}
@@ -655,12 +722,12 @@ export function ProjectFilesSidebar() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto py-1 custom-scrollbar">
-          {tree.length === 0 && !isLoading ? (
+          {visibleTree.length === 0 && !isLoading ? (
             <div className="px-4 py-8 text-center text-[10px] wb-muted">
-              This directory is empty. Create a SQL file to get started.
+              No files match {fileFilter}. Change the file filter or create a file.
             </div>
           ) : (
-            tree.map((node) => (
+            visibleTree.map((node) => (
               <ProjectFileNode
                 key={node.relativePath}
                 node={node}
@@ -684,6 +751,52 @@ export function ProjectFilesSidebar() {
           )}
         </div>
       )}
+
+      <Dialog open={fileFilterDialogOpen} onOpenChange={setFileFilterDialogOpen}>
+        <DialogContent className="w-[440px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+          <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+            <DialogTitle className="text-[13px]">File name filter</DialogTitle>
+            <DialogDescription className="text-[10px] leading-4">
+              Use a glob such as *.sql or *.sh, or a regular expression such as
+              {" "}\\.(sql|sh|py)$.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="px-4 py-4">
+            <Input
+              autoFocus
+              value={fileFilterDraft}
+              onChange={(event) => setFileFilterDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveFileFilter();
+              }}
+              className="wb-field font-mono"
+              aria-label="File name filter"
+              placeholder="*.sql"
+            />
+            {fileFilterError && (
+              <div className="mt-2 text-[10px] text-red-300">{fileFilterError}</div>
+            )}
+          </div>
+          <DialogFooter className="border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setFileFilterDraft(DEFAULT_PROJECT_FILE_FILTER)}
+            >
+              Show all
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="wb-primary-button"
+              onClick={saveFileFilter}
+            >
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(entryDialog)}

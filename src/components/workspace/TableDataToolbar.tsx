@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { resolveToolbarOverflowState } from "@/lib/toolbarOverflow";
 import {
   Check,
   Columns3,
@@ -22,7 +23,7 @@ import {
   Rows3,
   Square,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   SqlInsertConflictPolicy,
   TableExportFormat,
@@ -150,6 +151,9 @@ export function TableDataToolbar({
   onExportArrow,
   onCancelExport,
 }: TableDataToolbarProps) {
+  const actionListRef = useRef<HTMLDivElement | null>(null);
+  const expandedRequiredWidthRef = useRef(0);
+  const [overflowCompact, setOverflowCompact] = useState(false);
   const mutationDisabled = isExecuting || readOnly || viewOnly || !editingEnabled;
   const supportsExport = (format: TableExportFormat) =>
     exportFormats.includes(format);
@@ -161,9 +165,52 @@ export function TableDataToolbar({
         ? "Editing enabled"
         : "Enable editing";
 
+  useEffect(() => {
+    const actionList = actionListRef.current;
+    if (!actionList) return;
+    expandedRequiredWidthRef.current = 0;
+    setOverflowCompact(false);
+
+    const measure = () => {
+      setOverflowCompact((current) => {
+        const next = resolveToolbarOverflowState(
+          {
+            compact: current,
+            expandedRequiredWidth: expandedRequiredWidthRef.current,
+          },
+          actionList.clientWidth,
+          actionList.scrollWidth,
+        );
+        expandedRequiredWidthRef.current = next.expandedRequiredWidth;
+        return next.compact;
+      });
+    };
+
+    const timer = window.setTimeout(measure, 0);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(actionList);
+    const mutationObserver =
+      typeof MutationObserver === "undefined" ? null : new MutationObserver(measure);
+    mutationObserver?.observe(actionList, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    return () => {
+      window.clearTimeout(timer);
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
+    };
+  }, [hasEdits, onCloneDocument, onEditDocument, onGoToColumn, onToggleTranspose]);
+
   return (
     <div className="wb-table-commandbar h-8 border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
-      <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+      <div
+        ref={actionListRef}
+        data-compact={overflowCompact || undefined}
+        className="no-scrollbar flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden"
+      >
         <ToolbarButton title="Refresh data" onClick={onRefresh} disabled={isExecuting}>
           <RefreshCw size={14} className={cn(isExecuting && "animate-spin")} />
         </ToolbarButton>
@@ -231,7 +278,7 @@ export function TableDataToolbar({
               disabled={readOnly || viewOnly || isExecuting}
             >
               <Check size={12} />
-              Submit {editedCellCount + newRowCount}
+              {!overflowCompact && <>Submit {editedCellCount + newRowCount}</>}
             </button>
             <button
               type="button"
@@ -242,7 +289,7 @@ export function TableDataToolbar({
               disabled={isExecuting}
             >
               <Undo2 size={12} />
-              Revert
+              {!overflowCompact && "Revert"}
             </button>
           </>
         ) : (

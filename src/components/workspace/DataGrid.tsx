@@ -118,6 +118,7 @@ import {
 } from "@/lib/selectionAggregate";
 import { SelectionAggregateBar } from "./SelectionAggregateBar";
 import { presentQueryError } from "@/lib/queryErrorPresentation";
+import { buildDataGridVisualRows } from "@/lib/dataGridRows";
 import {
   APP_EVENT_OPEN_ASSISTANT,
   useAssistantComposerStore,
@@ -263,6 +264,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               gridState: tab.gridState,
               pendingEdits: tab.pendingEdits,
               newRowsCount: tab.newRowsCount,
+              newRowPlacements: tab.newRowPlacements,
               visualFilters: tab.visualFilters,
               columnWidths: tab.columnWidths,
               columnOrder: tab.columnOrder,
@@ -293,6 +295,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setFilterMode,
       setVisualFilters,
       setSqlFilter,
+      cloneRows,
     } = useTabStore(
       useShallow((state) => ({
         setGridFilter: state.setGridFilter,
@@ -312,6 +315,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         setFilterMode: state.setFilterMode,
         setVisualFilters: state.setVisualFilters,
         setSqlFilter: state.setSqlFilter,
+        cloneRows: state.cloneRows,
       })),
     );
     const connections = useConnectionStore((state) => state.connections);
@@ -667,14 +671,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     }, [filteredColumnLookupItems.length]);
 
     // Apply filters and sorting
-    const { filteredRows, sortedIndices } = useMemo(() => {
-      if (!result) return { filteredRows: [], sortedIndices: [] };
+    const sortedIndices = useMemo(() => {
+      if (!result) return [];
 
       if (isTransposed) {
-        return {
-          filteredRows: result.rows,
-          sortedIndices: result.rows.map((_, index) => index),
-        };
+        return result.rows.map((_, index) => index);
       }
 
       let indices = result.rows.map((_, i) => i);
@@ -766,19 +767,26 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         }
       }
 
-      return {
-        filteredRows: indices.map((i) => result.rows[i]),
-        sortedIndices: indices,
-      };
+      return indices;
     }, [result, gridState, globalFilter, columnFilters, activeTab?.type, isTransposed]);
+
+    const visualRows = useMemo(
+      () =>
+        buildDataGridVisualRows(
+          sortedIndices,
+          newRowsCount,
+          activeTab?.newRowPlacements,
+        ),
+      [activeTab?.newRowPlacements, newRowsCount, sortedIndices],
+    );
 
     const selectedRowIndexes = useMemo(
       () =>
         gridSelection.rows
           .toArray()
-          .map((row) => sortedIndices[row])
-          .filter((rowIndex): rowIndex is number => rowIndex !== undefined),
-      [gridSelection.rows, sortedIndices],
+          .map((row) => visualRows[row]?.rowKey)
+          .filter((rowIndex): rowIndex is number => rowIndex !== undefined && rowIndex >= 0),
+      [gridSelection.rows, visualRows],
     );
 
     useEffect(() => {
@@ -822,7 +830,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         ranges: current ? [current.range, ...current.rangeStack] : [],
         rows: deferredGridSelection.rows.toArray(),
         columns: deferredGridSelection.columns.toArray(),
-        rowCount: filteredRows.length + newRowsCount,
+        rowCount: visualRows.length,
         columnCount: columns.length,
       });
       if (selection.coordinates.length <= 1) return null;
@@ -833,11 +841,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const { originalColumnIndex } = columnMetadata;
         if (originalColumnIndex < 0) return { value: undefined };
 
-        const isNewRow = row >= filteredRows.length;
-        const rowKey = isNewRow
-          ? -1 - (row - filteredRows.length)
-          : sortedIndices[row];
-        if (rowKey === undefined) return { value: undefined };
+        const visualRow = visualRows[row];
+        if (!visualRow) return { value: undefined };
+        const { isNew: isNewRow, rowKey } = visualRow;
         const editKey = `${rowKey}:${originalColumnIndex}`;
         const pendingValue = pendingEdits.has(editKey)
           ? pendingEdits.get(editKey)
@@ -859,13 +865,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       activeTabId,
       aggregateColumnMetadata,
       deferredGridSelectionContext,
-      filteredRows.length,
-      newRowsCount,
       pendingEdits,
       result,
       resultIndex,
-      sortedIndices,
       isTransposed,
+      visualRows,
     ]);
 
     // Update getCellContent to handle missing result & new rows
@@ -883,19 +887,26 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           };
         }
 
-        // Check if it's a new row
-        const isNewRow = row >= filteredRows.length;
+        const visualRow = visualRows[row];
+        if (!visualRow) {
+          return {
+            kind: GridCellKind.Text,
+            displayData: "",
+            data: "",
+            allowOverlay: false,
+          };
+        }
+        const isNewRow = visualRow.isNew;
 
         // Determine the "Row Key" for editing/retrieval
         let editRowKey: number;
         let actualRowIndex: number | undefined;
 
         if (isNewRow) {
-          const newRowOffset = row - filteredRows.length;
-          editRowKey = -1 - newRowOffset; // -1, -2, -3...
+          editRowKey = visualRow.rowKey;
           actualRowIndex = undefined;
         } else {
-          actualRowIndex = sortedIndices[row];
+          actualRowIndex = visualRow.rowKey;
           if (actualRowIndex === undefined) {
             return {
               kind: GridCellKind.Text,
@@ -1023,8 +1034,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       },
       [
         result,
-        filteredRows,
-        sortedIndices,
+        visualRows,
         pendingEdits,
         columns,
         overrideColumns,
@@ -1090,12 +1100,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
         // Helper to map visual (r,c) to data indices
         const getIndices = (r: number, c: number) => {
-          let actualRowKey: number | undefined;
-          if (r >= filteredRows.length) {
-            actualRowKey = -1 - (r - filteredRows.length);
-          } else {
-            actualRowKey = sortedIndices[r];
-          }
+          const actualRowKey = visualRows[r]?.rowKey;
 
           const vCol = columns[c];
           if (!vCol) return null;
@@ -1175,11 +1180,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       [
         activeTab,
         result,
-        sortedIndices,
+        visualRows,
         setCellEdit,
         setBulkCellEdit,
         columns,
-        filteredRows,
         overrideColumns,
         gridSelection,
         isEditable,
@@ -1241,11 +1245,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const columnIndex = visualColumnIndexToResultIndex(visualColumnIndex);
         if (columnIndex < 0) return;
 
-        const isNewRow = visualRowIndex >= filteredRows.length;
-        const rowIndex = isNewRow
-          ? -1 - (visualRowIndex - filteredRows.length)
-          : sortedIndices[visualRowIndex];
-        if (rowIndex === undefined) return;
+        const visualRow = visualRows[visualRowIndex];
+        if (!visualRow) return;
+        const { rowKey: rowIndex } = visualRow;
 
         const resultColumn = result?.columns[columnIndex];
         const fallbackColumn = overrideColumns?.[columnIndex];
@@ -1300,12 +1302,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       },
       [
         activeTab,
-        filteredRows.length,
         isEditable,
         overrideColumns,
         pendingEdits,
         result,
-        sortedIndices,
+        visualRows,
         tableColumnsByName,
         visualColumnIndexToResultIndex,
       ],
@@ -1404,22 +1405,34 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         if (!result) return;
 
         const range = selection.current?.range;
-        let visualRows = selection.rows.toArray();
+        let selectedVisualRows = selection.rows.toArray();
         let visualColumns = selection.columns.toArray();
 
-        if (visualRows.length === 0 && range) {
-          visualRows = rangeIndexes(range.y, range.height);
+        if (selectedVisualRows.length === 0 && range) {
+          selectedVisualRows = rangeIndexes(range.y, range.height);
         }
         if (visualColumns.length === 0 && range) {
           visualColumns = rangeIndexes(range.x, range.width);
         }
-        if (visualRows.length === 0 && visualColumns.length > 0) {
-          visualRows = filteredRows.map((_, index) => index);
+        if (selectedVisualRows.length === 0 && visualColumns.length > 0) {
+          selectedVisualRows = visualRows.map((_, index) => index);
         }
 
-        const rowIndexes = visualRows
-          .map((row) => sortedIndices[row] ?? row)
-          .filter((rowIndex) => rowIndex >= 0 && rowIndex < result.rows.length);
+        const selectedRows = selectedVisualRows.flatMap((visualRowIndex) => {
+          const visualRow = visualRows[visualRowIndex];
+          if (!visualRow) return [];
+          return [
+            result.columns.map((_, columnIndex) => {
+              const editKey = `${visualRow.rowKey}:${columnIndex}`;
+              if (pendingEdits.has(editKey)) return pendingEdits.get(editKey);
+              return visualRow.rowKey >= 0
+                ? result.rows[visualRow.rowKey]?.[columnIndex]
+                : undefined;
+            }),
+          ];
+        });
+        const selectionResult = { ...result, rows: selectedRows };
+        const rowIndexes = selectedRows.map((_, index) => index);
         const columnIndexes =
           visualColumns.length > 0
             ? visualColumns
@@ -1427,7 +1440,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 .filter((columnIndex) => columnIndex >= 0)
             : result.columns.map((_, index) => index);
         const text = serializeQueryResultSelectionToTsv(
-          result,
+          selectionResult,
           rowIndexes,
           columnIndexes,
           copyIncludeHeaders,
@@ -1444,10 +1457,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       },
       [
         copyIncludeHeaders,
-        filteredRows,
+        pendingEdits,
         result,
-        sortedIndices,
         visualColumnIndexToResultIndex,
+        visualRows,
       ],
     );
 
@@ -1726,11 +1739,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         return undefined;
       }
       const columnIndex = visualColumnIndexToResultIndex(contextMenu.col);
-      const isNewRow = contextMenu.row >= filteredRows.length;
-      const rowIndex = isNewRow
-        ? -1 - (contextMenu.row - filteredRows.length)
-        : sortedIndices[contextMenu.row];
-      if (columnIndex < 0 || rowIndex === undefined) return undefined;
+      const visualRow = visualRows[contextMenu.row];
+      if (columnIndex < 0 || !visualRow) return undefined;
+      const { rowKey: rowIndex } = visualRow;
 
       const editKey = `${rowIndex}:${columnIndex}`;
       const value = pendingEdits.has(editKey)
@@ -1744,23 +1755,38 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     }, [
       contextMenu.col,
       contextMenu.row,
-      filteredRows.length,
       pendingEdits,
       result,
-      sortedIndices,
       visualColumnIndexToResultIndex,
+      visualRows,
     ]);
 
     const contextSourceRowIndex = useMemo(() => {
       if (
         contextMenu.row === undefined ||
-        contextMenu.row < 0 ||
-        contextMenu.row >= filteredRows.length
+        contextMenu.row < 0
       ) {
         return undefined;
       }
-      return sortedIndices[contextMenu.row];
-    }, [contextMenu.row, filteredRows.length, sortedIndices]);
+      const rowKey = visualRows[contextMenu.row]?.rowKey;
+      return rowKey !== undefined && rowKey >= 0 ? rowKey : undefined;
+    }, [contextMenu.row, visualRows]);
+
+    const handleCloneRows = useCallback(() => {
+      if (!activeTab || contextSourceRowIndex === undefined || !isEditable) return;
+      const sourceRows = selectedRowIndexes.includes(contextSourceRowIndex)
+        ? selectedRowIndexes
+        : [contextSourceRowIndex];
+      cloneRows(activeTab.id, sourceRows);
+      closeContextMenu();
+    }, [
+      activeTab,
+      cloneRows,
+      closeContextMenu,
+      contextSourceRowIndex,
+      isEditable,
+      selectedRowIndexes,
+    ]);
 
     const handleLocalCellFilter = useCallback(
       (
@@ -1855,10 +1881,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       }
 
       const colIndex = visualColumnIndexToResultIndex(contextMenu.col);
-      const rowIndex =
-        contextMenu.row >= filteredRows.length
-          ? -1 - (contextMenu.row - filteredRows.length)
-          : sortedIndices[contextMenu.row];
+      const rowIndex = visualRows[contextMenu.row]?.rowKey;
       if (colIndex < 0 || rowIndex === undefined) return;
       const columnName =
         result?.columns[colIndex]?.name || overrideColumns?.[colIndex]?.name;
@@ -1872,12 +1895,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       closeContextMenu,
       contextMenu.col,
       contextMenu.row,
-      filteredRows.length,
       isEditable,
       overrideColumns,
       result,
       setCellEdit,
-      sortedIndices,
+      visualRows,
       tableColumnsByName,
       visualColumnIndexToResultIndex,
     ]);
@@ -1895,14 +1917,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         !activeTab.tableName ||
         !result ||
         !contextMenu.columnName ||
-        contextMenu.row === undefined ||
-        contextMenu.row >= filteredRows.length
+        contextMenu.row === undefined
       ) {
         return [];
       }
 
-      const resultRowIndex = sortedIndices[contextMenu.row];
-      if (resultRowIndex === undefined) return [];
+      const resultRowIndex = visualRows[contextMenu.row]?.rowKey;
+      if (resultRowIndex === undefined || resultRowIndex < 0) return [];
       const resultRow = result.rows[resultRowIndex];
       if (!resultRow) return [];
 
@@ -1933,11 +1954,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       activeTab?.type,
       contextMenu.columnName,
       contextMenu.row,
-      filteredRows.length,
       pendingEdits,
       referencingForeignKeys,
       result,
-      sortedIndices,
+      visualRows,
       tableConstraints,
     ]);
 
@@ -2227,6 +2247,25 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   : []),
               ]
             : []),
+          ...(activeTab?.type === "table" &&
+          contextSourceRowIndex !== undefined &&
+          !onCloneDocument
+            ? [
+                {
+                  id: "clone-table-rows",
+                  label:
+                    selectedRowIndexes.length > 1 &&
+                    selectedRowIndexes.includes(contextSourceRowIndex)
+                      ? `Clone ${selectedRowIndexes.length} Rows`
+                      : "Clone Row",
+                  description: "Stage a copy directly below each source row.",
+                  icon: <Copy size={12} />,
+                  disabled: !isEditable,
+                  separatorBefore: true,
+                  onSelect: handleCloneRows,
+                } satisfies DataGridContextMenuItem,
+              ]
+            : []),
           {
             id: "set-cell-null",
             label: "Set NULL",
@@ -2268,6 +2307,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       handleDatabaseCellFilter,
       handleClearLocalColumnFilter,
       handleForeignKeyNavigation,
+      handleCloneRows,
       handleSetCellNull,
       handleSortAsc,
       handleSortDesc,
@@ -2632,7 +2672,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 getCellContent={getCellContent}
                 columns={columns}
                 freezeColumns={frozenColumnCount}
-                rows={filteredRows.length + newRowsCount}
+                rows={visualRows.length}
                 onHeaderMenuClick={isTransposed ? undefined : onHeaderMenuClick}
                 onHeaderContextMenu={isTransposed ? undefined : onHeaderContextMenu}
                 onCellContextMenu={isTransposed ? undefined : onCellContextMenu}
@@ -2711,7 +2751,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   </div>
                 </div>
               )}
-              {filteredRows.length === 0 && newRowsCount === 0 && (
+              {visualRows.length === 0 && (
                 <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
                     <span className="text-sm">

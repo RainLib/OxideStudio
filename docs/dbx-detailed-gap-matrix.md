@@ -277,3 +277,14 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 
 本阶段只执行纯逻辑测试和构建，不连接数据库。真实 Oracle/OceanBase Oracle、ClickHouse、
 Dameng、Db2 及兼容产品的 Monaco 接受行为与 server-version 语法仍按统一后置清单验收。
+
+## Phase 115 增量：DBX `f075caef2` 最新体验差异
+
+| 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
+| --- | --- | --- | --- |
+| 克隆行被统一追加到底部，脱离源行上下文 | `apps/desktop/src/composables/useDataGridEditor.ts:clonedRowMeta/cloneRow`（`b60f04ea6`） | `src/lib/dataGridRows.ts`、`src/store/useTabStore.ts:cloneRows`、`src/components/workspace/DataGrid.tsx` | 已对齐并增强：关系型表格补回 Clone Row/Rows；克隆草稿以稳定负 row key 锚定源行，排序/过滤时不篡改查询结果；源被过滤或删除时安全降级到底部。自增/生成列不复制，复制、编辑、提交与草稿重排共享同一 visual-row 映射。 |
+| 编辑操作出现后工具栏横向溢出且尾部动作不可见 | `apps/desktop/src/components/grid/DataGrid.vue:updateDataGridTopbarWidth`（`a84cb637b`） | `src/components/workspace/TableDataToolbar.tsx`、`src/lib/toolbarOverflow.ts` | 已对齐：ResizeObserver 与 MutationObserver 同时观测真实 action list；溢出时只折叠 Submit/Revert 文字并保留图标、标题和 aria-label，达到展开所需宽度后自动恢复。 |
+| 外部 SQL 文件浏览仅固定识别 `.sql` | `apps/desktop/src/components/layout/SqlFilePanel.vue`、`src-tauri/src/commands/list_sql_files.rs`（`f725c50b2`） | `src/components/workspace/ProjectFilesSidebar.tsx`、`src/lib/projectFileFilter.ts` | 按 Oxide 项目工作区架构对齐：文件面板提供持久化的大小写不敏感 glob/正则过滤和错误校验，默认 `*` 保留 SQL、脚本、文档和 AI 项目上下文；目录仍按需加载，因此过滤不会触发全树扫描。LSP 继续只同步受限 SQL 后缀，不因 UI 过滤扩大文档授权。 |
+| Elasticsearch index mapping/settings/stats/clear | `ElasticsearchIndexMetadataDialog.vue`、`elasticsearchIndexActions.ts`、`document_ops.rs`（`8f3134dce`） | `src/features/data-grid/ui/ElasticsearchIndexMetadataDialog.tsx`、`ElasticsearchIndexClearDialog.tsx`、`src-tauri/src/commands/document.rs`、`drivers/elasticsearch.rs` | 已在此前阶段对齐并更严格：metadata kind 为闭集，index path segment 编码；clear 走 preview/token/目标重验，通配目标要求动态确认短语，响应必须包含完整 shard 结果。ES 6 typed mapping 与 ES 7/8 typeless mapping 均有契约测试。 |
+
+本阶段不引入 DBX 的 S3 sccache 或 Kafka/Dameng package 版本号：前者属于其 CI/对象存储基础设施，后者属于 DBX 发布目录，不是 Oxide 产品能力差距。
