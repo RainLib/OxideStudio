@@ -141,7 +141,7 @@ function mongoShellCommandRanges(source: string): MongoDbCommandRange[] {
   if (quote || blockComment || depth !== 0) return [];
   const tail = trimmedCommandRange(source, start, source.length);
   if (tail) ranges.push(tail);
-  return ranges.every((range) => /^(?:(?:\/\/|--)[^\r\n]*(?:\r?\n)|\/\*[\s\S]*?\*\/\s*)*db\./iu.test(range.text))
+  return ranges.every((range) => /^(?:(?:\/\/|--)[^\r\n]*(?:\r?\n)|\/\*[\s\S]*?\*\/\s*)*(?:db\.|show\s+(?:dbs|databases)\b)/iu.test(range.text))
     ? ranges
     : [];
 }

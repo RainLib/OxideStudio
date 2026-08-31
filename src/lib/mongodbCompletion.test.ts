@@ -168,8 +168,8 @@ describe("MongoDB native JSON aggregation completion", () => {
   });
 });
 
-describe("MongoDB read-only shell completion", () => {
-  it("offers only Host-supported read methods after a collection dot", () => {
+describe("MongoDB shell completion", () => {
+  it("offers only Host-supported methods after a collection dot", () => {
     const source = "db.orders.fi";
     const result = buildMongoDbConsoleCompletions(source, source.length, {});
     expect(result.context).toMatchObject({
@@ -178,8 +178,24 @@ describe("MongoDB read-only shell completion", () => {
       collection: "orders",
       syntax: "shell",
     });
-    expect(result.items.map((item) => item.label)).toEqual(["find", "findOne"]);
-    expect(result.items.some((item) => item.label === "deleteMany")).toBe(false);
+    expect(result.items.map((item) => item.label)).toEqual([
+      "find",
+      "findOne",
+      "findOneAndUpdate",
+      "findOneAndReplace",
+      "findOneAndDelete",
+    ]);
+    expect(result.items.some((item) => item.label === "replaceOne")).toBe(false);
+
+    const mutation = buildMongoDbConsoleCompletions(
+      "db.orders.de",
+      "db.orders.de".length,
+      {},
+    );
+    expect(mutation.items.map((item) => item.label)).toEqual([
+      "deleteOne",
+      "deleteMany",
+    ]);
   });
 
   it("offers bounded cursor chains and live collection names", () => {
@@ -208,5 +224,29 @@ describe("MongoDB read-only shell completion", () => {
     expect(result.context.syntax).not.toBe("shell");
     expect(result.context.area).toBe("query-operator");
     expect(result.items.some((item) => item.label === "$gte")).toBe(true);
+  });
+
+  it("routes shell arguments to fields, operators, stages and options", () => {
+    const fields = [{ name: "status", dataType: "string" }];
+    const filter = "db.orders.find({sta";
+    expect(
+      buildMongoDbConsoleCompletions(filter, filter.length, { fields }).items,
+    ).toContainEqual(expect.objectContaining({ label: "status" }));
+
+    const update = "db.orders.updateMany({}, {$s";
+    expect(
+      buildMongoDbConsoleCompletions(update, update.length, { fields }).items,
+    ).toContainEqual(expect.objectContaining({ label: "$set" }));
+
+    const aggregate = "db.orders.aggregate([{$m";
+    expect(
+      buildMongoDbConsoleCompletions(aggregate, aggregate.length, { fields })
+        .items,
+    ).toContainEqual(expect.objectContaining({ label: "$match" }));
+
+    const options = "db.orders.updateOne({}, {$set: {status: 'ok'}}, {up";
+    expect(
+      buildMongoDbConsoleCompletions(options, options.length, { fields }).items,
+    ).toContainEqual(expect.objectContaining({ label: "upsert" }));
   });
 });

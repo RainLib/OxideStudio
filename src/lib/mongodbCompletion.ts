@@ -1,6 +1,6 @@
 /**
  * MongoDB completion supports both the native JSON contract and the bounded,
- * read-only shell syntax parsed by `src-tauri/src/drivers/mongodb_shell.rs`.
+ * structurally parsed shell syntax in `src-tauri/src/drivers/mongodb_shell.rs`.
  * Never suggest a shell method that the Host cannot structurally parse.
  */
 export type MongoDbCompletionArea =
@@ -20,6 +20,7 @@ export type MongoDbCompletionArea =
   | "shell-root"
   | "shell-method"
   | "shell-chain"
+  | "shell-option"
   | "unknown";
 
 export type MongoDbConsoleCompletion = {
@@ -451,6 +452,27 @@ const MONGODB_SHELL_ROOT_COMPLETIONS: MongoDbConsoleCompletion[] = [
     insertText: 'db.getCollection("${1:collection.name}").find({ ${2} }).limit(${3:100})',
     kind: "snippet",
   },
+  {
+    label: "show databases",
+    detail: "List databases visible to the current account",
+    insertText: "show databases",
+    kind: "snippet",
+  },
+];
+
+const MONGODB_SHELL_DATABASE_COMPLETIONS: MongoDbConsoleCompletion[] = [
+  {
+    label: "getCollection",
+    detail: "Reference a dotted or non-identifier collection name",
+    insertText: 'getCollection("${1:collection.name}")',
+    kind: "snippet",
+  },
+  {
+    label: "version",
+    detail: "Read the MongoDB server build information",
+    insertText: "version()",
+    kind: "snippet",
+  },
 ];
 
 const MONGODB_SHELL_METHOD_COMPLETIONS: MongoDbConsoleCompletion[] = [
@@ -462,6 +484,22 @@ const MONGODB_SHELL_METHOD_COMPLETIONS: MongoDbConsoleCompletion[] = [
   { label: "distinct", detail: "Read distinct field values", insertText: 'distinct("${1:field}", { ${2} })', kind: "snippet" },
   { label: "getIndexes", detail: "List collection indexes", insertText: "getIndexes()", kind: "snippet" },
   { label: "stats", detail: "Read collection statistics", insertText: "stats()", kind: "snippet" },
+  { label: "dataSize", detail: "Read total document size", insertText: "dataSize()", kind: "snippet" },
+  { label: "storageSize", detail: "Read allocated collection storage", insertText: "storageSize()", kind: "snippet" },
+  { label: "totalIndexSize", detail: "Read total index storage", insertText: "totalIndexSize()", kind: "snippet" },
+  { label: "insertOne", detail: "Insert one document", insertText: "insertOne({ ${1} })", kind: "snippet" },
+  { label: "insertMany", detail: "Insert multiple documents", insertText: "insertMany([\n  { ${1} }\n])", kind: "snippet" },
+  { label: "updateOne", detail: "Update the first matching document", insertText: "updateOne({ ${1:filter} }, { $set: { ${2} } })", kind: "snippet" },
+  { label: "updateMany", detail: "Update all matching documents", insertText: "updateMany({ ${1:filter} }, { $set: { ${2} } })", kind: "snippet" },
+  { label: "deleteOne", detail: "Delete the first matching document", insertText: "deleteOne({ ${1:filter} })", kind: "snippet" },
+  { label: "deleteMany", detail: "Delete all matching documents", insertText: "deleteMany({ ${1:filter} })", kind: "snippet" },
+  { label: "findOneAndUpdate", detail: "Atomically update and return a document", insertText: "findOneAndUpdate({ ${1:filter} }, { $set: { ${2} } }, { returnDocument: \"after\" })", kind: "snippet" },
+  { label: "findOneAndReplace", detail: "Atomically replace and return a document", insertText: "findOneAndReplace({ ${1:filter} }, { ${2:replacement} })", kind: "snippet" },
+  { label: "findOneAndDelete", detail: "Atomically delete and return a document", insertText: "findOneAndDelete({ ${1:filter} })", kind: "snippet" },
+  { label: "createIndex", detail: "Create an index", insertText: "createIndex({ ${1:field}: ${2:1} })", kind: "snippet" },
+  { label: "dropIndex", detail: "Drop one index", insertText: 'dropIndex("${1:indexName}")', kind: "snippet" },
+  { label: "dropIndexes", detail: "Drop all non-_id indexes", insertText: "dropIndexes()", kind: "snippet" },
+  { label: "drop", detail: "Drop the collection", insertText: "drop()", kind: "snippet" },
 ];
 
 const MONGODB_SHELL_CHAIN_COMPLETIONS: MongoDbConsoleCompletion[] = [
@@ -470,12 +508,186 @@ const MONGODB_SHELL_CHAIN_COMPLETIONS: MongoDbConsoleCompletion[] = [
   { label: "limit", detail: "Limit results to 1-10000 documents", insertText: "limit(${1:100})", kind: "snippet" },
 ];
 
+const MONGODB_SHELL_ARGUMENT_ROLES: Record<string, readonly string[]> = {
+  find: ["filter", "projection", "options"],
+  findOne: ["filter", "projection", "options"],
+  count: ["filter", "options"],
+  countDocuments: ["filter", "options"],
+  aggregate: ["pipeline", "options"],
+  distinct: ["fieldName", "filter"],
+  insertOne: ["insertOne", "options"],
+  insertMany: ["insertMany", "options"],
+  updateOne: ["filter", "update", "options"],
+  updateMany: ["filter", "update", "options"],
+  deleteOne: ["filter", "options"],
+  deleteMany: ["filter", "options"],
+  findOneAndUpdate: ["filter", "update", "options"],
+  findOneAndReplace: ["filter", "replacement", "options"],
+  findOneAndDelete: ["filter", "options"],
+  createIndex: ["sort", "options"],
+  sort: ["sort"],
+};
+
+const MONGODB_SHELL_OPTION_KEYS: Record<string, readonly string[]> = {
+  find: ["collation", "comment", "hint", "maxTimeMS"],
+  findOne: ["collation", "comment", "hint", "maxTimeMS", "sort"],
+  count: ["collation", "comment", "hint", "limit", "maxTimeMS", "skip"],
+  countDocuments: ["collation", "comment", "hint", "limit", "maxTimeMS", "skip"],
+  aggregate: ["allowDiskUse", "bypassDocumentValidation", "collation", "comment", "hint", "let", "maxTimeMS"],
+  insertOne: ["bypassDocumentValidation", "comment", "writeConcern"],
+  insertMany: ["bypassDocumentValidation", "comment", "ordered", "writeConcern"],
+  updateOne: ["arrayFilters", "bypassDocumentValidation", "collation", "comment", "hint", "let", "upsert", "writeConcern"],
+  updateMany: ["arrayFilters", "bypassDocumentValidation", "collation", "comment", "hint", "let", "upsert", "writeConcern"],
+  deleteOne: ["collation", "comment", "hint", "let", "writeConcern"],
+  deleteMany: ["collation", "comment", "hint", "let", "writeConcern"],
+  findOneAndUpdate: ["arrayFilters", "bypassDocumentValidation", "collation", "comment", "hint", "let", "maxTimeMS", "projection", "returnDocument", "sort", "upsert", "writeConcern"],
+  findOneAndReplace: ["bypassDocumentValidation", "collation", "comment", "hint", "let", "maxTimeMS", "projection", "returnDocument", "sort", "upsert", "writeConcern"],
+  findOneAndDelete: ["collation", "comment", "hint", "let", "maxTimeMS", "projection", "sort", "writeConcern"],
+  createIndex: ["collation", "expireAfterSeconds", "hidden", "name", "partialFilterExpression", "sparse", "unique", "weights", "wildcardProjection"],
+};
+
 function mongodbShellCollection(beforeCursor: string) {
   const getCollection = beforeCursor.match(
     /\bdb\.getCollection\(\s*(["'])(.*?)\1\s*\)/su,
   );
   if (getCollection?.[2]) return getCollection[2];
   return beforeCursor.match(/\bdb\.([\p{L}\p{N}_-]+)/u)?.[1];
+}
+
+type MongoShellCallContext = {
+  method: string;
+  argumentIndex: number;
+  argumentSource: string;
+};
+
+function activeMongoShellCall(beforeCursor: string): MongoShellCallContext | null {
+  const stack: Array<{
+    delimiter: "(" | "[" | "{";
+    method?: string;
+    argumentStart?: number;
+    argumentIndex?: number;
+  }> = [];
+  let quote: "'" | '"' | "`" | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < beforeCursor.length; index += 1) {
+    const character = beforeCursor[index] ?? "";
+    const next = beforeCursor[index + 1] ?? "";
+    if (lineComment) {
+      if (character === "\n" || character === "\r") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if ((character === "/" && next === "/") || (character === "-" && next === "-")) {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === ".") {
+      const match = beforeCursor
+        .slice(index + 1)
+        .match(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*\(/u);
+      const method = match?.[1];
+      if (method && MONGODB_SHELL_ARGUMENT_ROLES[method]) {
+        const openOffset = match[0].lastIndexOf("(");
+        const open = index + 1 + openOffset;
+        stack.push({
+          delimiter: "(",
+          method,
+          argumentStart: open + 1,
+          argumentIndex: 0,
+        });
+        index = open;
+        continue;
+      }
+    }
+    if (character === "(" || character === "[" || character === "{") {
+      stack.push({ delimiter: character });
+      continue;
+    }
+    if (character === ",") {
+      const call = [...stack].reverse().find((frame) => frame.method);
+      if (call && stack[stack.length - 1] === call) {
+        call.argumentIndex = (call.argumentIndex ?? 0) + 1;
+        call.argumentStart = index + 1;
+      }
+      continue;
+    }
+    if (character === ")" || character === "]" || character === "}") {
+      const expected = character === ")" ? "(" : character === "]" ? "[" : "{";
+      if (stack[stack.length - 1]?.delimiter === expected) stack.pop();
+    }
+  }
+
+  const call = [...stack].reverse().find((frame) => frame.method);
+  if (!call?.method || call.argumentStart === undefined) return null;
+  return {
+    method: call.method,
+    argumentIndex: call.argumentIndex ?? 0,
+    argumentSource: beforeCursor.slice(call.argumentStart),
+  };
+}
+
+function mongodbShellArgumentContext(
+  beforeCursor: string,
+  collection: string | undefined,
+): MongoDbCompletionContext | null {
+  const call = activeMongoShellCall(beforeCursor);
+  if (!call) return null;
+  const role = MONGODB_SHELL_ARGUMENT_ROLES[call.method]?.[call.argumentIndex];
+  if (!role) return null;
+  const typed = call.argumentSource.match(/[A-Za-z0-9_$.-]+$/u)?.[0] || "";
+  if (role === "options") {
+    return {
+      area: "shell-option",
+      typed,
+      parentKey: call.method,
+      collection,
+      syntax: "shell",
+    };
+  }
+  if (role === "fieldName") {
+    return {
+      area: "field",
+      typed: typed.replace(/^\$/u, ""),
+      parentKey: call.method,
+      collection,
+      syntax: "shell",
+      quoted: /["'][^"']*$/u.test(call.argumentSource),
+    };
+  }
+
+  const ownerKey = role === "replacement" ? "insertOne" : role;
+  const wrapper = `{ "${ownerKey}": ${call.argumentSource}`;
+  const nested = mongodbConsoleCompletionContext(wrapper, wrapper.length);
+  return {
+    ...nested,
+    collection,
+    syntax: "shell",
+  };
 }
 
 function mongodbShellCompletionContext(
@@ -517,13 +729,19 @@ function mongodbShellCompletionContext(
     };
   }
 
-  if (/^\s*(?:d|db)?$/iu.test(beforeCursor)) {
+  if (/^\s*(?:(?:d|db)|(?:s|sh|sho|show|show\s+d|show\s+db|show\s+dat|show\s+data))?$/iu.test(beforeCursor)) {
     return {
       area: "shell-root",
       typed: beforeCursor.trim(),
       syntax: "shell",
     };
   }
+
+  const argumentContext = mongodbShellArgumentContext(
+    beforeCursor,
+    mongodbShellCollection(beforeCursor),
+  );
+  if (argumentContext) return argumentContext;
 
   return trimmed.startsWith("db.")
     ? {
@@ -664,6 +882,55 @@ function operatorItems(values: readonly string[], typed: string, detail: string)
   }));
 }
 
+function shellOptionItems(method: string | undefined, typed: string) {
+  return (MONGODB_SHELL_OPTION_KEYS[method || ""] || [])
+    .filter((key) => matches(key, typed))
+    .map((key) => {
+      let value = "${1}";
+      if (
+        [
+          "allowDiskUse",
+          "bypassDocumentValidation",
+          "hidden",
+          "ordered",
+          "sparse",
+          "unique",
+          "upsert",
+        ].includes(key)
+      ) {
+        value = "${1:true}";
+      } else if (["expireAfterSeconds", "limit", "maxTimeMS", "skip"].includes(key)) {
+        value = "${1:0}";
+      } else if (key === "returnDocument") {
+        value = '"${1:after}"';
+      } else if (key === "arrayFilters") {
+        value = "[\n  { ${1} }\n]";
+      } else if (
+        [
+          "collation",
+          "hint",
+          "let",
+          "partialFilterExpression",
+          "projection",
+          "sort",
+          "weights",
+          "wildcardProjection",
+          "writeConcern",
+        ].includes(key)
+      ) {
+        value = "{ ${1} }";
+      } else {
+        value = '"${1}"';
+      }
+      return {
+        label: key,
+        detail: `${method || "MongoDB"} option`,
+        insertText: `${key}: ${value}`,
+        kind: "property" as const,
+      };
+    });
+}
+
 function fieldReferenceItems(
   fields: readonly { name: string; dataType?: string }[],
   typed: string,
@@ -752,6 +1019,9 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
         matches(item.label, context.typed),
       );
       break;
+    case "shell-option":
+      items = shellOptionItems(context.parentKey, context.typed);
+      break;
     case "root":
       items = ROOT_COMMANDS.filter((item) => matches(item.label, context.typed));
       break;
@@ -765,6 +1035,13 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
             : name,
         kind: "value",
       }));
+      if (context.syntax === "shell") {
+        items.push(
+          ...MONGODB_SHELL_DATABASE_COMPLETIONS.filter((item) =>
+            matches(item.label, context.typed),
+          ),
+        );
+      }
       break;
     case "field":
       items = fields.filter((field) => matches(field.name, context.typed)).map((field) => ({ label: field.name, detail: field.dataType || "MongoDB field", insertText: field.name, kind: "field" }));

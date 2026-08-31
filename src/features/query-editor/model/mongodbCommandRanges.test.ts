@@ -34,6 +34,12 @@ describe("MongoDB command ranges", () => {
     );
   });
 
+  it("treats show databases as an executable shell command", () => {
+    expect(mongodbCommandRanges("show databases")).toEqual([
+      { from: 0, to: "show databases".length, text: "show databases" },
+    ]);
+  });
+
   it("fails closed for unbalanced or unsupported shell text", () => {
     expect(mongodbCommandRanges("db.users.find({")).toEqual([]);
     expect(mongodbCommandRanges("console.log('not mongo')")).toEqual([]);

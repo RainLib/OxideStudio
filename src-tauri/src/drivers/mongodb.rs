@@ -44,6 +44,7 @@ struct MongoCommandInput {
     command: Option<Value>,
     find: Option<Value>,
     aggregate: Option<Vec<Value>>,
+    aggregate_options: Option<Value>,
     count_documents: Option<Value>,
     insert_one: Option<Value>,
     insert_many: Option<Vec<Value>>,
@@ -55,6 +56,8 @@ struct MongoCommandInput {
     skip: Option<i64>,
     sort: Option<Value>,
     projection: Option<Value>,
+    collation: Option<Value>,
+    find_options: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,7 +145,11 @@ impl MongoDbDriver {
 
         if let Some(pipeline) = input.aggregate.as_ref() {
             let result = database
-                .run_command(build_aggregate_command(collection, pipeline)?)
+                .run_command(build_aggregate_command(
+                    collection,
+                    pipeline,
+                    input.aggregate_options.as_ref(),
+                )?)
                 .await
                 .context("MongoDB aggregate command failed")?;
             return Ok(documents_result(extract_cursor_batch(result)?));
@@ -696,6 +703,20 @@ impl MongoCommandInput {
         if self.command.is_none() && self.collection.is_none() {
             return Err(anyhow!("MongoDB collection is required"));
         }
+        if self.aggregate_options.is_some() && self.aggregate.is_none() {
+            return Err(anyhow!(
+                "MongoDB aggregateOptions requires an aggregate operation"
+            ));
+        }
+        let has_find_options = self.limit.is_some()
+            || self.skip.is_some()
+            || self.sort.is_some()
+            || self.projection.is_some()
+            || self.collation.is_some()
+            || self.find_options.is_some();
+        if has_find_options && self.find.is_none() && operation_count != 0 {
+            return Err(anyhow!("MongoDB find options require a find operation"));
+        }
         Ok(())
     }
 }
@@ -712,11 +733,10 @@ fn parse_mongodb_commands(input: &str) -> Result<Vec<MongoCommandInput>> {
     let parsed_values = match parsed_values {
         Ok(values) => values,
         Err(_error) if mongodb_shell::looks_like_shell_command(input) => {
-            mongodb_shell::parse_read_commands(input).map_err(|shell_error| anyhow!(shell_error))?
+            mongodb_shell::parse_commands(input).map_err(|shell_error| anyhow!(shell_error))?
         }
         Err(error) => {
-            return Err(error)
-                .context("MongoDB commands must be JSON or a supported read-only shell command")
+            return Err(error).context("MongoDB commands must be JSON or a supported shell command")
         }
     };
     let values = parsed_values
@@ -835,21 +855,82 @@ fn build_find_command(collection: &str, input: &MongoCommandInput) -> Result<Doc
     if let Some(projection) = input.projection.as_ref() {
         command.insert("projection", json_to_document(projection, "projection")?);
     }
+    if let Some(collation) = input.collation.as_ref() {
+        command.insert("collation", json_to_document(collation, "collation")?);
+    }
+    append_mongodb_options(
+        &mut command,
+        input.find_options.as_ref(),
+        "findOptions",
+        &[
+            "allowPartialResults",
+            "collation",
+            "comment",
+            "hint",
+            "maxTimeMS",
+            "noCursorTimeout",
+            "returnKey",
+            "showRecordId",
+        ],
+    )?;
 
     Ok(command)
 }
 
-fn build_aggregate_command(collection: &str, pipeline: &[Value]) -> Result<Document> {
+fn build_aggregate_command(
+    collection: &str,
+    pipeline: &[Value],
+    options: Option<&Value>,
+) -> Result<Document> {
     let pipeline = pipeline
         .iter()
         .map(|value| json_to_bson(value, "aggregate pipeline stage"))
         .collect::<Result<Vec<_>>>()?;
     let cursor = Document::new();
-    Ok(doc! {
+    let mut command = doc! {
         "aggregate": collection,
         "pipeline": pipeline,
         "cursor": cursor,
-    })
+    };
+    append_mongodb_options(
+        &mut command,
+        options,
+        "aggregateOptions",
+        &[
+            "allowDiskUse",
+            "bypassDocumentValidation",
+            "collation",
+            "comment",
+            "hint",
+            "let",
+            "maxTimeMS",
+        ],
+    )?;
+    Ok(command)
+}
+
+fn append_mongodb_options(
+    command: &mut Document,
+    options: Option<&Value>,
+    label: &str,
+    allowed: &[&str],
+) -> Result<()> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    let options = options
+        .as_object()
+        .ok_or_else(|| anyhow!("MongoDB {label} must be a JSON object"))?;
+    for (key, value) in options {
+        if !allowed.iter().any(|allowed| allowed == &key.as_str()) {
+            return Err(anyhow!("Unsupported MongoDB {label} field: {key}"));
+        }
+        if command.contains_key(key) {
+            return Err(anyhow!("MongoDB {label} conflicts with {key}"));
+        }
+        command.insert(key, json_to_bson(value, label)?);
+    }
+    Ok(())
 }
 
 fn build_update_command(
@@ -1750,6 +1831,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_shell_mutations_and_read_options_into_native_contracts() {
+        let commands = parse_mongodb_commands(
+            "db.users.updateMany({active: false}, {$set: {active: true}}, {upsert: true}); db.events.insertMany([{kind: 'login'}], {ordered: false})",
+        )
+        .unwrap();
+        assert_eq!(commands.len(), 2);
+        let update = commands[0].update_many.as_ref().unwrap();
+        assert_eq!(update.filter["active"], false);
+        assert_eq!(update.update["$set"]["active"], true);
+        assert_eq!(update.upsert, Some(true));
+        assert_eq!(commands[1].command.as_ref().unwrap()["insert"], "events");
+        assert_eq!(commands[1].command.as_ref().unwrap()["ordered"], false);
+
+        let aggregate = parse_mongodb_commands(
+            "db.events.aggregate([{$match: {kind: 'login'}}], {allowDiskUse: true, maxTimeMS: 500})",
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(aggregate.collection.as_deref(), Some("events"));
+        assert_eq!(aggregate.aggregate.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            aggregate.aggregate_options.as_ref().unwrap()["allowDiskUse"],
+            true
+        );
+    }
+
+    #[test]
     fn rejects_ambiguous_or_collectionless_commands() {
         assert!(parse_mongodb_commands(r#"{"find":{}}"#).is_err());
         assert!(
@@ -1778,6 +1886,8 @@ mod tests {
                 "find":{"active":true},
                 "sort":{"createdAt":-1},
                 "projection":{"email":1},
+                "collation":{"locale":"en"},
+                "findOptions":{"hint":{"active":1},"maxTimeMS":500},
                 "skip":5,
                 "limit":20
             }"#,
@@ -1801,6 +1911,25 @@ mod tests {
             .get_document("projection")
             .unwrap()
             .contains_key("email"));
+        assert_eq!(
+            command
+                .get_document("collation")
+                .unwrap()
+                .get_str("locale")
+                .unwrap(),
+            "en"
+        );
+        assert!(command.get_document("hint").unwrap().contains_key("active"));
+        assert_eq!(command.get_i32("maxTimeMS").unwrap(), 500);
+
+        let aggregate = build_aggregate_command(
+            "users",
+            &[serde_json::json!({"$match": {"active": true}})],
+            Some(&serde_json::json!({"allowDiskUse": true, "maxTimeMS": 750})),
+        )
+        .unwrap();
+        assert!(aggregate.get_bool("allowDiskUse").unwrap());
+        assert_eq!(aggregate.get_i32("maxTimeMS").unwrap(), 750);
     }
 
     #[test]
