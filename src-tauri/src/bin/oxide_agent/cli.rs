@@ -1,13 +1,13 @@
 use crate::oxide_agent::{
-    bridge_mcp, catalog, mcp,
-    policy::{DatabaseScope, Grant},
+    bridge_mcp, catalog, http, mcp,
+    policy::{DatabaseScope, Grant, ToolScope},
     runtime::ToolRuntime,
     store::{resolve_data_dir, HeadlessStore},
 };
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 const MAX_INPUT_FILE_BYTES: u64 = 512 * 1024;
 
@@ -40,6 +40,8 @@ enum Command {
 enum McpCommand {
     /// Serve MCP 2025-11-25 over stdin/stdout.
     Stdio(ScopeArgs),
+    /// Serve MCP 2025-11-25 over authenticated Streamable HTTP.
+    Http(HttpArgs),
     /// Internal Desktop-authenticated MCP bridge. Not a public integration surface.
     #[command(hide = true)]
     Bridge,
@@ -77,6 +79,14 @@ pub struct ScopeArgs {
         value_delimiter = ','
     )]
     databases: Vec<String>,
+    /// Optional immutable tool allowlist. Repeat the flag or use a comma-separated environment value.
+    #[arg(
+        long = "tool",
+        env = "OXIDE_MCP_TOOL",
+        value_name = "TOOL",
+        value_delimiter = ','
+    )]
+    tools: Vec<String>,
     /// Override OxideStudio's application-data directory.
     #[arg(long, env = "OXIDE_DATA_DIR")]
     data_dir: Option<PathBuf>,
@@ -91,6 +101,38 @@ pub struct ScopeArgs {
     query_timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Args)]
+struct HttpArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+    /// Listener address. Loopback is the safe default.
+    #[arg(long, env = "OXIDE_MCP_HTTP_BIND", default_value = "127.0.0.1:43521")]
+    bind: SocketAddr,
+    /// MCP endpoint path.
+    #[arg(long, env = "OXIDE_MCP_HTTP_PATH", default_value = "/mcp")]
+    path: String,
+    /// Private file containing the bearer token. Tokens are never accepted as command arguments.
+    #[arg(long, env = "OXIDE_MCP_HTTP_TOKEN_FILE")]
+    token_file: PathBuf,
+    /// Allowed Host header value. Required for remote listeners; repeat as needed.
+    #[arg(
+        long = "allowed-host",
+        env = "OXIDE_MCP_HTTP_ALLOWED_HOSTS",
+        value_delimiter = ','
+    )]
+    allowed_hosts: Vec<String>,
+    /// Allowed browser origin. Required for remote listeners; repeat as needed.
+    #[arg(
+        long = "allowed-origin",
+        env = "OXIDE_MCP_HTTP_ALLOWED_ORIGINS",
+        value_delimiter = ','
+    )]
+    allowed_origins: Vec<String>,
+    /// Explicitly allow a non-loopback listener. Host and Origin allowlists remain mandatory.
+    #[arg(long)]
+    allow_remote: bool,
+}
+
 impl Cli {
     pub async fn execute(self) -> Result<()> {
         match self.command {
@@ -99,6 +141,32 @@ impl Cli {
             } => {
                 let runtime = scope.runtime().await?;
                 mcp::serve_stdio(runtime).await
+            }
+            Command::Mcp {
+                command: McpCommand::Http(args),
+            } => {
+                let HttpArgs {
+                    scope,
+                    bind,
+                    path,
+                    token_file,
+                    allowed_hosts,
+                    allowed_origins,
+                    allow_remote,
+                } = args;
+                let runtime = scope.runtime().await?;
+                http::serve(
+                    runtime,
+                    http::HttpConfig {
+                        bind_addr: bind,
+                        path,
+                        token_file,
+                        allowed_hosts,
+                        allowed_origins,
+                        allow_remote,
+                    },
+                )
+                .await
             }
             Command::Mcp {
                 command: McpCommand::Bridge,
@@ -134,12 +202,23 @@ impl ScopeArgs {
         } else {
             DatabaseScope::Selected(self.databases)
         };
-        let grant = Grant::new_with_database_scope(
+        for tool in &self.tools {
+            if catalog::find(tool).is_none() {
+                return Err(anyhow!("unknown OxideStudio tool in grant: {tool}"));
+            }
+        }
+        let tool_scope = if self.tools.is_empty() {
+            ToolScope::All
+        } else {
+            ToolScope::Selected(self.tools)
+        };
+        let grant = Grant::new_with_scopes(
             self.project,
             self.connection,
             self.max_rows,
             self.max_result_bytes,
             database_scope,
+            tool_scope,
         )?;
         let data_dir = resolve_data_dir(self.data_dir)?;
         let store = HeadlessStore::open(&data_dir).await?;
@@ -308,5 +387,53 @@ mod tests {
             _ => panic!("expected MCP stdio command"),
         };
         assert_eq!(databases, ["reporting", "analytics", "archive"]);
+    }
+
+    #[test]
+    fn http_transport_requires_token_file_and_defaults_to_loopback() {
+        let error =
+            Cli::try_parse_from(["oxide-agent", "mcp", "http", "--project", "p"]).unwrap_err();
+        assert!(error.to_string().contains("--token-file"));
+
+        let cli = Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "http",
+            "--project",
+            "p",
+            "--token-file",
+            "token.txt",
+        ])
+        .unwrap();
+        let args = match cli.command {
+            Command::Mcp {
+                command: McpCommand::Http(args),
+            } => args,
+            _ => panic!("expected MCP HTTP command"),
+        };
+        assert_eq!(args.bind, "127.0.0.1:43521".parse().unwrap());
+        assert_eq!(args.path, "/mcp");
+        assert!(!args.allow_remote);
+    }
+
+    #[test]
+    fn tool_flags_form_an_immutable_allowlist() {
+        let cli = Cli::try_parse_from([
+            "oxide-agent",
+            "mcp",
+            "stdio",
+            "--project",
+            "p",
+            "--tool",
+            "query.runReadOnly,metadata.listObjects",
+        ])
+        .unwrap();
+        let tools = match cli.command {
+            Command::Mcp {
+                command: McpCommand::Stdio(scope),
+            } => scope.tools,
+            _ => panic!("expected MCP stdio command"),
+        };
+        assert_eq!(tools, ["query.runReadOnly", "metadata.listObjects"]);
     }
 }

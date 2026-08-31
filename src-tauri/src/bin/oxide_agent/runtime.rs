@@ -121,6 +121,7 @@ impl ToolRuntime {
     }
 
     pub async fn invoke(&self, tool_name: &str, input: Value) -> Result<Value> {
+        self.grant.require_tool(tool_name)?;
         reject_self_reported_approval(&input)?;
         let data = match tool_name {
             catalog::CONNECTION_SUMMARIES => {

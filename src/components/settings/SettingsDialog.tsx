@@ -60,6 +60,7 @@ import {
 } from "@/lib/workbenchLayout";
 import { parseVimMappings, serializeVimMappings } from "@/lib/vimMappings";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
+import { McpHttpSettings } from "@/components/settings/McpHttpSettings";
 import {
   REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
@@ -102,7 +103,8 @@ export type SettingsSection =
   | "databaseExplorer"
   | "drivers"
   | "backups"
-  | "ai";
+  | "ai"
+  | "mcp";
 
 const SqliteBackupSettings = lazy(() =>
   import("@/features/database-admin/ui/SqliteBackupSettings").then((module) => ({
@@ -216,6 +218,11 @@ function createSettingsTree(t: Translate): SettingsTreeGroup[] {
         label: t("settings.section.ai"),
         section: "ai",
       },
+      {
+        id: "mcp",
+        label: t("settings.section.mcp"),
+        section: "mcp",
+      },
     ],
   },
   ];
@@ -276,6 +283,10 @@ function createSectionMeta(
     ai: {
       group: t("settings.group.tools"),
       title: t("settings.section.ai"),
+    },
+    mcp: {
+      group: t("settings.group.tools"),
+      title: t("settings.section.mcp"),
     },
   };
 }
@@ -829,6 +840,7 @@ export function SettingsDialog({
                   onClearAgentState={() => void clearCurrentProjectAgentState()}
                 />
               )}
+              {activeSection === "mcp" && <McpHttpSettings />}
             </div>
           </main>
         </div>

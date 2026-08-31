@@ -280,7 +280,7 @@ Assistant view model 固定为“问题 → 紧凑过程 → 最终答案”。t
 
 Changes 的逐文件审阅可切换 All、Staged、Working；不可用范围明确禁用，切换时先清空旧 patch 以免范围标签与内容短暂错配。该面板保持只读，不执行 Git mutation。
 
-外部 MCP/CLI 不经过 Deep Agents sidecar。Rust 原生 `oxide-agent mcp stdio` 与 tools list/inspect/call 首版只读，严格限定 MCP 2025-11-25、project grant、可选 connection grant 和结果上限，并作为 target-specific `externalBin` 随包发布。现存 TypeScript adapter 仅保留为迁移/契约资产；两条路径都不允许调用者通过 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
+外部 MCP/CLI 不经过 Deep Agents sidecar。Rust 原生 `oxide-agent mcp stdio`、`oxide-agent mcp http` 与 tools list/inspect/call 共用严格只读 runtime，限定 MCP 2025-11-25、project/connection/database/tool grant、查询超时和结果上限，并作为 target-specific `externalBin` 随包发布。Streamable HTTP 额外要求私有 bearer token 文件、Host/Origin 校验和 local-by-default bind，由 Desktop Settings 托管生命周期；它不能复用应用内 CLI 的短期审批 bridge。现存 TypeScript adapter 仅保留为迁移/契约资产；所有公开路径都不允许调用者通过 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
 
 编辑器修改采用两段式边界：只读 `editor.proposePatch` 工具根据当前 tab/selection 生成绑定 document revision 的 patch artifact；`editor.previewPatch` 只打开 before/after surface。只有用户点击 Apply，tab store 才再次核对整篇 revision 与 range 的原始文本并更新 Monaco 内容，预览本身不会写入或执行 SQL。单侧文本限制为 50,000 字符，binary preview 不进入文本 patch 链路。目标状态机、Deep Agents 分层与完整页面动作协议见 [AI Agent 产品与技术规格](AI_AGENT_PRODUCT_SPEC.md)，补丁决策见 [ADR-0009](decisions/0009-revision-bound-editor-patch.md)。
 
@@ -301,6 +301,6 @@ Changes 的逐文件审阅可切换 All、Staged、Working；不可用范围明�
 4. Search Everywhere 目前只索引内存中已知范围，还没有覆盖 MetaStore 的全项目对象索引。
 5. provider capability 同时存在前端默认值和后端运行时值，需要持续用契约测试防止漂移。
 6. Deep Agents host、协议、模型/tool proxy、加密 LangGraph checkpoint/pending writes、conversation snapshot 与 sidecar/app restart 显式 resume 已落地；剩余债务是数据库级 idempotency/receipt、普通后台任务恢复、完整 provider tool bridge、Context Vault range/search、长期 trace/eval 与四平台 production-bundle smoke。页面 action 已有 stale-context 防护，生产旧 runtime 只保留开发 feature flag。
-7. Rust 原生 `oxide-agent` 的只读 stdio/CLI 首版已接入 Cargo 和发布矩阵；后续若开放 mutation，必须先加入 GUI 签发的 60 秒单次 input-hash lease，不能复用调用者自报批准。
+7. Rust 原生 `oxide-agent` 的只读 stdio/Streamable HTTP/CLI 已接入 Cargo 和发布矩阵；后续若开放 mutation，必须先加入 GUI 签发的 60 秒单次 input-hash lease，不能复用公开 HTTP token 或调用者自报批准。
 
 DataGrip 对标差距、优先级和验收标准见 [datagrip-gap-analysis.md](datagrip-gap-analysis.md)。

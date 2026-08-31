@@ -64,7 +64,7 @@ printf '{}' > /tmp/oxide-input.json
 
 ## 3. MCP 接入
 
-在支持 MCP 的 AI 客户端中加入：
+支持 stdio 的 AI 客户端可加入：
 
 ```json
 {
@@ -119,6 +119,7 @@ printf '{}' > /tmp/oxide-input.json
 - `--project` 固定可访问的项目；
 - `--connection` 固定可访问的连接；
 - `--database` 固定可访问的数据库，可重复传入或使用逗号分隔；一旦设置，工具输入中的 `database` 不能越界；
+- `--tool` 固定可发现和可调用的工具，可重复传入或使用逗号分隔；未授权工具在 `tools/list` 中不可见，直接调用也会被 runtime 拒绝；
 - `--max-rows` 限制单次查询可返回的最大行数；
 - `--max-result-bytes` 限制单次工具结果的序列化大小；
 - `--query-timeout-secs` 为该 MCP 进程的所有数据库查询和 EXPLAIN 设置统一超时；省略时为 30 秒，设为 `0` 表示不设置自动截止时间；
@@ -128,13 +129,47 @@ printf '{}' > /tmp/oxide-input.json
 
 如果项目只有一个连接，可以不传工具级 `connectionId`。如果项目有多个连接且启动时未使用 `--connection` 固定范围，调用工具时必须显式传入 `connectionId`。
 
-也可以使用 `OXIDE_DATABASE`（逗号分隔）和 `OXIDE_MCP_QUERY_TIMEOUT_SECS` 环境变量设置数据库范围与全局超时。命令参数优先于环境变量；这些值不会进入工具 Schema，模型不能在单次调用中扩大范围或期限。
+也可以使用 `OXIDE_DATABASE`、`OXIDE_MCP_TOOL`（均为逗号分隔）和 `OXIDE_MCP_QUERY_TIMEOUT_SECS` 环境变量设置数据库、工具范围与全局超时。命令参数优先于环境变量；这些值不会进入工具 Schema，模型不能在单次调用中扩大范围或期限。
 
 ### 3.2 MCP 协议要求
 
 当前 MCP 服务严格要求协议版本 `2025-11-25`。如果客户端在初始化阶段提示协议不兼容，需要升级对应 AI 客户端。
 
-当前只提供 stdio transport，不提供 HTTP、SSE 或 OIDC 接口。stdout 专用于 MCP 协议帧，诊断信息只写入 stderr。
+stdio 的 stdout 专用于 MCP 协议帧，诊断信息只写入 stderr。Streamable HTTP 使用相同协议版本和同一个只读 runtime，不会扩大授权。
+
+### 3.3 Streamable HTTP
+
+推荐从 OxideStudio 的 **Settings → Tools → MCP Server** 配置。Desktop 会生成私有 bearer token 文件、托管独立的 `oxide-agent` 子进程、检查 readiness，并在异常退出后受控重启。界面可以限定项目、连接、数据库、工具、查询行数、结果字节数和全局超时；修改配置后必须显式重启服务。
+
+也可以独立运行：
+
+```bash
+"$BIN" mcp http \
+  --project "$PROJECT_ID" \
+  --connection "<connection-id>" \
+  --database reporting \
+  --tool connection.listSummaries \
+  --tool metadata.listObjects \
+  --tool query.runReadOnly \
+  --bind 127.0.0.1:43521 \
+  --path /mcp \
+  --token-file /private/path/oxide-mcp-token
+```
+
+客户端连接 `http://127.0.0.1:43521/mcp`，并发送：
+
+```text
+Authorization: Bearer <token-file 中的值>
+MCP-Protocol-Version: 2025-11-25
+```
+
+安全边界：
+
+- token 不接受命令行明文参数，避免进入系统进程列表；文件必须是普通、非符号链接文件，Unix 下还必须拒绝 group/other 权限；
+- 默认只监听 loopback，并只允许 `localhost`、`127.0.0.1` 和 `::1` Host；loopback 浏览器 Origin 可用，其他 Origin 必须显式列入 allowlist；
+- 非 loopback 监听同时要求 `--allow-remote`、`--allowed-host` 和 `--allowed-origin`，缺少任一项都会拒绝启动；HTTP 本身不提供 TLS，远程部署必须放在受信网络或 TLS 反向代理之后；
+- `/healthz` 与 `/readyz` 只返回服务身份和 readiness，不返回 token、项目、连接或数据库信息；`/mcp` 始终先经过 Origin 和 bearer token 校验；
+- HTTP 和 stdio 都只暴露五个公开只读工具。应用内 Codex/CodeBuddy 使用的短期私有 bridge 是另一条协议边界，HTTP token 不能用于审批或数据库写入。
 
 ## 4. CLI 使用
 
@@ -189,6 +224,7 @@ printf '%s\n' '{
 export OXIDE_PROJECT_ID="pencil-7ef0839d"
 export OXIDE_CONNECTION_ID="<connection-id>"
 export OXIDE_DATABASE="reporting,analytics"
+export OXIDE_MCP_TOOL="connection.listSummaries,query.runReadOnly"
 export OXIDE_DATA_DIR="$HOME/Library/Application Support/com.houshuai.oxide-studio"
 
 "$BIN" tools call connection.listSummaries \
@@ -217,7 +253,7 @@ export OXIDE_DATA_DIR="$HOME/Library/Application Support/com.houshuai.oxide-stud
 - MongoDB、Redis 和 Elasticsearch 当前只能通过 `metadata.listObjects` 读取缓存对象，尚未开放原生查询工具。
 - 不提供新增、修改、删除、DDL 或其他 mutation 工具。
 - 如果项目有多个连接，工具必须传 `connectionId`，或者在启动 MCP/CLI 时使用 `--connection` 固定连接。
-- 当前没有 HTTP/SSE MCP 服务，也没有 OIDC。
+- Streamable HTTP 支持 bearer token、Host/Origin 校验和 Desktop supervisor；当前不提供 OIDC，因此远程部署不能把 bearer token 当成多用户身份系统。
 - 当前不开放 UI、Editor 或页面跳转工具。
 
 ## 7. 常见问题
@@ -249,6 +285,9 @@ export OXIDE_DATA_DIR="$HOME/Library/Application Support/com.houshuai.oxide-stud
 - [CLI 命令定义](../src-tauri/src/bin/oxide_agent/cli.rs)
 - [工具清单和输入 Schema](../src-tauri/src/bin/oxide_agent/catalog.rs)
 - [MCP 协议边界](../src-tauri/src/bin/oxide_agent/mcp.rs)
+- [Streamable HTTP 传输](../src-tauri/src/bin/oxide_agent/http.rs)
+- [HTTP Token 与 Origin 校验](../src-tauri/src/bin/oxide_agent/http_auth.rs)
+- [Desktop 服务托管](../src-tauri/src/commands/mcp_http.rs)
 - [工具执行和数据库安全边界](../src-tauri/src/bin/oxide_agent/runtime.rs)
 - [项目/连接授权策略](../src-tauri/src/bin/oxide_agent/policy.rs)
 

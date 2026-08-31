@@ -90,6 +90,12 @@ pub fn run() {
             let meta_store = block_on(core::store::MetaStore::new(app.handle()))
                 .expect("failed to initialize metadata store");
             app.manage(meta_store);
+            let mcp_http_service = Arc::new(
+                commands::mcp_http::McpHttpServerState::new(app.handle())
+                    .map_err(std::io::Error::other)?,
+            );
+            app.manage(mcp_http_service.clone());
+            tauri::async_runtime::spawn(commands::mcp_http::start_if_enabled(mcp_http_service));
             let migration_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let meta_store = migration_handle.state::<core::store::MetaStore>();
@@ -182,6 +188,11 @@ pub fn run() {
             commands::ai::ai_cli_cancel_authentication,
             commands::ai::ai_cli_set_environment,
             commands::ai::ai_cli_get_environment,
+            // Public read-only MCP Streamable HTTP service
+            commands::mcp_http::load_mcp_http_server_settings,
+            commands::mcp_http::save_mcp_http_server_settings,
+            commands::mcp_http::mcp_http_server_status,
+            commands::mcp_http::rotate_mcp_http_server_token,
             // DeepAgents host commands
             commands::agent::agent_start_turn,
             commands::agent::agent_resume_turn,

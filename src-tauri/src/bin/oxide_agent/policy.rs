@@ -18,10 +18,19 @@ pub struct Grant {
     max_rows: usize,
     max_result_bytes: usize,
     database_scope: DatabaseScope,
+    tool_scope: ToolScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DatabaseScope {
+    #[default]
+    All,
+    Selected(Vec<String>),
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolScope {
     #[default]
     All,
     Selected(Vec<String>),
@@ -48,11 +57,16 @@ pub enum PolicyError {
     DatabaseOutsideGrant(String),
     #[error("multiple databases are granted; select one explicitly")]
     DatabaseSelectionRequired,
+    #[error("tool access is disabled for this grant")]
+    ToolAccessDisabled,
+    #[error("tool '{0}' is outside the granted tool scope")]
+    ToolOutsideGrant(String),
     #[error("caller-reported approval is not accepted; OxideStudio never trusts approved/approvalLease input fields")]
     SelfReportedApproval,
 }
 
 impl Grant {
+    #[cfg(test)]
     pub fn new_with_database_scope(
         project_id: String,
         connection_id: Option<String>,
@@ -60,17 +74,37 @@ impl Grant {
         max_result_bytes: usize,
         database_scope: DatabaseScope,
     ) -> Result<Self, PolicyError> {
+        Self::new_with_scopes(
+            project_id,
+            connection_id,
+            max_rows,
+            max_result_bytes,
+            database_scope,
+            ToolScope::All,
+        )
+    }
+
+    pub fn new_with_scopes(
+        project_id: String,
+        connection_id: Option<String>,
+        max_rows: usize,
+        max_result_bytes: usize,
+        database_scope: DatabaseScope,
+        tool_scope: ToolScope,
+    ) -> Result<Self, PolicyError> {
         let project_id = validate_scope(project_id, "project")?;
         let connection_id = connection_id
             .map(|value| validate_scope(value, "connection"))
             .transpose()?;
         let database_scope = database_scope.normalized()?;
+        let tool_scope = tool_scope.normalized()?;
         Ok(Self {
             project_id,
             connection_id,
             max_rows: max_rows.clamp(1, 1_000),
             max_result_bytes: max_result_bytes.clamp(4_096, 1_048_576),
             database_scope,
+            tool_scope,
         })
     }
 
@@ -134,6 +168,23 @@ impl Grant {
         }
     }
 
+    pub fn allows_tool(&self, tool_name: &str) -> bool {
+        match &self.tool_scope {
+            ToolScope::All => true,
+            ToolScope::Selected(tools) => tools.iter().any(|tool| tool == tool_name),
+            ToolScope::None => false,
+        }
+    }
+
+    pub fn require_tool(&self, tool_name: &str) -> Result<(), PolicyError> {
+        match &self.tool_scope {
+            ToolScope::All => Ok(()),
+            ToolScope::Selected(tools) if tools.iter().any(|tool| tool == tool_name) => Ok(()),
+            ToolScope::Selected(_) => Err(PolicyError::ToolOutsideGrant(tool_name.to_string())),
+            ToolScope::None => Err(PolicyError::ToolAccessDisabled),
+        }
+    }
+
     pub fn resolve_connection<'a, I>(
         &self,
         requested: Option<&str>,
@@ -194,6 +245,27 @@ impl DatabaseScope {
     }
 }
 
+impl ToolScope {
+    fn normalized(self) -> Result<Self, PolicyError> {
+        let Self::Selected(tools) = self else {
+            return Ok(self);
+        };
+        let mut normalized = Vec::<String>::new();
+        for tool in tools {
+            let tool = validate_tool_name(tool)?;
+            if !normalized.iter().any(|existing| existing == &tool) {
+                normalized.push(tool);
+            }
+        }
+        normalized.sort();
+        if normalized.is_empty() {
+            Ok(Self::None)
+        } else {
+            Ok(Self::Selected(normalized))
+        }
+    }
+}
+
 pub fn reject_self_reported_approval(value: &Value) -> Result<(), PolicyError> {
     if has_self_reported_approval(value) {
         Err(PolicyError::SelfReportedApproval)
@@ -239,6 +311,21 @@ fn validate_database_name(value: String) -> Result<String, PolicyError> {
         || value.chars().any(|character| character.is_control())
     {
         return Err(PolicyError::InvalidScope("database"));
+    }
+    Ok(value)
+}
+
+fn validate_tool_name(value: String) -> Result<String, PolicyError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(PolicyError::MissingScope("tool"));
+    }
+    if value.chars().count() > MAX_SCOPE_ID_CHARS
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(PolicyError::InvalidScope("tool"));
     }
     Ok(value)
 }
@@ -345,6 +432,30 @@ mod tests {
         assert_eq!(
             grant.resolve_database(None, Some("reporting")).unwrap_err(),
             PolicyError::DatabaseAccessDisabled
+        );
+    }
+
+    #[test]
+    fn selected_tool_scope_is_normalized_and_cannot_be_expanded() {
+        let grant = Grant::new_with_scopes(
+            "project-a".to_string(),
+            None,
+            200,
+            256 * 1024,
+            DatabaseScope::All,
+            ToolScope::Selected(vec![
+                "query.runReadOnly".to_string(),
+                "metadata.listObjects".to_string(),
+                "query.runReadOnly".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(grant.allows_tool("query.runReadOnly"));
+        assert!(grant.allows_tool("metadata.listObjects"));
+        assert!(!grant.allows_tool("connection.listSummaries"));
+        assert_eq!(
+            grant.require_tool("connection.listSummaries").unwrap_err(),
+            PolicyError::ToolOutsideGrant("connection.listSummaries".to_string())
         );
     }
 }

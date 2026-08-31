@@ -47,7 +47,7 @@ Assistant UI / Inline AI / Error Fix / Explain Plan
 - **`AiToolRegistry`/`agent-contract` 是能力契约，Rust policy 是最终裁决者**。sidecar 不能直接调用 driver，也不能把 Deep Agents permission 当作数据库授权。
 - **模型调用经过 Rust gateway**。API key 存于应用的用户级 credential file，不进入项目、Zustand/localStorage、sidecar 或 checkpoint；保存后重新读取验证，模型 streaming/tool calls/usage 通过内部协议返回。Agent checkpoint 主密钥仍使用 OS credential manager。
 - **项目级持久化已经落地**。thread、artifact 及 LangGraph checkpoint/pending writes 使用 AES-256-GCM 和七天 retention；sidecar 重启可通过 `interrupt()`/`Command({ resume })` 恢复等待状态，但完整应用进程恢复 UX 与数据库 exactly-once 仍需单独保证。
-- **MCP 只用于外部客户端**。应用内页面交互走 typed action bus；Rust 原生 `oxide-agent` 已接入首版 stdio/CLI 与五个只读工具，并随四平台安装包发布。
+- **公开 MCP 只用于外部客户端**。应用内页面交互走 typed action bus；Rust 原生 `oxide-agent` 已接入 stdio、受保护的 Streamable HTTP、CLI 与五个只读工具，并随四平台安装包发布。
 
 WebView 不获得 shell/spawn 权限；sidecar 禁用 FilesystemBackend、LocalShellBackend、shell 和任意宿主目录。Deep Agents 的文件权限仍不能替代 Oxide 对自定义工具、MCP 和数据库写操作的 Rust policy。
 
@@ -59,7 +59,7 @@ WebView 不获得 shell/spawn 权限；sidecar 禁用 FilesystemBackend、LocalS
 | Chat / Plan / Agent profile | 已具备 | `agent-host/src/runtime.ts` | 扩大模型/provider 兼容评测 |
 | read/write/destructive policy | 已具备/首批工具 | Rust host manifest/digest/lease 校验 | 逐个迁移 provider-specific tool bridge 与影响摘要 |
 | 模型 proxy 与 stream | 已具备 | `OxideChatModel`、Rust `ModelGateway` | 完善 provider capability 探测和错误映射 |
-| MCP / CLI | 已具备/只读首版 | Rust `oxide-agent`、严格 MCP 2025-11-25、project/connection grant、target-specific externalBin | 保持发布 smoke；写工具须先实现 GUI lease |
+| MCP / CLI | 已具备/严格只读 | Rust `oxide-agent`、严格 MCP 2025-11-25、stdio + bearer-protected Streamable HTTP、project/connection/database/tool grant、target-specific externalBin | 保持发布 smoke；公开 HTTP token 永不授予写入，写工具须先实现 GUI lease |
 | 多轮工具循环 | 已具备 | Deep Agents runtime、typed `AgentEvent` | crash 边界和长任务压力测试 |
 | 页面导航/编辑动作 | 已具备 | `src/ai/ui-actions`、database/editor/plan/task semantic navigation、revision-bound patch preview | 扩展更多 artifact action，不允许 selector 跳转 |
 | 持久 thread / memory | 已具备/需加固 | 加密 `agent_threads/checkpoints/artifacts` 与 LangGraph checkpoint/writes，七天 retention；支持 sidecar-restart interrupt resume | 完整应用进程恢复 UI、用户清理 UI、100+ Turn 评测 |
@@ -292,7 +292,7 @@ type UiAction = {
 - Deep Agents 使用真实 provider token profile并过滤 summarization stream；长问题可切块/digest，tool 大结果以 bounded observation + artifact reference 返回。Context Preview 的完整 token/省略来源和 100+ Turn 质量仍需加固。
 - 对话固定为“问题 → 默认收起的单行过程 → 最终答案”；tool/todo/subagent 不成为独立聊天消息。minimap 每个完整问答一个灰色 marker，只在宽面板且溢出时展示，支持键盘和 reduced motion。
 - Changes 审阅以当前 Git 状态为事实源：可按全部/Agent/Turn 做路径归因筛选，并在单文件 All、Staged、Working diff 间切换；范围切换不会写入索引区或工作区，未跟踪文件 preview 只有在 Git 精确确认后才生成。路径 badge 只表示历史 Agent 写入；详情仅在 scope current-side SHA-256 与可信事件 revision 完全一致时显示 `AI match`。在此前提下，Rust 写入证据还可保守标出“写入前全文不存在、写入后出现”的新侧行及其 hunk；未被证实的行不可暗示属于 Agent。
-- Rust 原生 `oxide-agent` 的首版限定 stdio/CLI 和只读能力，严格接受 MCP 2025-11-25，以不可扩大的 project/connection grant 运行，并作为 target-specific external binary 随包发布。Rust 与现有 TypeScript 契约层都拒绝 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
+- Rust 原生 `oxide-agent` 限定公开 stdio/Streamable HTTP/CLI 为只读能力，严格接受 MCP 2025-11-25，以不可扩大的 project/connection/database/tool grant 运行，并作为 target-specific external binary 随包发布。HTTP 使用私有 token 文件、Host/Origin 校验和 Desktop supervisor；Rust 与现有 TypeScript 契约层都拒绝 `_meta.approved`、`approved:true` 或 `--approve` 自我授权。
 
 ### 5.5 结构化错误基线（2026-07-15）
 

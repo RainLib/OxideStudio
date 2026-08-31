@@ -42,7 +42,8 @@
             "binaries/sql-lsp.manifest.json": "sql-lsp.manifest.json"
         },
         "externalBin": [
-            "binaries/oxide-agent-host"
+            "binaries/oxide-agent-host",
+            "binaries/oxide-agent"
         ]
     },
     "plugins": {

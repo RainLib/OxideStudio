@@ -34,7 +34,7 @@ impl ServerHandler for OxideMcpServer {
                     ),
             )
             .with_instructions(format!(
-                "This stdio server is restricted to OxideStudio project '{}'. It never accepts caller-reported approval and exposes no mutation tools.",
+                "This public server is restricted to OxideStudio project '{}'. It never accepts caller-reported approval and exposes no mutation tools.",
                 self.runtime.grant().project_id()
             ))
     }
@@ -63,12 +63,21 @@ impl ServerHandler for OxideMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult::with_all_items(
-            catalog::all().into_iter().map(mcp_tool).collect(),
+            catalog::all()
+                .into_iter()
+                .filter(|tool| self.runtime.grant().allows_tool(tool.name))
+                .map(mcp_tool)
+                .collect(),
         ))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        catalog::find(name).map(mcp_tool)
+        self.runtime
+            .grant()
+            .allows_tool(name)
+            .then(|| catalog::find(name))
+            .flatten()
+            .map(mcp_tool)
     }
 
     async fn call_tool(
@@ -76,7 +85,9 @@ impl ServerHandler for OxideMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        if catalog::find(request.name.as_ref()).is_none() {
+        if catalog::find(request.name.as_ref()).is_none()
+            || !self.runtime.grant().allows_tool(request.name.as_ref())
+        {
             return Err(ErrorData::new(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
                 format!("unknown OxideStudio tool: {}", request.name),
