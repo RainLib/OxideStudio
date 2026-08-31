@@ -20,11 +20,55 @@ pub struct SshTunnelConfig {
     pub private_key_passphrase: Option<String>,
     #[serde(default = "default_strict_host_key_checking")]
     pub strict_host_key_checking: bool,
+    /// Ordered SSH hops after this primary hop. The primary fields above stay
+    /// in place for backward-compatible single-hop connections; each entry
+    /// is authenticated through the preceding hop with a direct-tcpip
+    /// channel.
+    #[serde(default)]
+    pub jump_hosts: Vec<SshJumpHostConfig>,
     /// Present only for file-hosted SQLite. Keeping it nested prevents TCP
     /// tunnel connections from accidentally inheriting worker deployment
     /// authority merely because SSH is enabled.
     #[serde(default)]
     pub remote_sqlite: Option<RemoteSqliteSshConfig>,
+}
+
+/// Credentials and host-key policy for one non-primary SSH hop. It cannot
+/// carry Remote SQLite deployment options: file access always occurs at the
+/// final hop.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SshJumpHostConfig {
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub username: String,
+    #[serde(default = "default_ssh_auth_method")]
+    pub auth_method: String,
+    pub password: Option<String>,
+    pub private_key_path: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    #[serde(default = "default_strict_host_key_checking")]
+    pub strict_host_key_checking: bool,
+}
+
+impl std::fmt::Debug for SshJumpHostConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshJumpHostConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("auth_method", &self.auth_method)
+            .field("password", &self.password.as_ref().map(|_| "****"))
+            .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "****"),
+            )
+            .field("strict_host_key_checking", &self.strict_host_key_checking)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -70,6 +114,7 @@ impl std::fmt::Debug for SshTunnelConfig {
                 &self.private_key_passphrase.as_ref().map(|_| "****"),
             )
             .field("strict_host_key_checking", &self.strict_host_key_checking)
+            .field("jump_hosts", &self.jump_hosts)
             .field("remote_sqlite", &self.remote_sqlite)
             .finish()
     }
@@ -276,7 +321,36 @@ mod tests {
         assert_eq!(config.port, 22);
         assert_eq!(config.auth_method, "password");
         assert!(config.strict_host_key_checking);
+        assert!(config.jump_hosts.is_empty());
         assert!(config.remote_sqlite.is_none());
+    }
+
+    #[test]
+    fn ssh_jump_hosts_round_trip_without_worker_permissions() {
+        let config: SshTunnelConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "host": "bastion-a.example.com",
+            "username": "first",
+            "password": "first-secret",
+            "jumpHosts": [{
+                "host": "bastion-b.example.com",
+                "port": 2200,
+                "username": "second",
+                "authMethod": "privateKey",
+                "privateKeyPath": "~/.ssh/id_ed25519",
+                "privateKeyPassphrase": "second-secret"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(config.jump_hosts.len(), 1);
+        let hop = &config.jump_hosts[0];
+        assert_eq!(hop.host, "bastion-b.example.com");
+        assert_eq!(hop.port, 2200);
+        assert_eq!(hop.auth_method, "privateKey");
+        assert!(hop.strict_host_key_checking);
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized["jumpHosts"][0].get("remoteSqlite").is_none());
     }
 
     #[test]

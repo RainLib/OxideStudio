@@ -497,6 +497,37 @@ describe("connection store", () => {
     ).toBeLessThan(mocks.connect.mock.invocationCallOrder[0]!);
   });
 
+  it("reprepares a remote SQLite worker when its SSH route gains a jump host", async () => {
+    const config = remoteSqliteConnection("remote-sqlite-route-cache");
+
+    await expect(useConnectionStore.getState().testConnection(config)).resolves.toBeNull();
+    await expect(
+      useConnectionStore.getState().testConnection({
+        ...config,
+        sshTunnel: {
+          ...config.sshTunnel,
+          jumpHosts: [
+            {
+              host: "jump.remote-sqlite-route-cache",
+              port: 22,
+              username: "relay",
+              authMethod: "privateKey",
+              strictHostKeyChecking: true,
+            },
+          ],
+        },
+      }),
+    ).resolves.toBeNull();
+
+    expect(mocks.prepareRemoteSqliteWorker).toHaveBeenCalledTimes(2);
+    expect(mocks.prepareRemoteSqliteWorker).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        jumpHosts: [expect.objectContaining({ host: "jump.remote-sqlite-route-cache" })],
+      }),
+      "",
+    );
+  });
+
   it("does not open remote SQLite when signed worker preparation fails", async () => {
     const config = remoteSqliteConnection("remote-sqlite-failure");
     mocks.prepareRemoteSqliteWorker.mockRejectedValueOnce(

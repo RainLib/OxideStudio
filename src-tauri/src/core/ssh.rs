@@ -1,4 +1,4 @@
-use crate::core::config::SshTunnelConfig;
+use crate::core::config::{SshJumpHostConfig, SshTunnelConfig};
 use crate::core::dialect::database_capabilities_for_driver;
 use anyhow::{anyhow, bail, Context, Result};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
@@ -18,6 +18,63 @@ const SSH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FORWARDING_CHANNELS: usize = 64;
 const MAX_SSH_CAPTURE_BYTES: u64 = 1024 * 1024;
 const MAX_SSH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SSH_HOPS: usize = 4;
+
+#[derive(Clone)]
+struct SshHop {
+    host: String,
+    port: u16,
+    username: String,
+    auth_method: String,
+    password: Option<String>,
+    private_key_path: Option<String>,
+    private_key_passphrase: Option<String>,
+    strict_host_key_checking: bool,
+}
+
+impl SshHop {
+    fn primary(config: &SshTunnelConfig) -> Self {
+        Self {
+            host: config.host.clone(),
+            port: config.port,
+            username: config.username.clone(),
+            auth_method: config.auth_method.clone(),
+            password: config.password.clone(),
+            private_key_path: config.private_key_path.clone(),
+            private_key_passphrase: config.private_key_passphrase.clone(),
+            strict_host_key_checking: config.strict_host_key_checking,
+        }
+    }
+
+    fn jump(config: &SshJumpHostConfig) -> Self {
+        Self {
+            host: config.host.clone(),
+            port: config.port,
+            username: config.username.clone(),
+            auth_method: config.auth_method.clone(),
+            password: config.password.clone(),
+            private_key_path: config.private_key_path.clone(),
+            private_key_passphrase: config.private_key_passphrase.clone(),
+            strict_host_key_checking: config.strict_host_key_checking,
+        }
+    }
+
+    fn identity(&self) -> String {
+        format!(
+            "{}@{}:{}",
+            self.username.trim(),
+            self.host.trim().to_ascii_lowercase(),
+            self.port
+        )
+    }
+}
+
+struct ConnectedSshChain {
+    final_session: client::Handle<SshClientHandler>,
+    /// Earlier sessions must stay alive because every subsequent SSH client
+    /// is carried by a direct-tcpip channel through the preceding hop.
+    upstream_sessions: Vec<client::Handle<SshClientHandler>>,
+}
 
 #[derive(Clone)]
 struct SshClientHandler {
@@ -62,52 +119,21 @@ impl client::Handler for SshClientHandler {
 /// not expose a general renderer-controlled shell API.
 pub(crate) struct SshSession {
     session: client::Handle<SshClientHandler>,
+    upstream_sessions: Vec<client::Handle<SshClientHandler>>,
     identity: String,
 }
 
 impl SshSession {
     pub(crate) async fn connect(config: &SshTunnelConfig) -> Result<Self> {
-        validate_config(config)?;
-
-        let handler = SshClientHandler {
-            host: config.host.trim().to_string(),
-            port: config.port,
-            strict_host_key_checking: config.strict_host_key_checking,
-        };
-        let client_config = client::Config {
-            inactivity_timeout: Some(Duration::from_secs(60)),
-            keepalive_interval: Some(Duration::from_secs(15)),
-            keepalive_max: 3,
-            nodelay: true,
-            ..Default::default()
-        };
-        let mut session = timeout(
-            SSH_OPERATION_TIMEOUT,
-            client::connect(
-                Arc::new(client_config),
-                (handler.host.as_str(), handler.port),
-                handler.clone(),
-            ),
-        )
-        .await
-        .context("Timed out connecting to SSH server")?
-        .with_context(|| {
-            format!(
-                "Failed to connect to SSH server {}:{}",
-                config.host.trim(),
-                config.port
-            )
-        })?;
-
-        authenticate_session(&mut session, config).await?;
+        let identity = ssh_hops(config)?
+            .last()
+            .expect("validated SSH hop list is non-empty")
+            .identity();
+        let chain = connect_ssh_chain(config).await?;
         Ok(Self {
-            session,
-            identity: format!(
-                "{}@{}:{}",
-                config.username.trim(),
-                config.host.trim().to_ascii_lowercase(),
-                config.port
-            ),
+            session: chain.final_session,
+            upstream_sessions: chain.upstream_sessions,
+            identity,
         })
     }
 
@@ -282,6 +308,14 @@ impl SshSession {
         {
             tracing::debug!("Failed to send SSH session disconnect: {error}");
         }
+        for session in &self.upstream_sessions {
+            if let Err(error) = session
+                .disconnect(russh::Disconnect::ByApplication, "SSH chain closed", "en")
+                .await
+            {
+                tracing::debug!("Failed to close an upstream SSH hop: {error}");
+            }
+        }
     }
 
     async fn capture(&self, command: &str) -> Result<String> {
@@ -365,23 +399,127 @@ fn shell_quote(path: &str) -> Result<String> {
     Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
 }
 
+fn ssh_hops(config: &SshTunnelConfig) -> Result<Vec<SshHop>> {
+    let mut hops = Vec::with_capacity(config.jump_hosts.len().saturating_add(1));
+    hops.push(SshHop::primary(config));
+    hops.extend(config.jump_hosts.iter().map(SshHop::jump));
+    if hops.len() > MAX_SSH_HOPS {
+        bail!("SSH chains support at most {MAX_SSH_HOPS} hops");
+    }
+    for (index, hop) in hops.iter().enumerate() {
+        validate_hop(hop, index + 1)?;
+    }
+    Ok(hops)
+}
+
+fn ssh_client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        inactivity_timeout: Some(Duration::from_secs(60)),
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        nodelay: true,
+        ..Default::default()
+    })
+}
+
+fn ssh_handler(hop: &SshHop) -> SshClientHandler {
+    SshClientHandler {
+        host: hop.host.trim().to_string(),
+        port: hop.port,
+        strict_host_key_checking: hop.strict_host_key_checking,
+    }
+}
+
+async fn connect_ssh_chain(config: &SshTunnelConfig) -> Result<ConnectedSshChain> {
+    let hops = ssh_hops(config)?;
+    let first = hops.first().expect("validated SSH hop list is non-empty");
+    let mut session = connect_ssh_hop_direct(first).await?;
+    let mut upstream_sessions = Vec::with_capacity(hops.len().saturating_sub(1));
+
+    for hop in hops.iter().skip(1) {
+        let channel = timeout(
+            SSH_OPERATION_TIMEOUT,
+            session.channel_open_direct_tcpip(
+                hop.host.trim().to_string(),
+                u32::from(hop.port),
+                "127.0.0.1",
+                0,
+            ),
+        )
+        .await
+        .context("Timed out opening SSH jump-host forwarding channel")?
+        .with_context(|| {
+            format!(
+                "Failed to open an SSH forwarding channel to hop {}:{}",
+                hop.host.trim(),
+                hop.port
+            )
+        })?;
+        let handler = ssh_handler(hop);
+        let mut next_session = timeout(
+            SSH_OPERATION_TIMEOUT,
+            client::connect_stream(ssh_client_config(), channel.into_stream(), handler),
+        )
+        .await
+        .context("Timed out negotiating SSH jump host")?
+        .with_context(|| {
+            format!(
+                "Failed to connect to SSH jump host {}:{}",
+                hop.host.trim(),
+                hop.port
+            )
+        })?;
+        authenticate_session(&mut next_session, hop).await?;
+        upstream_sessions.push(session);
+        session = next_session;
+    }
+
+    Ok(ConnectedSshChain {
+        final_session: session,
+        upstream_sessions,
+    })
+}
+
+async fn connect_ssh_hop_direct(hop: &SshHop) -> Result<client::Handle<SshClientHandler>> {
+    let handler = ssh_handler(hop);
+    let mut session = timeout(
+        SSH_OPERATION_TIMEOUT,
+        client::connect(
+            ssh_client_config(),
+            (handler.host.as_str(), handler.port),
+            handler.clone(),
+        ),
+    )
+    .await
+    .context("Timed out connecting to SSH server")?
+    .with_context(|| {
+        format!(
+            "Failed to connect to SSH server {}:{}",
+            hop.host.trim(),
+            hop.port
+        )
+    })?;
+    authenticate_session(&mut session, hop).await?;
+    Ok(session)
+}
+
 async fn authenticate_session(
     session: &mut client::Handle<SshClientHandler>,
-    config: &SshTunnelConfig,
+    hop: &SshHop,
 ) -> Result<()> {
-    let authenticated = match config.auth_method.trim() {
+    let authenticated = match hop.auth_method.trim() {
         "password" => timeout(
             SSH_OPERATION_TIMEOUT,
             session.authenticate_password(
-                config.username.trim(),
-                config.password.as_deref().unwrap_or_default(),
+                hop.username.trim(),
+                hop.password.as_deref().unwrap_or_default(),
             ),
         )
         .await
         .context("SSH password authentication timed out")?
         .context("SSH password authentication failed")?,
         "privateKey" | "private-key" => {
-            let key_path = config
+            let key_path = hop
                 .private_key_path
                 .as_deref()
                 .map(str::trim)
@@ -389,7 +527,7 @@ async fn authenticate_session(
                 .expect("SSH private key path was validated");
             let key_path = expand_home_path(key_path);
             let key = Arc::new(
-                load_secret_key(&key_path, config.private_key_passphrase.as_deref()).with_context(
+                load_secret_key(&key_path, hop.private_key_passphrase.as_deref()).with_context(
                     || format!("Failed to load SSH private key {}", key_path.display()),
                 )?,
             );
@@ -401,7 +539,7 @@ async fn authenticate_session(
             timeout(
                 SSH_OPERATION_TIMEOUT,
                 session.authenticate_publickey(
-                    config.username.trim(),
+                    hop.username.trim(),
                     PrivateKeyWithHashAlg::new(key, hash),
                 ),
             )
@@ -415,7 +553,7 @@ async fn authenticate_session(
     if !authenticated.success() {
         bail!(
             "SSH authentication was rejected for user {}",
-            config.username.trim()
+            hop.username.trim()
         );
     }
     Ok(())
@@ -450,95 +588,16 @@ impl SshTunnel {
         target_host: String,
         target_port: u16,
     ) -> Result<Self> {
-        validate_config(config)?;
-
-        let handler = SshClientHandler {
-            host: config.host.trim().to_string(),
-            port: config.port,
-            strict_host_key_checking: config.strict_host_key_checking,
-        };
-        let client_config = client::Config {
-            inactivity_timeout: Some(Duration::from_secs(60)),
-            keepalive_interval: Some(Duration::from_secs(15)),
-            keepalive_max: 3,
-            nodelay: true,
-            ..Default::default()
-        };
-        let client_config = Arc::new(client_config);
-        let mut session = timeout(
-            SSH_OPERATION_TIMEOUT,
-            client::connect(
-                client_config,
-                (handler.host.as_str(), handler.port),
-                handler.clone(),
-            ),
-        )
-        .await
-        .context("Timed out connecting to SSH server")?
-        .with_context(|| {
-            format!(
-                "Failed to connect to SSH server {}:{}",
-                config.host.trim(),
-                config.port
-            )
-        })?;
-
-        let authenticated = match config.auth_method.trim() {
-            "password" => timeout(
-                SSH_OPERATION_TIMEOUT,
-                session.authenticate_password(
-                    config.username.trim(),
-                    config.password.as_deref().unwrap_or_default(),
-                ),
-            )
-            .await
-            .context("SSH password authentication timed out")?
-            .context("SSH password authentication failed")?,
-            "privateKey" | "private-key" => {
-                let key_path = config
-                    .private_key_path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .expect("SSH private key path was validated");
-                let key_path = expand_home_path(key_path);
-                let key = Arc::new(
-                    load_secret_key(&key_path, config.private_key_passphrase.as_deref())
-                        .with_context(|| {
-                            format!("Failed to load SSH private key {}", key_path.display())
-                        })?,
-                );
-                let hash = session
-                    .best_supported_rsa_hash()
-                    .await
-                    .context("Failed to negotiate SSH key algorithm")?
-                    .flatten();
-                timeout(
-                    SSH_OPERATION_TIMEOUT,
-                    session.authenticate_publickey(
-                        config.username.trim(),
-                        PrivateKeyWithHashAlg::new(key, hash),
-                    ),
-                )
-                .await
-                .context("SSH private-key authentication timed out")?
-                .context("SSH private-key authentication failed")?
-            }
-            method => bail!("Unsupported SSH authentication method: {method}"),
-        };
-
-        if !authenticated.success() {
-            bail!(
-                "SSH authentication was rejected for user {}",
-                config.username.trim()
-            );
-        }
+        let ConnectedSshChain {
+            final_session,
+            upstream_sessions,
+        } = connect_ssh_chain(config).await?;
 
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("Failed to create local SSH tunnel listener")?;
         let local_port = listener.local_addr()?.port();
-        let session = Arc::new(session);
+        let session = Arc::new(final_session);
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let accept_task = tokio::spawn(async move {
             let mut forwarding_tasks = tokio::task::JoinSet::new();
@@ -613,6 +672,14 @@ impl SshTunnel {
             {
                 tracing::debug!("Failed to send SSH disconnect message: {error}");
             }
+            for upstream in upstream_sessions {
+                if let Err(error) = upstream
+                    .disconnect(russh::Disconnect::ByApplication, "SSH chain closed", "en")
+                    .await
+                {
+                    tracing::debug!("Failed to close an upstream SSH hop: {error}");
+                }
+            }
         });
 
         Ok(Self {
@@ -639,29 +706,34 @@ impl Drop for SshTunnel {
     }
 }
 
-fn validate_config(config: &SshTunnelConfig) -> Result<()> {
-    if config.host.trim().is_empty() {
-        bail!("SSH host is required");
+fn validate_hop(hop: &SshHop, position: usize) -> Result<()> {
+    let label = if position == 1 {
+        "SSH host".to_string()
+    } else {
+        format!("SSH hop {position}")
+    };
+    if hop.host.trim().is_empty() {
+        bail!("{label} host is required");
     }
-    if config.port == 0 {
-        bail!("SSH port must be between 1 and 65535");
+    if hop.port == 0 {
+        bail!("{label} port must be between 1 and 65535");
     }
-    if config.username.trim().is_empty() {
-        bail!("SSH username is required");
+    if hop.username.trim().is_empty() {
+        bail!("{label} username is required");
     }
-    match config.auth_method.trim() {
-        "password" if config.password.as_deref().unwrap_or_default().is_empty() => {
-            bail!("SSH password is required")
+    match hop.auth_method.trim() {
+        "password" if hop.password.as_deref().unwrap_or_default().is_empty() => {
+            bail!("{label} password is required")
         }
         "privateKey" | "private-key"
-            if config
+            if hop
                 .private_key_path
                 .as_deref()
                 .map(str::trim)
                 .unwrap_or_default()
                 .is_empty() =>
         {
-            bail!("SSH private key path is required")
+            bail!("{label} private key path is required")
         }
         "password" | "privateKey" | "private-key" => Ok(()),
         method => bail!("Unsupported SSH authentication method: {method}"),
@@ -769,13 +841,55 @@ mod tests {
             private_key_path: None,
             private_key_passphrase: None,
             strict_host_key_checking: true,
+            jump_hosts: Vec::new(),
             remote_sqlite: None,
         };
 
-        assert!(validate_config(&config)
-            .unwrap_err()
+        assert!(ssh_hops(&config)
+            .err()
+            .expect("incomplete hop must fail")
             .to_string()
             .contains("host"));
+    }
+
+    #[test]
+    fn resolves_ordered_jump_hosts_and_validates_each_hop() {
+        let config = SshTunnelConfig {
+            enabled: true,
+            host: "bastion-a.example.com".to_string(),
+            port: 22,
+            username: "first".to_string(),
+            auth_method: "password".to_string(),
+            password: Some("secret-a".to_string()),
+            private_key_path: None,
+            private_key_passphrase: None,
+            strict_host_key_checking: true,
+            jump_hosts: vec![SshJumpHostConfig {
+                host: "bastion-b.example.com".to_string(),
+                port: 2200,
+                username: "second".to_string(),
+                auth_method: "privateKey".to_string(),
+                password: None,
+                private_key_path: Some("~/.ssh/id_ed25519".to_string()),
+                private_key_passphrase: Some("secret-b".to_string()),
+                strict_host_key_checking: true,
+            }],
+            remote_sqlite: None,
+        };
+
+        let hops = ssh_hops(&config).unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].identity(), "first@bastion-a.example.com:22");
+        assert_eq!(hops[1].identity(), "second@bastion-b.example.com:2200");
+
+        let mut invalid = config;
+        invalid.jump_hosts[0].password = Some(String::new());
+        invalid.jump_hosts[0].auth_method = "password".to_string();
+        assert!(ssh_hops(&invalid)
+            .err()
+            .expect("invalid later hop must fail")
+            .to_string()
+            .contains("hop 2 password"));
     }
 
     #[test]

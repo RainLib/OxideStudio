@@ -219,12 +219,24 @@ fn config_contains_plaintext_credentials(config: &serde_json::Value) -> bool {
     }) || object
         .get("sshTunnel")
         .and_then(serde_json::Value::as_object)
-        .is_some_and(|tunnel| {
-            ["password", "privateKeyPassphrase"].into_iter().any(|key| {
-                tunnel
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| !value.is_empty())
+        .is_some_and(ssh_tunnel_contains_plaintext_credentials)
+}
+
+fn ssh_tunnel_contains_plaintext_credentials(
+    tunnel: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    ["password", "privateKeyPassphrase"].into_iter().any(|key| {
+        tunnel
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) || tunnel
+        .get("jumpHosts")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|hops| {
+            hops.iter().any(|hop| {
+                hop.as_object()
+                    .is_some_and(ssh_tunnel_contains_plaintext_credentials)
             })
         })
 }
@@ -1029,14 +1041,7 @@ impl MetaStore {
             .get_mut("sshTunnel")
             .and_then(serde_json::Value::as_object_mut)
         {
-            let mut tunnel_secrets = serde_json::Map::new();
-            for key in ["password", "privateKeyPassphrase"] {
-                if let Some(value) = tunnel.remove(key) {
-                    if !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()) {
-                        tunnel_secrets.insert(key.to_string(), value);
-                    }
-                }
-            }
+            let tunnel_secrets = extract_ssh_tunnel_secrets(tunnel);
             if !tunnel_secrets.is_empty() {
                 secrets.insert(
                     "sshTunnel".into(),
@@ -1110,7 +1115,7 @@ impl MetaStore {
                     .as_object_mut()
                     .context("stored SSH tunnel config is invalid")?;
                 if let Some(values) = value.as_object() {
-                    tunnel.extend(values.clone());
+                    restore_ssh_tunnel_secrets(tunnel, values);
                 }
             } else {
                 object.insert(key, value);
@@ -1683,6 +1688,70 @@ impl MetaStore {
     }
 }
 
+/// Extract credentials recursively using a JSON shape that mirrors the public
+/// tunnel configuration. This keeps later bastion credentials in the existing
+/// encrypted record rather than the connection-config column.
+fn extract_ssh_tunnel_secrets(
+    tunnel: &mut serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut secrets = serde_json::Map::new();
+    for key in ["password", "privateKeyPassphrase"] {
+        if let Some(value) = tunnel.remove(key) {
+            if !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()) {
+                secrets.insert(key.to_string(), value);
+            }
+        }
+    }
+    if let Some(hops) = tunnel
+        .get_mut("jumpHosts")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        let mut hop_secrets = Vec::with_capacity(hops.len());
+        let mut has_secrets = false;
+        for hop in hops {
+            let hop_secret = hop
+                .as_object_mut()
+                .map(extract_ssh_tunnel_secrets)
+                .unwrap_or_default();
+            has_secrets |= !hop_secret.is_empty();
+            hop_secrets.push(serde_json::Value::Object(hop_secret));
+        }
+        if has_secrets {
+            secrets.insert(
+                "jumpHosts".to_string(),
+                serde_json::Value::Array(hop_secrets),
+            );
+        }
+    }
+    secrets
+}
+
+fn restore_ssh_tunnel_secrets(
+    tunnel: &mut serde_json::Map<String, serde_json::Value>,
+    secrets: &serde_json::Map<String, serde_json::Value>,
+) {
+    for (key, value) in secrets {
+        if key != "jumpHosts" {
+            tunnel.insert(key.clone(), value.clone());
+            continue;
+        }
+        let Some(secret_hops) = value.as_array() else {
+            continue;
+        };
+        let Some(hops) = tunnel
+            .get_mut("jumpHosts")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for (hop, hop_secrets) in hops.iter_mut().zip(secret_hops) {
+            if let (Some(hop), Some(hop_secrets)) = (hop.as_object_mut(), hop_secrets.as_object()) {
+                restore_ssh_tunnel_secrets(hop, hop_secrets);
+            }
+        }
+    }
+}
+
 fn validate_assistant_task(task: &AssistantTaskRecord) -> Result<()> {
     const ALLOWED_STATUSES: [&str; 6] = [
         "running",
@@ -2014,7 +2083,12 @@ mod tests {
                 "password": "top-secret",
                 "sshTunnel": {
                     "password": "ssh-secret",
-                    "privateKeyPassphrase": "key-secret"
+                    "privateKeyPassphrase": "key-secret",
+                    "jumpHosts": [{
+                        "host": "bastion-2.example.test",
+                        "password": "jump-secret",
+                        "privateKeyPassphrase": "jump-key-secret"
+                    }]
                 }
             }),
             created_at: 1,
@@ -2029,6 +2103,8 @@ mod tests {
                 .unwrap();
         assert!(!raw.contains("top-secret"));
         assert!(!raw.contains("ssh-secret"));
+        assert!(!raw.contains("jump-secret"));
+        assert!(!raw.contains("jump-key-secret"));
         assert!(!raw.contains("postgres://"));
         let ciphertext: Vec<u8> = sqlx::query_scalar(
             "SELECT ciphertext FROM connection_credentials

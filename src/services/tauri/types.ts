@@ -1318,6 +1318,19 @@ export interface RemoteSqliteSshConfig {
   approvedWorkerDigest?: string;
 }
 
+/** One SSH hop after the primary tunnel host. The final hop owns any remote
+ * SQLite worker session; jump hops only carry authenticated transport. */
+export interface SshJumpHostConfig {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  password?: string;
+  privateKeyPath?: string;
+  privateKeyPassphrase?: string;
+  strictHostKeyChecking: boolean;
+}
+
 export interface SshTunnelConfig {
   enabled: boolean;
   host: string;
@@ -1328,6 +1341,8 @@ export interface SshTunnelConfig {
   privateKeyPath?: string;
   privateKeyPassphrase?: string;
   strictHostKeyChecking: boolean;
+  /** Ordered hops reached through the primary host, limited by the Host. */
+  jumpHosts?: SshJumpHostConfig[];
   /** Enables the signed stdio worker path instead of TCP forwarding for SQLite. */
   remoteSqlite?: RemoteSqliteSshConfig;
 }

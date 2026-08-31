@@ -456,6 +456,27 @@ describe("ConnectionForm", () => {
     expect(updateConnectionConfig).not.toHaveBeenCalledWith(
       expect.objectContaining({ connectionUrl: "" }),
     );
+
+    await act(async () => {
+      buttonWithText(container, "Add jump host")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await flushAsyncWork();
+    });
+
+    expect(updateConnectionConfig).toHaveBeenCalledWith({
+      sshTunnel: expect.objectContaining({
+        jumpHosts: [
+          expect.objectContaining({
+            host: "",
+            port: 22,
+            username: "",
+            authMethod: "password",
+            strictHostKeyChecking: true,
+          }),
+        ],
+      }),
+    });
   });
 
   it("shows the database brand by default and edits appearance from General", async () => {

@@ -135,6 +135,14 @@ async function prepareRemoteSqliteWorker(config: ConnectionConfig) {
     config.sshTunnel.username.trim(),
     config.sshTunnel.host.trim().toLowerCase(),
     config.sshTunnel.port,
+    ...(config.sshTunnel.jumpHosts || []).map((hop) =>
+      [
+        hop.username.trim(),
+        hop.host.trim().toLowerCase(),
+        hop.port,
+        hop.authMethod,
+      ].join("@"),
+    ),
     downloadBaseUrl,
   ].join("|");
   const cached = remoteSqlitePreparationCache.get(key);
@@ -315,7 +323,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         selectedConnection: {
           ...conn,
           icon: conn.icon || defaultConnectionIcon(conn.driver),
-          sshTunnel: conn.sshTunnel ? { ...conn.sshTunnel } : undefined,
+          sshTunnel: conn.sshTunnel
+            ? {
+                ...conn.sshTunnel,
+                jumpHosts: conn.sshTunnel.jumpHosts?.map((hop) => ({ ...hop })),
+              }
+            : undefined,
         },
       }); // Clone nested editable configuration to avoid direct mutation
     }
@@ -348,6 +361,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         privateKeyPath: "",
         privateKeyPassphrase: "",
         strictHostKeyChecking: true,
+        jumpHosts: [],
       },
     };
 
