@@ -1,13 +1,20 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-08-31
-> DBX 参考提交：`dc2e16ffafbc`
+> DBX 参考提交：`1d98eca99`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`dc2e16ffafbc` → `1d98eca99`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `f70fe38a4`、`1d98eca99` | Win7 离线制品和静态 browser release 构建接入 sccache | 本阶段对齐并扩大到 Oxide 的 tag CI 与四平台桌面 release：Rust job 禁用 incremental，通过固定 commit 的 `mozilla-actions/sccache-action` 安装固定 `v0.10.0`，使用无需仓库凭据的 GitHub Actions backend。`swatinem/rust-cache` 不再恢复 release target tree，避免与 compiler cache 同时占用大量 runner 磁盘；quality/CI 的显式 `cargo clean` 仍保留以约束峰值磁盘，而后续重编译可命中 sccache。每个作业始终输出 cache stats，契约测试锁定 action/binary pin、无 S3/AWS secret 和 `cache-targets: false`。 |
+| `4605e4c32` | Dameng agent 版本从 0.1.57 更新至 0.1.58 | 只有 DBX 私有/独立 driver 制品版本变化，没有可迁移源码行为。Oxide 当前 Dameng 仍为候选外置产品；在取得签名 package、entrypoint digest、server-version conformance 与运行证据前，不复制版本号或把候选误标为 ready。 |
 
 ### 最新增量审计（`eba4e95a0` → `dc2e16ffafbc`）
 
