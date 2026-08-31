@@ -638,6 +638,25 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(())
     }
 
+    /// Read one closed, driver-owned metadata endpoint for a search index.
+    /// Generic query execution is intentionally not used as a fallback.
+    async fn get_search_index_metadata(
+        &self,
+        _index: &str,
+        _kind: crate::core::protocol::SearchIndexMetadataKind,
+    ) -> Result<serde_json::Value> {
+        Err(unsupported_driver_feature("Search index metadata"))
+    }
+
+    /// Delete documents while retaining the index, mapping, settings, and
+    /// aliases. Drivers must explicitly own this mutation contract.
+    async fn clear_search_index_documents(
+        &self,
+        _index: &str,
+    ) -> Result<crate::core::protocol::SearchIndexClearResult> {
+        Err(unsupported_driver_feature("Search index clear"))
+    }
+
     /// Get columns for a specific table
     async fn get_columns(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>> {
         Ok(Vec::new())

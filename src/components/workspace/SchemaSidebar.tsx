@@ -83,6 +83,8 @@ import type {
   SchemaObjectInfo,
   TableDataTransferEndpoint,
   TableInfo,
+  SearchIndexClearResult,
+  SearchIndexMetadataKind,
 } from "@/services/tauri/types";
 import { useSqlScriptImportController } from "@/features/sql-script-import";
 import type {
@@ -160,6 +162,7 @@ import {
   type TableBatchFailureDetail,
   type TableBatchSelection,
 } from "@/features/database-explorer/model/tableBatchSelection";
+import { searchIndexClearTouched } from "@/features/database-explorer/model/elasticsearchIndexActions";
 import {
   captureLiveSchemaSnapshot,
   type SchemaSnapshotIdentity,
@@ -225,6 +228,20 @@ const RedisKeyDialog = lazy(() =>
 const DatabaseAdministrationDialog = lazy(() =>
   import("@/features/database-admin").then((module) => ({
     default: module.DatabaseAdministrationDialog,
+  })),
+);
+const ElasticsearchIndexMetadataDialog = lazy(() =>
+  import(
+    "@/features/database-explorer/ui/ElasticsearchIndexMetadataDialog"
+  ).then((module) => ({
+    default: module.ElasticsearchIndexMetadataDialog,
+  })),
+);
+const ElasticsearchIndexClearDialog = lazy(() =>
+  import(
+    "@/features/database-explorer/ui/ElasticsearchIndexClearDialog"
+  ).then((module) => ({
+    default: module.ElasticsearchIndexClearDialog,
   })),
 );
 const DatabaseMaintenanceDialog = lazy(() =>
@@ -614,6 +631,19 @@ export function SchemaSidebar() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [ddlViewerOpen, setDdlViewerOpen] = useState(false);
   const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
+  const [elasticsearchMetadataTarget, setElasticsearchMetadataTarget] =
+    useState<{
+      connectionId: string;
+      driver: string;
+      index: string;
+      kind: SearchIndexMetadataKind;
+    } | null>(null);
+  const [elasticsearchClearTarget, setElasticsearchClearTarget] = useState<{
+    connectionId: string;
+    driver: string;
+    schema: string;
+    index: string;
+  } | null>(null);
   const [activeTable, setActiveTable] = useState("");
   const [activeTableType, setActiveTableType] = useState<string | null>(null);
   const [ddlContent, setDdlContent] = useState("");
@@ -2252,6 +2282,25 @@ export function SchemaSidebar() {
     }
   };
 
+  const handleElasticsearchIndexCleared = async (
+    _result: SearchIndexClearResult,
+    clearedIndex: string,
+  ) => {
+    const target = elasticsearchClearTarget;
+    if (!target) return;
+    await loadCollections(target.connectionId, target.schema, true);
+    bumpMetadataVersion();
+    const tabs = useTabStore
+      .getState()
+      .tabs.filter(
+        (tab) =>
+          tab.connectionId === target.connectionId &&
+          Boolean(tab.tableName) &&
+          searchIndexClearTouched(clearedIndex, tab.tableName || ""),
+      );
+    await Promise.allSettled(tabs.map((tab) => loadDocumentPage(tab.id, 0)));
+  };
+
   const handleDeleteCollectionClick = (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
@@ -3722,6 +3771,10 @@ export function SchemaSidebar() {
       depth = 0,
     ) => {
       const canDeleteCollection = Boolean(collectionDeleteSql(collection));
+      const collectionDriver = driver || activeDriver;
+      const isElasticsearchIndex =
+        normalizeDatabaseDriverName(collectionDriver) === "elasticsearch" &&
+        collection.type === "index";
       const isSelectedCollection =
         isCurrentSchema && selectedTable === collection.name;
       const canExpandCollectionMetadata =
@@ -3829,6 +3882,53 @@ export function SchemaSidebar() {
                 <Clipboard className="mr-2 h-3.5 w-3.5" />
                 Copy Preview Query
               </ContextMenuItem>
+              {isElasticsearchIndex && (
+                <>
+                  <ContextMenuSub>
+                    <ContextMenuSubTrigger>
+                      <Code2 className="mr-2 h-3.5 w-3.5" />
+                      Index Metadata
+                    </ContextMenuSubTrigger>
+                    <ContextMenuSubContent className="w-44">
+                      {(
+                        [
+                          ["mapping", "View Mapping"],
+                          ["settings", "View Settings"],
+                          ["stats", "View Statistics"],
+                        ] as const
+                      ).map(([kind, metadataLabel]) => (
+                        <ContextMenuItem
+                          key={kind}
+                          onClick={() =>
+                            setElasticsearchMetadataTarget({
+                              connectionId,
+                              driver: collectionDriver,
+                              index: collection.name,
+                              kind,
+                            })
+                          }
+                        >
+                          {metadataLabel}
+                        </ContextMenuItem>
+                      ))}
+                    </ContextMenuSubContent>
+                  </ContextMenuSub>
+                  <ContextMenuItem
+                    onClick={() =>
+                      setElasticsearchClearTarget({
+                        connectionId,
+                        driver: collectionDriver,
+                        schema,
+                        index: collection.name,
+                      })
+                    }
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="mr-2 h-3.5 w-3.5" />
+                    Clear Documents…
+                  </ContextMenuItem>
+                </>
+              )}
               <ContextMenuSeparator />
               <ContextMenuItem
                 onClick={() =>
@@ -6454,6 +6554,28 @@ export function SchemaSidebar() {
               });
               setDataCompareRequest(null);
             }}
+          />
+        )}
+        {elasticsearchMetadataTarget !== null && (
+          <ElasticsearchIndexMetadataDialog
+            open
+            connectionId={elasticsearchMetadataTarget.connectionId}
+            driver={elasticsearchMetadataTarget.driver}
+            index={elasticsearchMetadataTarget.index}
+            initialKind={elasticsearchMetadataTarget.kind}
+            onClose={() => setElasticsearchMetadataTarget(null)}
+          />
+        )}
+        {elasticsearchClearTarget !== null && (
+          <ElasticsearchIndexClearDialog
+            open
+            connectionId={elasticsearchClearTarget.connectionId}
+            driver={elasticsearchClearTarget.driver}
+            index={elasticsearchClearTarget.index}
+            onClose={() => setElasticsearchClearTarget(null)}
+            onCleared={(result, index) =>
+              void handleElasticsearchIndexCleared(result, index)
+            }
           />
         )}
       </Suspense>

@@ -288,6 +288,27 @@ pub struct DocumentPage {
     pub total: Option<u64>,
 }
 
+/// Driver-owned Elasticsearch-compatible metadata endpoints. Keeping the
+/// endpoint as a closed enum prevents renderer input from becoming an
+/// arbitrary transport path.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchIndexMetadataKind {
+    Mapping,
+    Settings,
+    Stats,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchIndexClearResult {
+    pub total: u64,
+    pub deleted: u64,
+    pub version_conflicts: u64,
+    pub timed_out: bool,
+    pub failures: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,

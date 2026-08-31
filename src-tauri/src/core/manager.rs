@@ -958,6 +958,25 @@ impl ConnectionManager {
         driver.close_document_cursor(cursor).await
     }
 
+    pub async fn get_search_index_metadata(
+        &self,
+        id: &str,
+        index: &str,
+        kind: super::protocol::SearchIndexMetadataKind,
+    ) -> Result<serde_json::Value> {
+        let driver = self.get_driver(id).await?;
+        driver.get_search_index_metadata(index, kind).await
+    }
+
+    pub async fn clear_search_index_documents(
+        &self,
+        id: &str,
+        index: &str,
+    ) -> Result<super::protocol::SearchIndexClearResult> {
+        let driver = self.get_driver(id).await?;
+        driver.clear_search_index_documents(index).await
+    }
+
     /// Get columns
     pub async fn get_columns(
         &self,

@@ -2,6 +2,7 @@ use crate::core::{
     driver::{DatabaseDriver, DocumentPageRequest},
     protocol::{
         CollectionInfo, ColumnDef, ColumnInfo, DocumentPage, QueryResponseMeta, QueryResult,
+        SearchIndexClearResult, SearchIndexMetadataKind,
     },
 };
 use anyhow::{anyhow, Context, Result};
@@ -733,6 +734,25 @@ impl DatabaseDriver for ElasticsearchDriver {
         }
     }
 
+    async fn get_search_index_metadata(
+        &self,
+        index: &str,
+        kind: SearchIndexMetadataKind,
+    ) -> Result<Value> {
+        self.ensure_connected().await?;
+        let request = build_elasticsearch_index_metadata_request(index, kind)?;
+        self.send_request(&request)
+            .await
+            .map(|(_, response)| response)
+    }
+
+    async fn clear_search_index_documents(&self, index: &str) -> Result<SearchIndexClearResult> {
+        self.ensure_connected().await?;
+        let request = build_elasticsearch_index_clear_request(index)?;
+        let (_, response) = self.send_request(&request).await?;
+        parse_elasticsearch_clear_result(&response)
+    }
+
     async fn get_columns(&self, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
         let index = table.trim();
         if index.is_empty() {
@@ -902,6 +922,44 @@ fn elasticsearch_response_error(status: StatusCode, body: &Value) -> anyhow::Err
             )
         }
     }
+}
+
+fn parse_elasticsearch_clear_result(value: &Value) -> Result<SearchIndexClearResult> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Elasticsearch delete-by-query response is malformed"))?;
+    let read_counter = |name: &str| -> Result<u64> {
+        object
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("Elasticsearch delete-by-query response is missing {name}"))
+    };
+    let failures = object
+        .get("failures")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Elasticsearch delete-by-query response is missing failures"))?
+        .iter()
+        .take(20)
+        .map(|failure| {
+            let value = failure.to_string();
+            if value.chars().count() <= 2_000 {
+                value
+            } else {
+                format!("{}…", value.chars().take(2_000).collect::<String>())
+            }
+        })
+        .collect();
+    let timed_out = object
+        .get("timed_out")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("Elasticsearch delete-by-query response is missing timed_out"))?;
+    Ok(SearchIndexClearResult {
+        total: read_counter("total")?,
+        deleted: read_counter("deleted")?,
+        version_conflicts: read_counter("version_conflicts")?,
+        timed_out,
+        failures,
+    })
 }
 
 fn elasticsearch_error_reason(body: &Value) -> Option<String> {
@@ -1155,6 +1213,76 @@ fn validate_elasticsearch_index_context(value: &str) -> Result<Option<String>> {
         return Err(anyhow!("Invalid Elasticsearch index context: {value}"));
     }
     Ok(Some(value.to_string()))
+}
+
+fn validate_elasticsearch_index_target(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 255 {
+        return Err(anyhow!("Invalid Elasticsearch index target"));
+    }
+    if matches!(value, "." | ".." | "*" | "?" | "_all")
+        || value.starts_with(['-', '_', '+'])
+        || !value.chars().any(|ch| !matches!(ch, '*' | '?'))
+        || value.chars().any(|ch| {
+            ch.is_whitespace()
+                || ch.is_uppercase()
+                || matches!(
+                    ch,
+                    '/' | '\\' | '\0' | ',' | '#' | ':' | '%' | '"' | '<' | '>' | '|'
+                )
+        })
+    {
+        return Err(anyhow!("Invalid Elasticsearch index target: {value}"));
+    }
+    Ok(value.to_string())
+}
+
+fn encode_elasticsearch_index_target(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'*') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0F) as usize] as char);
+        }
+    }
+    encoded
+}
+
+fn build_elasticsearch_index_metadata_request(
+    index: &str,
+    kind: SearchIndexMetadataKind,
+) -> Result<ElasticsearchRequest> {
+    let index = validate_elasticsearch_index_target(index)?;
+    let endpoint = match kind {
+        SearchIndexMetadataKind::Mapping => "_mapping",
+        SearchIndexMetadataKind::Settings => "_settings",
+        SearchIndexMetadataKind::Stats => "_stats",
+    };
+    Ok(ElasticsearchRequest {
+        method: Method::GET,
+        path: format!(
+            "/{}/{}",
+            encode_elasticsearch_index_target(&index),
+            endpoint
+        ),
+        body: None,
+    })
+}
+
+fn build_elasticsearch_index_clear_request(index: &str) -> Result<ElasticsearchRequest> {
+    let index = validate_elasticsearch_index_target(index)?;
+    Ok(ElasticsearchRequest {
+        method: Method::POST,
+        path: format!(
+            "/{}/_delete_by_query?conflicts=proceed&refresh=true",
+            encode_elasticsearch_index_target(&index)
+        ),
+        body: Some(json!({ "query": { "match_all": {} } }).to_string()),
+    })
 }
 
 fn encode_elasticsearch_path_segment(value: &str) -> String {
@@ -2263,5 +2391,64 @@ mod tests {
                 .map(|column| column.data_type.as_str()),
             Some("date")
         );
+    }
+
+    #[test]
+    fn validates_and_encodes_bounded_index_management_targets() {
+        assert_eq!(
+            validate_elasticsearch_index_target("logs-2026.*").unwrap(),
+            "logs-2026.*"
+        );
+        assert_eq!(
+            encode_elasticsearch_index_target("logs-????.08"),
+            "logs-%3F%3F%3F%3F.08"
+        );
+        for target in ["", "*", "?", "_all", "logs,orders", "../logs", "Logs"] {
+            assert!(
+                validate_elasticsearch_index_target(target).is_err(),
+                "unexpected valid target: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn builds_closed_metadata_and_clear_transport_contracts() {
+        let settings = build_elasticsearch_index_metadata_request(
+            "logs-????.08",
+            SearchIndexMetadataKind::Settings,
+        )
+        .unwrap();
+        assert_eq!(settings.method, Method::GET);
+        assert_eq!(settings.path, "/logs-%3F%3F%3F%3F.08/_settings");
+        assert!(settings.body.is_none());
+
+        let clear = build_elasticsearch_index_clear_request("logs-*").unwrap();
+        assert_eq!(clear.method, Method::POST);
+        assert_eq!(
+            clear.path,
+            "/logs-*/_delete_by_query?conflicts=proceed&refresh=true"
+        );
+        assert_eq!(clear.body.as_deref(), Some(r#"{"query":{"match_all":{}}}"#));
+    }
+
+    #[test]
+    fn parses_delete_by_query_partial_outcome_and_bounds_failure_details() {
+        let oversized = "x".repeat(2_100);
+        let result = parse_elasticsearch_clear_result(&json!({
+            "total": 10,
+            "deleted": 8,
+            "version_conflicts": 2,
+            "timed_out": false,
+            "failures": [{"reason": oversized}]
+        }))
+        .unwrap();
+
+        assert_eq!(result.total, 10);
+        assert_eq!(result.deleted, 8);
+        assert_eq!(result.version_conflicts, 2);
+        assert!(!result.timed_out);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].chars().count() <= 2_001);
+        assert!(parse_elasticsearch_clear_result(&json!({"deleted": 1})).is_err());
     }
 }
