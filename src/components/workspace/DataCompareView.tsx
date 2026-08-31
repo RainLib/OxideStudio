@@ -43,6 +43,7 @@ export function DataCompareView() {
   const left = activeTab?.dataCompareLeft;
   const right = activeTab?.dataCompareRight;
   const [keyColumns, setKeyColumns] = useState<string[]>([]);
+  const [ignoredColumns, setIgnoredColumns] = useState<Set<string>>(() => new Set());
   const [absoluteTolerance, setAbsoluteTolerance] = useState("0");
   const [relativeTolerancePercent, setRelativeTolerancePercent] = useState("0");
   const [showEqual, setShowEqual] = useState(false);
@@ -104,6 +105,7 @@ export function DataCompareView() {
     activeCompareIdRef.current = null;
     if (compareId) void tableService.cancelTableDataCompare(compareId).catch(() => undefined);
     setKeyColumns(suggestedDataCompareKeys(left, right));
+    setIgnoredColumns(new Set());
     setFullComparison(null);
     setFullComparisonPayload(null);
     setFullComparisonMeta(null);
@@ -117,12 +119,23 @@ export function DataCompareView() {
     setSelectedSyncRows(new Set());
   }, [left, right]);
 
+  const reviewedValueColumns = useMemo(
+    () =>
+      left && right
+        ? sharedDataCompareColumns(left, right).filter(
+            (column) =>
+              !keyColumns.includes(column) && !ignoredColumns.has(column),
+          )
+        : [],
+    [ignoredColumns, keyColumns, left, right],
+  );
   const comparison = useMemo(() => {
     if (!left || !right) return { result: null, error: null };
     try {
       return {
         result: compareDataSources(left, right, {
           keyColumns,
+          comparedColumns: reviewedValueColumns,
           absoluteTolerance: Number(absoluteTolerance),
           relativeTolerance: Number(relativeTolerancePercent) / 100,
         }),
@@ -134,7 +147,14 @@ export function DataCompareView() {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }, [absoluteTolerance, keyColumns, left, relativeTolerancePercent, right]);
+  }, [
+    absoluteTolerance,
+    keyColumns,
+    left,
+    relativeTolerancePercent,
+    reviewedValueColumns,
+    right,
+  ]);
 
   if (
     !activeTab ||
@@ -154,6 +174,9 @@ export function DataCompareView() {
       canCreateDataCompareSource(rightSourceTab),
   );
   const sharedColumns = sharedDataCompareColumns(left, right);
+  const effectiveColumns = sharedColumns.filter(
+    (column) => keyColumns.includes(column) || !ignoredColumns.has(column),
+  );
   const displayedComparison = fullComparison || comparison.result;
   const rows = displayedComparison
     ? flattenRows(displayedComparison.rows, left, right, showEqual, query)
@@ -175,6 +198,23 @@ export function DataCompareView() {
         ? current.filter((candidate) => candidate !== column)
         : [...current, column],
     );
+  };
+  const toggleComparedColumn = (column: string) => {
+    setFullComparison(null);
+    setFullComparisonPayload(null);
+    setFullComparisonMeta(null);
+    setFullComparisonError(null);
+    setSyncPreview(null);
+    setSyncPreviewError(null);
+    setSyncConfirmation("");
+    setSyncReceipt(null);
+    setSelectedSyncRows(new Set());
+    setIgnoredColumns((current) => {
+      const next = new Set(current);
+      if (next.has(column)) next.delete(column);
+      else next.add(column);
+      return next;
+    });
   };
   const leftConnection = connections.find((connection) => connection.id === left.connectionId);
   const rightConnection = connections.find((connection) => connection.id === right.connectionId);
@@ -219,13 +259,13 @@ export function DataCompareView() {
           schema: right.schemaName || "",
           table: right.objectName!,
         },
-        columns: sharedColumns,
+        columns: effectiveColumns,
         keyColumns,
       });
       if (activeCompareIdRef.current !== compareId) return;
       setFullComparisonPayload(result);
       setSelectedSyncRows(allSyncRowIds(result));
-      setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, sharedColumns));
+      setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, effectiveColumns));
       setFullComparisonMeta({
         sourceRows: result.sourceRowCount,
         targetRows: result.targetRowCount,
@@ -316,7 +356,7 @@ export function DataCompareView() {
           schema: right.schemaName || "",
           table: right.objectName!,
         },
-        columns: sharedColumns,
+        columns: effectiveColumns,
         keyColumns,
         comparison: selectedComparisonPayload,
       });
@@ -517,6 +557,38 @@ export function DataCompareView() {
               )}
               <p className="px-3 pt-1 text-[8px] leading-4 wb-muted">
                 Full-table compare requires the complete shared primary key. Loaded-page compare can use any shared column.
+              </p>
+            </div>
+          </section>
+
+          <section className="border-b border-[hsl(var(--wb-border-subtle))]">
+            <div className="px-3 pb-1 pt-3 text-[8px] font-semibold uppercase tracking-[0.12em] wb-muted">
+              Compare values
+            </div>
+            <div className="pb-2">
+              {sharedColumns
+                .filter((column) => !keyColumns.includes(column))
+                .map((column) => (
+                  <label
+                    key={column}
+                    className="flex h-7 cursor-pointer items-center gap-2 px-3 text-[9px] hover:bg-[hsl(var(--wb-hover))]"
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label={`Compare value column ${column}`}
+                      checked={!ignoredColumns.has(column)}
+                      onChange={() => toggleComparedColumn(column)}
+                    />
+                    <span className="truncate font-mono">{column}</span>
+                  </label>
+                ))}
+              {sharedColumns.every((column) => keyColumns.includes(column)) && (
+                <p className="px-3 py-2 text-[8px] leading-4 wb-muted">
+                  The selected key is the only shared column.
+                </p>
+              )}
+              <p className="px-3 pt-1 text-[8px] leading-4 wb-muted">
+                Clear volatile or intentionally ignored fields. Key columns stay included.
               </p>
             </div>
           </section>

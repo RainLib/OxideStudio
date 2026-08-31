@@ -230,4 +230,40 @@ describe("data compare", () => {
       useTabStore.getState().tabs.filter((tab) => tab.type === "data_compare"),
     ).toHaveLength(1);
   });
+
+  it("compares only the reviewed value-column subset while retaining keys", () => {
+    const result = compareDataSources(
+      source("left", [[1, 10, { stable: true }]]),
+      source("right", [[1, 99, { stable: true }]]),
+      { keyColumns: ["id"], comparedColumns: ["payload"] },
+    );
+
+    expect(result.counts).toMatchObject({ equal: 1, changed: 0 });
+    expect(result.comparedColumns).toEqual(["payload"]);
+  });
+
+  it("opens metadata-backed table comparisons without loaded table tabs", () => {
+    const left = source("endpoint:left:public:users", [], {
+      sourceKind: "table",
+      connectionId: "left",
+      schemaName: "public",
+      objectName: "users",
+    });
+    const right = source("endpoint:right:public:users", [], {
+      sourceKind: "table",
+      connectionId: "right",
+      schemaName: "public",
+      objectName: "users",
+    });
+
+    const tabId = useTabStore.getState().openDataCompareSourcesTab(left, right);
+
+    expect(tabId).toBeTruthy();
+    expect(useTabStore.getState().tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      type: "data_compare",
+      dataCompareLeft: { connectionId: "left", objectName: "users", rows: [] },
+      dataCompareRight: { connectionId: "right", objectName: "users", rows: [] },
+    });
+    expect(useTabStore.getState().openDataCompareSourcesTab(left, right)).toBe(tabId);
+  });
 });

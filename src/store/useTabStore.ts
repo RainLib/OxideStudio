@@ -814,6 +814,10 @@ interface TabState {
   selectSchemaDiagramArea: (tabId: string, areaId: string | null) => void;
   selectSchemaDiagramRelations: (tabId: string, relationNames: string[]) => void;
   openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
+  openDataCompareSourcesTab: (
+    left: DataCompareSource,
+    right: DataCompareSource,
+  ) => string | null;
   retargetTableTabs: (
     connectionId: string,
     schemaName: string,
@@ -1509,12 +1513,20 @@ export const useTabStore = create<TabState>((set, get) => ({
     const right = dataCompareSourceFromTab(rightTab, capturedAt);
     if (!left || !right) return null;
 
+    return get().openDataCompareSourcesTab(left, right);
+  },
+
+  openDataCompareSourcesTab: (left, right) => {
+    if (left.tabId === right.tabId || left.columns.length === 0 || right.columns.length === 0) {
+      return null;
+    }
+
     const title = `Compare · ${left.label} ↔ ${right.label}`;
     const existing = get().tabs.find(
       (tab) =>
         tab.type === "data_compare" &&
-        tab.dataCompareLeft?.tabId === leftTabId &&
-        tab.dataCompareRight?.tabId === rightTabId,
+        tab.dataCompareLeft?.tabId === left.tabId &&
+        tab.dataCompareRight?.tabId === right.tabId,
     );
     if (existing) {
       set((state) => ({

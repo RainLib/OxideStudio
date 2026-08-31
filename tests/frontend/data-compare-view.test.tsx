@@ -99,6 +99,23 @@ describe("DataCompareView", () => {
     expect(container.textContent).not.toContain("id=1");
   });
 
+  it("lets users ignore reviewed value columns without removing the match key", async () => {
+    await act(async () => {
+      root.render(<DataCompareView />);
+    });
+    const score = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Compare value column score"]',
+    );
+    expect(score?.checked).toBe(true);
+
+    await act(async () => score?.click());
+
+    expect(container.textContent).toContain("Changed 0");
+    expect(container.textContent).toContain("Equal 1");
+    expect(container.textContent).toContain("Left only 1");
+    expect(container.textContent).toContain("Right only 1");
+  });
+
   it("keeps the full-compare IPC fixture bounded while totals remain exact", () => {
     const result = compareResultFixture as TableDataCompareResult;
     expect(result.addedCount).toBe(2_500);

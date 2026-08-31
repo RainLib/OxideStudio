@@ -50,12 +50,18 @@ interface PostgresRemoteDatabaseContentsProps {
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
   onOpenSchemaSnapshots?: (database: string, schema: string) => void;
   onOpenSchemaDataTransfer?: (database: string, schema: string) => void;
+  onOpenSchemaDataCompare?: (database: string, schema: string) => void;
   onOpenTableSchemaSnapshots?: (
     database: string,
     schema: string,
     table: string,
   ) => void;
   onOpenTableDataTransfer?: (
+    database: string,
+    schema: string,
+    table: string,
+  ) => void;
+  onOpenTableDataCompare?: (
     database: string,
     schema: string,
     table: string,
@@ -87,8 +93,10 @@ export function PostgresRemoteDatabaseContents({
   onTablesLoaded,
   onOpenSchemaSnapshots,
   onOpenSchemaDataTransfer,
+  onOpenSchemaDataCompare,
   onOpenTableSchemaSnapshots,
   onOpenTableDataTransfer,
+  onOpenTableDataCompare,
   onOpenTableMaintenance,
   onImportSqlScript,
   onOpenTable,
@@ -391,6 +399,14 @@ export function PostgresRemoteDatabaseContents({
                   <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                   Transfer Schema Data...
                 </ContextMenuItem>
+                <ContextMenuItem
+                  className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                  disabled={!onOpenSchemaDataCompare}
+                  onClick={() => onOpenSchemaDataCompare?.(database, schema)}
+                >
+                  <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                  Compare Schema Data...
+                </ContextMenuItem>
                 <ContextMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
                 <ContextMenuItem
                   className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
@@ -522,6 +538,20 @@ export function PostgresRemoteDatabaseContents({
                           >
                             <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                             Transfer Table Data...
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
+                            disabled={isViewObject(table.type) || !onOpenTableDataCompare}
+                            onClick={() =>
+                              onOpenTableDataCompare?.(
+                                database,
+                                schema,
+                                table.name,
+                              )
+                            }
+                          >
+                            <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                            Compare Table Data...
                           </ContextMenuItem>
                           <ContextMenuItem
                             className="text-[12px] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"

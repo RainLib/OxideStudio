@@ -61,6 +61,8 @@ export interface DataCompareResult {
 
 export interface DataCompareOptions {
   keyColumns: string[];
+  /** Optional reviewed value-column subset. Key columns are always included separately. */
+  comparedColumns?: string[];
   absoluteTolerance?: number;
   relativeTolerance?: number;
   maxRowsPerSide?: number;
@@ -121,8 +123,13 @@ export function compareDataSources(
     );
   }
 
+  const requestedComparedColumns = options.comparedColumns
+    ? new Set(options.comparedColumns)
+    : null;
   const comparedColumns = sharedColumns.filter(
-    (column) => !keyColumns.includes(column),
+    (column) =>
+      !keyColumns.includes(column) &&
+      (!requestedComparedColumns || requestedComparedColumns.has(column)),
   );
   const leftColumnNames = new Set(left.columns.map((column) => column.name));
   const rightColumnNames = new Set(right.columns.map((column) => column.name));

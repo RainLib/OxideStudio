@@ -242,6 +242,11 @@ const TableDataTransferDialog = lazy(() =>
     default: module.TableDataTransferDialog,
   })),
 );
+const TableDataCompareDialog = lazy(() =>
+  import("./TableDataCompareDialog").then((module) => ({
+    default: module.TableDataCompareDialog,
+  })),
+);
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
@@ -255,6 +260,13 @@ interface ExplorerDataTransferRequest {
   initialSourceScope: "table" | "schema" | "database";
   sourceSchemas: string[];
   initialSourceTables?: string[];
+  initialTarget?: Omit<TableDataTransferEndpoint, "table">;
+}
+
+interface ExplorerDataCompareRequest {
+  source: TableDataTransferEndpoint;
+  sourceTables: string[];
+  sourceCapabilities: DatabaseCapabilities;
 }
 
 interface ExplorerTableBatchSelection extends TableBatchSelection {
@@ -663,6 +675,8 @@ export function SchemaSidebar() {
   >(null);
   const [dataTransferRequest, setDataTransferRequest] =
     useState<ExplorerDataTransferRequest | null>(null);
+  const [dataCompareRequest, setDataCompareRequest] =
+    useState<ExplorerDataCompareRequest | null>(null);
   const [tableBatchSelection, setTableBatchSelection] =
     useState<ExplorerTableBatchSelection | null>(null);
   const [tableBatchAction, setTableBatchAction] = useState<{
@@ -1975,6 +1989,79 @@ export function SchemaSidebar() {
       void loadDocumentPage(tabId, 0);
     } else {
       void runTabQuery(tabId, activeConnectionId, previewCommand);
+    }
+  };
+
+  const handleOpenDataCompare = async (options: {
+    connection: (typeof connections)[number];
+    database?: string;
+    schema?: string;
+    table?: string;
+    tables?: string[];
+  }) => {
+    setNamespaceError(null);
+    try {
+      const readiness = await setActiveConnection(options.connection.id);
+      if (readiness) throw new Error(readiness);
+      const context =
+        await databaseService.getConnectionDatabaseCapabilityContext(
+          options.connection.id,
+        );
+      if (!supportsTableWorkspace(context.capabilities)) {
+        throw new Error(
+          `${context.capabilities.displayName} does not expose a comparable table workspace.`,
+        );
+      }
+      const availableSchemas = options.database
+        ? await schemaService.getDatabaseSchemas(
+            options.connection.id,
+            options.database,
+          )
+        : await schemaService.getSchemas(options.connection.id);
+      const schema =
+        options.schema ||
+        [currentSchema, "public", "dbo", availableSchemas[0]].find(
+          (candidate): candidate is string =>
+            Boolean(candidate && availableSchemas.includes(candidate)),
+        );
+      if (!schema) throw new Error("No comparable schema was found.");
+      const requested = options.tables?.length
+        ? options.tables
+        : options.table
+          ? [options.table]
+          : [];
+      const tableNames = requested.length
+        ? requested
+        : (options.database
+            ? await schemaService.getDatabaseTables(
+                options.connection.id,
+                options.database,
+                schema,
+              )
+            : await schemaService.getTables(options.connection.id, schema))
+            .filter((item) => !item.type?.toUpperCase().includes("VIEW"))
+            .map((item) => item.name);
+      const sourceTables = [...new Set(tableNames)].sort((left, right) =>
+        left.localeCompare(right),
+      );
+      if (sourceTables.length === 0) {
+        throw new Error(`No comparable tables were found in ${schema}.`);
+      }
+      setDataCompareRequest({
+        source: {
+          connectionId: options.connection.id,
+          driver: options.connection.driver,
+          database: options.database,
+          schema,
+          table: sourceTables[0]!,
+        },
+        sourceTables,
+        sourceCapabilities: context.capabilities,
+      });
+    } catch (nextError) {
+      setNamespaceError(
+        `Could not prepare data comparison: ${nextError instanceof Error ? nextError.message : String(nextError)}`,
+      );
     }
   };
 
@@ -4007,6 +4094,26 @@ export function SchemaSidebar() {
                 >
                   Transfer
                 </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    !objectConnection ||
+                    tableBatchAction?.running
+                  }
+                  onClick={() => {
+                    if (!objectConnection) return;
+                    void handleOpenDataCompare({
+                      connection: objectConnection,
+                      database: navigationDatabaseName,
+                      schema,
+                      tables: selectedTableBatchNames,
+                    });
+                  }}
+                >
+                  Compare
+                </button>
                 {tableBatchAction?.scopeKey === groupKey &&
                   tableBatchAction.running &&
                   tableBatchAction.cancelId && (
@@ -4917,6 +5024,22 @@ export function SchemaSidebar() {
                             <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                             Transfer Table Data...
                           </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={isView || !objectConnection}
+                            onClick={() => {
+                              if (!objectConnection) return;
+                              void handleOpenDataCompare({
+                                connection: objectConnection,
+                                database: navigationDatabaseName,
+                                schema,
+                                table: table.name,
+                              });
+                            }}
+                          >
+                            <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                            Compare Table Data...
+                          </ContextMenuItem>
                           <ContextMenuSeparator
                             className={menuSeparatorClass}
                           />
@@ -5639,6 +5762,18 @@ export function SchemaSidebar() {
                                 <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                                 Transfer Database Data...
                               </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  void handleOpenDataCompare({
+                                    connection,
+                                    database,
+                                  })
+                                }
+                              >
+                                <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                Compare Database Tables...
+                              </ContextMenuItem>
                               {databaseSchemas.length > 0 ? (
                                 <ContextMenuSub>
                                   <ContextMenuSubTrigger
@@ -5753,6 +5888,13 @@ export function SchemaSidebar() {
                                   scope: "schema",
                                 })
                               }
+                              onOpenSchemaDataCompare={(databaseName, schema) =>
+                                void handleOpenDataCompare({
+                                  connection,
+                                  database: databaseName,
+                                  schema,
+                                })
+                              }
                               onOpenTableSchemaSnapshots={(
                                 databaseName,
                                 schema,
@@ -5779,6 +5921,18 @@ export function SchemaSidebar() {
                                   schema,
                                   table,
                                   scope: "table",
+                                })
+                              }
+                              onOpenTableDataCompare={(
+                                databaseName,
+                                schema,
+                                table,
+                              ) =>
+                                void handleOpenDataCompare({
+                                  connection,
+                                  database: databaseName,
+                                  schema,
+                                  table,
                                 })
                               }
                               onOpenTableMaintenance={
@@ -6065,6 +6219,22 @@ export function SchemaSidebar() {
                                     </ContextMenuItem>
                                     <ContextMenuItem
                                       className={menuItemClass}
+                                      onClick={() =>
+                                        void handleOpenDataCompare({
+                                          connection,
+                                          database:
+                                            connectionCanBrowseDatabaseCatalogs
+                                              ? connectedPostgresDatabase
+                                              : undefined,
+                                          schema,
+                                        })
+                                      }
+                                    >
+                                      <GitCompareArrows className="mr-2 h-3.5 w-3.5" />
+                                      Compare Schema Data...
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
                                       disabled={
                                         !(
                                           supportsTableWorkspace(
@@ -6255,6 +6425,7 @@ export function SchemaSidebar() {
             source={dataTransferRequest.source}
             initialSourceScope={dataTransferRequest.initialSourceScope}
             initialSourceTables={dataTransferRequest.initialSourceTables}
+            initialTarget={dataTransferRequest.initialTarget}
             sourceSchemas={dataTransferRequest.sourceSchemas}
             sourceCapabilities={dataTransferRequest.sourceCapabilities}
             connections={connections}
@@ -6262,6 +6433,26 @@ export function SchemaSidebar() {
             onTransferred={() => {
               const { connectionId, schema } = dataTransferRequest.source;
               void handleRefreshSchema(connectionId, schema);
+            }}
+          />
+        )}
+        {dataCompareRequest !== null && (
+          <TableDataCompareDialog
+            open
+            source={dataCompareRequest.source}
+            sourceTables={dataCompareRequest.sourceTables}
+            connections={connections}
+            onClose={() => setDataCompareRequest(null)}
+            onTransferMissing={(tables, target) => {
+              setDataTransferRequest({
+                source: dataCompareRequest.source,
+                sourceCapabilities: dataCompareRequest.sourceCapabilities,
+                initialSourceScope: tables.length > 1 ? "schema" : "table",
+                sourceSchemas: [dataCompareRequest.source.schema],
+                initialSourceTables: tables,
+                initialTarget: target,
+              });
+              setDataCompareRequest(null);
             }}
           />
         )}

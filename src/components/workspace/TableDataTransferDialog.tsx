@@ -53,6 +53,7 @@ interface TableDataTransferDialogProps {
   source: TableDataTransferEndpoint;
   initialSourceScope?: "table" | "schema" | "database";
   initialSourceTables?: string[];
+  initialTarget?: Omit<TableDataTransferEndpoint, "table">;
   sourceSchemas?: string[];
   sourceCapabilities?: DatabaseCapabilities | null;
   connections: ConnectionConfig[];
@@ -236,6 +237,7 @@ export function TableDataTransferDialog({
   source,
   initialSourceScope = "table",
   initialSourceTables,
+  initialTarget,
   sourceSchemas = [source.schema],
   sourceCapabilities,
   connections,
@@ -608,14 +610,16 @@ export function TableDataTransferDialog({
   useEffect(() => {
     if (!open) return;
     const firstTarget = eligibleTargetConnections.find(
+      (connection) => connection.id === initialTarget?.connectionId,
+    ) || eligibleTargetConnections.find(
       (connection) =>
         connection.id !== source.connectionId || connection.driver !== source.driver,
     ) || eligibleTargetConnections.find((connection) => connection.id === source.connectionId);
     setTargetConnectionId(firstTarget?.id || "");
     setActiveSourceSchema(source.schema);
     setTransferId(createTableDataTransferId());
-    setTargetDatabase("");
-    setTargetSchema(source.schema);
+    setTargetDatabase(initialTarget?.database || "");
+    setTargetSchema(initialTarget?.schema || source.schema);
     setTargetTable("");
     setTargetTableMode("existing");
     setMode("append");
@@ -650,6 +654,9 @@ export function TableDataTransferDialog({
   }, [
     eligibleTargetConnections,
     initialSourceTables,
+    initialTarget?.connectionId,
+    initialTarget?.database,
+    initialTarget?.schema,
     open,
     source.connectionId,
     source.driver,
@@ -782,6 +789,9 @@ export function TableDataTransferDialog({
         if (cancelled) return;
         setDatabases(nextDatabases);
         const preferredDatabase = [
+          targetConnectionId === initialTarget?.connectionId
+            ? initialTarget.database
+            : undefined,
           source.database,
           targetConnection?.database,
           nextDatabases[0],
@@ -802,6 +812,8 @@ export function TableDataTransferDialog({
     };
   }, [
     open,
+    initialTarget?.connectionId,
+    initialTarget?.database,
     source.database,
     targetConnection?.database,
     targetConnection?.driver,
