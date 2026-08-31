@@ -5,6 +5,7 @@ import {
   shouldTriggerElasticsearchCompletions,
 } from "@/lib/elasticsearchConsole";
 import {
+  MONGODB_CONSOLE_LANGUAGE_ID,
   shouldOfferMongoDbCompletions,
   shouldTriggerMongoDbCompletions,
 } from "@/lib/mongodbCompletion";
@@ -46,7 +47,8 @@ export function attachConsoleAutoSuggest(
     const isElasticsearchModel =
       model.getLanguageId() === ELASTICSEARCH_CONSOLE_LANGUAGE_ID;
     const isMongoDbModel =
-      model.getLanguageId() === "json" && identity?.driver === "mongodb";
+      model.getLanguageId() === MONGODB_CONSOLE_LANGUAGE_ID &&
+      identity?.driver === "mongodb";
     if (!isElasticsearchModel && !isMongoDbModel) return;
     const position = editor.getPosition();
     if (!position) return;

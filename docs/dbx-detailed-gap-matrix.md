@@ -14,6 +14,7 @@
 | 差距 | 本轮补齐 | 验证状态 |
 | --- | --- | --- |
 | PostgreSQL sequence `is_called` 与 ownership 状态 | DBX 与旧 Oxide 都只读取 `last_value` 并生成 `setval(..., true)`。Oxide 现在在具备 `SELECT`/`USAGE` 权限时同时捕获 state value 与 `is_called`；从未调用的 sequence 使用 start value + `false` 恢复。Schema Diff 将同名 sequence 的结构变化与状态变化分离，可审阅地恢复 `OWNED BY <table.column>`、`OWNED BY NONE` 和精确 `setval`，不会再把纯状态差异误判为不可执行的对象定义变更。旧快照未包含 `sequenceIsCalled` 时继续按历史 `true` 语义读取。SQL 备份也保留相同状态，权限不足时不猜测。 | 新增/更新 Rust 单元测试覆盖 never-called export、同名 sequence 状态恢复、owner 解除、只读 catalog 查询和旧快照 fallback；真实 PostgreSQL 版本/权限 fixture 仍按统一数据库验证阶段执行。此记录取代下文 T05/M01 中“仍缺 `is_called` 逻辑”的旧残差描述。 |
+| MongoDB shell 编辑器与 Host 执行契约 | DBX 的 `lib/mongo/mongoCompletion.ts` 与 `crates/dbx-core/src/mongo_shell.rs` 使用 shell 风格；旧 Oxide 只有原生 JSON completion/execution。Oxide 现在保留 JSON 契约，同时新增专用 Monaco `mongodb-console` 语言、实时 collection/method/chain 补全、多行及顶层分号命令范围，以及 Host 结构化 parser。首批可执行 shell 面仅包含 `find/findOne/count/countDocuments/aggregate/distinct/getIndexes/stats`、`getCollection()`、`sort/skip/limit` 和 `ObjectId/ISODate`；默认 find limit 为 100、硬上限 10000，`$out/$merge` 与所有未声明写方法 fail closed。Run Current 与 Run All 使用相同范围/解析边界，普通字符串中的构造器文本不会被改写。 | Rust/前端单元测试覆盖 native JSON 回归、shell→native contract、dotted collection、Extended JSON、链式分页、多命令/注释/字符串分号和补全范围。DBX 的 shell 写方法、更多 options/constructor、完整字段级 shell argument completion 与真实 MongoDB 版本验证仍是明确后续差距，不能把当前只读子集标为全量 shell 对齐。 |
 
 ### 最新增量审计（`1d98eca99` → `f075caef2`）
 

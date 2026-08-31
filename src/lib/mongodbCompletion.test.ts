@@ -167,3 +167,46 @@ describe("MongoDB native JSON aggregation completion", () => {
     expect(result.items).toHaveLength(256);
   });
 });
+
+describe("MongoDB read-only shell completion", () => {
+  it("offers only Host-supported read methods after a collection dot", () => {
+    const source = "db.orders.fi";
+    const result = buildMongoDbConsoleCompletions(source, source.length, {});
+    expect(result.context).toMatchObject({
+      area: "shell-method",
+      typed: "fi",
+      collection: "orders",
+      syntax: "shell",
+    });
+    expect(result.items.map((item) => item.label)).toEqual(["find", "findOne"]);
+    expect(result.items.some((item) => item.label === "deleteMany")).toBe(false);
+  });
+
+  it("offers bounded cursor chains and live collection names", () => {
+    const chain = "db.orders.find({}).";
+    expect(
+      buildMongoDbConsoleCompletions(chain, chain.length).items.map(
+        (item) => item.label,
+      ),
+    ).toEqual(["sort", "skip", "limit"]);
+
+    const collection = "db.aud";
+    const result = buildMongoDbConsoleCompletions(collection, collection.length, {
+      collections: ["audit.logs", "users"],
+    });
+    expect(result.items).toContainEqual(
+      expect.objectContaining({
+        label: "audit.logs",
+        insertText: 'getCollection("audit.logs")',
+      }),
+    );
+  });
+
+  it("keeps native JSON context routing unchanged", () => {
+    const source = '{"find":"orders","filter":{"amount":{"$g';
+    const result = completion(source);
+    expect(result.context.syntax).not.toBe("shell");
+    expect(result.context.area).toBe("query-operator");
+    expect(result.items.some((item) => item.label === "$gte")).toBe(true);
+  });
+});

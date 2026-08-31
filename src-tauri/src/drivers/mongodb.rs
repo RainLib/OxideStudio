@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use tokio::sync::Mutex;
 
+use super::mongodb_shell;
+
 const MONGODB_DATABASE_INITIALIZATION_COLLECTION: &str = "oxide_init";
 
 pub struct MongoDbDriver {
@@ -706,8 +708,17 @@ fn parse_mongodb_commands(input: &str) -> Result<Vec<MongoCommandInput>> {
 
     let parsed_values = serde_json::Deserializer::from_str(input)
         .into_iter::<Value>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("MongoDB commands must be JSON")?;
+        .collect::<std::result::Result<Vec<_>, _>>();
+    let parsed_values = match parsed_values {
+        Ok(values) => values,
+        Err(_error) if mongodb_shell::looks_like_shell_command(input) => {
+            mongodb_shell::parse_read_commands(input).map_err(|shell_error| anyhow!(shell_error))?
+        }
+        Err(error) => {
+            return Err(error)
+                .context("MongoDB commands must be JSON or a supported read-only shell command")
+        }
+    };
     let values = parsed_values
         .into_iter()
         .flat_map(|value| match value {
@@ -1708,6 +1719,34 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert!(commands[0].find.is_some());
         assert!(commands[1].count_documents.is_some());
+    }
+
+    #[test]
+    fn parses_supported_read_only_shell_command_into_native_contract() {
+        let command = parse_mongodb_commands(
+            "db.getCollection('audit.logs').find({createdAt: {$gte: ISODate('2026-01-01T00:00:00Z')}}).sort({createdAt: -1}).limit(20)",
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(command.collection.as_deref(), Some("audit.logs"));
+        assert_eq!(
+            command.find,
+            Some(serde_json::json!({
+                "createdAt": { "$gte": { "$date": "2026-01-01T00:00:00Z" } }
+            }))
+        );
+        assert_eq!(command.sort, Some(serde_json::json!({"createdAt": -1})));
+        assert_eq!(command.limit, Some(20));
+        assert!(command.insert_one.is_none());
+        assert!(command.update_many.is_none());
+
+        let commands = parse_mongodb_commands(
+            "db.users.find({note: 'a;b'}).limit(5); db.orders.count({active: true});",
+        )
+        .unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1].collection.as_deref(), Some("orders"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /**
- * MongoDB's native query runner accepts JSON command documents, not shell
- * expressions. Keep completion on that contract so every template is directly
- * executable by `src-tauri/src/drivers/mongodb.rs`.
+ * MongoDB completion supports both the native JSON contract and the bounded,
+ * read-only shell syntax parsed by `src-tauri/src/drivers/mongodb_shell.rs`.
+ * Never suggest a shell method that the Host cannot structurally parse.
  */
 export type MongoDbCompletionArea =
   | "root"
@@ -17,6 +17,9 @@ export type MongoDbCompletionArea =
   | "expression"
   | "field-reference"
   | "value"
+  | "shell-root"
+  | "shell-method"
+  | "shell-chain"
   | "unknown";
 
 export type MongoDbConsoleCompletion = {
@@ -36,6 +39,7 @@ export type MongoDbCompletionContext = {
   collection?: string;
   /** True when the cursor is inside a JSON string value. */
   quoted?: boolean;
+  syntax?: "json" | "shell";
 };
 
 export type MongoDbCompletionInput = {
@@ -141,6 +145,72 @@ const STAGE_OPTION_KEYS: Record<string, readonly string[]> = {
   ],
   $replaceRoot: ["newRoot"],
 };
+
+export const MONGODB_CONSOLE_LANGUAGE_ID = "mongodb-console";
+export const MONGODB_COMPLETION_TRIGGER_CHARACTERS = Array.from(
+  new Set(
+    ` .({[,\"'$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-`.split(
+      "",
+    ),
+  ),
+);
+
+export function registerMongoDbConsoleLanguage(monaco: any) {
+  const registrationKey = "__oxideMongoDbConsoleRegistration";
+  if (monaco[registrationKey]) return;
+  if (
+    !monaco.languages
+      .getLanguages()
+      .some((language: { id: string }) => language.id === MONGODB_CONSOLE_LANGUAGE_ID)
+  ) {
+    monaco.languages.register({
+      id: MONGODB_CONSOLE_LANGUAGE_ID,
+      extensions: [".mongo", ".mongodb"],
+      aliases: ["MongoDB Console", "MongoDB"],
+    });
+  }
+  const disposables = [
+    monaco.languages.setMonarchTokensProvider(MONGODB_CONSOLE_LANGUAGE_ID, {
+      tokenizer: {
+        root: [
+          [/\/\*/, "comment", "@comment"],
+          [/\/\/.*$/, "comment"],
+          [/\b(db)(\.)(getCollection)\b/, ["variable.predefined", "delimiter", "keyword"]],
+          [/\b(db)\b/, "variable.predefined"],
+          [/\b(find|findOne|count|countDocuments|aggregate|distinct|getIndexes|stats|sort|skip|limit)\b(?=\s*\()/, "keyword"],
+          [/\$(?:[A-Za-z][\w]*)/, "type.identifier"],
+          [/[{}()[\]]/, "@brackets"],
+          [/-?\d+(?:\.\d+)?/, "number"],
+          [/"(?:[^"\\]|\\.)*"/, "string"],
+          [/'(?:[^'\\]|\\.)*'/, "string"],
+          [/\b(?:true|false|null)\b/, "constant"],
+          [/[A-Za-z_][\w-]*(?=\s*:)/, "key"],
+        ],
+        comment: [
+          [/[^/*]+/, "comment"],
+          [/\*\//, "comment", "@pop"],
+          [/[/*]/, "comment"],
+        ],
+      },
+    }),
+    monaco.languages.setLanguageConfiguration(MONGODB_CONSOLE_LANGUAGE_ID, {
+      comments: { lineComment: "//", blockComment: ["/*", "*/"] },
+      brackets: [
+        ["{", "}"],
+        ["[", "]"],
+        ["(", ")"],
+      ],
+      autoClosingPairs: [
+        { open: "{", close: "}" },
+        { open: "[", close: "]" },
+        { open: "(", close: ")" },
+        { open: '"', close: '"' },
+        { open: "'", close: "'" },
+      ],
+    }),
+  ];
+  monaco[registrationKey] = disposables;
+}
 
 /** Keep semantic completion kinds while still enabling Monaco tab stops. */
 export function mongodbCompletionUsesSnippetSyntax(
@@ -359,7 +429,115 @@ function activeCollection(source: string, offset: number) {
   return matches[matches.length - 1]?.[1]?.trim() || undefined;
 }
 
+const MONGODB_SHELL_ROOT_COMPLETIONS: MongoDbConsoleCompletion[] = [
+  {
+    label: "db.collection.find",
+    detail: "Find documents with a bounded result",
+    documentation: "Read-only shell syntax parsed by OxideStudio; the default limit is 100.",
+    insertText:
+      "db.${1:collection}.find({\n  ${2}\n}).limit(${3:100})",
+    kind: "snippet",
+  },
+  {
+    label: "db.collection.aggregate",
+    detail: "Run a read-only aggregation pipeline",
+    insertText:
+      'db.${1:collection}.aggregate([\n  { "$match": { ${2} } }\n])',
+    kind: "snippet",
+  },
+  {
+    label: "db.getCollection",
+    detail: "Address a dotted or non-identifier collection name",
+    insertText: 'db.getCollection("${1:collection.name}").find({ ${2} }).limit(${3:100})',
+    kind: "snippet",
+  },
+];
+
+const MONGODB_SHELL_METHOD_COMPLETIONS: MongoDbConsoleCompletion[] = [
+  { label: "find", detail: "Find documents (default limit 100)", insertText: "find({ ${1} }).limit(${2:100})", kind: "snippet" },
+  { label: "findOne", detail: "Find the first matching document", insertText: "findOne({ ${1} })", kind: "snippet" },
+  { label: "countDocuments", detail: "Count matching documents", insertText: "countDocuments({ ${1} })", kind: "snippet" },
+  { label: "count", detail: "Legacy count helper", insertText: "count({ ${1} })", kind: "snippet" },
+  { label: "aggregate", detail: "Read-only aggregation pipeline", insertText: 'aggregate([\n  { "$match": { ${1} } }\n])', kind: "snippet" },
+  { label: "distinct", detail: "Read distinct field values", insertText: 'distinct("${1:field}", { ${2} })', kind: "snippet" },
+  { label: "getIndexes", detail: "List collection indexes", insertText: "getIndexes()", kind: "snippet" },
+  { label: "stats", detail: "Read collection statistics", insertText: "stats()", kind: "snippet" },
+];
+
+const MONGODB_SHELL_CHAIN_COMPLETIONS: MongoDbConsoleCompletion[] = [
+  { label: "sort", detail: "Sort find results", insertText: "sort({ ${1:field}: ${2:1} })", kind: "snippet" },
+  { label: "skip", detail: "Skip a non-negative number of results", insertText: "skip(${1:0})", kind: "snippet" },
+  { label: "limit", detail: "Limit results to 1-10000 documents", insertText: "limit(${1:100})", kind: "snippet" },
+];
+
+function mongodbShellCollection(beforeCursor: string) {
+  const getCollection = beforeCursor.match(
+    /\bdb\.getCollection\(\s*(["'])(.*?)\1\s*\)/su,
+  );
+  if (getCollection?.[2]) return getCollection[2];
+  return beforeCursor.match(/\bdb\.([\p{L}\p{N}_-]+)/u)?.[1];
+}
+
+function mongodbShellCompletionContext(
+  source: string,
+  cursorOffset: number,
+): MongoDbCompletionContext | null {
+  const beforeCursor = source.slice(0, clampOffset(source, cursorOffset));
+  const trimmed = beforeCursor.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return null;
+
+  const chain = beforeCursor.match(/\)\s*\.\s*([A-Za-z]*)$/u);
+  if (chain) {
+    return {
+      area: "shell-chain",
+      typed: chain[1] || "",
+      collection: mongodbShellCollection(beforeCursor),
+      syntax: "shell",
+    };
+  }
+
+  const method = beforeCursor.match(
+    /\bdb\.(?:getCollection\(\s*(["']).*?\1\s*\)|[\p{L}\p{N}_-]+)\s*\.\s*([A-Za-z]*)$/su,
+  );
+  if (method) {
+    return {
+      area: "shell-method",
+      typed: method[2] || "",
+      collection: mongodbShellCollection(beforeCursor),
+      syntax: "shell",
+    };
+  }
+
+  const collection = beforeCursor.match(/\bdb\.([\p{L}\p{N}_.-]*)$/u);
+  if (collection) {
+    return {
+      area: "collection",
+      typed: collection[1] || "",
+      syntax: "shell",
+    };
+  }
+
+  if (/^\s*(?:d|db)?$/iu.test(beforeCursor)) {
+    return {
+      area: "shell-root",
+      typed: beforeCursor.trim(),
+      syntax: "shell",
+    };
+  }
+
+  return trimmed.startsWith("db.")
+    ? {
+        area: "unknown",
+        typed: beforeCursor.match(/[A-Za-z0-9_$.-]+$/u)?.[0] || "",
+        collection: mongodbShellCollection(beforeCursor),
+        syntax: "shell",
+      }
+    : null;
+}
+
 export function mongodbConsoleCompletionContext(source: string, cursorOffset: number): MongoDbCompletionContext {
+  const shellContext = mongodbShellCompletionContext(source, cursorOffset);
+  if (shellContext) return shellContext;
   const scan = scanJsonBeforeCursor(source, cursorOffset);
   const frame = scan.frames[scan.frames.length - 1];
   const collection = activeCollection(source, cursorOffset);
@@ -559,11 +737,34 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
     .sort((left, right) => left.name.localeCompare(right.name));
   let items: MongoDbConsoleCompletion[];
   switch (context.area) {
+    case "shell-root":
+      items = MONGODB_SHELL_ROOT_COMPLETIONS.filter((item) =>
+        matches(item.label, context.typed),
+      );
+      break;
+    case "shell-method":
+      items = MONGODB_SHELL_METHOD_COMPLETIONS.filter((item) =>
+        matches(item.label, context.typed),
+      );
+      break;
+    case "shell-chain":
+      items = MONGODB_SHELL_CHAIN_COMPLETIONS.filter((item) =>
+        matches(item.label, context.typed),
+      );
+      break;
     case "root":
       items = ROOT_COMMANDS.filter((item) => matches(item.label, context.typed));
       break;
     case "collection":
-      items = collections.filter((name) => matches(name, context.typed)).map((name) => ({ label: name, detail: "MongoDB collection", insertText: name, kind: "value" }));
+      items = collections.filter((name) => matches(name, context.typed)).map((name) => ({
+        label: name,
+        detail: "MongoDB collection",
+        insertText:
+          context.syntax === "shell" && !/^[\p{L}\p{N}_-]+$/u.test(name)
+            ? `getCollection(${JSON.stringify(name)})`
+            : name,
+        kind: "value",
+      }));
       break;
     case "field":
       items = fields.filter((field) => matches(field.name, context.typed)).map((field) => ({ label: field.name, detail: field.dataType || "MongoDB field", insertText: field.name, kind: "field" }));
@@ -609,7 +810,7 @@ export function buildMongoDbConsoleCompletions(source: string, cursorOffset: num
 /** Compatibility shape used by the auto-suggest lifecycle. */
 export function mongodbCompletionArea(source: string, cursorOffset: number): MongoDbCompletionArea | "unknown" {
   const area = mongodbConsoleCompletionContext(source, cursorOffset).area;
-  if (area === "root") return "key";
+  if (area === "root" || area === "shell-root" || area === "shell-method" || area === "shell-chain") return "key";
   if (
     area === "field" ||
     area === "query-operator" ||
@@ -639,5 +840,5 @@ const MONGODB_AUTOMATIC_TRIGGER = /[A-Za-z0-9_$.-]/u;
 
 export function shouldTriggerMongoDbCompletions(source: string, cursorOffset: number, insertedText: string) {
   const lastCharacter = insertedText[insertedText.length - 1];
-  return Boolean(lastCharacter && (lastCharacter === '"' || lastCharacter === "{" || lastCharacter === "[" || lastCharacter === "," || lastCharacter === ":" || MONGODB_AUTOMATIC_TRIGGER.test(lastCharacter)) && shouldOfferMongoDbCompletions(source, cursorOffset));
+  return Boolean(lastCharacter && (lastCharacter === '"' || lastCharacter === "'" || lastCharacter === "." || lastCharacter === "(" || lastCharacter === "{" || lastCharacter === "[" || lastCharacter === "," || lastCharacter === ":" || MONGODB_AUTOMATIC_TRIGGER.test(lastCharacter)) && shouldOfferMongoDbCompletions(source, cursorOffset));
 }

@@ -9,6 +9,7 @@ use std::str::FromStr;
 pub mod elasticsearch;
 pub mod external;
 pub mod mongodb;
+mod mongodb_shell;
 pub mod mysql;
 pub mod postgres;
 pub mod redis;

@@ -76,6 +76,76 @@ function arrayCommandRanges(source: string, from: number, to: number) {
   return ranges;
 }
 
+function trimmedCommandRange(source: string, from: number, to: number) {
+  let start = from;
+  let end = to;
+  while (start < end && /\s/u.test(source[start] || "")) start += 1;
+  while (end > start && /\s/u.test(source[end - 1] || "")) end -= 1;
+  if (start >= end) return null;
+  return { from: start, to: end, text: source.slice(start, end) };
+}
+
+function mongoShellCommandRanges(source: string): MongoDbCommandRange[] {
+  const ranges: MongoDbCommandRange[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let cursor = 0; cursor < source.length; cursor += 1) {
+    const character = source[cursor] || "";
+    const next = source[cursor + 1] || "";
+    if (lineComment) {
+      if (character === "\n" || character === "\r") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        cursor += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if ((character === "/" && next === "/") || (character === "-" && next === "-")) {
+      lineComment = true;
+      cursor += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      cursor += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "(" || character === "[" || character === "{") depth += 1;
+    else if (character === ")" || character === "]" || character === "}") {
+      depth -= 1;
+      if (depth < 0) return [];
+    } else if (character === ";" && depth === 0) {
+      const range = trimmedCommandRange(source, start, cursor);
+      if (range) ranges.push(range);
+      start = cursor + 1;
+    }
+  }
+  if (quote || blockComment || depth !== 0) return [];
+  const tail = trimmedCommandRange(source, start, source.length);
+  if (tail) ranges.push(tail);
+  return ranges.every((range) => /^(?:(?:\/\/|--)[^\r\n]*(?:\r?\n)|\/\*[\s\S]*?\*\/\s*)*db\./iu.test(range.text))
+    ? ranges
+    : [];
+}
+
 /**
  * Split the strict JSON command shapes accepted by the native MongoDB driver.
  * A document may contain one object, a top-level array of objects, or several
@@ -83,6 +153,10 @@ function arrayCommandRanges(source: string, from: number, to: number) {
  * remaining valid for the backend's streaming JSON parser.
  */
 export function mongodbCommandRanges(source: string): MongoDbCommandRange[] {
+  const first = source.slice(skipWhitespace(source, 0), skipWhitespace(source, 0) + 1);
+  if (first && first !== "{" && first !== "[") {
+    return mongoShellCommandRanges(source);
+  }
   const ranges: MongoDbCommandRange[] = [];
   let cursor = skipWhitespace(source, 0);
   while (cursor < source.length) {

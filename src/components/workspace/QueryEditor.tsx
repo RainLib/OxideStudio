@@ -156,8 +156,11 @@ import {
 } from "@/lib/elasticsearchConsole";
 import {
   buildMongoDbConsoleCompletions,
+  MONGODB_COMPLETION_TRIGGER_CHARACTERS,
+  MONGODB_CONSOLE_LANGUAGE_ID,
   mongodbCompletionUsesSnippetSyntax,
   mongodbConsoleCompletionContext,
+  registerMongoDbConsoleLanguage,
 } from "@/lib/mongodbCompletion";
 import {
   sqlBatchColumnInsertion,
@@ -1309,83 +1312,96 @@ export function QueryEditor({
       );
     };
 
-    const disposable = monaco.languages.registerCompletionItemProvider("json", {
-      triggerCharacters: ['"', "{", "[", ",", ":", "$"],
-      provideCompletionItems: async (
-        model: any,
-        position: any,
-        _providerContext: any,
-        token: { isCancellationRequested?: boolean },
-      ) => {
-        const identity = extractLspDocumentIdentity(model.uri.toString());
-        if (identity?.tabId !== effectiveTabId || identity.driver !== "mongodb") {
-          return { suggestions: [] };
-        }
-        const source = model.getValue();
-        const offset = model.getOffsetAt(position);
-        const initialVersion = model.getVersionId();
-        const context = mongodbConsoleCompletionContext(source, offset);
-        const needsCollections = context.area === "collection";
-        const needsFields =
-          context.area === "field" || context.area === "field-reference";
-        let refreshQueued = false;
-        const onBackgroundRefresh = () => {
-          if (refreshQueued) return;
-          refreshQueued = true;
-          retriggerActiveDocumentCompletion({
-            model,
-            position,
-            modelVersion: initialVersion,
-            token,
+    const disposable = monaco.languages.registerCompletionItemProvider(
+      MONGODB_CONSOLE_LANGUAGE_ID,
+      {
+        triggerCharacters: MONGODB_COMPLETION_TRIGGER_CHARACTERS,
+        provideCompletionItems: async (
+          model: any,
+          position: any,
+          _providerContext: any,
+          token: { isCancellationRequested?: boolean },
+        ) => {
+          const identity = extractLspDocumentIdentity(model.uri.toString());
+          if (
+            identity?.tabId !== effectiveTabId ||
+            identity.driver !== "mongodb"
+          ) {
+            return { suggestions: [] };
+          }
+          const source = model.getValue();
+          const offset = model.getOffsetAt(position);
+          const initialVersion = model.getVersionId();
+          const context = mongodbConsoleCompletionContext(source, offset);
+          const needsCollections = context.area === "collection";
+          const needsFields =
+            context.area === "field" || context.area === "field-reference";
+          let refreshQueued = false;
+          const onBackgroundRefresh = () => {
+            if (refreshQueued) return;
+            refreshQueued = true;
+            retriggerActiveDocumentCompletion({
+              model,
+              position,
+              modelVersion: initialVersion,
+              token,
+            });
+          };
+          const [collections, fields] = await Promise.all([
+            needsCollections
+              ? loadCollections(onBackgroundRefresh)
+              : Promise.resolve([]),
+            needsFields && context.collection
+              ? loadFields(context.collection, onBackgroundRefresh)
+              : Promise.resolve([]),
+          ]);
+          if (
+            token?.isCancellationRequested ||
+            model.getVersionId() !== initialVersion
+          ) {
+            return { suggestions: [] };
+          }
+          const { items } = buildMongoDbConsoleCompletions(source, offset, {
+            collections,
+            fields,
           });
-        };
-        const [collections, fields] = await Promise.all([
-          needsCollections
-            ? loadCollections(onBackgroundRefresh)
-            : Promise.resolve([]),
-          needsFields && context.collection
-            ? loadFields(context.collection, onBackgroundRefresh)
-            : Promise.resolve([]),
-        ]);
-        if (
-          token?.isCancellationRequested ||
-          model.getVersionId() !== initialVersion
-        ) {
-          return { suggestions: [] };
-        }
-        const { items } = buildMongoDbConsoleCompletions(source, offset, {
-          collections,
-          fields,
-        });
-        const range = mongodbJsonStringCompletionRange(monaco, model, position);
-        const kindMap = {
-          property: monaco.languages.CompletionItemKind.Property,
-          field: monaco.languages.CompletionItemKind.Field,
-          operator: monaco.languages.CompletionItemKind.Operator,
-          snippet: monaco.languages.CompletionItemKind.Snippet,
-          value: monaco.languages.CompletionItemKind.Value,
-        };
-        return {
-          incomplete: Boolean(needsCollections || needsFields),
-          suggestions: items.map((item, index) => ({
-            label: item.label,
-            kind: kindMap[item.kind],
-            detail: item.detail,
-            documentation: item.documentation
-              ? { value: item.documentation }
-              : undefined,
-            insertText: item.insertText,
-            insertTextRules:
-              mongodbCompletionUsesSnippetSyntax(item)
+          const range =
+            context.syntax === "shell"
+              ? new monaco.Range(
+                  position.lineNumber,
+                  Math.max(1, position.column - context.typed.length),
+                  position.lineNumber,
+                  position.column,
+                )
+              : mongodbJsonStringCompletionRange(monaco, model, position);
+          const kindMap = {
+            property: monaco.languages.CompletionItemKind.Property,
+            field: monaco.languages.CompletionItemKind.Field,
+            operator: monaco.languages.CompletionItemKind.Operator,
+            snippet: monaco.languages.CompletionItemKind.Snippet,
+            value: monaco.languages.CompletionItemKind.Value,
+          };
+          return {
+            incomplete: Boolean(needsCollections || needsFields),
+            suggestions: items.map((item, index) => ({
+              label: item.label,
+              kind: kindMap[item.kind],
+              detail: item.detail,
+              documentation: item.documentation
+                ? { value: item.documentation }
+                : undefined,
+              insertText: item.insertText,
+              insertTextRules: mongodbCompletionUsesSnippetSyntax(item)
                 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
                 : undefined,
-            filterText: item.label,
-            sortText: item.sortText || String(index).padStart(3, "0"),
-            range,
-          })),
-        };
+              filterText: item.label,
+              sortText: item.sortText || String(index).padStart(3, "0"),
+              range,
+            })),
+          };
+        },
       },
-    });
+    );
     return () => disposable.dispose();
   }, [
     activeConnection?.database,
@@ -3633,6 +3649,7 @@ export function QueryEditor({
 
   const handleEditorBeforeMount = useCallback((monacoInstance: any) => {
     registerElasticsearchConsoleLanguage(monacoInstance);
+    registerMongoDbConsoleLanguage(monacoInstance);
     monacoInstance.editor.defineTheme("oxide-dark", {
       base: "vs-dark",
       inherit: true,

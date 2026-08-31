@@ -4,6 +4,7 @@ import {
   supportsLspCapabilities,
 } from "@/lib/databaseDialect";
 import { ELASTICSEARCH_CONSOLE_LANGUAGE_ID } from "@/lib/elasticsearchConsole";
+import { MONGODB_CONSOLE_LANGUAGE_ID } from "@/lib/mongodbCompletion";
 import {
   projectFileLanguage,
   projectFileModelUri,
@@ -70,6 +71,8 @@ export function editorDocumentIdentity(options: {
       ? "plaintext"
       : driver === "elasticsearch"
         ? ELASTICSEARCH_CONSOLE_LANGUAGE_ID
+        : driver === "mongodb"
+          ? MONGODB_CONSOLE_LANGUAGE_ID
         : queryEditorLanguageIdForCapabilities(capabilities));
   const canUseLsp = Boolean(
     !isProjectFilePreview &&
