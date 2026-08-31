@@ -30,6 +30,11 @@ import {
   databaseSchemaNavigationKey,
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
+import {
+  explorerActivationLabel,
+  shouldActivateExplorerObject,
+  type ExplorerActivationMode,
+} from "@/features/database-explorer/model/explorerActivation";
 
 type SchemaLoadStatus = "idle" | "loading" | "success" | "error";
 
@@ -47,6 +52,7 @@ interface PostgresRemoteDatabaseContentsProps {
   schemas: string[];
   connectionColor: string;
   filterText?: string;
+  activationMode: ExplorerActivationMode;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
   onOpenSchemaSnapshots?: (database: string, schema: string) => void;
   onOpenSchemaDataTransfer?: (database: string, schema: string) => void;
@@ -90,6 +96,7 @@ export function PostgresRemoteDatabaseContents({
   schemas,
   connectionColor,
   filterText = "",
+  activationMode = "single",
   onTablesLoaded,
   onOpenSchemaSnapshots,
   onOpenSchemaDataTransfer,
@@ -490,15 +497,38 @@ export function PostgresRemoteDatabaseContents({
                               },
                             )}
                             data-postgres-remote-table={`${database}.${schema}.${table.name}`}
-                            onClick={() =>
-                              void onOpenTable(database, schema, table)
-                            }
+                            onClick={(event) => {
+                              if (
+                                shouldActivateExplorerObject(
+                                  activationMode,
+                                  "click",
+                                  event.detail,
+                                )
+                              ) {
+                                void onOpenTable(database, schema, table);
+                              }
+                            }}
+                            onDoubleClick={() => {
+                              if (
+                                shouldActivateExplorerObject(
+                                  activationMode,
+                                  "double-click",
+                                )
+                              ) {
+                                void onOpenTable(database, schema, table);
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter") return;
+                              event.preventDefault();
+                              void onOpenTable(database, schema, table);
+                            }}
                             className={cn(
                               "flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-left text-[11px]",
                               "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                               "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]",
                             )}
-                            title={`Open ${database}.${schema}.${table.name} data (read-only)`}
+                            title={`${explorerActivationLabel(activationMode)} to open ${database}.${schema}.${table.name} data (read-only)`}
                           >
                             <ObjectIcon
                               size={12}

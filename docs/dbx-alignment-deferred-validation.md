@@ -1545,6 +1545,21 @@ explicit deferred validation task rather than an implicit release check.
 - Verify driver error mapping, generated/identity/read-only columns, SQL Server
   and SQLite dialect contracts, multiline editor behavior, IME and screen-reader
   focus. Phase 124 performs no database connection.
+
+## Database Explorer activation and selected-table batch actions
+
+- In a packaged WebView, switch between single-click and double-click activation,
+  restart the application, and verify the policy across the main schema tree,
+  PostgreSQL remote-database contents, database browser, views, collections and
+  keyboard Enter. A physical double click in single-click mode must not create a
+  duplicate tab or duplicate metadata request.
+- Select up to 200 tables, including Shift ranges and filtered lists. Verify
+  bounded metadata refresh, ordered name copy, partial DDL failures, diagram
+  highlighting, SQL export cancellation, transfer and compare target scope.
+- Repeat on a large catalog while changing connection/schema during an active
+  batch request. Stale cache generations must be rejected and failure details
+  must remain bounded. This phase has 299 green frontend files / 1,590 tests and
+  a production frontend build; no live database was opened.
 # Phase 128 — whole-schema SQL export
 
 - Run PostgreSQL fixtures that cover empty schemas, generated/identity columns, foreign-key ordering, large relations, cancellation during metadata and data pages, and restore into a clean target.

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  composeTableBatchDdl,
+  formatTableBatchNamesForClipboard,
   pruneTableBatchSelection,
   settleTableBatchWork,
   summarizeTableBatchFailures,
@@ -9,6 +11,19 @@ import {
 
 describe("Explorer table batch selection", () => {
   const visible = ["accounts", "orders", "payments", "users"];
+
+  it("formats selected names and only successful non-empty DDL results", () => {
+    expect(formatTableBatchNamesForClipboard(["accounts", "orders"])).toBe(
+      "accounts, orders",
+    );
+    expect(
+      composeTableBatchDdl("public", ["accounts", "orders", "payments"], [
+        { status: "fulfilled", value: "CREATE TABLE accounts ();\n" },
+        { status: "rejected", reason: new Error("offline") },
+        { status: "fulfilled", value: "  " },
+      ]),
+    ).toBe("-- public.accounts\nCREATE TABLE accounts ();");
+  });
 
   it("toggles one table while preserving metadata order", () => {
     let selection = { names: [] as string[], anchor: null as string | null };

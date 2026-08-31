@@ -231,7 +231,7 @@ describe("Database Explorer NoSQL navigation", () => {
     await act(async () => {
       container
         .querySelector<HTMLElement>('[title="session"]')!
-        .dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+        .click();
     });
 
     await vi.waitFor(() => {

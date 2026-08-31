@@ -58,6 +58,7 @@ export type WorkbenchSide = "left" | "right";
 
 export type AppLocale = "system" | "en-US" | "zh-CN";
 export type TableTabReuseMode = "always-new" | "same-table" | "active-tab";
+export type ExplorerActivationMode = "single" | "double";
 export type AppearanceStylePreset = "oxide" | "graphite" | "violet" | "terminal";
 export type AppearanceAccent = "blue" | "violet" | "teal" | "amber";
 export type AppearanceFontFamily = "system" | "sans" | "mono";
@@ -146,6 +147,7 @@ export type AppSettings = {
     showTypeIcons: boolean;
   };
   databaseExplorer: {
+    activationMode: ExplorerActivationMode;
     refreshMode: "manual" | "cache-first";
     showOnlySelectedSchemas: boolean;
     showCacheBadges: boolean;
@@ -318,6 +320,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     showTypeIcons: true,
   },
   databaseExplorer: {
+    activationMode: "single",
     refreshMode: "cache-first",
     showOnlySelectedSchemas: true,
     showCacheBadges: true,
@@ -733,6 +736,12 @@ export function normalizeAppSettings(value: unknown): AppSettings {
       ),
     },
     databaseExplorer: {
+      activationMode: enumAt(
+        raw,
+        ["databaseExplorer", "activationMode"],
+        ["single", "double"],
+        defaults.databaseExplorer.activationMode,
+      ),
       refreshMode: enumAt(
         raw,
         ["databaseExplorer", "refreshMode"],

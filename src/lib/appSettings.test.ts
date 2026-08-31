@@ -61,6 +61,27 @@ describe("SQL editor settings", () => {
   });
 });
 
+describe("Database Explorer settings", () => {
+  it("defaults object activation to a single click", () => {
+    expect(normalizeAppSettings({}).databaseExplorer.activationMode).toBe(
+      "single",
+    );
+  });
+
+  it("persists supported activation modes and rejects unknown values", () => {
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { activationMode: "double" },
+      }).databaseExplorer.activationMode,
+    ).toBe("double");
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { activationMode: "hover" },
+      }).databaseExplorer.activationMode,
+    ).toBe("single");
+  });
+});
+
 describe("driver runtime settings", () => {
   it("migrates old settings and accepts only credential-free HTTPS worker roots", () => {
     expect(normalizeAppSettings({}).drivers.sqliteWorkerBaseUrl).toBe("");

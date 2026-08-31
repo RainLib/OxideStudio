@@ -74,7 +74,10 @@ import {
   invalidateRoutineSourceCache,
   loadPostgresRoutineDefinitions,
 } from "@/services/routineSourceCache";
-import { loadTableMetadata } from "@/services/tableMetadataCache";
+import {
+  loadTableDdl,
+  loadTableMetadata,
+} from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
   DatabaseCapabilities,
@@ -153,6 +156,8 @@ import {
   routineSignature,
 } from "@/features/database-explorer/model/routinePresentation";
 import {
+  composeTableBatchDdl,
+  formatTableBatchNamesForClipboard,
   MAX_EXPLORER_TABLE_BATCH_SELECTION,
   pruneTableBatchSelection,
   settleTableBatchWork,
@@ -162,6 +167,10 @@ import {
   type TableBatchFailureDetail,
   type TableBatchSelection,
 } from "@/features/database-explorer/model/tableBatchSelection";
+import {
+  explorerActivationLabel,
+  shouldActivateExplorerObject,
+} from "@/features/database-explorer/model/explorerActivation";
 import { searchIndexClearTouched } from "@/features/database-explorer/model/elasticsearchIndexActions";
 import {
   captureLiveSchemaSnapshot,
@@ -737,6 +746,7 @@ export function SchemaSidebar() {
     databaseExplorerSettings.refreshMode === "cache-first";
   const shouldLimitVisibleSchemas =
     databaseExplorerSettings.showOnlySelectedSchemas;
+  const explorerActivationMode = databaseExplorerSettings.activationMode;
 
   const {
     truncateTable,
@@ -1753,7 +1763,10 @@ export function SchemaSidebar() {
     }
   };
 
-  const handleOpenSchemaDiagram = async (identity: SchemaSnapshotIdentity) => {
+  const handleOpenSchemaDiagram = async (
+    identity: SchemaSnapshotIdentity,
+    selectedRelations: readonly string[] = [],
+  ) => {
     const loadingKey = [
       identity.connectionId,
       identity.databaseName || "",
@@ -1774,7 +1787,16 @@ export function SchemaSidebar() {
       const snapshot = await captureLiveSchemaSnapshot(identity, {
         allowPartial: true,
       });
-      openSchemaDiagramTab(snapshot);
+      const tabId = openSchemaDiagramTab(snapshot);
+      if (selectedRelations.length > 0) {
+        const availableRelations = new Set(
+          snapshot.relations.map((relation) => relation.name),
+        );
+        useTabStore.getState().selectSchemaDiagramRelations(
+          tabId,
+          selectedRelations.filter((name) => availableRelations.has(name)),
+        );
+      }
       tasks.finishTask(
         taskId,
         `${snapshot.relations.length.toLocaleString()} relations mapped`,
@@ -2272,6 +2294,104 @@ export function SchemaSidebar() {
         : current,
     );
     await tableService.cancelTableExport(exportId);
+  };
+
+  const copySelectedTableNames = async (options: {
+    scopeKey: string;
+    tables: string[];
+  }) => {
+    if (options.tables.length === 0 || tableBatchAction?.running) return;
+    try {
+      await copyText(formatTableBatchNamesForClipboard(options.tables));
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message: `${options.tables.length} name${options.tables.length === 1 ? "" : "s"} copied`,
+      });
+    } catch {
+      // copyText owns the user-visible clipboard failure message.
+    }
+  };
+
+  const showSelectedTableDdl = async (options: {
+    scopeKey: string;
+    connectionId: string;
+    driver: DatabaseDriver;
+    driverPackageVersion?: string | null;
+    connectionDatabaseName?: string | null;
+    databaseName?: string;
+    schema: string;
+    tables: TableInfo[];
+  }) => {
+    if (options.tables.length === 0 || tableBatchAction?.running) return;
+    setTableBatchAction({
+      scopeKey: options.scopeKey,
+      running: true,
+      message: `Loading DDL for ${options.tables.length} table${options.tables.length === 1 ? "" : "s"}…`,
+    });
+    try {
+      const readinessError = await setActiveConnection(options.connectionId);
+      if (readinessError) throw new Error(readinessError);
+      const tableNames = options.tables.map((table) => table.name);
+      const tableTypes = new Map(
+        options.tables.map((table) => [table.name, table.type] as const),
+      );
+      const results = await settleTableBatchWork(
+        tableNames,
+        (table) =>
+          loadTableDdl(
+            {
+              projectId: activeProjectId || undefined,
+              connectionId: options.connectionId,
+              driver: options.driver,
+              driverPackageVersion: options.driverPackageVersion,
+              connectionDatabaseName: options.connectionDatabaseName,
+              databaseName: options.databaseName,
+              schema: options.schema,
+              table,
+            },
+            tableTypes.get(table),
+          ),
+        6,
+      );
+      const failureSummary = summarizeTableBatchFailures(
+        tableNames,
+        results,
+      );
+      const ddl = composeTableBatchDdl(
+        options.schema,
+        tableNames,
+        results,
+      );
+      const loadedCount = results.filter(
+        (result) => result.status === "fulfilled" && result.value.trim(),
+      ).length;
+      if (!ddl) {
+        throw new Error("No table DDL could be loaded.");
+      }
+      setActiveTable(
+        `${options.tables.length} selected table${options.tables.length === 1 ? "" : "s"}`,
+      );
+      setActiveTableType(null);
+      setDdlContent(ddl);
+      setDdlViewerOpen(true);
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message: failureSummary.total
+          ? `${loadedCount} DDL loaded · ${failureSummary.total} failed`
+          : `${loadedCount} DDL loaded`,
+        failures: failureSummary.failures,
+        omittedFailures: failureSummary.omitted,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setTableBatchAction({
+        scopeKey: options.scopeKey,
+        running: false,
+        message: `DDL failed: ${message}`,
+      });
+    }
   };
 
   const handleCopyCollectionPreview = async (collection: CollectionInfo) => {
@@ -3504,14 +3624,37 @@ export function SchemaSidebar() {
                             ? "wb-tree-row-selected"
                             : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                         )}
-                        onClick={() =>
+                        onClick={(event) => {
+                          if (
+                            shouldActivateExplorerObject(
+                              explorerActivationMode,
+                              "click",
+                              event.detail,
+                            )
+                          ) {
+                            void handleTableDoubleClick(view, schema);
+                            return;
+                          }
                           void runForSchema(schema, () =>
                             handleTableSelect(view.name),
-                          )
-                        }
-                        onDoubleClick={() =>
-                          void handleTableDoubleClick(view, schema)
-                        }
+                          );
+                        }}
+                        onDoubleClick={() => {
+                          if (
+                            shouldActivateExplorerObject(
+                              explorerActivationMode,
+                              "double-click",
+                            )
+                          ) {
+                            void handleTableDoubleClick(view, schema);
+                          }
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          void handleTableDoubleClick(view, schema);
+                        }}
+                        title={`${explorerActivationLabel(explorerActivationMode)} to open ${schema}.${view.name} data`}
                       >
                         <TableProperties
                           size={12}
@@ -3809,17 +3952,44 @@ export function SchemaSidebar() {
                     : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                 )}
                 style={{ paddingLeft: `${8 + depth * 14}px` }}
-                onClick={() =>
+                onClick={(event) => {
+                  if (
+                    shouldActivateExplorerObject(
+                      explorerActivationMode,
+                      "click",
+                      event.detail,
+                    )
+                  ) {
+                    void runForSchema(schema, () =>
+                      handleCollectionDoubleClick(collection),
+                    );
+                    return;
+                  }
                   void runForSchema(schema, () =>
                     handleCollectionSelect(collection.name),
-                  )
-                }
-                onDoubleClick={() =>
+                  );
+                }}
+                onDoubleClick={() => {
+                  if (
+                    shouldActivateExplorerObject(
+                      explorerActivationMode,
+                      "double-click",
+                    )
+                  ) {
+                    void runForSchema(schema, () =>
+                      handleCollectionDoubleClick(collection),
+                    );
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
                   void runForSchema(schema, () =>
                     handleCollectionDoubleClick(collection),
-                  )
-                }
+                  );
+                }}
                 title={collection.name}
+                aria-label={`${collection.name}. ${explorerActivationLabel(explorerActivationMode)} to open data.`}
               >
                 {canExpandCollectionMetadata && (
                   <button
@@ -4087,8 +4257,8 @@ export function SchemaSidebar() {
               </div>
             )}
             {isTableBatchSelectionActive && tableRelations.length > 0 && (
-              <div className="mx-1 mb-1 mt-0.5 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] border-l-2 border-l-[hsl(var(--wb-accent))] bg-[hsl(var(--wb-panel-raised))] text-[10px]">
-                <div className="flex min-h-7 items-center gap-1 px-1.5 py-1">
+              <div className="mx-1 mb-1 mt-0.5 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] text-[10px]">
+                <div className="flex min-h-7 flex-wrap items-center gap-1 px-1.5 py-1">
                   <Checkbox
                   className={checkboxClass}
                   disabled={tableBatchAction?.running}
@@ -4144,6 +4314,79 @@ export function SchemaSidebar() {
                   }
                 >
                   Refresh
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    tableBatchAction?.running
+                  }
+                  title="Copy selected table names"
+                  onClick={() =>
+                    void copySelectedTableNames({
+                      scopeKey: groupKey,
+                      tables: selectedTableBatchNames,
+                    })
+                  }
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    !objectConnection ||
+                    tableBatchAction?.running
+                  }
+                  title="Load the selected tables into one DDL viewer"
+                  onClick={() => {
+                    if (!objectConnection) return;
+                    const selectedNames = new Set(selectedTableBatchNames);
+                    void showSelectedTableDdl({
+                      scopeKey: groupKey,
+                      connectionId,
+                      driver: objectConnection.driver,
+                      driverPackageVersion:
+                        objectConnection.driverPackageVersion,
+                      connectionDatabaseName: objectConnection.database,
+                      databaseName: navigationDatabaseName,
+                      schema,
+                      tables: tableRelations.filter((table) =>
+                        selectedNames.has(table.name),
+                      ),
+                    });
+                  }}
+                >
+                  DDL
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                  disabled={
+                    selectedTableBatchNames.length === 0 ||
+                    !objectConnection ||
+                    tableBatchAction?.running ||
+                    Boolean(schemaDiagramLoadingKey)
+                  }
+                  title="Open a schema diagram with the selected tables highlighted"
+                  onClick={() => {
+                    if (!objectConnection) return;
+                    void handleOpenSchemaDiagram(
+                      {
+                        projectId: activeProjectId,
+                        connectionId,
+                        connectionName: objectConnection.name,
+                        driver: objectConnection.driver,
+                        databaseName: navigationDatabaseName,
+                        schemaName: schema,
+                      },
+                      selectedTableBatchNames,
+                    );
+                  }}
+                >
+                  Diagram
                 </button>
                 {objectDriver &&
                   normalizeDatabaseDriverName(objectDriver) === "postgres" &&
@@ -4396,7 +4639,7 @@ export function SchemaSidebar() {
                               },
                             )}
                             tabIndex={-1}
-                            aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. Double-click to open data; right-click for actions; expand for columns and indexes.`}
+                            aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. ${explorerActivationLabel(explorerActivationMode)} to open data; right-click for actions; expand for columns and indexes.`}
                             className={cn(
                               "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
                               selectedTableBatchSet.has(table.name) ||
@@ -4418,15 +4661,37 @@ export function SchemaSidebar() {
                                 });
                                 return;
                               }
+                              if (
+                                shouldActivateExplorerObject(
+                                  explorerActivationMode,
+                                  "click",
+                                  event.detail,
+                                )
+                              ) {
+                                void handleTableDoubleClick(table, schema);
+                                return;
+                              }
                               void runForSchema(schema, () =>
                                 handleTableSelect(table.name),
                               );
                             }}
-                            onDoubleClick={() =>
-                              !isTableBatchSelectionActive &&
-                              void handleTableDoubleClick(table, schema)
-                            }
-                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\nDouble-click to open data · Right-click for actions · Expand for columns and indexes`}
+                            onDoubleClick={() => {
+                              if (
+                                !isTableBatchSelectionActive &&
+                                shouldActivateExplorerObject(
+                                  explorerActivationMode,
+                                  "double-click",
+                                )
+                              ) {
+                                void handleTableDoubleClick(table, schema);
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter" || isTableBatchSelectionActive) return;
+                              event.preventDefault();
+                              void handleTableDoubleClick(table, schema);
+                            }}
+                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\n${explorerActivationLabel(explorerActivationMode)} to open data · Right-click for actions · Expand for columns and indexes`}
                           >
                             {isTableBatchSelectionActive && (
                               <Checkbox
@@ -5988,6 +6253,7 @@ export function SchemaSidebar() {
                                   scope: "schema",
                                 })
                               }
+                              activationMode={explorerActivationMode}
                               onOpenSchemaDataCompare={(databaseName, schema) =>
                                 void handleOpenDataCompare({
                                   connection,

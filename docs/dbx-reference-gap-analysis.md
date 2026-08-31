@@ -404,13 +404,19 @@ Editor，而不是引入一个新的 Git UI 框架。
 - PostgreSQL database 层和 remote database contents，Redis namespace，
   Mongo collection，Elasticsearch index。
 - 新建/删除/重命名、DDL、diagram、diff 等动作按 capability 暴露。
+- 对象打开支持全局单击/双击策略，键盘 Enter 始终可执行；该策略同时覆盖主树、
+  PostgreSQL 远程 database 内容和 database browser。
+- 表组支持显式批量选择、Shift 范围选择和 200 项上限；批量刷新使用 6 worker
+  有界并发并汇总有限失败详情。批量操作已覆盖复制名称、合并 DDL 预览、关系图
+  高亮、SQL 数据导出、数据迁移和数据比较。
 
 ### 差距
 
 - `SchemaSidebar.tsx` 超过 4,400 行，同时承担树构建、加载、动作路由、弹窗和状态。
 - 对象类型覆盖与各 driver 不一致：sequence、type/domain、extension、trigger、
   event、partition、foreign server、tablespace 等仍不完整。
-- 批量选择、批量刷新/导出/删除、拖放复制和跨连接数据传输不足。
+- 通用树节点的 Ctrl/Cmd 多选、所选表拖入 SQL、批量加入 AI 上下文和受保护的
+  批量删除尚未与 DBX 的通用树 runtime 对齐；跨连接数据传输已支持显式所选表集。
 - 大 catalog 虚拟化、增量搜索、过期节点和失败节点的恢复策略仍需压测。
 - 对象动作应由 provider/command descriptor 生成，避免继续在树组件中追加
   `if (driver === ...)`。

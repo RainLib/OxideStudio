@@ -2195,7 +2195,26 @@ function DatabaseExplorerSettings({
 
   return (
     <SettingsPanel>
-      <SettingsDivider title="Introspection" first />
+      <SettingsDivider title="Interaction" first />
+      <SettingRow label="Open table and collection data:">
+        <select
+          className={selectClass}
+          value={databaseExplorer.activationMode}
+          onChange={(event) =>
+            updateDatabaseExplorer({
+              activationMode:
+                event.target.value as AppSettings["databaseExplorer"]["activationMode"],
+            })
+          }
+        >
+          <option value="single">Single click</option>
+          <option value="double">Double click</option>
+        </select>
+      </SettingRow>
+      <p className="px-0.5 text-[10px] leading-4 wb-muted">
+        Selection remains immediate. Enter always opens the focused object.
+      </p>
+      <SettingsDivider title="Introspection" />
       <SettingRow label="Refresh mode:">
         <select
           className={selectClass}

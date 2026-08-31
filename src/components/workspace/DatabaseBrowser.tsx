@@ -19,7 +19,12 @@ import {
 import { schemaService, type DatabaseInfo } from "@/services/tauri";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
+import {
+  explorerActivationLabel,
+  shouldActivateExplorerObject,
+} from "@/features/database-explorer/model/explorerActivation";
 
 type ColumnKey =
   | "name"
@@ -94,6 +99,9 @@ export function DatabaseBrowser() {
   );
   const setActiveConnection = useConnectionStore((state) => state.setActiveConnection);
   const projectId = useProjectStore((state) => state.activeProjectId);
+  const activationMode = useSettingsStore(
+    (state) => state.settings.databaseExplorer.activationMode,
+  );
   const [rows, setRows] = useState<DatabaseInfo[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -229,6 +237,7 @@ export function DatabaseBrowser() {
     )
     .join(" ");
   const minimumWidth = columns.reduce((total, key) => total + columnWidths[key], 0);
+  const activationHint = `${explorerActivationLabel(activationMode)} to reveal in Database Explorer`;
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col bg-[hsl(var(--wb-editor))] text-[hsl(var(--wb-text))]">
@@ -295,7 +304,7 @@ export function DatabaseBrowser() {
             ))}
           </div>
           {visibleRows.map((row) => (
-            <button key={row.name} type="button" className="grid h-[34px] w-full items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 text-left outline-none hover:bg-[hsl(var(--wb-hover))] focus-visible:bg-[hsl(var(--wb-selected))]" style={{ gridTemplateColumns, minWidth: minimumWidth }} onDoubleClick={() => openDatabase(row.name)} onKeyDown={(event) => { if (event.key === "Enter") openDatabase(row.name); }} title="Double-click to reveal in Database Explorer">
+            <button key={row.name} type="button" className="grid h-[34px] w-full items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 text-left outline-none hover:bg-[hsl(var(--wb-hover))] focus-visible:bg-[hsl(var(--wb-selected))]" style={{ gridTemplateColumns, minWidth: minimumWidth }} onClick={(event) => { if (shouldActivateExplorerObject(activationMode, "click", event.detail)) openDatabase(row.name); }} onDoubleClick={() => { if (shouldActivateExplorerObject(activationMode, "double-click")) openDatabase(row.name); }} onKeyDown={(event) => { if (event.key === "Enter") openDatabase(row.name); }} title={activationHint}>
               {columns.map((key) => (
                 <span key={key} className={cn("min-w-0 truncate text-[11px] wb-muted", key === "name" && "flex items-center gap-2 font-medium text-[hsl(var(--wb-text))]")} title={cellValue(row, key)}>
                   {key === "name" && <Database size={13} className="shrink-0 text-emerald-400" />}
@@ -308,7 +317,7 @@ export function DatabaseBrowser() {
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(176px,1fr))] content-start gap-2 overflow-auto p-3">
           {visibleRows.map((row) => (
-            <button key={row.name} type="button" className="flex min-h-28 flex-col items-center justify-center gap-1 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-3 text-center outline-none hover:border-[hsl(var(--wb-accent)/0.55)] hover:bg-[hsl(var(--wb-hover))] focus-visible:border-[hsl(var(--wb-accent))]" onDoubleClick={() => openDatabase(row.name)} onKeyDown={(event) => { if (event.key === "Enter") openDatabase(row.name); }} title="Double-click to reveal in Database Explorer">
+            <button key={row.name} type="button" className="flex min-h-28 flex-col items-center justify-center gap-1 rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-3 text-center outline-none hover:border-[hsl(var(--wb-accent)/0.55)] hover:bg-[hsl(var(--wb-hover))] focus-visible:border-[hsl(var(--wb-accent))]" onClick={(event) => { if (shouldActivateExplorerObject(activationMode, "click", event.detail)) openDatabase(row.name); }} onDoubleClick={() => { if (shouldActivateExplorerObject(activationMode, "double-click")) openDatabase(row.name); }} onKeyDown={(event) => { if (event.key === "Enter") openDatabase(row.name); }} title={activationHint}>
               <span className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/10"><Database size={21} className="text-emerald-400" /></span>
               <span className="w-full truncate text-xs font-medium" title={row.name}>{row.name}</span>
               <span className="min-h-4 text-[10px] wb-muted">{formatBytes(row.sizeBytes) || row.defaultCharset || "Database"}</span>

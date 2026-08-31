@@ -16,6 +16,28 @@ export type TableBatchFailureSummary = {
   omitted: number;
 };
 
+export function formatTableBatchNamesForClipboard(
+  names: readonly string[],
+): string {
+  return names.join(", ");
+}
+
+export function composeTableBatchDdl(
+  schema: string,
+  names: readonly string[],
+  results: readonly PromiseSettledResult<string>[],
+): string {
+  return results
+    .flatMap((result, index) => {
+      if (result.status !== "fulfilled") return [];
+      const name = names[index];
+      const ddl = result.value.trim();
+      if (!name || !ddl) return [];
+      return [`-- ${schema}.${name}\n${ddl}`];
+    })
+    .join("\n\n");
+}
+
 const MAX_TABLE_BATCH_FAILURE_DETAILS = 20;
 const MAX_TABLE_BATCH_FAILURE_MESSAGE_CHARS = 240;
 
