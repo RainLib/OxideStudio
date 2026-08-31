@@ -1,13 +1,20 @@
 // @vitest-environment happy-dom
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LspClient } from "@/services/lsp";
 import {
   registerLspHoverProvider,
   useLspHoverProviderCoordinator,
   type LspHoverProviderRuntime,
 } from "./useLspHoverProviderCoordinator";
+
+const metadataMocks = vi.hoisted(() => ({
+  loadTableMetadata: vi.fn(),
+  loadTableDdl: vi.fn(),
+}));
+
+vi.mock("@/services/tableMetadataCache", () => metadataMocks);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -53,6 +60,7 @@ function fixture() {
     documentVersionsRef: { current: new Map([[uri, 1]]) },
     documentTextsRef: { current: new Map([[uri, "SELECT users"]]) },
     schemaTables: [],
+    showTableDdlHoverPreview: true,
     supportsTableBrowsing: false,
     targetSchema: "public",
   };
@@ -89,6 +97,18 @@ function fixture() {
 }
 
 describe("LSP hover provider coordinator", () => {
+  beforeEach(() => {
+    metadataMocks.loadTableMetadata.mockResolvedValue({
+      columns: [],
+      indexes: [],
+      constraints: [],
+      ddl: null,
+      viewDefinition: null,
+      source: "cache",
+      updatedAt: 1,
+    });
+    metadataMocks.loadTableDdl.mockResolvedValue("CREATE TABLE users (id bigint)");
+  });
   it("owns registration and disposal as one lifecycle", () => {
     const { coordinator, dispose, monaco } = fixture();
 
@@ -154,5 +174,39 @@ describe("LSP hover provider coordinator", () => {
       endLineNumber: 1,
       endColumn: 13,
     });
+  });
+
+  it("loads DDL only when the table hover preference is enabled", async () => {
+    const state = fixture();
+    state.setRuntime({
+      ...state.runtime(),
+      schemaTables: [{ name: "users", type: "BASE TABLE" }],
+      supportsTableBrowsing: true,
+      showTableDdlHoverPreview: true,
+    });
+    const model = {
+      ...state.model,
+      getLineContent: () => "SELECT * FROM users",
+      getValue: () => "SELECT * FROM users",
+      getWordAtPosition: () => ({ startColumn: 15, endColumn: 20 }),
+    };
+
+    const hover = await state
+      .provider()
+      .provideHover(model, { lineNumber: 1, column: 15 });
+
+    expect(metadataMocks.loadTableDdl).toHaveBeenCalledOnce();
+    expect(hover.contents[0].value).toContain("CREATE TABLE users");
+
+    metadataMocks.loadTableDdl.mockClear();
+    state.setRuntime({
+      ...state.runtime(),
+      showTableDdlHoverPreview: false,
+    });
+    const metadataOnly = await state
+      .provider()
+      .provideHover(model, { lineNumber: 1, column: 15 });
+    expect(metadataMocks.loadTableDdl).not.toHaveBeenCalled();
+    expect(metadataOnly.contents[0].value).not.toContain("DDL preview");
   });
 });

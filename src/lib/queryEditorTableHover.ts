@@ -7,6 +7,8 @@ export interface QueryEditorHoverTable {
 
 const HOVER_TEXT_LIMIT = 160;
 const HOVER_INDEX_COLUMN_LIMIT = 8;
+const HOVER_DDL_CHAR_LIMIT = 24 * 1024;
+const HOVER_DDL_LINE_LIMIT = 160;
 
 function compactHoverText(value: unknown, limit = HOVER_TEXT_LIMIT): string {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -24,6 +26,33 @@ function compactIndexColumns(columns: string[]): string {
   const visible = columns.slice(0, HOVER_INDEX_COLUMN_LIMIT).map((column) => hoverCode(column));
   if (columns.length > visible.length) visible.push(`… +${columns.length - visible.length}`);
   return visible.join(", ");
+}
+
+export function boundedHoverDdl(value: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const normalized = value.trim();
+  if (!normalized) return { text: "", truncated: false };
+  const lines = normalized.split(/\r?\n/u);
+  const visibleLines = lines.slice(0, HOVER_DDL_LINE_LIMIT);
+  let text = visibleLines.join("\n");
+  let truncated = lines.length > visibleLines.length;
+  const characters = Array.from(text);
+  if (characters.length > HOVER_DDL_CHAR_LIMIT) {
+    text = characters.slice(0, HOVER_DDL_CHAR_LIMIT).join("");
+    truncated = true;
+  }
+  return { text, truncated };
+}
+
+function markdownSqlFence(sql: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(sql.matchAll(/`+/gu), (match) => match[0].length),
+  );
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}sql\n${sql}\n${fence}`;
 }
 
 /** Extract the identifier under a Monaco one-based column, including common
@@ -83,6 +112,7 @@ export function buildQueryEditorTableHoverMarkdown(input: {
   table: QueryEditorHoverTable;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
+  ddl?: string | null;
 }): string {
   const qualifiedName = [input.schema, input.table.name].filter(Boolean).map(hoverCode).join(".");
   const visibleColumns = input.columns.slice(0, 24);
@@ -99,5 +129,13 @@ export function buildQueryEditorTableHoverMarkdown(input: {
       .map((index) => `${hoverCode(index.name)} (${compactIndexColumns(index.columns)})`)
       .join(" · ")}${input.indexes.length > visibleIndexes.length ? " · …" : ""}`
     : "";
-  return `**${input.table.tableType === "view" ? "View" : "Table"}** ${qualifiedName}\n\n| Column | Type | Details |\n| --- | --- | --- |\n${columnLines.join("\n") || "| … | … | … |"}${indexSummary}`;
+  const ddl = boundedHoverDdl(input.ddl || "");
+  const ddlPreview = ddl.text
+    ? `\n\n**DDL preview**\n\n${markdownSqlFence(ddl.text)}${
+        ddl.truncated
+          ? "\n\n_Preview truncated. Open the table DDL tab and use Ctrl/Cmd+F to search the full definition._"
+          : ""
+      }`
+    : "";
+  return `**${input.table.tableType === "view" ? "View" : "Table"}** ${qualifiedName}\n\n| Column | Type | Details |\n| --- | --- | --- |\n${columnLines.join("\n") || "| … | … | … |"}${indexSummary}${ddlPreview}`;
 }

@@ -1550,6 +1550,24 @@ function EditorSettings({
           })
         }
       />
+      <CheckboxLabel
+        label="Show table DDL in editor hover"
+        detail="Loads a cached, bounded DDL preview only when hovering a table reference."
+        checked={editor.showTableDdlHoverPreview}
+        onChange={() =>
+          updateEditor({
+            showTableDdlHoverPreview: !editor.showTableDdlHoverPreview,
+          })
+        }
+      />
+      <CheckboxLabel
+        label="Refresh DDL when opening its tab"
+        detail="Disabled by default to avoid an extra database request; Refresh always fetches the latest DDL."
+        checked={editor.refreshDdlOnOpen}
+        onChange={() =>
+          updateEditor({ refreshDdlOnOpen: !editor.refreshDdlOnOpen })
+        }
+      />
       <SettingsDivider title="SQL formatting" />
       <SettingRow label="Keyword case:">
         <select

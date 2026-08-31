@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
-import { Check, Copy, RefreshCw } from "lucide-react";
+import { Check, Copy, RefreshCw, Search } from "lucide-react";
 import { useTheme } from "@/theme/useTheme";
 import { cn } from "@/lib/utils";
 
@@ -46,6 +46,7 @@ export function TableDdlView({
 }: TableDdlViewProps) {
   const { mode } = useTheme();
   const [copied, setCopied] = useState(false);
+  const editorRef = useRef<any>(null);
 
   useEffect(() => {
     if (!copied) return;
@@ -66,6 +67,16 @@ export function TableDdlView({
           {kind === "mapping" ? "Index Mapping" : "Generated DDL"} · read-only
         </span>
         <div className="ml-auto flex items-center gap-0.5">
+          <button
+            type="button"
+            className="wb-icon-button"
+            onClick={() => void editorRef.current?.getAction("actions.find")?.run()}
+            disabled={!ddl || isLoading}
+            title={kind === "mapping" ? "Search Mapping (Ctrl+F)" : "Search DDL (Ctrl+F)"}
+            aria-label={kind === "mapping" ? "Search Mapping" : "Search DDL"}
+          >
+            <Search size={12} />
+          </button>
           <button
             type="button"
             className="wb-icon-button"
@@ -122,6 +133,9 @@ export function TableDdlView({
                 : "-- DDL is not available for this object.")
             }
             theme={mode === "light" ? "vs" : "oxide-dark"}
+            onMount={(editor) => {
+              editorRef.current = editor;
+            }}
             beforeMount={(monaco) => {
               monaco.editor.defineTheme("oxide-dark", {
                 base: "vs-dark",

@@ -123,6 +123,8 @@ export type AppSettings = {
     minimap: boolean;
     confirmDestructiveSql: boolean;
     executeAllOnBlankLine: boolean;
+    showTableDdlHoverPreview: boolean;
+    refreshDdlOnOpen: boolean;
     sqlCompletion: SqlCompletionSettings;
     sqlFormatting: SqlFormattingSettings;
     inlineCompletion: InlineCompletionSettings;
@@ -275,6 +277,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     minimap: false,
     confirmDestructiveSql: true,
     executeAllOnBlankLine: false,
+    showTableDdlHoverPreview: true,
+    refreshDdlOnOpen: false,
     sqlCompletion: {
       triggerMode: "positional",
       keywordCase: "upper",
@@ -546,6 +550,16 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["editor", "executeAllOnBlankLine"],
         defaults.editor.executeAllOnBlankLine,
+      ),
+      showTableDdlHoverPreview: boolAt(
+        raw,
+        ["editor", "showTableDdlHoverPreview"],
+        defaults.editor.showTableDdlHoverPreview,
+      ),
+      refreshDdlOnOpen: boolAt(
+        raw,
+        ["editor", "refreshDdlOnOpen"],
+        defaults.editor.refreshDdlOnOpen,
       ),
       sqlCompletion: {
         triggerMode: enumAt(

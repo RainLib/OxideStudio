@@ -9,7 +9,10 @@ import {
   isSqlRelationIdentifierContext,
   sqlIdentifierAtColumn,
 } from "@/lib/queryEditorTableHover";
-import { loadTableMetadata } from "@/services/tableMetadataCache";
+import {
+  loadTableDdl,
+  loadTableMetadata,
+} from "@/services/tableMetadataCache";
 import { syncLspModelBeforeCompletion } from "../model/lspDocumentSync";
 import { toMonacoRange } from "../model/lspMonacoAdapter";
 
@@ -29,6 +32,7 @@ export type LspHoverProviderRuntime = {
   documentVersionsRef: MutableRefObject<Map<string, number>>;
   documentTextsRef: MutableRefObject<Map<string, string>>;
   schemaTables: TableInfo[];
+  showTableDdlHoverPreview: boolean;
   supportsTableBrowsing: boolean;
   targetSchema?: string | null;
 };
@@ -49,6 +53,7 @@ function runtimeOwnerKey(runtime: LspHoverProviderRuntime) {
     runtime.databaseName || "",
     runtime.targetSchema || runtime.currentSchema || "",
     runtime.documentLanguageId,
+    runtime.showTableDdlHoverPreview ? "ddl" : "metadata-only",
     runtime.metadataRevision ?? "",
   ].join("\u0000");
 }
@@ -109,21 +114,30 @@ export function registerLspHoverProvider(options: {
           ? findQueryEditorHoverTable(runtime.schemaTables, identifier)
           : null;
       const hoverSchema = runtime.targetSchema || runtime.currentSchema;
-      const [lspHover, metadata] = await Promise.all([
-        lspClient
-          .getHover(uri, position.lineNumber - 1, position.column - 1)
-          .catch(() => null),
+      const tableIdentity =
         relation && hoverSchema && runtime.effectiveConnectionId
-          ? loadTableMetadata({
+          ? {
               projectId: runtime.activeProjectId || undefined,
               connectionId: runtime.effectiveConnectionId,
               driver: runtime.driver,
               databaseName: runtime.databaseName || undefined,
               schema: hoverSchema,
               table: relation.name,
+            }
+          : null;
+      const [lspHover, metadata, ddl] = await Promise.all([
+        lspClient
+          .getHover(uri, position.lineNumber - 1, position.column - 1)
+          .catch(() => null),
+        tableIdentity
+          ? loadTableMetadata({
+              ...tableIdentity,
               includeIndexes: true,
               includeConstraints: false,
             }).catch(() => null)
+          : Promise.resolve(null),
+        tableIdentity && runtime.showTableDdlHoverPreview
+          ? loadTableDdl(tableIdentity, relation?.type).catch(() => null)
           : Promise.resolve(null),
       ]);
       if (!isCurrentRequest()) return null;
@@ -137,6 +151,7 @@ export function registerLspHoverProvider(options: {
                   table: { name: relation!.name, tableType: relation!.type },
                   columns: metadata.columns,
                   indexes: metadata.indexes,
+                  ddl,
                 }),
               },
             ]

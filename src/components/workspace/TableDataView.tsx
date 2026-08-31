@@ -147,6 +147,9 @@ export function TableDataView() {
     useState<TableExportReport | null>(null);
   const [exportMaxRows, setExportMaxRows] = useState<number | undefined>();
   const dataGridSettings = useSettingsStore((state) => state.settings.dataGrid);
+  const refreshDdlOnOpen = useSettingsStore(
+    (state) => state.settings.editor.refreshDdlOnOpen,
+  );
   const defaultPageSize = dataGridSettings.pageSize;
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const tabConnectionId = activeTab?.connectionId || activeConnectionId;
@@ -732,9 +735,9 @@ export function TableDataView() {
 
   useEffect(() => {
     if (showDdl && !tableDdl && !isDdlLoading && !ddlError) {
-      void refreshDdl(false);
+      void refreshDdl(refreshDdlOnOpen);
     }
-  }, [ddlError, isDdlLoading, refreshDdl, showDdl, tableDdl]);
+  }, [ddlError, isDdlLoading, refreshDdl, refreshDdlOnOpen, showDdl, tableDdl]);
 
   // Auto-fetch data on mount if no results
   useEffect(() => {

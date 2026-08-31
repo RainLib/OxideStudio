@@ -202,6 +202,33 @@ describe("app settings workbench layout", () => {
     ).toBe(false);
   });
 
+  it("keeps table DDL hover enabled while avoiding automatic refresh requests", () => {
+    expect(DEFAULT_APP_SETTINGS.editor.showTableDdlHoverPreview).toBe(true);
+    expect(DEFAULT_APP_SETTINGS.editor.refreshDdlOnOpen).toBe(false);
+    expect(
+      normalizeAppSettings({
+        editor: {
+          showTableDdlHoverPreview: false,
+          refreshDdlOnOpen: true,
+        },
+      }).editor,
+    ).toMatchObject({
+      showTableDdlHoverPreview: false,
+      refreshDdlOnOpen: true,
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          showTableDdlHoverPreview: "yes",
+          refreshDdlOnOpen: "yes",
+        },
+      }).editor,
+    ).toMatchObject({
+      showTableDdlHoverPreview: true,
+      refreshDdlOnOpen: false,
+    });
+  });
+
   it("normalizes SQL formatter layout preferences", () => {
     expect(DEFAULT_APP_SETTINGS.editor.sqlFormatting).toEqual({
       keywordCase: "upper",

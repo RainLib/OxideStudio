@@ -2503,6 +2503,7 @@ export function QueryEditor({
     monaco,
     openedDocumentsRef,
     schemaTables,
+    showTableDdlHoverPreview: editorSettings.showTableDdlHoverPreview,
     supportsTableBrowsing: capabilities.supportsTableBrowsing,
     targetSchema: activeTab?.targetSchema,
   });

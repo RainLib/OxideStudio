@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  boundedHoverDdl,
   buildQueryEditorTableHoverMarkdown,
   findQueryEditorHoverTable,
   isSqlRelationIdentifierContext,
@@ -39,5 +40,27 @@ describe("query editor table hover", () => {
     expect(markdown).toContain("`public`.`orders`");
     expect(markdown).toContain("PK · UNIQUE · NOT NULL · AUTO");
     expect(markdown).toContain("`ix_orders_created` (`created_at`)");
+  });
+
+  it("renders a bounded DDL preview with a fence that cannot be closed by source text", () => {
+    const ddl = [
+      "CREATE TABLE orders (note text DEFAULT '```');",
+      ...Array.from({ length: 180 }, (_, index) => `-- column ${index}`),
+    ].join("\n");
+    const bounded = boundedHoverDdl(ddl);
+    const markdown = buildQueryEditorTableHoverMarkdown({
+      schema: "public",
+      table: { name: "orders" },
+      columns: [],
+      indexes: [],
+      ddl,
+    });
+
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.text.split("\n").length).toBe(160);
+    expect(markdown).toContain("**DDL preview**");
+    expect(markdown).toContain("````sql");
+    expect(markdown).toContain("Preview truncated");
+    expect(markdown.length).toBeLessThan(30_000);
   });
 });
