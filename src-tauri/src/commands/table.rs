@@ -435,6 +435,17 @@ pub enum TableImportFormat {
     Xlsx,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TableImportMode {
+    Append,
+    Truncate,
+}
+
+fn default_table_import_mode() -> TableImportMode {
+    TableImportMode::Append
+}
+
 /// The import plan intentionally contains only source-column indices and
 /// target identifiers. It never carries source rows or credentials across the
 /// IPC boundary, which keeps large native imports streamable and reviewable.
@@ -643,6 +654,8 @@ pub struct TableImportReport {
     pub schema: String,
     pub table: String,
     pub format: TableImportFormat,
+    #[serde(default = "default_table_import_mode")]
+    pub mode: TableImportMode,
     pub mapping_digest: String,
     pub rows_imported: u64,
     pub batches: u64,
@@ -6354,10 +6367,11 @@ fn validate_table_import_id(import_id: &str) -> Result<String, String> {
 
 fn table_import_mapping_digest(
     format: TableImportFormat,
+    mode: TableImportMode,
     first_row_header: Option<bool>,
     csv_options: Option<&TableCsvImportOptions>,
 ) -> Result<String, String> {
-    let snapshot = serde_json::to_vec(&(format, first_row_header, csv_options))
+    let snapshot = serde_json::to_vec(&(format, mode, first_row_header, csv_options))
         .map_err(|error| format!("Could not serialize table import mapping: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(snapshot)))
 }
@@ -11421,24 +11435,44 @@ async fn execute_import_transaction_batch(
     table: &str,
     columns: &BTreeMap<String, ColumnInfo>,
     rows: &mut Vec<BTreeMap<String, Value>>,
+    replace_existing: bool,
 ) -> Result<u64, String> {
     if rows.is_empty() {
         return Ok(0);
     }
-    let statements = rows
-        .iter()
-        .map(|row| {
-            build_insert_mutation(kind, schema, table, columns, row)
-                .map(|(sql, params)| ParameterizedStatement { sql, params })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let imported = manager
+    let row_count = rows.len() as u64;
+    let mut statements = Vec::with_capacity(rows.len() + usize::from(replace_existing));
+    if replace_existing {
+        statements.push(table_import_replace_statement(kind, schema, table));
+    }
+    statements.extend(
+        rows.iter()
+            .map(|row| {
+                build_insert_mutation(kind, schema, table, columns, row)
+                    .map(|(sql, params)| ParameterizedStatement { sql, params })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    manager
         .execute_parameterized_transaction(connection_id, transaction_id, &statements)
         .await
-        .map_err(|error| error.to_string())?
-        .len() as u64;
+        .map_err(|error| error.to_string())?;
     rows.clear();
-    Ok(imported)
+    Ok(row_count)
+}
+
+fn table_import_replace_statement(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+) -> ParameterizedStatement {
+    ParameterizedStatement {
+        sql: format!(
+            "DELETE FROM {}",
+            kind.qualified_table(schema_option(schema), table)
+        ),
+        params: Vec::new(),
+    }
 }
 
 /// Writes already-parsed records through a single explicit transaction. This
@@ -11454,6 +11488,7 @@ async fn import_materialized_rows_in_transaction(
     columns: &BTreeMap<String, ColumnInfo>,
     rows: Vec<BTreeMap<String, Value>>,
     database: Option<&str>,
+    mode: TableImportMode,
     context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
     context.ensure_not_cancelled()?;
@@ -11480,6 +11515,7 @@ async fn import_materialized_rows_in_transaction(
     let import_result = async {
         let mut rows_imported = 0_u64;
         let mut batches = 0_u64;
+        let mut replace_pending = mode == TableImportMode::Truncate;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
         for row in rows {
             context.ensure_not_cancelled()?;
@@ -11494,8 +11530,10 @@ async fn import_materialized_rows_in_transaction(
                     table,
                     columns,
                     &mut pending_rows,
+                    replace_pending,
                 )
                 .await?;
+                replace_pending = false;
                 batches += 1;
                 context.emit_running(rows_imported, batches);
             }
@@ -11511,6 +11549,7 @@ async fn import_materialized_rows_in_transaction(
                 table,
                 columns,
                 &mut pending_rows,
+                replace_pending,
             )
             .await?;
             batches += 1;
@@ -11546,6 +11585,7 @@ async fn import_csv_in_transaction(
     first_row_header: Option<bool>,
     ordered_columns: Vec<String>,
     csv_options: Option<&TableCsvImportOptions>,
+    mode: TableImportMode,
     context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
     context.ensure_not_cancelled()?;
@@ -11588,6 +11628,7 @@ async fn import_csv_in_transaction(
     let import_result = async {
         let mut rows_imported = 0_u64;
         let mut batches = 0_u64;
+        let mut replace_pending = mode == TableImportMode::Truncate;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
         for (index, record) in reader.records().enumerate() {
             context.ensure_not_cancelled()?;
@@ -11615,8 +11656,10 @@ async fn import_csv_in_transaction(
                     table,
                     columns,
                     &mut pending_rows,
+                    replace_pending,
                 )
                 .await?;
+                replace_pending = false;
                 batches += 1;
                 context.emit_running(rows_imported, batches);
             }
@@ -11632,6 +11675,7 @@ async fn import_csv_in_transaction(
                 table,
                 columns,
                 &mut pending_rows,
+                replace_pending,
             )
             .await?;
             batches += 1;
@@ -11675,6 +11719,7 @@ pub async fn preflight_table_csv_import(
     database: Option<String>,
     file_path: String,
     first_row_header: Option<bool>,
+    mode: Option<TableImportMode>,
     csv_options: Option<TableCsvImportOptions>,
     expected_file_digest: Option<String>,
 ) -> Result<Response<TableCsvImportPreflight>, String> {
@@ -11749,6 +11794,7 @@ pub async fn preflight_table_csv_import(
     Ok(Response::ok(TableCsvImportPreflight {
         mapping_digest: table_import_mapping_digest(
             TableImportFormat::Csv,
+            mode.unwrap_or_else(default_table_import_mode),
             first_row_header,
             csv_options.as_ref(),
         )?,
@@ -11770,6 +11816,7 @@ async fn import_json_lines_in_transaction(
     columns: &BTreeMap<String, ColumnInfo>,
     path: &Path,
     database: Option<&str>,
+    mode: TableImportMode,
     context: &TableImportExecutionContext,
 ) -> Result<(u64, u64), String> {
     context.ensure_not_cancelled()?;
@@ -11798,6 +11845,7 @@ async fn import_json_lines_in_transaction(
     let import_result = async {
         let mut rows_imported = 0_u64;
         let mut batches = 0_u64;
+        let mut replace_pending = mode == TableImportMode::Truncate;
         let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
         let mut line = String::new();
         let mut line_number = 0_u64;
@@ -11841,8 +11889,10 @@ async fn import_json_lines_in_transaction(
                     table,
                     columns,
                     &mut pending_rows,
+                    replace_pending,
                 )
                 .await?;
+                replace_pending = false;
                 batches += 1;
                 context.emit_running(rows_imported, batches);
             }
@@ -11858,6 +11908,7 @@ async fn import_json_lines_in_transaction(
                 table,
                 columns,
                 &mut pending_rows,
+                replace_pending,
             )
             .await?;
             batches += 1;
@@ -11931,13 +11982,15 @@ pub async fn import_table_data(
     database: Option<String>,
     file_path: String,
     format: TableImportFormat,
+    mode: Option<TableImportMode>,
     first_row_header: Option<bool>,
     csv_options: Option<TableCsvImportOptions>,
     expected_file_digest: Option<String>,
 ) -> Result<Response<TableImportResult>, String> {
     let import_id = validate_table_import_id(&import_id)?;
+    let mode = mode.unwrap_or_else(default_table_import_mode);
     let mapping_digest =
-        table_import_mapping_digest(format, first_row_header, csv_options.as_ref())?;
+        table_import_mapping_digest(format, mode, first_row_header, csv_options.as_ref())?;
     let cancel_rx = cancellation.register(&import_id).await?;
     let context = TableImportExecutionContext {
         app,
@@ -12000,6 +12053,7 @@ pub async fn import_table_data(
                 first_row_header,
                 ordered_columns,
                 csv_options.as_ref(),
+                mode,
                 &context,
             )
             .await?;
@@ -12021,6 +12075,7 @@ pub async fn import_table_data(
                 &column_lookup,
                 &path,
                 database,
+                mode,
                 &context,
             )
             .await?;
@@ -12068,6 +12123,7 @@ pub async fn import_table_data(
             &column_lookup,
             pending_rows,
             database,
+            mode,
             &materialized_context,
         )
         .await?;
@@ -12147,6 +12203,7 @@ pub async fn import_table_data(
             schema: schema.clone(),
             table: table.clone(),
             format,
+            mode,
             mapping_digest,
             rows_imported,
             batches,
@@ -13686,24 +13743,25 @@ mod tests {
         select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
         summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
         table_data_transfer_dialect, table_data_transfer_plan_digest,
-        table_data_transfer_report_id, transfer_confirmation_token, transfer_plan_can_execute,
-        transfer_target_column_type, transfer_target_confirmation_token,
-        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
-        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
-        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
-        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
-        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
-        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
-        TableDataCompareResult, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferMode, TableDataTransferPreview, TableDataTransferReport,
-        TableDataTransferRequest, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
-        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableImportCancellationState, TableImportTextEncoding, TableRowUpdate,
-        TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
+        table_data_transfer_report_id, table_import_mapping_digest, table_import_replace_statement,
+        transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
+        transfer_target_confirmation_token, transfer_type_mapping_assessment,
+        transfer_type_mapping_warnings, tsv_escape, validate_table_data_transfer_id,
+        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
+        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
+        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, AlterColumnValueMode,
+        AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
+        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
+        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
+        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
+        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
+        TableExportWriterContext, TableExportWriterMessage, TableFilter,
+        TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
+        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
         MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
         MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
@@ -14460,6 +14518,38 @@ mod tests {
         )
         .unwrap_err()
         .contains("last data row"));
+    }
+
+    #[test]
+    fn table_import_mode_is_bound_to_review_digest_and_uses_transactional_delete() {
+        let options = TableCsvImportOptions {
+            delimiter: Some(",".to_string()),
+            ..Default::default()
+        };
+        let append_digest = table_import_mapping_digest(
+            TableImportFormat::Csv,
+            TableImportMode::Append,
+            Some(true),
+            Some(&options),
+        )
+        .unwrap();
+        let replace_digest = table_import_mapping_digest(
+            TableImportFormat::Csv,
+            TableImportMode::Truncate,
+            Some(true),
+            Some(&options),
+        )
+        .unwrap();
+        assert_ne!(append_digest, replace_digest);
+
+        assert_eq!(
+            table_import_replace_statement(DatabaseKind::Postgres, "public", "Order").sql,
+            "DELETE FROM \"public\".\"Order\""
+        );
+        assert_eq!(
+            table_import_replace_statement(DatabaseKind::Mysql, "store", "order-items").sql,
+            "DELETE FROM `store`.`order-items`"
+        );
     }
 
     #[tokio::test]

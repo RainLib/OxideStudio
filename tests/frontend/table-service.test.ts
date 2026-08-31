@@ -125,6 +125,7 @@ describe("table service database scope", () => {
       table: "users",
       filePath: "/tmp/users.json",
       format: "json",
+      mode: "append",
       firstRowHeader: true,
       database: "analytics",
       csvOptions: undefined,
@@ -167,6 +168,7 @@ describe("table service database scope", () => {
       table: "users",
       filePath: "/tmp/users.csv",
       format: "csv",
+      mode: "append",
       firstRowHeader: true,
       database: "analytics",
       csvOptions: {

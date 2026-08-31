@@ -26,6 +26,7 @@ import type {
   ForeignKeyReferenceInfo,
   IndexInfo,
   TableCsvImportOptions,
+  TableImportMode,
   TableJsonImportPreview,
   TableXlsxImportPreview,
   TableExportFormat,
@@ -1157,6 +1158,8 @@ export function TableDataView() {
   const handleImportCsvRows = async (
     rows: Array<Record<string, unknown>>,
     csvOptions: TableCsvImportOptions,
+    _sourceEncoding: string,
+    mode: TableImportMode,
   ) => {
     if (
       !tabConnectionId ||
@@ -1193,6 +1196,7 @@ export function TableDataView() {
           activeTab.databaseName,
           csvOptions,
           csvImportSource.contentDigest,
+          mode,
         );
         if (preflight.rejectedRows > 0) {
           const locations = preflight.issues
@@ -1221,7 +1225,7 @@ export function TableDataView() {
           activeTab.databaseName,
           csvOptions,
           csvImportSource.contentDigest,
-          { projectId: activeProjectId, importId },
+          { projectId: activeProjectId, importId, mode },
         );
         rowsImported = imported.rowsImported;
       } else if (activeTab.databaseName) {
@@ -1333,7 +1337,7 @@ export function TableDataView() {
     }
   };
 
-  const handleImportJsonRows = async () => {
+  const handleImportJsonRows = async (mode: TableImportMode) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
@@ -1366,7 +1370,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         jsonImportSource.preview.contentDigest,
-        { projectId: activeProjectId, importId },
+        { projectId: activeProjectId, importId, mode },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);
@@ -1394,7 +1398,7 @@ export function TableDataView() {
     }
   };
 
-  const handleImportXlsxRows = async () => {
+  const handleImportXlsxRows = async (mode: TableImportMode) => {
     if (
       !tabConnectionId ||
       !activeTab.tableName ||
@@ -1427,7 +1431,7 @@ export function TableDataView() {
         activeTab.databaseName,
         undefined,
         xlsxImportSource.preview.contentDigest,
-        { projectId: activeProjectId, importId },
+        { projectId: activeProjectId, importId, mode },
       );
       const importedRowCount = imported.rowsImported.toLocaleString();
       finishTask(taskId, `${importedRowCount} rows imported`);

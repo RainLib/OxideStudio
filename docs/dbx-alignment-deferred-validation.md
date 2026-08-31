@@ -187,6 +187,13 @@ database target until its relevant queue entries pass.
   the signed manifest + runtime handshake gate; the privacy-bounded
   conformance runner records migration evidence only after the complete state
   machine succeeds. No migration fixture was executed against a real database.
+- Native CSV/TSV/JSON/XLSX imports now expose append and transactional
+  replace-all. Unit and frontend contract tests bind the mode to preflight,
+  execution digest, report metadata and dialect quoting. Real PostgreSQL,
+  MySQL/MariaDB, SQLite and DuckDB fixtures must still verify that an empty
+  source never clears rows, the first valid batch replaces exactly once, and
+  later parse/write/cancellation failures roll back both the delete and all
+  inserts.
 
 Rust database integration targets (including `live_database`) remain outside
 tag-release gating until runnable database fixtures are supplied. They are an

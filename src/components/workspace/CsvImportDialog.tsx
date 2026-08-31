@@ -16,7 +16,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { ColumnInfo, TableCsvImportOptions } from "@/services/tauri/types";
+import type {
+  ColumnInfo,
+  TableCsvImportOptions,
+  TableImportMode,
+} from "@/services/tauri/types";
 import {
   buildCsvImportPlan,
   createCsvColumnMapping,
@@ -45,6 +49,7 @@ interface CsvImportDialogProps {
     rows: Array<Record<string, unknown>>,
     options: TableCsvImportOptions,
     sourceEncoding: CsvEncoding,
+    mode: TableImportMode,
   ) => Promise<void>;
 }
 
@@ -81,6 +86,7 @@ export function CsvImportDialog({
   const [lastDataRow, setLastDataRow] = useState(0);
   const [emptyAsNull, setEmptyAsNull] = useState(true);
   const [trimValues, setTrimValues] = useState(false);
+  const [importMode, setImportMode] = useState<TableImportMode>("append");
   const [mapping, setMapping] = useState<CsvColumnMapping[]>([]);
   const hasHeader = titleRow > 0;
 
@@ -98,6 +104,7 @@ export function CsvImportDialog({
     setLastDataRow(0);
     setEmptyAsNull(true);
     setTrimValues(false);
+    setImportMode("append");
     setMapping([]);
 
     const readFile = async () => {
@@ -214,7 +221,8 @@ export function CsvImportDialog({
     !isSubmitting &&
     !blockingError &&
     plan.errorCount === 0 &&
-    plan.rows.length > 0;
+    plan.rows.length > 0 &&
+    (importMode === "append" || isNativeSource);
 
   const updateMapping = (sourceIndex: number, value: string) => {
     setMapping((current) => current.map((item) =>
@@ -254,6 +262,15 @@ export function CsvImportDialog({
         <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
           <aside className="flex min-h-0 flex-col border-r border-[hsl(var(--wb-border-subtle))]">
             <section className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-[hsl(var(--wb-border-subtle))] p-3">
+              <label className="pt-1.5 text-[10px] wb-muted">Write mode</label>
+              <Select value={importMode} onValueChange={(value) => setImportMode(value as TableImportMode)} disabled={isSubmitting}>
+                <SelectTrigger className={selectClass}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="append">Append rows</SelectItem>
+                  <SelectItem value="truncate" disabled={!isNativeSource}>Replace all rows</SelectItem>
+                </SelectContent>
+              </Select>
+
               <label className="pt-1.5 text-[10px] wb-muted">Encoding</label>
               <Select value={encoding} onValueChange={(value) => setEncoding(value as CsvEncoding)} disabled={isLoading}>
                 <SelectTrigger className={selectClass}><SelectValue /></SelectTrigger>
@@ -440,7 +457,9 @@ export function CsvImportDialog({
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
           <span className="text-[10px] wb-muted">
-            {isNativeSource
+            {importMode === "truncate"
+              ? "Replace deletes existing rows and inserts this reviewed source in one transaction. Empty sources never clear the table."
+              : isNativeSource
               ? `${decoded.encoding.toUpperCase()} will be decoded strictly by the native streaming importer. No rows are written before full-file preflight succeeds.`
               : "No rows are written until Import is confirmed. Database errors roll back the full batch."}
           </span>
@@ -477,9 +496,10 @@ export function CsvImportDialog({
                   encoding: decoded.encoding,
                 },
                 decoded.encoding,
+                importMode,
               )}
             >
-              {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `Import ${plan.rows.length.toLocaleString()} row${plan.rows.length === 1 ? "" : "s"}`}
+              {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `${importMode === "truncate" ? "Replace with" : "Import"} ${plan.rows.length.toLocaleString()} row${plan.rows.length === 1 ? "" : "s"}`}
             </button>
           </div>
         </DialogFooter>

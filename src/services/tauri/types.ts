@@ -760,6 +760,7 @@ export interface TableImportResult {
   reportId?: string | null;
 }
 
+export type TableImportMode = "append" | "truncate";
 export type TableImportReportStatus = "done" | "cancelled" | "error";
 
 export interface TableImportProgress {
@@ -782,6 +783,7 @@ export interface TableImportReport {
   schema: string;
   table: string;
   format: TableImportFormat;
+  mode: TableImportMode;
   mappingDigest: string;
   rowsImported: number;
   batches: number;

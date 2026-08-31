@@ -176,7 +176,7 @@ surface，schema-aware LSP 继续补充当前 index mapping 字段，接受候�
 WebView，全文诊断和 gutter 请求索引在专用 Web Worker 中 debounce 执行；Smart Tab/补全只扫描
 光标附近的当前 request，编辑内容以短批次写回 workspace store，执行和切换文档前仍会同步
 提交最新 Monaco model。关系型数据交换复用 Rust
-后端：表数据通过参数化事务批次导入，CSV、
+后端：表数据通过参数化事务批次导入；append 与 replace-all 共用一个显式事务，replace-all 仅在首个有效数据批次执行可回滚的 `DELETE + INSERT`，因此空源不会清表。CSV、
 JSON 和 SQL `INSERT` 导出采用有界分页写盘，SQL dump 导入保留脚本自身的事务语义。
 
 SQLite 现在使用独立的原生 `sqlx-sqlite` 数据源驱动：本地文件和 `:memory:` 均可连接，Explorer 可读取表、视图、列、索引和外键，编辑器可执行脚本并通过 SQLite LSP profile 获取 schema-aware completion；表/视图创建、表名/列名变更、列增删、索引增删、清空和删除由 SQLite 专用 DDL builder 执行，不复用 PostgreSQL DDL。`sqlite::memory:` 强制单连接池，避免同一会话被拆到不同的内存数据库。SQLite 暂不公布 Explain Plan、结构迁移执行或 Agent 只读事务包装能力，直至其专用的安全与渲染适配器完成。SQL Server 仍无内置运行时驱动，应通过已签名的外部 driver package 接入。任何面向用户或 AI 的支持列表都以后端 `list_database_capabilities` 为权威来源，前端 profile 只提供显示/连接表单信息和离线降级。

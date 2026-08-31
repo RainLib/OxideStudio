@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, FileJson, FileSpreadsheet, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -8,8 +8,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type {
   ColumnInfo,
+  TableImportMode,
   TableJsonImportPreview,
   TableXlsxImportPreview,
 } from "@/services/tauri/types";
@@ -22,7 +30,7 @@ interface JsonImportDialogProps {
   columns: ColumnInfo[];
   isSubmitting: boolean;
   onClose: () => void;
-  onImport: () => Promise<void>;
+  onImport: (mode: TableImportMode) => Promise<void>;
 }
 
 function previewValue(value: unknown) {
@@ -45,6 +53,10 @@ export function JsonImportDialog({
   onClose,
   onImport,
 }: JsonImportDialogProps) {
+  const [importMode, setImportMode] = useState<TableImportMode>("append");
+  useEffect(() => {
+    if (open) setImportMode("append");
+  }, [open, preview?.contentDigest]);
   const unknownColumns = useMemo(() => {
     if (!preview) return [];
     const targetColumns = new Set(columns.map((column) => column.name.toLocaleLowerCase()));
@@ -120,16 +132,31 @@ export function JsonImportDialog({
         </main>
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
-          <span className="text-[10px] wb-muted">No rows are written until Import is confirmed. Database errors roll back the full batch.</span>
+          <div className="flex min-w-0 items-center gap-3">
+            <Select value={importMode} onValueChange={(value) => setImportMode(value as TableImportMode)} disabled={isSubmitting}>
+              <SelectTrigger aria-label="Import write mode" className="h-7 w-40 rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-[10px] focus:ring-0 focus:ring-offset-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="append">Append rows</SelectItem>
+                <SelectItem value="truncate">Replace all rows</SelectItem>
+              </SelectContent>
+            </Select>
+            <span className="truncate text-[10px] wb-muted">
+              {importMode === "truncate"
+                ? "Existing rows are replaced in one transaction; an empty source never clears the table."
+                : "Database errors roll back the full import transaction."}
+            </span>
+          </div>
           <div className="flex gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[11px]" onClick={onClose} disabled={isSubmitting}>Cancel</button>
             <button
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"
               disabled={!canImport}
-              onClick={() => void onImport()}
+              onClick={() => void onImport(importMode)}
             >
-              {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `Import ${format}`}
+              {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `${importMode === "truncate" ? "Replace with" : "Import"} ${format}`}
             </button>
           </div>
         </DialogFooter>

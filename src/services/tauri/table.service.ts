@@ -18,6 +18,7 @@ import type {
   DatabaseSqlExportResult,
   SqlInsertConflictPolicy,
   TableImportFormat,
+  TableImportMode,
   TableCsvImportOptions,
   TableCsvImportPreview,
   TableCsvImportPreflight,
@@ -84,6 +85,7 @@ export interface DatabaseSqlExportOptions {
 export interface TableImportOptions {
   importId?: string;
   projectId?: string;
+  mode?: TableImportMode;
 }
 
 export function createTableImportId(): string {
@@ -246,6 +248,7 @@ export async function importTableData(
     table,
     filePath,
     format,
+    mode: options.mode ?? "append",
     firstRowHeader,
     database: databaseName,
     csvOptions,
@@ -257,9 +260,10 @@ export async function preflightTableCsvImport(
   connectionId: string, driver: DatabaseDriver, schema: string, table: string,
   filePath: string, firstRowHeader = true, databaseName?: string,
   csvOptions?: TableCsvImportOptions, expectedFileDigest?: string,
+  mode: TableImportMode = "append",
 ): Promise<TableCsvImportPreflight> {
   return invokeWithInterceptors<TableCsvImportPreflight>("preflight_table_csv_import", {
-    connectionId, driver, schema, table, filePath, firstRowHeader,
+    connectionId, driver, schema, table, filePath, firstRowHeader, mode,
     database: databaseName, csvOptions, expectedFileDigest,
   });
 }

@@ -7,7 +7,12 @@ const { invokeWithInterceptors } = vi.hoisted(() => ({
 vi.mock("./client", () => ({ invokeWithInterceptors }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { exportDatabaseSql, exportTableData } from "./table.service";
+import {
+  exportDatabaseSql,
+  exportTableData,
+  importTableData,
+  preflightTableCsvImport,
+} from "./table.service";
 
 describe("exportTableData", () => {
   beforeEach(() => {
@@ -82,6 +87,48 @@ describe("exportDatabaseSql", () => {
         pageSize: 250,
         sqlInsertBatchSize: 80,
       },
+    );
+  });
+});
+
+describe("table import write mode", () => {
+  beforeEach(() => {
+    invokeWithInterceptors.mockReset();
+    invokeWithInterceptors.mockResolvedValue({
+      importId: "table-import-test",
+      filePath: "users.csv",
+      rowsImported: 2,
+      batches: 1,
+    });
+  });
+
+  it("defaults imports to append and forwards an explicit transactional replace", async () => {
+    await importTableData(
+      "connection-1", "postgres", "public", "users", "users.csv", "csv",
+    );
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
+      "import_table_data",
+      expect.objectContaining({ mode: "append" }),
+    );
+
+    await importTableData(
+      "connection-1", "postgres", "public", "users", "users.csv", "csv",
+      true, undefined, undefined, "sha256", { mode: "truncate" },
+    );
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
+      "import_table_data",
+      expect.objectContaining({ mode: "truncate" }),
+    );
+  });
+
+  it("binds the same mode into CSV preflight", async () => {
+    await preflightTableCsvImport(
+      "connection-1", "postgres", "public", "users", "users.csv",
+      true, undefined, undefined, "sha256", "truncate",
+    );
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
+      "preflight_table_csv_import",
+      expect.objectContaining({ mode: "truncate" }),
     );
   });
 });
