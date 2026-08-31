@@ -22,6 +22,12 @@ pub struct SchemaRelationSnapshot {
     pub object_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The read-only SELECT body for a view, when the driver can expose it.
+    /// This is intentionally absent for tables and for drivers where catalog
+    /// source cannot be obtained safely. Older snapshots deserialize without
+    /// it and remain review-only for view changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
@@ -2224,9 +2230,42 @@ fn compare_relation(
         || source_flags.is_foreign_table
         || target_flags.is_foreign_table
     {
+        if source.object_type == target.object_type
+            && source_flags.is_view
+            && !source_flags.is_materialized_view
+            && !target_flags.is_materialized_view
+            && source.definition != target.definition
+        {
+            if let Some(definition) =
+                normalized_view_select_definition(source.definition.as_deref())
+            {
+                warnings.push(format!(
+                    "View {} source changed. The generated replacement is review-required because dependent views can be affected.",
+                    source.name
+                ));
+                changes.push(change(
+                    SchemaChangeKind::RelationModify,
+                    SchemaChangeRisk::Review,
+                    target_schema,
+                    &source.name,
+                    source.object_type.clone(),
+                    None,
+                    format!("Replace view definition for {}", source.name),
+                    vec![kind.create_view_query(
+                        Some(target_schema),
+                        &source.name,
+                        &definition,
+                        true,
+                    )],
+                    false,
+                    true,
+                ));
+                return;
+            }
+        }
         if source != target {
             warnings.push(format!(
-                "Relation {} requires manual review because view/foreign-table definitions are not captured yet.",
+                "Relation {} requires manual review because its view or foreign-table definition is not available for a safe replacement.",
                 source.name
             ));
             changes.push(change(
@@ -2274,6 +2313,22 @@ fn compare_relation(
             true,
             false,
         ));
+    }
+}
+
+/// View definitions are persisted as a single read-only SELECT body. Reject
+/// catalog output that is not a stand-alone query so schema-diff generation
+/// cannot accidentally replay multi-statement or DDL source text.
+fn normalized_view_select_definition(definition: Option<&str>) -> Option<String> {
+    let definition = definition?.trim().trim_end_matches(';').trim();
+    if definition.is_empty() || definition.contains(';') {
+        return None;
+    }
+    let upper = definition.to_ascii_uppercase();
+    if upper.starts_with("SELECT ") || upper.starts_with("WITH ") {
+        Some(definition.to_string())
+    } else {
+        None
     }
 }
 
@@ -2706,7 +2761,47 @@ fn create_relation_sql(
     relation: &SchemaRelationSnapshot,
 ) -> (Vec<String>, bool, Vec<String>) {
     let flags = relation_flags(relation.object_type.as_deref());
-    if flags.is_view || flags.is_foreign_table {
+    if flags.is_view {
+        let Some(definition) = normalized_view_select_definition(relation.definition.as_deref())
+        else {
+            return (
+                Vec::new(),
+                true,
+                vec![format!(
+                    "View {} requires its source definition before it can be created.",
+                    relation.name
+                )],
+            );
+        };
+        if flags.is_materialized_view {
+            let sql = kind
+                .create_materialized_view_query(
+                    Some(target_schema),
+                    &relation.name,
+                    &definition,
+                    true,
+                )
+                .into_iter()
+                .collect();
+            return (
+                sql,
+                true,
+                vec![format!(
+                    "Materialized view {} must be reviewed before creation because its source query can depend on target data.",
+                    relation.name
+                )],
+            );
+        }
+        return (
+            vec![kind.create_view_query(Some(target_schema), &relation.name, &definition, false)],
+            true,
+            vec![format!(
+                "View {} source was captured read-only. Review its dependencies before applying the generated DDL.",
+                relation.name
+            )],
+        );
+    }
+    if flags.is_foreign_table {
         return (
             Vec::new(),
             true,
@@ -4136,6 +4231,7 @@ mod tests {
                 name: "users".to_string(),
                 object_type: Some("BASE TABLE".to_string()),
                 comment: None,
+                definition: None,
                 columns,
                 indexes: Vec::new(),
                 constraints: Vec::new(),
@@ -4265,6 +4361,7 @@ mod tests {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
+            definition: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4634,6 +4731,7 @@ mod tests {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
+            definition: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),
@@ -4686,6 +4784,68 @@ mod tests {
             assert!(plan.changes[0].manual_review);
             assert!(plan.migration_sql.contains("MANUAL REVIEW REQUIRED"));
         }
+    }
+
+    #[test]
+    fn captured_view_source_generates_reviewable_create_sql() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations[0].name = "active_users".to_string();
+        source.relations[0].object_type = Some("VIEW".to_string());
+        source.relations[0].definition = Some("SELECT id FROM users WHERE active".to_string());
+        let mut target = snapshot("actual", Vec::new());
+        target.relations.clear();
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users")
+            .expect("view creation should be planned");
+
+        assert_eq!(change.kind, SchemaChangeKind::RelationCreate);
+        assert_eq!(change.risk, SchemaChangeRisk::Review);
+        assert!(change.manual_review);
+        assert_eq!(
+            change.sql,
+            vec![
+                "CREATE VIEW \"public\".\"active_users\" AS\nSELECT id FROM users WHERE active;"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn captured_view_source_generates_reviewable_replacement_sql() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        let mut target = snapshot("actual", vec![column("id", "int4", false)]);
+        for relation in [&mut source.relations[0], &mut target.relations[0]] {
+            relation.name = "active_users".to_string();
+            relation.object_type = Some("VIEW".to_string());
+        }
+        source.relations[0].definition = Some("SELECT id FROM users WHERE active".to_string());
+        target.relations[0].definition = Some("SELECT id FROM users".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "active_users")
+            .expect("view replacement should be planned");
+
+        assert_eq!(change.kind, SchemaChangeKind::RelationModify);
+        assert_eq!(change.risk, SchemaChangeRisk::Review);
+        assert!(change.manual_review);
+        assert_eq!(
+            change.sql,
+            vec![
+                "CREATE OR REPLACE VIEW \"public\".\"active_users\" AS\nSELECT id FROM users WHERE active;"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
@@ -4828,6 +4988,7 @@ mod tests {
             name: "accounts".to_string(),
             object_type: Some("BASE TABLE".to_string()),
             comment: None,
+            definition: None,
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
             constraints: Vec::new(),

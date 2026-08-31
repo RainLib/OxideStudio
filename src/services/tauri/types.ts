@@ -1555,6 +1555,11 @@ export interface SchemaRelationSnapshot {
   name: string;
   objectType?: string | null;
   comment?: string | null;
+  /**
+   * Read-only SELECT source captured for native views. It is absent for
+   * tables, older snapshots, and drivers without a safe catalog contract.
+   */
+  definition?: string | null;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   constraints: ConstraintInfo[];

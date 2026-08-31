@@ -47,6 +47,72 @@ const EXTERNAL_MIGRATION_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_EXTERNAL_MIGRATION_SESSIONS: usize = 64;
 static ACTIVE_MIGRATION_JOURNALS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn object_type_is_view(object_type: Option<&str>) -> bool {
+    object_type.is_some_and(|value| value.to_ascii_uppercase().contains("VIEW"))
+}
+
+/// Catalog source is enabled only for native PostgreSQL/MySQL views. Both
+/// adapters return a SELECT body rather than CREATE DDL, which keeps the
+/// snapshot source portable across schemas of the same dialect and lets the
+/// planner own the target-side identifier quoting. Other drivers remain
+/// metadata-only until their package exposes an equivalent safe contract.
+fn native_view_definition_query(driver: &str, schema: &str, view: &str) -> Option<String> {
+    let schema = sql_string_literal(schema);
+    let view = sql_string_literal(view);
+    match driver.trim().to_ascii_lowercase().as_str() {
+        "postgres" => Some(format!(
+            "SELECT pg_catalog.pg_get_viewdef(class.oid, true) AS definition \
+             FROM pg_catalog.pg_class class \
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace \
+             WHERE namespace.nspname = {schema} AND class.relname = {view} \
+             AND class.relkind IN ('v', 'm');"
+        )),
+        "mysql" => Some(format!(
+            "SELECT VIEW_DEFINITION AS definition FROM information_schema.VIEWS \
+             WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {view};"
+        )),
+        _ => None,
+    }
+}
+
+fn query_first_string(results: &[QueryResult]) -> Option<String> {
+    results
+        .first()?
+        .rows
+        .first()?
+        .first()?
+        .as_str()
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn capture_native_view_definition(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+    view: &str,
+) -> Result<Option<String>, String> {
+    let Some(sql) = native_view_definition_query(driver, schema, view) else {
+        return Ok(None);
+    };
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(query_first_string(&results))
+}
+
 #[derive(Default)]
 pub struct ExternalSchemaMigrationSessionState {
     sessions: Mutex<HashMap<String, ExternalSchemaMigrationSession>>,
@@ -395,12 +461,14 @@ async fn capture_schema_snapshot_inner(
     let mut warnings = Vec::new();
     let concurrency = Arc::new(Semaphore::new(SNAPSHOT_METADATA_CONCURRENCY));
     let mut captures = JoinSet::new();
+    let snapshot_driver = capabilities.driver.clone();
     for (relation_name, object_type, comment) in objects {
         let manager = manager.clone();
         let concurrency = Arc::clone(&concurrency);
         let connection_id = connection_id.clone();
         let database = database.map(ToString::to_string);
         let schema = schema.to_string();
+        let driver = snapshot_driver.clone();
         let supports_indexes = capabilities.supports_table_indexes;
         let supports_constraints = capabilities.supports_table_constraints;
         let database_scoped = capabilities.supports_table_browsing && database.is_some();
@@ -409,6 +477,28 @@ async fn capture_schema_snapshot_inner(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Schema snapshot concurrency gate closed".to_string())?;
+            let (definition, view_warning) = if object_type_is_view(object_type.as_deref()) {
+                match capture_native_view_definition(
+                    &manager,
+                    &connection_id,
+                    database.as_deref(),
+                    &driver,
+                    &schema,
+                    &relation_name,
+                )
+                .await
+                {
+                    Ok(definition) => (definition, None),
+                    Err(error) => (
+                        None,
+                        Some(format!(
+                            "View source for {schema}.{relation_name} was unavailable; this view remains review-only: {error}"
+                        )),
+                    ),
+                }
+            } else {
+                (None, None)
+            };
             let columns = async {
                 match (database_scoped, database.as_deref()) {
                     (true, Some(database)) => {
@@ -468,24 +558,29 @@ async fn capture_schema_snapshot_inner(
                         name: relation_name,
                         object_type,
                         comment,
+                        definition,
                         columns: metadata.0,
                         indexes: metadata.1,
                         constraints: metadata.2,
                     },
-                    None,
+                    view_warning.into_iter().collect::<Vec<_>>(),
                 )),
                 Err(error) if allow_partial => Ok((
                     SchemaRelationSnapshot {
                         name: relation_name.clone(),
                         object_type,
                         comment,
+                        definition,
                         columns: Vec::new(),
                         indexes: Vec::new(),
                         constraints: Vec::new(),
                     },
-                    Some(format!(
-                        "Diagram metadata for {schema}.{relation_name} is incomplete: {error}"
-                    )),
+                    view_warning
+                        .into_iter()
+                        .chain(std::iter::once(format!(
+                            "Diagram metadata for {schema}.{relation_name} is incomplete: {error}"
+                        )))
+                        .collect::<Vec<_>>(),
                 )),
                 Err(error) => Err(format!(
                     "Failed to capture metadata for {schema}.{relation_name}: {error}"
@@ -497,11 +592,9 @@ async fn capture_schema_snapshot_inner(
     let mut relations = Vec::with_capacity(captures.len());
     while let Some(capture) = captures.join_next().await {
         match capture {
-            Ok(Ok((relation, warning))) => {
+            Ok(Ok((relation, relation_warnings))) => {
                 relations.push(relation);
-                if let Some(warning) = warning {
-                    warnings.push(warning);
-                }
+                warnings.extend(relation_warnings);
             }
             Ok(Err(error)) => {
                 captures.abort_all();
@@ -2226,6 +2319,7 @@ mod tests {
                 name: "users".to_string(),
                 object_type: Some("TABLE".to_string()),
                 comment: None,
+                definition: None,
                 columns: vec![ColumnInfo {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
@@ -2262,6 +2356,28 @@ mod tests {
             schema_objects: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn native_view_definition_queries_are_catalog_scoped_and_read_only() {
+        let postgres = native_view_definition_query("postgres", "public", "active_users")
+            .expect("PostgreSQL view introspection should be supported");
+        assert!(postgres.contains("pg_catalog.pg_get_viewdef"));
+        assert!(postgres.contains("namespace.nspname = 'public'"));
+        assert!(postgres.contains("class.relname = 'active_users'"));
+
+        let mysql = native_view_definition_query("mysql", "app", "active_users")
+            .expect("MySQL view introspection should be supported");
+        assert!(mysql.contains("information_schema.VIEWS"));
+        assert!(mysql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(mysql.contains("TABLE_NAME = 'active_users'"));
+
+        assert!(native_view_definition_query("sqlite", "main", "active_users").is_none());
+        assert!(
+            native_view_definition_query("postgres", "p'ublic", "active_users")
+                .expect("quoted PostgreSQL catalog query")
+                .contains("'p''ublic'")
+        );
     }
 
     fn check(assertion: SchemaPreflightAssertion, column: Option<&str>) -> SchemaPreflightCheck {
