@@ -71,6 +71,93 @@ const operatorLabels: Record<FilterOperator, string> = {
 const filterButtonClass =
   "inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-[3px] px-1.5 text-[10px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:opacity-40";
 
+function gridColumnId(column: GridColumn) {
+  return String(column.id || column.title);
+}
+
+/** Keep column ordering stable while narrowing a dense schema list. */
+export function filterGridColumns(
+  columns: readonly GridColumn[],
+  query: string,
+) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return columns;
+
+  return columns.filter((column) =>
+    [gridColumnId(column), column.title]
+      .filter(Boolean)
+      .some((value) => value.toLowerCase().includes(normalizedQuery)),
+  );
+}
+
+function FilterColumnSelect({
+  columns,
+  value,
+  onValueChange,
+}: {
+  columns: readonly GridColumn[];
+  value: string;
+  onValueChange: (column: string) => void;
+}) {
+  const [columnSearch, setColumnSearch] = useState("");
+  const filteredColumns = useMemo(
+    () => filterGridColumns(columns, columnSearch),
+    [columnSearch, columns],
+  );
+
+  return (
+    <Select
+      value={value}
+      onValueChange={onValueChange}
+      onOpenChange={(open) => {
+        if (!open) setColumnSearch("");
+      }}
+    >
+      <SelectTrigger
+        aria-label="Filter column"
+        className="h-6 w-[160px] shrink-0 border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-2 text-[11px]"
+      >
+        <SelectValue placeholder="Column" />
+      </SelectTrigger>
+      <SelectContent
+        header={
+          <div
+            className="flex items-center gap-1.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2 py-1.5"
+            data-filter-column-search
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <Search size={12} className="wb-muted shrink-0" aria-hidden="true" />
+            <input
+              autoFocus
+              value={columnSearch}
+              onChange={(event) => setColumnSearch(event.target.value)}
+              onKeyDown={(event) => event.stopPropagation()}
+              placeholder="Search columns"
+              aria-label="Search filter columns"
+              className="h-6 min-w-0 flex-1 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-1.5 text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))] focus:ring-1 focus:ring-[hsl(var(--wb-accent))]"
+            />
+          </div>
+        }
+      >
+        {filteredColumns.length > 0 ? (
+          filteredColumns.map((column) => {
+            const id = gridColumnId(column);
+            return (
+              <SelectItem key={id} value={id} className="text-xs">
+                {column.title}
+              </SelectItem>
+            );
+          })
+        ) : (
+          <div className="px-2 py-2 text-[11px] wb-muted" role="status">
+            No matching columns
+          </div>
+        )}
+      </SelectContent>
+    </Select>
+  );
+}
+
 export function GridFilterRow({
   columns,
   mode,
@@ -286,24 +373,11 @@ export function GridFilterRow({
               </button>
             )}
 
-            <Select
+            <FilterColumnSelect
+              columns={columns}
               value={filter.column}
               onValueChange={(column) => updateFilter(index, { column })}
-            >
-              <SelectTrigger className="h-6 w-[160px] shrink-0 border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] px-2 text-[11px]">
-                <SelectValue placeholder="Column" />
-              </SelectTrigger>
-              <SelectContent>
-                {columns.map((column) => {
-                  const id = String(column.id || column.title);
-                  return (
-                    <SelectItem key={id} value={id}>
-                      {column.title}
-                    </SelectItem>
-                  );
-                })}
-              </SelectContent>
-            </Select>
+            />
 
             <Select
               value={filter.operator}
