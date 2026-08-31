@@ -2103,6 +2103,13 @@ fn schema_object_review_change_with_definition(
         {
             Some(definition.to_string())
         }
+        (
+            SchemaChangeKind::SchemaObjectCreate,
+            Some(DatabaseKind::Mysql),
+            true,
+            _,
+            Some(definition),
+        ) if is_simple_mysql_trigger_definition(definition) => Some(definition.to_string()),
         _ => None,
     };
     let mut change = change(
@@ -2120,11 +2127,22 @@ fn schema_object_review_change_with_definition(
     if change.sql.is_empty() {
         change.phase = SchemaChangePhase::ManualReview;
         change.blocked_reason = Some(
-            "Schema object source/DDL is unavailable or lacks a reviewed native PostgreSQL create definition."
+            "Schema object source/DDL is unavailable or lacks a reviewed native create definition."
                 .to_string(),
         );
     }
     change
+}
+
+/// MySQL compound triggers require a client-side delimiter protocol, which a
+/// schema-diff plan deliberately does not emulate. A catalog-built, single
+/// statement trigger can be applied safely as one review-gated unit; anything
+/// with a statement separator stays blocked for manual migration.
+fn is_simple_mysql_trigger_definition(definition: &str) -> bool {
+    let normalized = definition.trim().to_ascii_uppercase();
+    normalized.starts_with("CREATE TRIGGER ")
+        && !normalized.contains("DEFINER")
+        && !definition.contains(';')
 }
 
 fn compare_schema_objects(
@@ -2186,6 +2204,9 @@ fn compare_schema_objects(
         });
         warnings.push(if catalog_backed && database_kind == Some(DatabaseKind::Postgres) {
             "PostgreSQL catalog trigger/sequence DDL is included only for review-gated creation; object removal remains blocked."
+                .to_string()
+        } else if catalog_backed && database_kind == Some(DatabaseKind::Mysql) {
+            "MySQL catalog trigger DDL is included only for review-gated single-statement creation; compound trigger bodies and object removal remain blocked."
                 .to_string()
         } else {
             "Schema object descriptor drift is review-only: source/DDL and automatic migration are intentionally unavailable."
@@ -4849,6 +4870,74 @@ mod tests {
         assert!(change.blocked_reason.is_none());
         assert_eq!(change.sql.len(), 1);
         assert!(change.sql[0].starts_with("CREATE TRIGGER"));
+    }
+
+    #[test]
+    fn mysql_single_statement_catalog_trigger_is_review_gated_but_executable() {
+        let mut source = snapshot("desired", vec![column("id", "int", false)]);
+        source.driver = "mysql".to_string();
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER `orders_audit` AFTER INSERT ON `app`.`orders` FOR EACH ROW SET NEW.updated_at = NOW()"
+                    .to_string(),
+            ),
+            dependencies: Vec::new(),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int", false)]);
+        target.driver = "mysql".to_string();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+
+        assert!(change.manual_review);
+        assert!(change.blocked_reason.is_none());
+        assert_eq!(change.sql.len(), 1);
+        assert!(change.sql[0].starts_with("CREATE TRIGGER"));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("single-statement")));
+    }
+
+    #[test]
+    fn mysql_compound_catalog_trigger_remains_blocked_without_delimiter_protocol() {
+        let mut source = snapshot("desired", vec![column("id", "int", false)]);
+        source.driver = "mysql".to_string();
+        source.schema_objects = vec![SchemaObjectSnapshot {
+            name: "orders_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("orders".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER `orders_audit` AFTER INSERT ON `app`.`orders` FOR EACH ROW BEGIN SET @audit = NEW.id; END"
+                    .to_string(),
+            ),
+            dependencies: Vec::new(),
+        }];
+        let source = finalize_schema_snapshot(source).unwrap();
+        let mut target = snapshot("actual", vec![column("id", "int", false)]);
+        target.driver = "mysql".to_string();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::SchemaObjectCreate)
+            .unwrap();
+
+        assert!(change.sql.is_empty());
+        assert!(change.blocked_reason.is_some());
     }
 
     #[test]

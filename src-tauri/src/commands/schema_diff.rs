@@ -204,6 +204,81 @@ fn postgres_trigger_definition_query(schema: &str) -> String {
     )
 }
 
+fn mysql_quote_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// MySQL's information_schema trigger catalog avoids copying source DEFINER
+/// accounts. Only simple action statements are later eligible for execution;
+/// compound BEGIN/END bodies retain review-only status because they require a
+/// delimiter-aware execution contract.
+fn mysql_trigger_definition_query(schema: &str) -> String {
+    let schema = sql_string_literal(schema);
+    format!(
+        "SELECT TRIGGER_NAME AS trigger_name, EVENT_OBJECT_TABLE AS parent_name, \
+         ACTION_TIMING AS action_timing, EVENT_MANIPULATION AS event_manipulation, \
+         ACTION_STATEMENT AS action_statement \
+         FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {schema} \
+         ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME;"
+    )
+}
+
+async fn capture_mysql_trigger_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    database: Option<&str>,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, String>, String> {
+    if !driver.trim().eq_ignore_ascii_case("mysql") {
+        return Ok(HashMap::new());
+    }
+    let sql = mysql_trigger_definition_query(schema);
+    let results = match database {
+        Some(database) => manager.query_database(connection_id, database, &sql).await,
+        None => {
+            manager
+                .query(connection_id, &sql, Some(schema.to_string()), None, None)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(parent_name), Some(timing), Some(event), Some(statement)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+            row.get(2).and_then(serde_json::Value::as_str),
+            row.get(3).and_then(serde_json::Value::as_str),
+            row.get(4).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let statement = statement.trim();
+        if name.trim().is_empty()
+            || parent_name.trim().is_empty()
+            || timing.trim().is_empty()
+            || event.trim().is_empty()
+            || statement.is_empty()
+        {
+            continue;
+        }
+        definitions.insert(
+            schema_object_definition_key(Some(parent_name), name),
+            format!(
+                "CREATE TRIGGER {} {} {} ON {}.{} FOR EACH ROW {}",
+                mysql_quote_identifier(name),
+                timing.to_ascii_uppercase(),
+                event.to_ascii_uppercase(),
+                mysql_quote_identifier(schema),
+                mysql_quote_identifier(parent_name),
+                statement,
+            ),
+        );
+    }
+    Ok(definitions)
+}
+
 /// Creates reviewable sequence DDL without copying mutable last-value state.
 /// `pg_sequence` exposes only typed catalog values and identifiers are quoted
 /// by PostgreSQL itself, so no user-provided SQL fragment is interpolated.
@@ -1133,6 +1208,34 @@ async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "PostgreSQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_mysql_trigger_definitions(
+            &manager,
+            &connection_id,
+            database,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("trigger") {
+                        if let Some(definition) = definitions.get(&schema_object_definition_key(
+                            object.parent_name.as_deref(),
+                            &object.name,
+                        )) {
+                            object.definition = Some(definition.clone());
+                        }
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "MySQL trigger source was unavailable; trigger drift remains review-only: {error}"
             )),
         }
     }
@@ -2925,7 +3028,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_native_object_source_queries_are_catalog_scoped_and_read_only() {
+    fn native_object_source_queries_are_catalog_scoped_and_read_only() {
         let routine = postgres_routine_definition_query("public");
         assert!(routine.contains("pg_catalog.pg_get_functiondef"));
         assert!(routine.contains("namespace.nspname = 'public'"));
@@ -2961,6 +3064,14 @@ mod tests {
             schema_object_definition_key(Some("orders"), "orders_audit"),
             "orders\u{1f}orders_audit"
         );
+
+        let mysql_trigger = mysql_trigger_definition_query("app");
+        assert!(mysql_trigger.contains("information_schema.TRIGGERS"));
+        assert!(mysql_trigger.contains("TRIGGER_SCHEMA = 'app'"));
+        assert!(mysql_trigger.contains("ACTION_STATEMENT"));
+        assert!(!mysql_trigger.contains("INSERT"));
+        assert!(!mysql_trigger.contains("UPDATE"));
+        assert_eq!(mysql_quote_identifier("order`audit"), "`order``audit`");
     }
 
     fn check(assertion: SchemaPreflightAssertion, column: Option<&str>) -> SchemaPreflightCheck {

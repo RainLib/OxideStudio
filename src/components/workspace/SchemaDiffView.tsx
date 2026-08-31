@@ -459,7 +459,7 @@ export function SchemaDiffView() {
         >
           <ShieldAlert size={12} className="mt-0.5 shrink-0 text-violet-300" />
           <span>
-            {catalogBackedObjectChanges.length} PostgreSQL routine or trigger change{catalogBackedObjectChanges.length === 1 ? " has" : "s have"} catalog-backed DDL in this preview. It remains review-gated and is applied only after target confirmation; delete operations are never generated automatically.
+            {catalogBackedObjectChanges.length} catalog-backed routine or trigger change{catalogBackedObjectChanges.length === 1 ? " has" : "s have"} DDL in this preview. It remains review-gated and is applied only after target confirmation; delete operations are never generated automatically.
           </span>
         </div>
       )}
