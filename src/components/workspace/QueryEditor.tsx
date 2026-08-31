@@ -1992,7 +1992,7 @@ export function QueryEditor({
           ) => {
             let presentedSuggestions = suggestions;
             const batchMode = isSqlCompletionDocument
-              ? sqlBatchColumnMode(textBeforeCursor)
+              ? sqlBatchColumnMode(textBeforeCursor, driver)
               : null;
             if (batchMode && suggestions.length > 1) {
               const word = model.getWordUntilPosition(position);
@@ -2038,6 +2038,7 @@ export function QueryEditor({
                 batchColumnSessionsRef.current.clear();
                 batchColumnSessionsRef.current.set(sessionId, session);
                 presentedSuggestions = [
+                  ...suggestions,
                   {
                     label: `Choose columns… (${candidates.length})`,
                     kind: monaco.languages.CompletionItemKind.Snippet,
@@ -2057,7 +2058,6 @@ export function QueryEditor({
                       arguments: [completionOwnerKey, sessionId],
                     },
                   },
-                  ...suggestions,
                 ];
               }
             }

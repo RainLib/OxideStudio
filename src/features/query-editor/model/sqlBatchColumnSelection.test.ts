@@ -10,6 +10,13 @@ describe("SQL batch column selection", () => {
     expect(sqlBatchColumnMode("SELECT ")).toBe("select");
     expect(sqlBatchColumnMode("SELECT id FROM users")).toBeNull();
     expect(sqlBatchColumnMode("INSERT INTO users (")).toBe("insert");
+    expect(sqlBatchColumnMode("SELECT ';' AS note; SELECT ")).toBe("select");
+    expect(sqlBatchColumnMode("SELECT 'FROM shadow_table'")).toBe("select");
+    expect(sqlBatchColumnMode("SELECT id /* FROM shadow_table */")).toBe("select");
+    expect(sqlBatchColumnMode("SELECT $$ FROM shadow_table $$", "postgres")).toBe("select");
+    expect(sqlBatchColumnMode("-- INSERT INTO shadow (\nSELECT ")).toBe("select");
+    expect(sqlBatchColumnMode("INSERT INTO `order items` (")).toBe("insert");
+    expect(sqlBatchColumnMode("INSERT INTO users VALUES (\"not a column list\"")).toBeNull();
   });
 
   it("builds a tab-navigable INSERT values snippet", () => {

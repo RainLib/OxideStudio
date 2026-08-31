@@ -1,3 +1,6 @@
+import { maskSqlNoise } from "@/lib/sqlAnalysis";
+import { sqlStatementBeforeCursor } from "@/lib/queryEditorCachedCompletion";
+
 export type SqlBatchColumnMode = "select" | "insert";
 
 export type SqlBatchColumnCandidate = {
@@ -7,13 +10,25 @@ export type SqlBatchColumnCandidate = {
   detail?: string;
 };
 
-export function sqlBatchColumnMode(textBeforeCursor: string): SqlBatchColumnMode | null {
-  const statement = textBeforeCursor.slice(textBeforeCursor.lastIndexOf(";") + 1);
-  if (/\binsert\s+into\s+[\s\S]*\(\s*(?:[\w$`"\[\].]*\s*)$/iu.test(statement)) {
+export function sqlBatchColumnMode(
+  textBeforeCursor: string,
+  dialect?: string,
+): SqlBatchColumnMode | null {
+  // Batch selection is a local presentation action, but it must share the
+  // same statement boundary and lexical-noise rules as the LSP/fallback path.
+  // In particular, a semicolon or `FROM` within a literal/comment must not
+  // switch the active editor statement or expose an unrelated column picker.
+  const statement = sqlStatementBeforeCursor(textBeforeCursor);
+  const masked = maskSqlNoise(statement, dialect);
+  if (
+    /\binsert\s+into\b/iu.test(masked) &&
+    /\binsert\s+into\s+[\s\S]*\(\s*(?:[\w$`"\[\].]*\s*)$/iu.test(statement)
+  ) {
     return "insert";
   }
-  const selectIndex = statement.toLocaleLowerCase().lastIndexOf("select");
-  const fromIndex = statement.toLocaleLowerCase().lastIndexOf("from");
+  const normalized = masked.toLocaleLowerCase();
+  const selectIndex = normalized.lastIndexOf("select");
+  const fromIndex = normalized.lastIndexOf("from");
   return selectIndex >= 0 && selectIndex > fromIndex ? "select" : null;
 }
 

@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | `73a7b3f4c` | Elasticsearch 通过 PIT + `search_after` 跨越 10k result window | 已迁移为 native opaque cursor 协议；Grid 分页、fallback 与 cursor 清理逻辑完成，真实 ES 6/7/8 验证延期。 |
 | `5a11b8f14` | MongoDB 创建数据库预览和确认 | 已迁移为严格 JSON 预览与后端固定初始化 collection 的语义命令，避免执行 shell source；真实权限/竞争验证延期。 |
-| `bd3e58562`、`143be57d4` | completion popup 多选列并批量生成 SELECT/INSERT | 逻辑已对齐：Monaco 建议列表末尾提供 batch action，独立选择面板支持搜索、checkbox 与可访问焦点；SELECT 按 metadata 顺序插入，INSERT 生成可 Tab 导航的 VALUES snippet。普通单列继续作为默认 Enter 目标，不耦合 Monaco 私有 DOM。真实 WebView/IME 验证延期。 |
+| `bd3e58562`、`143be57d4` | completion popup 多选列并批量生成 SELECT/INSERT | 逻辑已对齐：Monaco 建议列表末尾提供 batch action，独立选择面板支持搜索、checkbox 与可访问焦点；SELECT 按 metadata 顺序插入，INSERT 生成可 Tab 导航的 VALUES snippet。batch action 的上下文复用当前 statement boundary 与 SQL noise mask，因此注释、字面量和 PostgreSQL dollar quote 中的 `;`/`FROM`/`INSERT` 不会误触发；普通单列继续作为默认 Enter 目标，不耦合 Monaco 私有 DOM。真实 WebView/IME 验证延期。 |
 | `d5f4eadf7` | 工具栏执行前冻结 SQL selection | 已对齐：pointer-down 捕获 immutable snapshot，执行目标不再受 focus transition 影响。 |
 | `e6f8b2187` | MCP 全局查询超时覆盖 | 已对齐到 Oxide 的独立公开 MCP 架构：`oxide-agent mcp stdio` 与 `tools call` 共用 `--query-timeout-secs` / `OXIDE_MCP_QUERY_TIMEOUT_SECS` 进程级策略；省略保持 30 秒，`0` 表示不自动截止。查询与 estimated EXPLAIN 共用该边界，模型不能通过工具参数扩大期限，公开 MCP 仍严格只读。 |
 | `7ba30ae76` | SQL 文件树创建、重命名、删除 | 已有等价能力：Project Files 树支持新建文件/目录、保存、重命名和带确认删除；Rust 端规范化相对路径、限制 project root、拒绝 symlink 逃逸，并在重命名/删除后同步 tab 与 LSP 虚拟文档。 |
