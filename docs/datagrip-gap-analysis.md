@@ -38,7 +38,7 @@ DataGrip 的官方能力基线主要来自：
 OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 → 查看/编辑表数据”的骨架，并在多数据模型、Tauri 安全边界、项目文件和 AI 工具一致性上形成了自己的方向。与 DataGrip 的主要差距不在单个按钮，而在五条专业闭环尚未形成：
 
 1. **发现闭环**：Search Everywhere、对象导航、find usages、数据库全文搜索仍不完整。
-2. **变更闭环**：schema diff/migration review、机器可判定 preflight 与 PostgreSQL 指纹绑定的原子 apply/post-verify/journal 已形成首条安全闭环；项目 Git 已覆盖 clone/init/status/diff/stage/unstage/hunk/commit/history/branch/remote/fetch/pull/push/patch，Agent 文件变化也可直接在主编辑器审阅，loaded-result Data Compare 已形成只读主路径；仍缺 MySQL 安全 apply、服务端全量 compare/sync、changelist/blame 与 DDL data source mapping。
+2. **变更闭环**：schema diff/migration review、机器可判定 preflight 与 PostgreSQL 指纹绑定的原子 apply/post-verify/journal 已形成首条安全闭环；项目 Git 已覆盖 clone/init/status/diff/stage/unstage/hunk/commit/history/branch/remote/fetch/pull/push/patch，Agent 文件变化也可直接在主编辑器审阅，Data Compare 已具备服务端全量/降级比较和小差异安全同步；仍缺 MySQL 安全 apply、多表/缺表 compare、changelist/blame 与 DDL data source mapping。
 3. **数据工作闭环**：Value Editor 已有类型感知主路径，但外键导航、聚合视图、多视图模式和导入映射不足。
 4. **诊断闭环**：Explain Plan 与 PostgreSQL/MySQL 原生错误诊断已有主路径，但自动 Fix → Validate、会话/锁/运行监控仍不足。
 5. **智能协作闭环**：Chat/Plan/Agent 已统一进入独立 TypeScript Deep Agents host，并具备 Rust 模型/工具/审批边界、加密 LangGraph checkpoint/pending writes、应用重启后的对话恢复与手动 checkpoint resume、文本附件、项目文件 revision-safe 写入、Changes 审阅、trusted metadata/plan citation、optimizer-estimate 热点信号和 vendor error 到 review-only patch 的修复路径；仍缺运行时统计驱动的自动优化、通用后台任务恢复和全部 provider tool bridge。LSP 已补齐 catalog 隔离、同名列排序、CTE/派生表输出、当前 console 临时表生命周期、routine overload、MongoDB collection-aware 自动补全、ES 引号内 mapping 字段与 6/7/8 版本路径、Table WHERE 补全、FK JOIN、静态 domain 值、偏好/usage 排序和大 catalog 性能基线；未打开文件的全项目 usage index 与需显式治理的 live value-frequency sampling 仍属于后续缺口。
@@ -83,7 +83,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Table / Tree / Text / Transpose | 部分具备 | Mongo collection、Redis key、ES index 已进入只读有界 Data Grid，不再打开 SQL editor；表数据与 SQL 查询结果的加载页都有只读 transpose（表格未提交编辑时锁定），JSON Value Editor 有 1 MiB 有界只读 tree；仍缺文档 tree/text 切换、原生服务端分页/过滤/编辑与 XML/array/map 专用视图 | P1 |
 | 外键导航 | 已具备/部分 | PostgreSQL/MySQL 可从 FK cell 跳到 referenced row，也可从主键/唯一键 cell 查看 referencing rows；复合键原子映射、NULL 不误跳、保留 connection/database/schema scope。尚缺键盘快捷键、关系路径历史和图内联动 | P1 |
 | Aggregate View | 已具备/部分 | Table/Query grid 的 range/row/column 多选支持 cells/distinct/NULL/default 与类型感知 sum/avg/min/max；decimal/bigint 用定点精确累计，50k cell 有界采样且明确标记。尚缺自定义函数和 server-wide aggregate | P1 |
-| Data compare | 已具备/部分 | 任意两个已加载 Table/Query 结果可从 tab 菜单打开只读 artifact；支持共同 PK/`id` 推荐、用户复合 key、不同列序、changed/left-only/right-only/equal/duplicate 分类、absolute/relative 数值 tolerance、搜索和显式 refresh。表端点另有 Host 全量 keyset / 确定性极值抽样 / 超限风险降级，带稳定 operation ID、阶段进度、双端 backend cancel、批次/本地 checksum 协作取消和有界明细。精确且未截断的小差异集可生成 Host 方言化、4 MiB 有界、带事务包装的 review-only 同步脚本；sample/skip/truncated 结果 fail closed。重复 key/重复列不静默配对，truncated/current-page 边界可见；尚缺手动列映射/忽略规则、多表/缺表计划，以及冻结快照和乐观并发校验后的参数化原子同步执行 | P1 |
+| Data compare | 已具备/部分 | 任意两个已加载 Table/Query 结果可从 tab 菜单打开只读 artifact；支持共同 PK/`id` 推荐、用户复合 key、不同列序、changed/left-only/right-only/equal/duplicate 分类、absolute/relative 数值 tolerance、搜索和显式 refresh。表端点另有 Host 全量 keyset / 确定性极值抽样 / 超限风险降级，带稳定 operation ID、阶段进度、双端 backend cancel、批次/本地 checksum 协作取消和有界明细。精确且未截断的小差异集会同时生成审阅 SQL与 Host 冻结的短期单次参数化计划；执行前复核 metadata digest，UPDATE/DELETE 绑定旧目标快照，单事务逐句验证 affected rows，漂移或异常整体回滚，commit 结果未知时禁止自动重试。sample/skip/truncated 结果 fail closed。重复 key/重复列不静默配对，truncated/current-page 边界可见；尚缺手动列映射/忽略规则、逐行选择、多表/缺表计划和真实产品并发验证 | P1 |
 | 当前结果内查找 | 部分具备 | 有 grid search/filter；普通 PostgreSQL/MySQL 查询在驱动读取阶段硬限制为首 1,000 行并明确标记 truncated，避免先全量入内存；仍缺可配置 fetch page、列范围、正则和匹配导航 | P0 |
 
 ### 3.4 Import / Export
@@ -194,7 +194,7 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 
 1. Schema snapshot + diff + dependency/preflight + PostgreSQL 安全 apply/journal/post-verify/conditional rollback 已完成；MySQL 已具备显式 partial-commit 确认与逐条 journal 执行，继续补对象 source、rename detection、跨对象 dependency graph、schema mapping、独立 server dry-run 与 interrupted-journal reconciliation。
 2. ER diagram MVP 已完成：复用稳定 snapshot 与 PK/FK/constraint metadata；继续补手动布局、导出、跨 schema 节点和 dependency overlay。
-3. Loaded Data Compare 与数值 tolerance 已完成；继续补服务端全量 compare、手动列 mapping/ignore rule 与审核后同步。
+3. Loaded Data Compare、服务端全量/降级 compare、小差异冻结计划与参数化原子同步已完成；继续补手动列 mapping/ignore rule、逐行选择、多表与目标缺表计划。
 4. 外键导航继续补键盘路径、关系历史和 diagram 联动；新增 object dependency navigation。
 5. 完整方言 DDL data source、真实数据源 mapping 和 migration run configurations（当前项目 DDL baseline 仅用于 review）。
 6. 编辑器 inspections、quick-fix、find usages 和 local history。
@@ -245,4 +245,4 @@ SQL script import 是库/schema 级执行能力：即使入口来自 table 右�
 20. **DG-P1-01 migration execute** 已完成：前端内联确认要求 exact `connection / database / schema`、manual-review 与 destructive 分级批准；Rust 不接收前端 SQL，而是验证 snapshot fingerprint/plan id、刷新 live target、重算计划并执行机器 preflight。PostgreSQL DDL 复用 database-scoped transaction batch，任一错误回滚且 committed statements 为 0；MySQL 需要额外 auto-commit 确认，逐条执行并在每条成功后持久 journal，失败会报告可能已提交数；两者提交后都重新抓取并 diff。reverse plan 仅在全量可逆且无 blocked change 时发布为 guarded artifact。边界见 [ADR-0013](decisions/0013-schema-migration-execution.md)。
 21. **DG-P1-02 ER diagram MVP** 已完成：schema context menu 可抓取 fresh snapshot，历史 snapshot 也可直接打开；artifact 保留复合 FK、确定性有界布局、搜索、keys-only、zoom/Fit、选中关系检查和 Explorer reveal。同一 target 再打开会刷新 snapshot，不制造重复 tab。边界见 [ADR-0014](decisions/0014-schema-diagram-artifact.md)。
 22. **DG-P1-03 Loaded Data Compare** 已完成：两个 Table/Query loaded result 经共同/复合 key 对齐，支持数值 tolerance、状态汇总和不可变 artifact refresh；duplicate key、重复列与 truncated source 均不会被静默解释成可靠全量差异。边界见 [ADR-0015](decisions/0015-loaded-data-compare.md)。
-23. 数据库主线下一步仍是服务端全量 compare/sync、完整 source/dependency capture、rename/schema mapping、独立 server dry-run、MySQL interrupted-journal reconciliation，以及长期 workload statistics/自动优化；不能把 PostgreSQL 单次 post-verify、MySQL 顺序执行或单次 Analyze 描述为跨驱动 exactly-once migration 或稳定性能提升。
+23. 数据库主线下一步仍是多表/缺表 compare、完整 source/dependency capture、rename/schema mapping、独立 server dry-run、MySQL interrupted-journal reconciliation，以及长期 workload statistics/自动优化；不能把小差异同步、PostgreSQL 单次 post-verify、MySQL 顺序执行或单次 Analyze 描述为跨驱动 exactly-once replication/migration 或稳定性能提升。

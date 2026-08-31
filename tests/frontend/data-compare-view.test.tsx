@@ -262,7 +262,7 @@ describe("DataCompareView", () => {
     cancel.mockRestore();
   });
 
-  it("offers review-only sync SQL only after an exact untruncated comparison", async () => {
+  it("offers a frozen sync plan only after an exact untruncated comparison", async () => {
     const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
       (tab) => tab.type === "table",
     );
@@ -333,7 +333,20 @@ describe("DataCompareView", () => {
         sql: '-- Review-only\nBEGIN;\nINSERT INTO "public"."users" ("id", "score") VALUES (2, 20);\nCOMMIT;',
         planDigest: "digest",
         reviewOnly: true,
-        warnings: ["Review only; refresh before execution."],
+        canExecute: true,
+        planToken: "single-use-token",
+        expiresAt: Date.now() + 60_000,
+        confirmationText: "SYNC public.users",
+        warnings: ["Review artifact; execution uses the frozen plan."],
+      });
+    const execute = vi
+      .spyOn(tableService, "executeTableDataCompareSync")
+      .mockResolvedValue({
+        insertCount: 1,
+        updateCount: 0,
+        deleteCount: 0,
+        rowsAffected: 1,
+        planDigest: "digest",
       });
 
     await act(async () => root.render(<DataCompareView />));
@@ -361,9 +374,36 @@ describe("DataCompareView", () => {
         'textarea[aria-label="Data compare synchronization SQL"]',
       )?.value,
     ).toContain("INSERT INTO");
-    expect(container.textContent).toContain("Review-only synchronization SQL");
+    expect(container.textContent).toContain("Synchronization plan");
+    const apply = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.includes("Apply atomically"),
+    );
+    expect(apply?.disabled).toBe(true);
+    const confirmation = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Synchronization confirmation phrase"]',
+    );
+    await act(async () => {
+      if (!confirmation) return;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        confirmation,
+        "SYNC public.users",
+      );
+      confirmation.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(apply?.disabled).toBe(false);
+    await act(async () => {
+      apply?.click();
+      await Promise.resolve();
+    });
+    expect(execute).toHaveBeenCalledWith({
+      planToken: "single-use-token",
+      planDigest: "digest",
+      confirmationText: "SYNC public.users",
+    });
+    expect(container.textContent).toContain("Applied 1 frozen operation(s) atomically");
     compare.mockRestore();
     preview.mockRestore();
+    execute.mockRestore();
   });
 
   it("requires the complete shared primary key before enabling full-table compare", async () => {

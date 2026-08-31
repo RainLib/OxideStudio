@@ -456,7 +456,7 @@ describe("table service database scope", () => {
     expect(stop).toBe(unlisten);
   });
 
-  it("keeps synchronization preview review-only and passes the exact comparison payload", async () => {
+  it("freezes synchronization preview and executes only its single-use plan", async () => {
     mocks.invoke.mockResolvedValueOnce({
       success: true,
       data: {
@@ -468,7 +468,11 @@ describe("table service database scope", () => {
         sql: 'BEGIN;\nINSERT INTO "public"."users" ("id") VALUES (2);\nCOMMIT;',
         planDigest: "digest",
         reviewOnly: true,
-        warnings: ["Review only"],
+        canExecute: true,
+        planToken: "single-use-token",
+        expiresAt: 1_800_000_000_000,
+        confirmationText: "SYNC public.users",
+        warnings: ["Review artifact"],
       },
     });
     const request = {
@@ -507,7 +511,31 @@ describe("table service database scope", () => {
       request,
     });
     expect(preview.reviewOnly).toBe(true);
+    expect(preview.canExecute).toBe(true);
     expect(preview.statementCount).toBe(1);
+
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        insertCount: 1,
+        updateCount: 0,
+        deleteCount: 0,
+        rowsAffected: 1,
+        planDigest: "digest",
+      },
+    });
+    const execution = {
+      planToken: preview.planToken,
+      planDigest: preview.planDigest,
+      confirmationText: preview.confirmationText,
+    };
+    await expect(tableService.executeTableDataCompareSync(execution)).resolves.toEqual(
+      expect.objectContaining({ rowsAffected: 1 }),
+    );
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "execute_table_data_compare_sync",
+      { request: execution },
+    );
   });
 
   it("previews create-table SQL without a connection or execution request", async () => {

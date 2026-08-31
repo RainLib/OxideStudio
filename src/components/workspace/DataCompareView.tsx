@@ -25,6 +25,7 @@ import {
   tableService,
   type TableDataCompareProgress,
   type TableDataCompareResult,
+  type TableDataCompareSyncReceipt,
   type TableDataCompareSyncPreview,
 } from "@/services/tauri";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -69,6 +70,9 @@ export function DataCompareView() {
   const [syncPreview, setSyncPreview] = useState<TableDataCompareSyncPreview | null>(null);
   const [syncPreviewError, setSyncPreviewError] = useState<string | null>(null);
   const [isPlanningSync, setIsPlanningSync] = useState(false);
+  const [syncConfirmation, setSyncConfirmation] = useState("");
+  const [isExecutingSync, setIsExecutingSync] = useState(false);
+  const [syncReceipt, setSyncReceipt] = useState<TableDataCompareSyncReceipt | null>(null);
   const activeCompareIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -107,6 +111,8 @@ export function DataCompareView() {
     setFullComparisonError(null);
     setSyncPreview(null);
     setSyncPreviewError(null);
+    setSyncConfirmation("");
+    setSyncReceipt(null);
   }, [left, right]);
 
   const comparison = useMemo(() => {
@@ -159,6 +165,8 @@ export function DataCompareView() {
     setFullComparisonError(null);
     setSyncPreview(null);
     setSyncPreviewError(null);
+    setSyncConfirmation("");
+    setSyncReceipt(null);
     setKeyColumns((current) =>
       current.includes(column)
         ? current.filter((candidate) => candidate !== column)
@@ -189,6 +197,8 @@ export function DataCompareView() {
     setFullComparisonError(null);
     setSyncPreview(null);
     setSyncPreviewError(null);
+    setSyncConfirmation("");
+    setSyncReceipt(null);
     try {
       const result = await tableService.compareTableDataFull({
         compareId,
@@ -282,6 +292,8 @@ export function DataCompareView() {
         comparison: fullComparisonPayload,
       });
       setSyncPreview(preview);
+      setSyncConfirmation("");
+      setSyncReceipt(null);
     } catch (error) {
       setSyncPreview(null);
       setSyncPreviewError(error instanceof Error ? error.message : String(error));
@@ -296,6 +308,37 @@ export function DataCompareView() {
       setSyncPreviewError(null);
     } catch (error) {
       setSyncPreviewError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const executeSync = async () => {
+    if (
+      !syncPreview?.canExecute ||
+      syncConfirmation !== syncPreview.confirmationText ||
+      isExecutingSync
+    ) return;
+    setIsExecutingSync(true);
+    setSyncPreviewError(null);
+    try {
+      const receipt = await tableService.executeTableDataCompareSync({
+        planToken: syncPreview.planToken,
+        planDigest: syncPreview.planDigest,
+        confirmationText: syncConfirmation,
+      });
+      setSyncReceipt(receipt);
+      setSyncPreview(null);
+      setSyncConfirmation("");
+      setFullComparison(null);
+      setFullComparisonPayload(null);
+      setFullComparisonMeta(null);
+      setFullComparisonProgress(null);
+    } catch (error) {
+      setSyncPreview(null);
+      setSyncConfirmation("");
+      setSyncPreviewError(
+        `${error instanceof Error ? error.message : String(error)} Compare and preview again before retrying.`,
+      );
+    } finally {
+      setIsExecutingSync(false);
     }
   };
 
@@ -343,7 +386,7 @@ export function DataCompareView() {
           disabled={!canPreviewSync || isPlanningSync || isComparingFull}
           title={
             canPreviewSync
-              ? "Generate a review-only target synchronization script"
+              ? "Freeze a short-lived parameterized synchronization plan and generate review SQL"
               : "Sync preview requires an exact, untruncated full-table comparison with differences"
           }
           onClick={() => void previewSync()}
@@ -534,11 +577,11 @@ export function DataCompareView() {
             </div>
           ) : displayedComparison ? (
             <>
-              {(syncPreview || syncPreviewError) && (
+              {(syncPreview || syncPreviewError || syncReceipt) && (
                 <section className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.76)] p-3">
                   <div className="mb-2 flex items-center gap-2 text-[10px]">
                     <FileCode2 size={12} className="text-cyan-300" />
-                    <span className="font-medium">Review-only synchronization SQL</span>
+                    <span className="font-medium">Synchronization plan</span>
                     {syncPreview && (
                       <span className="wb-muted">
                         {syncPreview.insertCount.toLocaleString()} inserts · {syncPreview.updateCount.toLocaleString()} updates · {syncPreview.deleteCount.toLocaleString()} deletes
@@ -557,6 +600,12 @@ export function DataCompareView() {
                   {syncPreviewError && (
                     <div className="mb-2 text-[9px] leading-4 text-rose-300">{syncPreviewError}</div>
                   )}
+                  {syncReceipt && (
+                    <div className="flex items-center gap-2 rounded-[5px] border border-emerald-400/25 bg-emerald-400/[0.07] px-3 py-2 text-[9px] text-emerald-200">
+                      <Check size={11} />
+                      Applied {syncReceipt.rowsAffected.toLocaleString()} frozen operation(s) atomically. Run the comparison again to refresh both sides.
+                    </div>
+                  )}
                   {syncPreview && (
                     <>
                       <textarea
@@ -571,6 +620,32 @@ export function DataCompareView() {
                             <AlertTriangle size={9} className="mt-0.5 shrink-0" /> {warning}
                           </div>
                         ))}
+                      </div>
+                      <div className="mt-3 rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2.5">
+                        <div className="text-[8px] leading-4 wb-muted">
+                          Type <span className="select-all font-mono text-[hsl(var(--wb-text))]">{syncPreview.confirmationText}</span> to consume this single-use plan. It expires at {new Date(syncPreview.expiresAt).toLocaleTimeString()}.
+                        </div>
+                        <div className="mt-2 flex gap-2">
+                          <input
+                            aria-label="Synchronization confirmation phrase"
+                            value={syncConfirmation}
+                            onChange={(event) => setSyncConfirmation(event.target.value)}
+                            className="h-7 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2 font-mono text-[9px] outline-none focus:border-[hsl(var(--wb-accent)/0.55)]"
+                            placeholder={syncPreview.confirmationText}
+                          />
+                          <button
+                            type="button"
+                            className="wb-text-button h-7 px-3 text-[9px]"
+                            disabled={
+                              !syncPreview.canExecute ||
+                              syncConfirmation !== syncPreview.confirmationText ||
+                              isExecutingSync
+                            }
+                            onClick={() => void executeSync()}
+                          >
+                            {isExecutingSync ? "Applying…" : "Apply atomically"}
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}

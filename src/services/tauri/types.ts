@@ -736,8 +736,27 @@ export interface TableDataCompareSyncPreview {
   statements: string[];
   sql: string;
   planDigest: string;
+  /** The displayed SQL remains a review artifact; execution uses the frozen parameterized plan. */
   reviewOnly: true;
+  canExecute: boolean;
+  planToken: string;
+  expiresAt: number;
+  confirmationText: string;
   warnings: string[];
+}
+
+export interface ExecuteTableDataCompareSyncRequest {
+  planToken: string;
+  planDigest: string;
+  confirmationText: string;
+}
+
+export interface TableDataCompareSyncReceipt {
+  insertCount: number;
+  updateCount: number;
+  deleteCount: number;
+  rowsAffected: number;
+  planDigest: string;
 }
 
 export interface TableExportResult {

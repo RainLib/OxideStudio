@@ -98,6 +98,8 @@ const DEFAULT_DATA_COMPARE_SAMPLE_SIZE: u32 = 10_000;
 const MAX_DATA_COMPARE_SAMPLE_SIZE: u32 = 10_000;
 const MAX_DATA_COMPARE_SYNC_OPERATIONS: usize = MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS * 3;
 const MAX_DATA_COMPARE_SYNC_SQL_BYTES: usize = 4 * 1024 * 1024;
+const TABLE_DATA_COMPARE_SYNC_PLAN_TTL_MILLIS: i64 = 5 * 60 * 1_000;
+const MAX_ACTIVE_TABLE_DATA_COMPARE_SYNC_PLANS: usize = 8;
 /// SQLite defaults to 999 bind variables and external PostgreSQL-compatible
 /// packages may enforce similarly conservative limits. Keep sampled key lookup
 /// batches below that boundary even for composite keys.
@@ -382,7 +384,92 @@ pub struct TableDataCompareSyncPreview {
     pub sql: String,
     pub plan_digest: String,
     pub review_only: bool,
+    pub can_execute: bool,
+    pub plan_token: String,
+    pub expires_at: i64,
+    pub confirmation_text: String,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteTableDataCompareSyncRequest {
+    pub plan_token: String,
+    pub plan_digest: String,
+    pub confirmation_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataCompareSyncReceipt {
+    pub insert_count: u64,
+    pub update_count: u64,
+    pub delete_count: u64,
+    pub rows_affected: u64,
+    pub plan_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct FrozenTableDataCompareSyncPlan {
+    target: TableDataCompareEndpoint,
+    metadata_digest: String,
+    statements: Vec<ParameterizedStatement>,
+    insert_count: u64,
+    update_count: u64,
+    delete_count: u64,
+    plan_digest: String,
+    confirmation_text: String,
+    expires_at: i64,
+}
+
+#[derive(Default)]
+pub struct TableDataCompareSyncPlanState(
+    Arc<AsyncMutex<HashMap<String, FrozenTableDataCompareSyncPlan>>>,
+);
+
+impl TableDataCompareSyncPlanState {
+    async fn issue(&self, mut plan: FrozenTableDataCompareSyncPlan) -> (String, i64) {
+        let now = current_table_timestamp_millis();
+        plan.expires_at = now.saturating_add(TABLE_DATA_COMPARE_SYNC_PLAN_TTL_MILLIS);
+        let expires_at = plan.expires_at;
+        let token = uuid::Uuid::new_v4().to_string();
+        let token_digest = table_data_compare_sync_token_digest(&token);
+        let mut plans = self.0.lock().await;
+        plans.retain(|_, candidate| candidate.expires_at > now);
+        if plans.len() >= MAX_ACTIVE_TABLE_DATA_COMPARE_SYNC_PLANS {
+            if let Some(oldest) = plans
+                .iter()
+                .min_by_key(|(_, candidate)| candidate.expires_at)
+                .map(|(key, _)| key.clone())
+            {
+                plans.remove(&oldest);
+            }
+        }
+        plans.insert(token_digest, plan);
+        (token, expires_at)
+    }
+
+    async fn consume(&self, token: &str) -> Result<FrozenTableDataCompareSyncPlan, String> {
+        let token = token.trim();
+        if token.is_empty() || token.len() > 128 {
+            return Err("Synchronization plan token is invalid".to_string());
+        }
+        let now = current_table_timestamp_millis();
+        let token_digest = table_data_compare_sync_token_digest(token);
+        let mut plans = self.0.lock().await;
+        plans.retain(|key, candidate| key == &token_digest || candidate.expires_at > now);
+        let plan = plans.remove(&token_digest).ok_or_else(|| {
+            "Synchronization plan is unavailable or was already consumed. Compare and preview again."
+                .to_string()
+        })?;
+        if plan.expires_at <= now {
+            return Err(
+                "Synchronization plan expired. Compare and preview again before writing."
+                    .to_string(),
+            );
+        }
+        Ok(plan)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -11153,6 +11240,9 @@ fn validate_table_data_compare_sync_preview(
         .len()
         .saturating_add(request.comparison.removed.len())
         .saturating_add(request.comparison.modified.len());
+    if operation_count == 0 {
+        return Err("Data synchronization preview requires at least one difference".to_string());
+    }
     if operation_count > MAX_DATA_COMPARE_SYNC_OPERATIONS {
         return Err(format!(
             "Data synchronization preview is limited to {MAX_DATA_COMPARE_SYNC_OPERATIONS} reviewed row operations"
@@ -11195,32 +11285,64 @@ fn data_compare_sync_literal(
     sql_export_literal(dialect, value, Some(&column.data_type))
 }
 
-fn data_compare_sync_key_predicate(
+fn table_data_compare_sync_token_digest(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn table_data_compare_sync_metadata_digest(
+    metadata: &BTreeMap<String, ColumnInfo>,
+) -> Result<String, String> {
+    serde_json::to_vec(metadata)
+        .map(|encoded| format!("{:x}", Sha256::digest(encoded)))
+        .map_err(|error| format!("Could not bind target metadata to synchronization plan: {error}"))
+}
+
+fn table_data_compare_sync_confirmation_text(
+    target: &TableDataCompareEndpoint,
+    delete_count: u64,
+) -> String {
+    let relation = target
+        .database
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(target.schema.as_str()))
+        .chain(std::iter::once(target.table.as_str()))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    if delete_count > 0 {
+        format!("SYNC AND DELETE {delete_count} ROWS FROM {relation}")
+    } else {
+        format!("SYNC {relation}")
+    }
+}
+
+fn data_compare_sync_snapshot_predicate(
     kind: DatabaseKind,
     dialect: SqlExportDialect,
     metadata: &BTreeMap<String, ColumnInfo>,
     values: &BTreeMap<String, Value>,
-    key_columns: &[String],
+    columns: &[String],
 ) -> Result<String, String> {
-    let mut predicates = Vec::with_capacity(key_columns.len());
-    for key in key_columns {
-        let column = column_for(metadata, key)?;
-        let value = values
-            .get(key)
-            .ok_or_else(|| format!("Data synchronization row is missing key column {key}"))?;
-        let identifier = kind.quote_identifier(key);
+    let mut predicates = Vec::with_capacity(columns.len());
+    for column_name in columns {
+        let column = column_for(metadata, column_name)?;
+        let value = values.get(column_name).ok_or_else(|| {
+            format!("Data synchronization row is missing selected column {column_name}")
+        })?;
+        let identifier = kind.quote_identifier(column_name);
         if value.is_null() {
-            return Err(format!(
-                "Data synchronization key column {key} cannot contain NULL"
+            predicates.push(format!("{identifier} IS NULL"));
+        } else {
+            predicates.push(format!(
+                "{identifier} = {}",
+                data_compare_sync_literal(dialect, column, value)
             ));
         }
-        predicates.push(format!(
-            "{identifier} = {}",
-            data_compare_sync_literal(dialect, column, value)
-        ));
     }
     if predicates.is_empty() {
-        Err("Data synchronization key produced no predicates".to_string())
+        Err("Data synchronization snapshot produced no predicates".to_string())
     } else {
         Ok(predicates.join(" AND "))
     }
@@ -11341,12 +11463,25 @@ fn build_table_data_compare_sync_statements(
             skipped_generated_updates += 1;
             continue;
         }
-        let predicate = data_compare_sync_key_predicate(
+        for key in key_columns {
+            let source_key = row.source_values.get(key).ok_or_else(|| {
+                format!("Modified synchronization row is missing source key column {key}")
+            })?;
+            let target_key = row.target_values.get(key).ok_or_else(|| {
+                format!("Modified synchronization row is missing target key column {key}")
+            })?;
+            if source_key.is_null() || source_key != target_key {
+                return Err(format!(
+                    "Data synchronization key column {key} changed or contains NULL"
+                ));
+            }
+        }
+        let predicate = data_compare_sync_snapshot_predicate(
             kind,
             dialect,
             metadata,
-            &row.source_values,
-            key_columns,
+            &row.target_values,
+            columns,
         )?;
         statements.push(format!(
             "UPDATE {relation} SET {} WHERE {predicate};",
@@ -11356,8 +11491,170 @@ fn build_table_data_compare_sync_statements(
 
     for row in &request.comparison.removed {
         let predicate =
-            data_compare_sync_key_predicate(kind, dialect, metadata, &row.values, key_columns)?;
+            data_compare_sync_snapshot_predicate(kind, dialect, metadata, &row.values, columns)?;
         statements.push(format!("DELETE FROM {relation} WHERE {predicate};"));
+    }
+    Ok((statements, skipped_generated_updates))
+}
+
+fn data_compare_sync_parameterized_snapshot_predicate(
+    kind: DatabaseKind,
+    metadata: &BTreeMap<String, ColumnInfo>,
+    values: &BTreeMap<String, Value>,
+    columns: &[String],
+    params: &mut Vec<QueryParameter>,
+) -> Result<String, String> {
+    let mut predicates = Vec::with_capacity(columns.len());
+    for column_name in columns {
+        let column = column_for(metadata, column_name)?;
+        let value = values.get(column_name).ok_or_else(|| {
+            format!("Data synchronization row is missing selected column {column_name}")
+        })?;
+        let identifier = kind.quote_identifier(column_name);
+        if value.is_null() {
+            predicates.push(format!("{identifier} IS NULL"));
+        } else {
+            let placeholder = kind.parameter_placeholder(params.len() + 1, &column.data_type);
+            predicates.push(format!("{identifier} = {placeholder}"));
+            params.push(query_parameter(column, value));
+        }
+    }
+    if predicates.is_empty() {
+        Err("Data synchronization snapshot produced no predicates".to_string())
+    } else {
+        Ok(predicates.join(" AND "))
+    }
+}
+
+fn build_table_data_compare_sync_parameterized_statements(
+    request: &TableDataCompareSyncPreviewRequest,
+    kind: DatabaseKind,
+    metadata: &BTreeMap<String, ColumnInfo>,
+    columns: &[String],
+    key_columns: &[String],
+) -> Result<(Vec<ParameterizedStatement>, u64), String> {
+    let relation =
+        kind.qualified_table(schema_option(&request.target.schema), &request.target.table);
+    let writable_columns = columns
+        .iter()
+        .filter_map(|column_name| {
+            metadata.get(column_name).and_then(|column| {
+                (column.is_generated == Some(false) && column.is_hidden == Some(false))
+                    .then_some(column_name)
+            })
+        })
+        .collect::<Vec<_>>();
+    for column_name in columns {
+        let column = column_for(metadata, column_name)?;
+        if column.is_generated.is_none() || column.is_hidden.is_none() {
+            return Err(format!(
+                "Column {column_name} cannot be synchronized because generated/hidden metadata is unavailable"
+            ));
+        }
+    }
+
+    let mut statements = Vec::new();
+    for row in &request.comparison.added {
+        let values = writable_columns
+            .iter()
+            .map(|column_name| {
+                row.values
+                    .get(*column_name)
+                    .cloned()
+                    .map(|value| ((*column_name).clone(), value))
+                    .ok_or_else(|| {
+                        format!(
+                            "Inserted synchronization row is missing selected column {column_name}"
+                        )
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let (sql, params) = build_insert_mutation(
+            kind,
+            &request.target.schema,
+            &request.target.table,
+            metadata,
+            &values,
+        )?;
+        statements.push(ParameterizedStatement { sql, params });
+    }
+
+    let mut skipped_generated_updates = 0_u64;
+    for row in &request.comparison.modified {
+        for key in key_columns {
+            let source_key = row.source_values.get(key).ok_or_else(|| {
+                format!("Modified synchronization row is missing source key column {key}")
+            })?;
+            let target_key = row.target_values.get(key).ok_or_else(|| {
+                format!("Modified synchronization row is missing target key column {key}")
+            })?;
+            if source_key.is_null() || source_key != target_key {
+                return Err(format!(
+                    "Data synchronization key column {key} changed or contains NULL"
+                ));
+            }
+        }
+        let mut params = Vec::new();
+        let mut assignments = Vec::new();
+        for column_name in &row.changed_columns {
+            if !columns.contains(column_name) {
+                return Err(format!(
+                    "Modified synchronization row references an unselected column {column_name}"
+                ));
+            }
+            if key_columns.contains(column_name) {
+                return Err(format!(
+                    "Data synchronization cannot modify key column {column_name}"
+                ));
+            }
+            let column = column_for(metadata, column_name)?;
+            if column.is_generated == Some(true) || column.is_hidden == Some(true) {
+                continue;
+            }
+            let column = writable_column_for(metadata, column_name)?;
+            let value = row.source_values.get(column_name).ok_or_else(|| {
+                format!("Modified synchronization row is missing source column {column_name}")
+            })?;
+            let placeholder = kind.parameter_placeholder(params.len() + 1, &column.data_type);
+            assignments.push(format!(
+                "{} = {placeholder}",
+                kind.quote_identifier(column_name)
+            ));
+            params.push(query_parameter(column, value));
+        }
+        if assignments.is_empty() {
+            skipped_generated_updates += 1;
+            continue;
+        }
+        let predicate = data_compare_sync_parameterized_snapshot_predicate(
+            kind,
+            metadata,
+            &row.target_values,
+            columns,
+            &mut params,
+        )?;
+        statements.push(ParameterizedStatement {
+            sql: format!(
+                "UPDATE {relation} SET {} WHERE {predicate};",
+                assignments.join(", ")
+            ),
+            params,
+        });
+    }
+
+    for row in &request.comparison.removed {
+        let mut params = Vec::new();
+        let predicate = data_compare_sync_parameterized_snapshot_predicate(
+            kind,
+            metadata,
+            &row.values,
+            columns,
+            &mut params,
+        )?;
+        statements.push(ParameterizedStatement {
+            sql: format!("DELETE FROM {relation} WHERE {predicate};"),
+            params,
+        });
     }
     Ok((statements, skipped_generated_updates))
 }
@@ -11365,6 +11662,7 @@ fn build_table_data_compare_sync_statements(
 #[tauri::command]
 pub async fn preview_table_data_compare_sync(
     manager: State<'_, ConnectionManager>,
+    plans: State<'_, TableDataCompareSyncPlanState>,
     request: TableDataCompareSyncPreviewRequest,
 ) -> Result<Response<TableDataCompareSyncPreview>, String> {
     let result: Result<TableDataCompareSyncPreview, String> = async {
@@ -11401,6 +11699,21 @@ pub async fn preview_table_data_compare_sync(
                 &columns,
                 &key_columns,
             )?;
+        let (parameterized_statements, parameterized_skipped_updates) =
+            build_table_data_compare_sync_parameterized_statements(
+                &request,
+                kind,
+                &metadata,
+                &columns,
+                &key_columns,
+            )?;
+        if parameterized_skipped_updates != skipped_generated_updates
+            || parameterized_statements.len() != statements.len()
+        {
+            return Err(
+                "Synchronization review and parameterized execution plans diverged".to_string(),
+            );
+        }
         let transaction_start = if dialect == SqlExportDialect::Mysql {
             "START TRANSACTION;"
         } else {
@@ -11421,11 +11734,14 @@ pub async fn preview_table_data_compare_sync(
                 MAX_DATA_COMPARE_SYNC_SQL_BYTES / (1024 * 1024)
             ));
         }
+        let metadata_digest = table_data_compare_sync_metadata_digest(&metadata)?;
         let digest_input = serde_json::json!({
             "target": &request.target,
             "columns": &columns,
             "keyColumns": &key_columns,
             "sql": &sql,
+            "metadataDigest": &metadata_digest,
+            "parameterizedStatements": &parameterized_statements,
         });
         let digest = format!(
             "{:x}",
@@ -11435,10 +11751,26 @@ pub async fn preview_table_data_compare_sync(
             .comparison
             .modified_count
             .saturating_sub(skipped_generated_updates);
+        let confirmation_text = table_data_compare_sync_confirmation_text(
+            &request.target,
+            request.comparison.removed_count,
+        );
+        let frozen_plan = FrozenTableDataCompareSyncPlan {
+            target: request.target.clone(),
+            metadata_digest,
+            statements: parameterized_statements,
+            insert_count: request.comparison.added_count,
+            update_count,
+            delete_count: request.comparison.removed_count,
+            plan_digest: digest.clone(),
+            confirmation_text: confirmation_text.clone(),
+            expires_at: 0,
+        };
+        let (plan_token, expires_at) = plans.issue(frozen_plan).await;
         let mut warnings = vec![
-            "This is a review-only SQL artifact. Oxide does not execute it automatically because the target may change after comparison; refresh and inspect it immediately before manual execution."
+            "The SQL is a review artifact. Oxide executes only the Host-frozen parameterized plan after the exact confirmation phrase; the preview SQL is never submitted back for execution."
                 .to_string(),
-            "DELETE statements remove rows found only on the target. Keep the transaction wrapper and verify the selected database/schema before execution."
+            "Every UPDATE and DELETE is bound to the compared target snapshot. Target drift, schema drift, expiry, replay, or an unexpected affected-row count rolls the entire transaction back."
                 .to_string(),
         ];
         if skipped_generated_updates > 0 {
@@ -11455,6 +11787,10 @@ pub async fn preview_table_data_compare_sync(
             sql,
             plan_digest: digest,
             review_only: true,
+            can_execute: true,
+            plan_token,
+            expires_at,
+            confirmation_text,
             warnings,
         })
     }
@@ -11463,6 +11799,177 @@ pub async fn preview_table_data_compare_sync(
         Ok(plan) => Response::ok(plan),
         Err(error) => Response::err("PREVIEW_TABLE_DATA_COMPARE_SYNC_ERROR", &error),
     })
+}
+
+async fn execute_frozen_table_data_compare_sync(
+    manager: &ConnectionManager,
+    plan: FrozenTableDataCompareSyncPlan,
+) -> Result<TableDataCompareSyncReceipt, String> {
+    let endpoint = data_compare_transfer_endpoint(&plan.target);
+    ensure_transfer_endpoint_driver_matches_connection(manager, &endpoint).await?;
+    ensure_target_relation_operation_allowed(
+        manager,
+        &plan.target.connection_id,
+        plan.target.database.as_deref(),
+        &plan.target.schema,
+        &plan.target.table,
+        RelationOperation::DataMutation,
+    )
+    .await?;
+    let metadata = get_target_columns(
+        manager,
+        &plan.target.connection_id,
+        plan.target.database.as_deref(),
+        &plan.target.schema,
+        &plan.target.table,
+    )
+    .await
+    .map(column_lookup)
+    .map_err(|error| error.to_string())?;
+    if table_data_compare_sync_metadata_digest(&metadata)? != plan.metadata_digest {
+        return Err(
+            "Target table metadata changed after preview. Compare and preview again before writing."
+                .to_string(),
+        );
+    }
+    let expected_statement_count = plan
+        .insert_count
+        .saturating_add(plan.update_count)
+        .saturating_add(plan.delete_count);
+    if plan.statements.len() as u64 != expected_statement_count {
+        return Err("Frozen synchronization plan has inconsistent operation counts".to_string());
+    }
+
+    let transaction_id = format!("table-compare-sync-{}", uuid::Uuid::new_v4());
+    match plan.target.database.as_deref() {
+        Some(database) => {
+            manager
+                .begin_database_transaction(
+                    &plan.target.connection_id,
+                    &transaction_id,
+                    database,
+                    schema_option(&plan.target.schema).map(str::to_string),
+                )
+                .await
+        }
+        None => {
+            manager
+                .begin_transaction(
+                    &plan.target.connection_id,
+                    &transaction_id,
+                    schema_option(&plan.target.schema).map(str::to_string),
+                )
+                .await
+        }
+    }
+    .map_err(|error| format!("Could not start synchronization transaction: {error}"))?;
+
+    let mut commit_attempted = false;
+    let execution = async {
+        let affected = manager
+            .execute_parameterized_transaction(
+                &plan.target.connection_id,
+                &transaction_id,
+                &plan.statements,
+            )
+            .await
+            .map_err(|error| format!("Synchronization transaction failed: {error}"))?;
+        if affected.len() != plan.statements.len()
+            || affected.iter().any(|rows_affected| *rows_affected != 1)
+        {
+            return Err(format!(
+                "Target data changed after comparison: expected one affected row for each of {} operation(s), but the database returned {:?}. The transaction was not committed.",
+                plan.statements.len(),
+                affected
+            ));
+        }
+        commit_attempted = true;
+        manager
+            .commit_transaction(&plan.target.connection_id, &transaction_id)
+            .await
+            .map_err(|error| format!("Could not commit synchronization transaction: {error}"))?;
+        Ok(TableDataCompareSyncReceipt {
+            insert_count: plan.insert_count,
+            update_count: plan.update_count,
+            delete_count: plan.delete_count,
+            rows_affected: expected_statement_count,
+            plan_digest: plan.plan_digest.clone(),
+        })
+    }
+    .await;
+
+    if let Err(execution_error) = &execution {
+        let rollback = manager
+            .rollback_transaction(&plan.target.connection_id, &transaction_id)
+            .await;
+        if commit_attempted {
+            let rollback_status = rollback
+                .map(|_| {
+                    "A rollback was requested, but it cannot prove whether the commit took effect."
+                        .to_string()
+                })
+                .unwrap_or_else(|error| format!("Rollback also failed: {error}."));
+            return Err(format!(
+                "{execution_error} The commit outcome is unknown. {rollback_status} Verify the target manually and do not retry automatically."
+            ));
+        }
+        if let Err(rollback_error) = rollback {
+            return Err(format!(
+                "{execution_error} Rollback could not be confirmed: {rollback_error}. Verify the target manually before retrying."
+            ));
+        }
+    }
+    execution
+}
+
+#[tauri::command]
+pub async fn execute_table_data_compare_sync(
+    manager: State<'_, ConnectionManager>,
+    plans: State<'_, TableDataCompareSyncPlanState>,
+    request: ExecuteTableDataCompareSyncRequest,
+) -> Result<Response<TableDataCompareSyncReceipt>, String> {
+    let plan = match plans.consume(&request.plan_token).await {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Ok(Response::err(
+                "TABLE_DATA_COMPARE_SYNC_PLAN_UNAVAILABLE",
+                &error,
+            ))
+        }
+    };
+    if request.plan_digest.trim() != plan.plan_digest {
+        return Ok(Response::err(
+            "TABLE_DATA_COMPARE_SYNC_PLAN_CHANGED",
+            "Synchronization plan digest does not match the Host-frozen plan. Compare and preview again.",
+        ));
+    }
+    if request.confirmation_text.trim() != plan.confirmation_text {
+        return Ok(Response::err(
+            "TABLE_DATA_COMPARE_SYNC_CONFIRMATION_REQUIRED",
+            "The synchronization confirmation phrase does not match exactly.",
+        ));
+    }
+
+    let target_connection = plan.target.connection_id.clone();
+    let target_table = plan.target.table.clone();
+    let plan_digest = plan.plan_digest.clone();
+    let result = execute_frozen_table_data_compare_sync(&manager, plan).await;
+    match result {
+        Ok(receipt) => {
+            tracing::info!(
+                connection_id = %target_connection,
+                table = %target_table,
+                plan_digest = %plan_digest,
+                rows_affected = receipt.rows_affected,
+                "executed frozen table comparison synchronization plan"
+            );
+            Ok(Response::ok(receipt))
+        }
+        Err(error) => Ok(Response::err(
+            "EXECUTE_TABLE_DATA_COMPARE_SYNC_ERROR",
+            &error,
+        )),
+    }
 }
 
 #[tauri::command]
@@ -16826,16 +17333,17 @@ mod tests {
         build_sqlite_add_column_statements, build_sqlite_create_index_statement,
         build_sqlite_create_table_statements, build_sqlite_drop_column_statement,
         build_sqlite_drop_index_statement, build_structured_filter_where,
-        build_table_data_compare_result, build_table_data_compare_sync_statements,
-        build_table_data_transfer_object_plan, build_table_order_by, build_transfer_target_columns,
-        build_update_mutation, build_upsert_mutation, canonical_import_columns, column_lookup,
-        csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
-        csv_import_source_columns, csv_record_values, data_compare_degradation_level,
-        data_compare_key, data_compare_key_columns_are_declared_unique,
-        data_compare_keyset_continuation, data_compare_row_values,
-        data_compare_sample_key_predicate, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
-        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
+        build_table_data_compare_result, build_table_data_compare_sync_parameterized_statements,
+        build_table_data_compare_sync_statements, build_table_data_transfer_object_plan,
+        build_table_order_by, build_transfer_target_columns, build_update_mutation,
+        build_upsert_mutation, canonical_import_columns, column_lookup, csv_delimiter, csv_escape,
+        csv_import_reader, csv_import_row_selected, csv_import_source_columns, csv_record_values,
+        data_compare_degradation_level, data_compare_key,
+        data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
+        data_compare_row_values, data_compare_sample_key_predicate,
+        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
+        ensure_sql_insert_conflict_policy, ensure_table_export_format,
+        ensure_transfer_endpoint_driver_matches_connection, execute_frozen_table_data_compare_sync,
         execute_target_parameterized_batch, filter_sql_export_batch,
         finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
         generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
@@ -16860,7 +17368,8 @@ mod tests {
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         select_database_sql_export_tables, skipped_table_data_compare_result,
         sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
-        table_data_dialect, table_data_transfer_batch_plan, table_data_transfer_dialect,
+        table_data_compare_sync_metadata_digest, table_data_dialect,
+        table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         table_import_mapping_digest, table_import_replace_statement, transfer_confirmation_token,
         transfer_plan_can_execute, transfer_target_column_type, transfer_target_confirmation_token,
@@ -16870,17 +17379,17 @@ mod tests {
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
         AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, ImportInferredType, RelationOperation, SqlExportDialect,
-        SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
+        CreateTableColumn, FrozenTableDataCompareSyncPlan, ImportInferredType, RelationOperation,
+        SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
         TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareCancellationState,
         TableDataCompareDegradationLevel, TableDataCompareDegradationThreshold,
         TableDataCompareEndpoint, TableDataCompareResult, TableDataCompareSamplingStrategy,
-        TableDataCompareSyncPreviewRequest, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
-        TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
-        TableDataTransferObjectKind, TableDataTransferObjectReport,
+        TableDataCompareSyncPlanState, TableDataCompareSyncPreviewRequest,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConfirmationBinding, TableDataTransferConversion,
+        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
+        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
         TableDataTransferObjectSelection, TableDataTransferPreview,
         TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
@@ -16927,6 +17436,12 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         delete_rows: u64,
         rollback_error: Option<String>,
+    }
+
+    struct SyncTransactionDriver {
+        events: Arc<Mutex<Vec<String>>>,
+        affected_rows: u64,
+        columns: Vec<ColumnInfo>,
     }
 
     #[test]
@@ -17159,6 +17674,74 @@ mod tests {
             if let Some(error) = &self.rollback_error {
                 return Err(anyhow::anyhow!(error.clone()));
             }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for SyncTransactionDriver {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_tables(&self, schema: &str) -> Result<Vec<TableInfo>> {
+            Ok(vec![TableInfo {
+                name: "users".to_string(),
+                schema: Some(schema.to_string()),
+                table_type: Some("BASE TABLE".to_string()),
+                comment: None,
+            }])
+        }
+
+        async fn get_columns(&self, _schema: &str, _table: &str) -> Result<Vec<ColumnInfo>> {
+            Ok(self.columns.clone())
+        }
+
+        async fn begin_transaction(&self, session_id: &str, _schema: Option<&str>) -> Result<()> {
+            self.events
+                .lock()
+                .expect("sync event mutex")
+                .push(format!("begin:{session_id}"));
+            Ok(())
+        }
+
+        async fn execute_parameterized_transaction(
+            &self,
+            session_id: &str,
+            statements: &[ParameterizedStatement],
+        ) -> Result<Vec<u64>> {
+            self.events
+                .lock()
+                .expect("sync event mutex")
+                .push(format!("execute:{session_id}:{}", statements.len()));
+            Ok(vec![self.affected_rows; statements.len()])
+        }
+
+        async fn commit_transaction(&self, session_id: &str) -> Result<()> {
+            self.events
+                .lock()
+                .expect("sync event mutex")
+                .push(format!("commit:{session_id}"));
+            Ok(())
+        }
+
+        async fn rollback_transaction(&self, session_id: &str) -> Result<()> {
+            self.events
+                .lock()
+                .expect("sync event mutex")
+                .push(format!("rollback:{session_id}"));
             Ok(())
         }
     }
@@ -22239,12 +22822,37 @@ WITH DATA;"#
         );
         assert_eq!(
             statements[1],
-            "UPDATE \"public\".\"users\" SET \"name\" = 'O''Reilly' WHERE \"id\" = 1;"
+            "UPDATE \"public\".\"users\" SET \"name\" = 'O''Reilly' WHERE \"id\" = 1 AND \"name\" = 'Old';"
         );
         assert_eq!(
             statements[2],
-            "DELETE FROM \"public\".\"users\" WHERE \"id\" = 3;"
+            "DELETE FROM \"public\".\"users\" WHERE \"id\" = 3 AND \"name\" = 'Gone';"
         );
+
+        let (parameterized, parameterized_skipped) =
+            build_table_data_compare_sync_parameterized_statements(
+                &request,
+                DatabaseKind::Postgres,
+                &metadata,
+                &validated_columns,
+                &validated_keys,
+            )
+            .unwrap();
+        assert_eq!(parameterized_skipped, 0);
+        assert_eq!(parameterized.len(), 3);
+        assert_eq!(
+            parameterized[1].sql,
+            "UPDATE \"public\".\"users\" SET \"name\" = $1::text WHERE \"id\" = $2::integer AND \"name\" = $3::text;"
+        );
+        assert_eq!(
+            parameterized[1]
+                .params
+                .iter()
+                .map(|parameter| parameter.value.clone())
+                .collect::<Vec<_>>(),
+            vec![json!("O'Reilly"), json!(1), json!("Old")]
+        );
+        assert!(!parameterized[1].sql.contains("O'Reilly"));
     }
 
     #[test]
@@ -22268,6 +22876,104 @@ WITH DATA;"#
         truncated.comparison.counts_exact = true;
         truncated.comparison.details_truncated = true;
         assert!(validate_table_data_compare_sync_preview(&truncated).is_err());
+    }
+
+    #[tokio::test]
+    async fn synchronization_plan_tokens_are_single_use_and_expire_host_side() {
+        let plans = TableDataCompareSyncPlanState::default();
+        let frozen = || FrozenTableDataCompareSyncPlan {
+            target: TableDataCompareEndpoint {
+                connection_id: "target".to_string(),
+                driver: "postgres".to_string(),
+                database: None,
+                schema: "public".to_string(),
+                table: "users".to_string(),
+            },
+            metadata_digest: "metadata".to_string(),
+            statements: Vec::new(),
+            insert_count: 0,
+            update_count: 0,
+            delete_count: 0,
+            plan_digest: "plan".to_string(),
+            confirmation_text: "SYNC public.users".to_string(),
+            expires_at: 0,
+        };
+
+        let (token, expires_at) = plans.issue(frozen()).await;
+        assert!(expires_at > super::current_table_timestamp_millis());
+        assert_eq!(plans.consume(&token).await.unwrap().plan_digest, "plan");
+        assert!(plans
+            .consume(&token)
+            .await
+            .unwrap_err()
+            .contains("consumed"));
+
+        let (expired_token, _) = plans.issue(frozen()).await;
+        let digest = super::table_data_compare_sync_token_digest(&expired_token);
+        plans.0.lock().await.get_mut(&digest).unwrap().expires_at =
+            super::current_table_timestamp_millis().saturating_sub(1);
+        assert!(plans
+            .consume(&expired_token)
+            .await
+            .unwrap_err()
+            .contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn frozen_synchronization_rolls_back_when_snapshot_affects_no_row() {
+        let mut id = target_column("id");
+        id.data_type = "integer".to_string();
+        id.is_nullable = false;
+        id.is_primary_key = true;
+        let columns = vec![id, target_column("name")];
+        let metadata_digest =
+            table_data_compare_sync_metadata_digest(&column_lookup(columns.clone())).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let manager = ConnectionManager::new();
+        manager
+            .replace_connection_with_tunnel_and_driver_id(
+                "target".to_string(),
+                Box::new(SyncTransactionDriver {
+                    events: Arc::clone(&events),
+                    affected_rows: 0,
+                    columns,
+                }),
+                None,
+                Some("postgres".to_string()),
+            )
+            .await
+            .unwrap();
+        let plan = FrozenTableDataCompareSyncPlan {
+            target: TableDataCompareEndpoint {
+                connection_id: "target".to_string(),
+                driver: "postgres".to_string(),
+                database: None,
+                schema: "public".to_string(),
+                table: "users".to_string(),
+            },
+            metadata_digest,
+            statements: vec![ParameterizedStatement {
+                sql: "UPDATE \"public\".\"users\" SET \"name\" = $1::text WHERE \"id\" = $2::integer AND \"name\" = $3::text;".to_string(),
+                params: vec![],
+            }],
+            insert_count: 0,
+            update_count: 1,
+            delete_count: 0,
+            plan_digest: "plan".to_string(),
+            confirmation_text: "SYNC public.users".to_string(),
+            expires_at: i64::MAX,
+        };
+
+        let error = execute_frozen_table_data_compare_sync(&manager, plan)
+            .await
+            .unwrap_err();
+        assert!(error.contains("expected one affected row"));
+        let events = events.lock().expect("sync event mutex");
+        assert_eq!(events.len(), 3);
+        assert!(events[0].starts_with("begin:table-compare-sync-"));
+        assert!(events[1].starts_with("execute:table-compare-sync-"));
+        assert!(events[2].starts_with("rollback:table-compare-sync-"));
+        assert!(!events.iter().any(|event| event.starts_with("commit:")));
     }
 
     #[tokio::test]
