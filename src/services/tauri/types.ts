@@ -1006,6 +1006,8 @@ export interface TableDataTransferBatchTablePreflight {
   mappedColumns: number;
   /** Digest of the reviewed mapping; no SQL or row data is exposed. */
   planDigest?: string | null;
+  /** Preview-only target generator identities and current state. */
+  identityReseedPlans?: TableDataTransferIdentityReseedPlan[];
   warnings: string[];
 }
 
@@ -1070,6 +1072,21 @@ export interface TableDataTransferColumnMapping {
   reason: string;
 }
 
+/**
+ * Exact PostgreSQL generator ownership captured during preview. Numeric state
+ * is bound to the one-time confirmation but is not stored in transfer reports.
+ */
+export interface TableDataTransferIdentityReseedPlan {
+  column: string;
+  sequenceSchema: string;
+  sequenceName: string;
+  ownerSchema: string;
+  ownerTable: string;
+  ownerColumn: string;
+  currentValue?: string | null;
+  targetMaxValue?: string | null;
+}
+
 export interface TableDataTransferPreview {
   mode: TableDataTransferMode;
   mappedColumns: TableDataTransferColumnMapping[];
@@ -1083,6 +1100,7 @@ export interface TableDataTransferPreview {
   /** Target primary-key columns used as the conflict identity in upsert mode. */
   upsertKeyColumns: string[];
   identityReseedColumns: string[];
+  identityReseedPlans?: TableDataTransferIdentityReseedPlan[];
   canExecute: boolean;
   confirmationToken: string;
   warnings: string[];

@@ -31,6 +31,18 @@
     "targetRowsToDelete": null,
     "upsertKeyColumns": [],
     "identityReseedColumns": ["id"],
+    "identityReseedPlans": [
+      {
+        "column": "id",
+        "sequenceSchema": "public",
+        "sequenceName": "users_id_seq",
+        "ownerSchema": "public",
+        "ownerTable": "users",
+        "ownerColumn": "id",
+        "currentValue": "41",
+        "targetMaxValue": "40"
+      }
+    ],
     "canExecute": true,
     "confirmationToken": "TRANSFER 72DB4F91",
     "warnings": ["Identity state will be verified after commit."]
@@ -57,6 +69,7 @@
     "targetRowsToDelete": null,
     "upsertKeyColumns": [],
     "identityReseedColumns": [],
+    "identityReseedPlans": [],
     "canExecute": false,
     "confirmationToken": "TRANSFER 1A2B3C4D",
     "warnings": ["Unsupported mappings must be resolved before execution."]

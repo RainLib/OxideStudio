@@ -224,6 +224,17 @@ describe("TableDataTransferDialog", () => {
 
     expect(previews.append.targetRowsBefore).toBe(41);
     expect(previews.append.identityReseedColumns).toEqual(["id"]);
+    expect(previews.append.identityReseedPlans).toEqual([
+      expect.objectContaining({
+        column: "id",
+        sequenceSchema: "public",
+        sequenceName: "users_id_seq",
+        ownerTable: "users",
+        ownerColumn: "id",
+        currentValue: "41",
+        targetMaxValue: "40",
+      }),
+    ]);
     expect(previews.append.confirmationToken).toMatch(/^TRANSFER [A-Z0-9]+$/u);
     expect(previews.append.mappedColumns).toHaveLength(2);
     expect(previews.append.mappedColumns.every((column) => column.compatibility !== "unsupported")).toBe(true);

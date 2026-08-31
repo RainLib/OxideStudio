@@ -884,6 +884,11 @@ pub struct TableDataTransferBatchTablePreflight {
     /// batch review to the exact source/target column mapping without
     /// exposing any SQL, values, or credentials.
     pub plan_digest: Option<String>,
+    /// Exact target-owned PostgreSQL generators reviewed for this table.
+    /// Numeric state is preview-only and is never copied into the durable
+    /// transfer report.
+    #[serde(default)]
+    pub identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
     pub warnings: Vec<String>,
 }
 
@@ -931,6 +936,22 @@ pub struct TableDataTransferColumnMapping {
     pub reason: String,
 }
 
+/// Read-only PostgreSQL generator state captured while building a transfer
+/// preview. Sequence identity and ownership are bound into the confirmation
+/// token; numeric state is deliberately not persisted after execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferIdentityReseedPlan {
+    pub column: String,
+    pub sequence_schema: String,
+    pub sequence_name: String,
+    pub owner_schema: String,
+    pub owner_table: String,
+    pub owner_column: String,
+    pub current_value: Option<String>,
+    pub target_max_value: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataTransferPreview {
@@ -949,6 +970,8 @@ pub struct TableDataTransferPreview {
     /// PostgreSQL target columns whose owned serial/identity generator will
     /// be synchronized inside the same transaction after row writes.
     pub identity_reseed_columns: Vec<String>,
+    #[serde(default)]
+    pub identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
     pub can_execute: bool,
     /// The user must type this exact short-lived plan binding to start a
     /// destructive cross-connection write.  Execute recomputes the plan and
@@ -5977,6 +6000,7 @@ struct ResolvedTableDataTransferPlan {
     target_rows_to_delete: Option<u64>,
     upsert_key_columns: Vec<String>,
     identity_reseed_columns: Vec<String>,
+    identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
     confirmation_token: String,
     warnings: Vec<String>,
 }
@@ -6510,27 +6534,33 @@ fn endpoint_label(endpoint: &TableDataTransferEndpoint) -> String {
     format!("{}{}{}", namespace, schema, endpoint.table.trim())
 }
 
-fn transfer_confirmation_token(
-    request: &TableDataTransferRequest,
-    mapped_columns: &[TableDataTransferColumnMapping],
+struct TableDataTransferConfirmationBinding<'a> {
+    mapped_columns: &'a [TableDataTransferColumnMapping],
     max_rows: u32,
     batch_size: u32,
     target_rows_before: Option<u64>,
     target_rows_to_delete: Option<u64>,
-    upsert_key_columns: &[String],
+    upsert_key_columns: &'a [String],
+    identity_reseed_plans: &'a [TableDataTransferIdentityReseedPlan],
+}
+
+fn transfer_confirmation_token(
+    request: &TableDataTransferRequest,
+    binding: &TableDataTransferConfirmationBinding<'_>,
 ) -> Result<String, String> {
     let binding = serde_json::json!({
         "transferId": &request.transfer_id,
         "source": &request.source,
         "target": &request.target,
         "mode": request.mode,
-        "mappedColumns": mapped_columns,
-        "maxRows": max_rows,
-        "batchSize": batch_size,
-        "targetRowsBefore": target_rows_before,
-        "targetRowsToDelete": target_rows_to_delete,
-        "upsertKeyColumns": upsert_key_columns,
+        "mappedColumns": binding.mapped_columns,
+        "maxRows": binding.max_rows,
+        "batchSize": binding.batch_size,
+        "targetRowsBefore": binding.target_rows_before,
+        "targetRowsToDelete": binding.target_rows_to_delete,
+        "upsertKeyColumns": binding.upsert_key_columns,
         "reseedIdentity": request.reseed_identity,
+        "identityReseedPlans": binding.identity_reseed_plans,
     });
     let encoded = serde_json::to_vec(&binding).map_err(|error| error.to_string())?;
     let digest = format!("{:x}", Sha256::digest(encoded));
@@ -6563,21 +6593,176 @@ fn postgres_identity_reseed_columns(
         .collect())
 }
 
-fn postgres_identity_reseed_statements(
+fn postgres_identity_reseed_plan_query(
+    endpoint: &TableDataTransferEndpoint,
+    column: &str,
+) -> String {
+    let relation =
+        DatabaseKind::Postgres.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
+    let relation_literal = sql_string_literal(&relation);
+    let column_literal = sql_string_literal(column);
+    let quoted_column = DatabaseKind::Postgres.quote_identifier(column);
+    format!(
+        "WITH selected AS (\
+             SELECT pg_catalog.pg_get_serial_sequence({relation_literal}, {column_literal}) AS qualified_name\
+         ), sequence_relation AS (\
+             SELECT sequence_class.oid, sequence_namespace.nspname AS sequence_schema, \
+                    sequence_class.relname AS sequence_name \
+             FROM selected \
+             JOIN pg_catalog.pg_class sequence_class \
+               ON sequence_class.oid = selected.qualified_name::pg_catalog.regclass \
+             JOIN pg_catalog.pg_namespace sequence_namespace \
+               ON sequence_namespace.oid = sequence_class.relnamespace \
+             WHERE sequence_class.relkind = 'S'\
+         ) \
+         SELECT sequence_relation.sequence_schema, sequence_relation.sequence_name, \
+                owner.owner_schema, owner.owner_table, owner.owner_column, \
+                pg_catalog.pg_sequence_last_value(sequence_relation.oid::pg_catalog.regclass)::text, \
+                (SELECT MAX({quoted_column})::text FROM {relation}) \
+         FROM sequence_relation \
+         LEFT JOIN LATERAL (\
+             SELECT owner_namespace.nspname AS owner_schema, \
+                    owner_class.relname AS owner_table, \
+                    owner_attribute.attname AS owner_column \
+             FROM pg_catalog.pg_depend dependency \
+             JOIN pg_catalog.pg_class owner_class ON owner_class.oid = dependency.refobjid \
+             JOIN pg_catalog.pg_namespace owner_namespace ON owner_namespace.oid = owner_class.relnamespace \
+             JOIN pg_catalog.pg_attribute owner_attribute \
+               ON owner_attribute.attrelid = owner_class.oid \
+              AND owner_attribute.attnum = dependency.refobjsubid \
+             WHERE dependency.classid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+               AND dependency.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+               AND dependency.objid = sequence_relation.oid \
+               AND dependency.deptype IN ('a', 'i') \
+             ORDER BY dependency.deptype \
+             LIMIT 1\
+         ) owner ON TRUE"
+    )
+}
+
+fn required_postgres_identity_state_cell(
+    row: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<String, String> {
+    let value = row
+        .get(index)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("PostgreSQL identity preview did not return {label}."))?;
+    if value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(format!(
+            "PostgreSQL identity preview returned an invalid {label}."
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn optional_postgres_identity_numeric_state(
+    row: &[Value],
+    index: usize,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = row
+        .get(index)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    value
+        .parse::<i64>()
+        .map_err(|_| format!("PostgreSQL identity preview returned an invalid {label}."))?;
+    Ok(Some(value.to_string()))
+}
+
+fn postgres_identity_reseed_plan_from_results(
+    endpoint: &TableDataTransferEndpoint,
+    column: &str,
+    results: &[QueryResult],
+) -> Result<TableDataTransferIdentityReseedPlan, String> {
+    let row = results
+        .first()
+        .and_then(|result| result.rows.first())
+        .ok_or_else(|| {
+            format!(
+                "PostgreSQL target column {}.{} has no attached serial/identity sequence.",
+                endpoint.table, column
+            )
+        })?;
+    let sequence_schema = required_postgres_identity_state_cell(row, 0, "sequence schema")?;
+    let sequence_name = required_postgres_identity_state_cell(row, 1, "sequence name")?;
+    let owner_schema = required_postgres_identity_state_cell(row, 2, "owner schema")?;
+    let owner_table = required_postgres_identity_state_cell(row, 3, "owner table")?;
+    let owner_column = required_postgres_identity_state_cell(row, 4, "owner column")?;
+    if (!endpoint.schema.trim().is_empty() && owner_schema != endpoint.schema)
+        || owner_table != endpoint.table
+        || owner_column != column
+    {
+        return Err(format!(
+            "PostgreSQL sequence {}.{} is not owned by the reviewed target column {}.{}.",
+            sequence_schema, sequence_name, endpoint.table, column
+        ));
+    }
+    Ok(TableDataTransferIdentityReseedPlan {
+        column: column.to_string(),
+        sequence_schema,
+        sequence_name,
+        owner_schema,
+        owner_table,
+        owner_column,
+        current_value: optional_postgres_identity_numeric_state(row, 5, "sequence value")?,
+        target_max_value: optional_postgres_identity_numeric_state(row, 6, "table maximum")?,
+    })
+}
+
+async fn resolve_postgres_identity_reseed_plans(
+    manager: &ConnectionManager,
     endpoint: &TableDataTransferEndpoint,
     columns: &[String],
+) -> Result<Vec<TableDataTransferIdentityReseedPlan>, String> {
+    let mut plans = Vec::with_capacity(columns.len());
+    for column in columns {
+        let sql = postgres_identity_reseed_plan_query(endpoint, column);
+        let results = query_target(
+            manager,
+            &endpoint.connection_id,
+            endpoint.database.as_deref(),
+            &sql,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Could not inspect PostgreSQL generator ownership for {}.{}: {error}",
+                endpoint.table, column
+            )
+        })?;
+        plans.push(postgres_identity_reseed_plan_from_results(
+            endpoint, column, &results,
+        )?);
+    }
+    plans.sort_by(|left, right| left.column.cmp(&right.column));
+    Ok(plans)
+}
+
+fn postgres_identity_reseed_statements(
+    endpoint: &TableDataTransferEndpoint,
+    plans: &[TableDataTransferIdentityReseedPlan],
 ) -> Vec<ParameterizedStatement> {
     let relation =
         DatabaseKind::Postgres.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
-    columns
+    plans
         .iter()
-        .map(|column| {
-            let quoted_column = DatabaseKind::Postgres.quote_identifier(column);
+        .map(|plan| {
+            let quoted_column = DatabaseKind::Postgres.quote_identifier(&plan.column);
+            let sequence = DatabaseKind::Postgres
+                .qualified_table(Some(&plan.sequence_schema), &plan.sequence_name);
             ParameterizedStatement {
                 sql: format!(
-                    "SELECT setval(pg_get_serial_sequence({}, {}), GREATEST(COALESCE(MAX({quoted_column}), 0), 1), MAX({quoted_column}) IS NOT NULL) FROM {relation}",
-                    sql_string_literal(&relation),
-                    sql_string_literal(column),
+                    "SELECT pg_catalog.setval({}::pg_catalog.regclass, GREATEST(COALESCE(MAX({quoted_column}), 0), 1), MAX({quoted_column}) IS NOT NULL) FROM {relation}",
+                    sql_string_literal(&sequence),
                 ),
                 params: Vec::new(),
             }
@@ -7568,6 +7753,9 @@ async fn resolve_table_data_transfer_plan(
     )?;
     let identity_reseed_columns =
         postgres_identity_reseed_columns(target_kind, &target_columns, request.reseed_identity)?;
+    let identity_reseed_plans =
+        resolve_postgres_identity_reseed_plans(manager, &request.target, &identity_reseed_columns)
+            .await?;
     let max_rows = normalized_transfer_limit(request.max_rows);
     let batch_size = normalized_transfer_batch_size(request.batch_size);
     let target_rows_before = if matches!(
@@ -7610,12 +7798,15 @@ async fn resolve_table_data_transfer_plan(
     };
     let confirmation_token = transfer_confirmation_token(
         request,
-        &mapped_columns,
-        max_rows,
-        batch_size,
-        target_rows_before,
-        target_rows_to_delete,
-        &upsert_key_columns,
+        &TableDataTransferConfirmationBinding {
+            mapped_columns: &mapped_columns,
+            max_rows,
+            batch_size,
+            target_rows_before,
+            target_rows_to_delete,
+            upsert_key_columns: &upsert_key_columns,
+            identity_reseed_plans: &identity_reseed_plans,
+        },
     )?;
 
     let mut warnings = vec![match request.mode {
@@ -7635,7 +7826,7 @@ async fn resolve_table_data_transfer_plan(
             count = target_rows_before.unwrap_or_default(),
         ),
     }];
-    if request.mode == TableDataTransferMode::Upsert {
+    if request.mode == TableDataTransferMode::Upsert && !request.reseed_identity {
         warnings.push(
             "Explicit identity values are copied, but database sequences/identity generators are not reseeded by this transfer. Review the target generator before later inserts."
                 .to_string(),
@@ -7646,8 +7837,15 @@ async fn resolve_table_data_transfer_plan(
             warnings.push("Identity reseed was requested, but the PostgreSQL target exposes no serial/identity column to synchronize.".to_string());
         } else {
             warnings.push(format!(
-                "After data writes, the PostgreSQL generator(s) for {} will be synchronized inside the same target transaction.",
-                identity_reseed_columns.join(", ")
+                "After data writes, the reviewed PostgreSQL generator(s) {} will be synchronized inside the same target transaction.",
+                identity_reseed_plans
+                    .iter()
+                    .map(|plan| format!(
+                        "{}.{} for {}",
+                        plan.sequence_schema, plan.sequence_name, plan.column
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
@@ -7675,6 +7873,7 @@ async fn resolve_table_data_transfer_plan(
         target_rows_to_delete,
         upsert_key_columns,
         identity_reseed_columns,
+        identity_reseed_plans,
         confirmation_token,
         warnings,
     })
@@ -8019,6 +8218,7 @@ async fn resolve_table_data_transfer_batch_plan(
                             plan_digest: Some(table_data_transfer_plan_digest(
                                 &table_plan.confirmation_token,
                             )),
+                            identity_reseed_plans: table_plan.identity_reseed_plans,
                             warnings: table_plan.warnings,
                         });
                     plan.can_execute &= can_execute;
@@ -8030,6 +8230,7 @@ async fn resolve_table_data_transfer_batch_plan(
                             can_execute: false,
                             mapped_columns: 0,
                             plan_digest: None,
+                            identity_reseed_plans: Vec::new(),
                             warnings: vec![bounded_table_data_transfer_message(&error)],
                         });
                     plan.can_execute = false;
@@ -8109,6 +8310,7 @@ pub async fn preview_table_data_transfer(
             target_rows_to_delete: plan.target_rows_to_delete,
             upsert_key_columns: plan.upsert_key_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
+            identity_reseed_plans: plan.identity_reseed_plans,
             can_execute,
             confirmation_token: plan.confirmation_token,
             warnings: plan.warnings,
@@ -8294,9 +8496,9 @@ async fn execute_resolved_table_data_transfer_in_transaction(
             limit_reached = true;
         }
     }
-    if !plan.identity_reseed_columns.is_empty() {
+    if !plan.identity_reseed_plans.is_empty() {
         let statements =
-            postgres_identity_reseed_statements(&request.target, &plan.identity_reseed_columns);
+            postgres_identity_reseed_statements(&request.target, &plan.identity_reseed_plans);
         manager
             .execute_parameterized_transaction(
                 &request.target.connection_id,
@@ -14249,14 +14451,16 @@ mod tests {
         object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
         object_type_is_view, order_postgres_views, overwrite_transfer_verification,
         postgres_backup_index_definitions, postgres_backup_routine_definitions,
-        postgres_backup_routine_definitions_query, postgres_identity_reseed_verification_query,
-        postgres_materialized_view_populated_query, postgres_multirange_type_names,
-        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
-        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_setval_sql,
-        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
-        push_delimited_export_row, query_target, query_target_parameterized,
-        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
-        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
+        postgres_backup_routine_definitions_query, postgres_identity_reseed_plan_from_results,
+        postgres_identity_reseed_plan_query, postgres_identity_reseed_statements,
+        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
+        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
+        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
+        postgres_sequence_setval_sql, postgres_view_definition_query,
+        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
+        query_target, query_target_parameterized, read_csv_import_preview,
+        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
+        resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect, sanitize_file_part,
         select_database_sql_export_tables, sql_export_insert_batch_rows, sql_insert_statements,
         summarize_mutation_affected, table_data_dialect, table_data_transfer_batch_plan,
@@ -14274,7 +14478,8 @@ mod tests {
         TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareResult,
         TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
         TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConversion, TableDataTransferEndpoint, TableDataTransferMode,
+        TableDataTransferConfirmationBinding, TableDataTransferConversion,
+        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
         TableDataTransferPreview, TableDataTransferReport, TableDataTransferRequest,
         TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
         TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
@@ -15788,47 +15993,173 @@ mod tests {
             build_data_transfer_column_mapping(&[target_column("id")], &[target_column("id")])
                 .unwrap()
                 .0;
-        let token =
-            transfer_confirmation_token(&request, &mappings, 500, 100, Some(4), None, &[]).unwrap();
+        let confirmation_token =
+            |candidate: &TableDataTransferRequest,
+             target_rows_before: Option<u64>,
+             target_rows_to_delete: Option<u64>,
+             upsert_key_columns: &[String],
+             identity_reseed_plans: &[TableDataTransferIdentityReseedPlan]| {
+                transfer_confirmation_token(
+                    candidate,
+                    &TableDataTransferConfirmationBinding {
+                        mapped_columns: &mappings,
+                        max_rows: 500,
+                        batch_size: 100,
+                        target_rows_before,
+                        target_rows_to_delete,
+                        upsert_key_columns,
+                        identity_reseed_plans,
+                    },
+                )
+            };
+        let token = confirmation_token(&request, Some(4), None, &[], &[]).unwrap();
         assert!(token.starts_with("TRANSFER "));
 
         let mut changed = request.clone();
         changed.target.table = "other_users".to_string();
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(4), None, &[]).unwrap()
+            confirmation_token(&changed, Some(4), None, &[], &[]).unwrap()
         );
         changed = request.clone();
         changed.transfer_id = "transfer-test-0002".to_string();
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(4), None, &[]).unwrap()
+            confirmation_token(&changed, Some(4), None, &[], &[]).unwrap()
         );
         changed = request.clone();
         changed.mode = TableDataTransferMode::Overwrite;
         assert_ne!(
             token,
-            transfer_confirmation_token(&changed, &mappings, 500, 100, Some(12), Some(12), &[])
-                .unwrap()
+            confirmation_token(&changed, Some(12), Some(12), &[], &[]).unwrap()
         );
         changed.mode = TableDataTransferMode::Upsert;
         assert_ne!(
             token,
-            transfer_confirmation_token(
-                &changed,
-                &mappings,
-                500,
-                100,
-                None,
-                None,
-                &["id".to_string()],
-            )
-            .unwrap()
+            confirmation_token(&changed, None, None, &["id".to_string()], &[]).unwrap()
         );
         assert_ne!(
             token,
-            transfer_confirmation_token(&request, &mappings, 500, 100, Some(5), None, &[]).unwrap()
+            confirmation_token(&request, Some(5), None, &[], &[]).unwrap()
         );
+
+        let generator = TableDataTransferIdentityReseedPlan {
+            column: "id".to_string(),
+            sequence_schema: "app".to_string(),
+            sequence_name: "users_copy_id_seq".to_string(),
+            owner_schema: "app".to_string(),
+            owner_table: "users_copy".to_string(),
+            owner_column: "id".to_string(),
+            current_value: Some("41".to_string()),
+            target_max_value: Some("40".to_string()),
+        };
+        assert_ne!(
+            token,
+            confirmation_token(&request, Some(4), None, &[], &[generator]).unwrap()
+        );
+    }
+
+    #[test]
+    fn postgres_identity_reseed_preview_binds_sequence_owner_and_state() {
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "target".to_string(),
+            driver: "postgres".to_string(),
+            schema: "archive".to_string(),
+            table: "users".to_string(),
+            database: Some("app".to_string()),
+        };
+        let results = vec![QueryResult::rows(
+            Vec::new(),
+            vec![vec![
+                serde_json::json!("archive"),
+                serde_json::json!("users_id_seq"),
+                serde_json::json!("archive"),
+                serde_json::json!("users"),
+                serde_json::json!("id"),
+                serde_json::json!("41"),
+                serde_json::json!("40"),
+            ]],
+        )];
+
+        let plan = postgres_identity_reseed_plan_from_results(&endpoint, "id", &results).unwrap();
+
+        assert_eq!(plan.sequence_name, "users_id_seq");
+        assert_eq!(plan.current_value.as_deref(), Some("41"));
+        assert_eq!(plan.target_max_value.as_deref(), Some("40"));
+        let statements = postgres_identity_reseed_statements(&endpoint, &[plan]);
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0]
+            .sql
+            .contains("pg_catalog.setval('\"archive\".\"users_id_seq\"'::pg_catalog.regclass"));
+        assert!(!statements[0].sql.contains("pg_get_serial_sequence"));
+        assert!(statements[0].sql.contains("MAX(\"id\")"));
+    }
+
+    #[test]
+    fn postgres_identity_reseed_preview_rejects_detached_or_invalid_state() {
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "target".to_string(),
+            driver: "postgres".to_string(),
+            schema: "archive".to_string(),
+            table: "users".to_string(),
+            database: None,
+        };
+        let detached = vec![QueryResult::rows(
+            Vec::new(),
+            vec![vec![
+                serde_json::json!("archive"),
+                serde_json::json!("shared_seq"),
+                serde_json::json!("archive"),
+                serde_json::json!("accounts"),
+                serde_json::json!("id"),
+                serde_json::json!("7"),
+                serde_json::json!("9"),
+            ]],
+        )];
+        let invalid_state = vec![QueryResult::rows(
+            Vec::new(),
+            vec![vec![
+                serde_json::json!("archive"),
+                serde_json::json!("users_id_seq"),
+                serde_json::json!("archive"),
+                serde_json::json!("users"),
+                serde_json::json!("id"),
+                serde_json::json!("not-a-number"),
+                serde_json::Value::Null,
+            ]],
+        )];
+
+        assert!(
+            postgres_identity_reseed_plan_from_results(&endpoint, "id", &detached)
+                .unwrap_err()
+                .contains("not owned by the reviewed target column")
+        );
+        assert!(
+            postgres_identity_reseed_plan_from_results(&endpoint, "id", &invalid_state)
+                .unwrap_err()
+                .contains("invalid sequence value")
+        );
+    }
+
+    #[test]
+    fn postgres_identity_reseed_preview_query_is_catalog_scoped_and_read_only() {
+        let endpoint = TableDataTransferEndpoint {
+            connection_id: "target".to_string(),
+            driver: "postgres".to_string(),
+            schema: "archive".to_string(),
+            table: "users".to_string(),
+            database: None,
+        };
+
+        let sql = postgres_identity_reseed_plan_query(&endpoint, "id");
+
+        assert!(sql.starts_with("WITH selected AS (SELECT"));
+        assert!(sql.contains("pg_catalog.pg_get_serial_sequence"));
+        assert!(sql.contains("pg_catalog.pg_depend"));
+        assert!(sql.contains("FROM \"archive\".\"users\""));
+        assert!(!sql.contains(';'));
+        assert!(!sql.to_ascii_uppercase().contains(" UPDATE "));
+        assert!(!sql.to_ascii_uppercase().contains(" DELETE "));
     }
 
     #[test]

@@ -1612,12 +1612,27 @@ export function TableDataTransferDialog({
                         const preflight = batchPlan.tablePreflights.find(
                           (item) => item.table === table,
                         );
+                        const generatorPlans = preflight?.identityReseedPlans || [];
                         return (
-                          <div key={table} className="flex items-center justify-between gap-2 border-b border-[hsl(var(--wb-border-subtle))] py-1 last:border-b-0">
-                            <span className="truncate">{table}</span>
-                            <span className={preflight?.canExecute ? "text-[hsl(var(--wb-success))]" : "text-[hsl(var(--destructive))]"}>
-                              {preflight?.canExecute ? `${preflight.mappedColumns} mapped` : "blocked"}
-                            </span>
+                          <div key={table} className="space-y-1 border-b border-[hsl(var(--wb-border-subtle))] py-1 last:border-b-0">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate">{table}</span>
+                              <span className={preflight?.canExecute ? "text-[hsl(var(--wb-success))]" : "text-[hsl(var(--destructive))]"}>
+                                {preflight?.canExecute
+                                  ? `${preflight.mappedColumns} mapped${generatorPlans.length > 0 ? ` · ${generatorPlans.length} generator(s)` : ""}`
+                                  : "blocked"}
+                              </span>
+                            </div>
+                            {generatorPlans.map((generator) => (
+                              <div
+                                key={`${generator.column}:${generator.sequenceSchema}:${generator.sequenceName}`}
+                                className="truncate pl-2 text-[9px] wb-muted"
+                                title={`${generator.ownerSchema}.${generator.ownerTable}.${generator.ownerColumn}`}
+                              >
+                                {generator.column} → {generator.sequenceSchema}.{generator.sequenceName}
+                                {` · last ${generator.currentValue ?? "unavailable"} · target max ${generator.targetMaxValue ?? "empty"}`}
+                              </div>
+                            ))}
                           </div>
                         );
                       })}
@@ -1712,6 +1727,27 @@ export function TableDataTransferDialog({
                     ))}
                   </div>
                 </div>
+                {(preview.identityReseedPlans?.length || 0) > 0 && (
+                  <div className="rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
+                    <div className="mb-1 font-medium">PostgreSQL generator plan</div>
+                    <div className="space-y-1 font-mono leading-4 wb-muted">
+                      {preview.identityReseedPlans?.map((generator) => (
+                        <div
+                          key={`${generator.column}:${generator.sequenceSchema}:${generator.sequenceName}`}
+                          className="border-b border-[hsl(var(--wb-border-subtle))] py-1 last:border-b-0"
+                        >
+                          <div>
+                            {generator.column} → {generator.sequenceSchema}.{generator.sequenceName}
+                          </div>
+                          <div className="text-[9px]">
+                            owner {generator.ownerSchema}.{generator.ownerTable}.{generator.ownerColumn}
+                            {` · current ${generator.currentValue ?? "unavailable"} · target max ${generator.targetMaxValue ?? "empty"}`}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {!preview.canExecute && (
                   <p className="leading-4 text-[hsl(var(--destructive))]">
                     This plan contains an unsupported type conversion. Change the target column type and preview again.

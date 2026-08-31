@@ -246,12 +246,17 @@ explicit deferred validation task rather than an implicit release check.
   `review`, stale plan tokens are rejected, and the UI exposes the normalized
   mapping profile while hiding the create action for blocked plans.
 - Verify PostgreSQL serial and identity reseed previews against empty/non-empty
-  targets, a target without owned generators, rollback after a reseed failure,
-  and stale-token rejection when the reseed option changes. Confirm reseed SQL
-  runs before the copy transaction commits. After commit, confirm the read-only
-  generator-vs-table-maximum comparison reports verified/needs-review without
-  persisting either numeric value; unavailable catalog functions or privileges
-  must degrade to review rather than relabeling a committed transfer as failed.
+  targets, quoted/cross-schema sequence names, detached or reassigned ownership,
+  a target without owned generators, rollback after a reseed failure, and
+  stale-token rejection when the reseed option, owner, sequence state or target
+  maximum changes. Confirm the preview exposes the exact sequence/owner identity
+  and numeric state, execution uses that reviewed qualified sequence before the
+  copy transaction commits, and durable reports persist none of those numeric
+  values. After commit, confirm the read-only generator-vs-table-maximum
+  comparison reports verified/needs-review; unavailable catalog functions,
+  older PostgreSQL versions or insufficient privileges must degrade to review
+  rather than relabeling a committed transfer as failed. Cover `is_called=false`
+  explicitly before claiming exact next-value semantic parity.
 - Run append baseline and overwrite post-commit verification tests under
   concurrent target writers; append must remain `needs review` until a stable
   baseline is implemented.
