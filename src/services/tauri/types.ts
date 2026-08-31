@@ -1564,6 +1564,8 @@ export interface SchemaRelationSnapshot {
   materializedViewPopulated?: boolean | null;
   /** Direct same-schema view prerequisites used only to order reviewed DDL. */
   dependencies?: string[];
+  /** Qualified PostgreSQL view dependencies outside the captured schema. */
+  externalDependencies?: string[];
   /** PostgreSQL sequences referenced by catalog-captured column defaults. */
   sequenceDependencies?: string[];
   columns: ColumnInfo[];

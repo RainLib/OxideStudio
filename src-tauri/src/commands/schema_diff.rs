@@ -137,7 +137,8 @@ async fn capture_native_view_definition(
 fn postgres_view_dependency_query(schema: &str) -> String {
     let schema = sql_string_literal(schema);
     format!(
-        "SELECT dependent.relname AS view_name, referenced.relname AS depends_on \
+        "SELECT dependent.relname AS view_name, referenced.relname AS depends_on, \
+                referenced_namespace.nspname AS depends_on_schema \
          FROM pg_catalog.pg_rewrite rewrite \
          JOIN pg_catalog.pg_class dependent ON dependent.oid = rewrite.ev_class \
          JOIN pg_catalog.pg_namespace dependent_namespace ON dependent_namespace.oid = dependent.relnamespace \
@@ -145,13 +146,18 @@ fn postgres_view_dependency_query(schema: &str) -> String {
          JOIN pg_catalog.pg_class referenced ON referenced.oid = dependency.refobjid \
          JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.relnamespace \
          WHERE dependent_namespace.nspname = {schema} \
-           AND referenced_namespace.nspname = {schema} \
            AND dependent.relkind IN ('v', 'm') \
            AND referenced.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') \
            AND dependent.oid <> referenced.oid \
            AND dependency.deptype = 'n' \
          ORDER BY dependent.relname, referenced.relname;"
     )
+}
+
+#[derive(Debug, Clone, Default)]
+struct PostgresViewDependencies {
+    same_schema: Vec<String>,
+    external: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -763,7 +769,7 @@ async fn capture_postgres_view_dependencies(
     database: Option<&str>,
     driver: &str,
     schema: &str,
-) -> Result<HashMap<String, Vec<String>>, String> {
+) -> Result<HashMap<String, PostgresViewDependencies>, String> {
     if !driver.trim().eq_ignore_ascii_case("postgres") {
         return Ok(HashMap::new());
     }
@@ -777,7 +783,7 @@ async fn capture_postgres_view_dependencies(
         }
     }
     .map_err(|error| error.to_string())?;
-    let mut dependencies = HashMap::<String, Vec<String>>::new();
+    let mut dependencies = HashMap::<String, PostgresViewDependencies>::new();
     for row in results.iter().flat_map(|result| result.rows.iter()) {
         let Some(view) = row.first().and_then(serde_json::Value::as_str) else {
             continue;
@@ -785,19 +791,28 @@ async fn capture_postgres_view_dependencies(
         let Some(dependency) = row.get(1).and_then(serde_json::Value::as_str) else {
             continue;
         };
+        let Some(dependency_schema) = row.get(2).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
         if !view.trim().is_empty()
             && !dependency.trim().is_empty()
             && !view.eq_ignore_ascii_case(dependency)
         {
-            dependencies
-                .entry(view.to_string())
-                .or_default()
-                .push(dependency.to_string());
+            let entry = dependencies.entry(view.to_string()).or_default();
+            if dependency_schema.eq_ignore_ascii_case(schema) {
+                entry.same_schema.push(dependency.to_string());
+            } else {
+                entry
+                    .external
+                    .push(format!("{dependency_schema}.{dependency}"));
+            }
         }
     }
     for relation_dependencies in dependencies.values_mut() {
-        relation_dependencies.sort();
-        relation_dependencies.dedup();
+        relation_dependencies.same_schema.sort();
+        relation_dependencies.same_schema.dedup();
+        relation_dependencies.external.sort();
+        relation_dependencies.external.dedup();
     }
     Ok(dependencies)
 }
@@ -1200,10 +1215,12 @@ async fn capture_schema_snapshot_inner(
         let database = database.map(ToString::to_string);
         let schema = schema.to_string();
         let driver = snapshot_driver.clone();
-        let dependencies = view_dependencies
+        let view_dependencies = view_dependencies
             .get(&relation_name)
             .cloned()
             .unwrap_or_default();
+        let dependencies = view_dependencies.same_schema;
+        let external_dependencies = view_dependencies.external;
         let sequence_dependencies = relation_sequence_dependencies
             .get(&relation_name)
             .cloned()
@@ -1306,6 +1323,7 @@ async fn capture_schema_snapshot_inner(
                         definition,
                         materialized_view_populated,
                         dependencies,
+                        external_dependencies,
                         sequence_dependencies,
                         columns: metadata.0,
                         indexes: metadata.1,
@@ -1321,6 +1339,7 @@ async fn capture_schema_snapshot_inner(
                         definition,
                         materialized_view_populated,
                         dependencies,
+                        external_dependencies,
                         sequence_dependencies,
                         columns: Vec::new(),
                         indexes: Vec::new(),
@@ -3277,6 +3296,7 @@ mod tests {
                 definition: None,
                 materialized_view_populated: None,
                 dependencies: Vec::new(),
+                external_dependencies: Vec::new(),
                 sequence_dependencies: Vec::new(),
                 columns: vec![ColumnInfo {
                     name: "id".to_string(),
@@ -3341,11 +3361,12 @@ mod tests {
     }
 
     #[test]
-    fn postgres_view_dependency_query_is_same_schema_and_read_only() {
+    fn postgres_view_dependency_query_captures_external_dependencies_and_is_read_only() {
         let query = postgres_view_dependency_query("public");
         assert!(query.contains("pg_catalog.pg_rewrite"));
         assert!(query.contains("dependent_namespace.nspname = 'public'"));
-        assert!(query.contains("referenced_namespace.nspname = 'public'"));
+        assert!(query.contains("referenced_namespace.nspname AS depends_on_schema"));
+        assert!(!query.contains("referenced_namespace.nspname = 'public'"));
         assert!(query.contains("dependent.relkind IN ('v', 'm')"));
         assert!(query.contains("referenced.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"));
         assert!(!query.contains("INSERT"));

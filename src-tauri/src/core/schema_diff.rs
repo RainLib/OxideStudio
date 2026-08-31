@@ -39,6 +39,11 @@ pub struct SchemaRelationSnapshot {
     /// broaden the set of objects selected for a migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
+    /// Direct PostgreSQL view prerequisites that are outside the captured
+    /// schema. They are retained as qualified catalog names for review but
+    /// never become plan edges because this snapshot does not own them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_dependencies: Vec<String>,
     /// Native PostgreSQL sequences referenced by this relation's defaults.
     /// Kept separate from relation dependencies so a sequence named like a
     /// table cannot be mistaken for a relation during planning.
@@ -336,6 +341,8 @@ pub fn finalize_schema_snapshot(mut snapshot: SchemaSnapshot) -> Result<SchemaSn
     for relation in &mut snapshot.relations {
         relation.dependencies.sort();
         relation.dependencies.dedup();
+        relation.external_dependencies.sort();
+        relation.external_dependencies.dedup();
         relation.sequence_dependencies.sort();
         relation.sequence_dependencies.dedup();
         relation
@@ -2575,6 +2582,7 @@ fn compare_relation(
             if let Some(definition) =
                 normalized_view_select_definition(source.definition.as_deref())
             {
+                warnings.extend(external_view_dependency_warnings(source));
                 warnings.push(format!(
                     "View {} source changed. The generated replacement is review-required because dependent views can be affected.",
                     source.name
@@ -2606,7 +2614,9 @@ fn compare_relation(
             && (source.definition != target.definition
                 || source.materialized_view_populated != target.materialized_view_populated)
         {
-            if let Some(definition) = normalized_view_select_definition(source.definition.as_deref()) {
+            if let Some(definition) =
+                normalized_view_select_definition(source.definition.as_deref())
+            {
                 let with_data = source.materialized_view_populated.unwrap_or(false);
                 let create_sql = kind.create_materialized_view_query(
                     Some(target_schema),
@@ -2615,6 +2625,7 @@ fn compare_relation(
                     with_data,
                 );
                 if let Some(create_sql) = create_sql {
+                    warnings.extend(external_view_dependency_warnings(source));
                     warnings.push(format!(
                         "Materialized view {} changes are represented as a destructive, review-required DROP/CREATE without CASCADE; dependent target views must be handled explicitly.",
                         source.name
@@ -2712,6 +2723,17 @@ fn normalized_view_select_definition(definition: Option<&str>) -> Option<String>
     } else {
         None
     }
+}
+
+fn external_view_dependency_warnings(relation: &SchemaRelationSnapshot) -> Vec<String> {
+    if relation.external_dependencies.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "View {} references out-of-scope PostgreSQL relation(s): {}. Verify those target objects and schema mappings before applying generated DDL.",
+        relation.name,
+        relation.external_dependencies.join(", ")
+    )]
 }
 
 fn compare_columns(
@@ -3144,16 +3166,14 @@ fn create_relation_sql(
 ) -> (Vec<String>, bool, Vec<String>) {
     let flags = relation_flags(relation.object_type.as_deref());
     if flags.is_view {
+        let mut warnings = external_view_dependency_warnings(relation);
         let Some(definition) = normalized_view_select_definition(relation.definition.as_deref())
         else {
-            return (
-                Vec::new(),
-                true,
-                vec![format!(
-                    "View {} requires its source definition before it can be created.",
-                    relation.name
-                )],
-            );
+            warnings.push(format!(
+                "View {} requires its source definition before it can be created.",
+                relation.name
+            ));
+            return (Vec::new(), true, warnings);
         };
         if flags.is_materialized_view {
             let sql = kind
@@ -3165,29 +3185,27 @@ fn create_relation_sql(
                 )
                 .into_iter()
                 .collect();
-            return (
-                sql,
-                true,
-                vec![if relation.materialized_view_populated == Some(true) {
-                    format!(
-                        "Materialized view {} must be reviewed before creation because WITH DATA executes its source query on the target.",
-                        relation.name
-                    )
-                } else {
-                    format!(
-                        "Materialized view {} is created WITH NO DATA because its captured population state is false or unavailable; refresh it manually after review.",
-                        relation.name
-                    )
-                }],
-            );
+            warnings.push(if relation.materialized_view_populated == Some(true) {
+                format!(
+                    "Materialized view {} must be reviewed before creation because WITH DATA executes its source query on the target.",
+                    relation.name
+                )
+            } else {
+                format!(
+                    "Materialized view {} is created WITH NO DATA because its captured population state is false or unavailable; refresh it manually after review.",
+                    relation.name
+                )
+            });
+            return (sql, true, warnings);
         }
+        warnings.push(format!(
+            "View {} source was captured read-only. Review its dependencies before applying the generated DDL.",
+            relation.name
+        ));
         return (
             vec![kind.create_view_query(Some(target_schema), &relation.name, &definition, false)],
             true,
-            vec![format!(
-                "View {} source was captured read-only. Review its dependencies before applying the generated DDL.",
-                relation.name
-            )],
+            warnings,
         );
     }
     if flags.is_foreign_table {
@@ -4766,6 +4784,7 @@ mod tests {
                 definition: None,
                 materialized_view_populated: None,
                 dependencies: Vec::new(),
+                external_dependencies: Vec::new(),
                 sequence_dependencies: Vec::new(),
                 columns,
                 indexes: Vec::new(),
@@ -4900,6 +4919,7 @@ mod tests {
             definition: None,
             materialized_view_populated: None,
             dependencies: Vec::new(),
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5625,6 +5645,7 @@ mod tests {
             definition: None,
             materialized_view_populated: None,
             dependencies: Vec::new(),
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5752,6 +5773,7 @@ mod tests {
             definition: Some("SELECT id FROM users WHERE active".to_string()),
             materialized_view_populated: None,
             dependencies: vec!["users".to_string()],
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5764,6 +5786,7 @@ mod tests {
             definition: Some("SELECT id FROM active_users".to_string()),
             materialized_view_populated: None,
             dependencies: vec!["active_users".to_string()],
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5806,6 +5829,7 @@ mod tests {
             definition: Some("SELECT id FROM users WHERE active".to_string()),
             materialized_view_populated: Some(false),
             dependencies: vec!["users".to_string()],
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5818,6 +5842,7 @@ mod tests {
             definition: Some("SELECT id FROM users".to_string()),
             materialized_view_populated: Some(true),
             dependencies: vec!["users".to_string()],
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5878,6 +5903,7 @@ mod tests {
             definition: Some("SELECT id FROM users WHERE active".to_string()),
             materialized_view_populated: Some(false),
             dependencies: vec!["users".to_string()],
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
@@ -5915,6 +5941,45 @@ mod tests {
         );
         assert!(plan.requires_destructive_approval);
         assert!(!change.sql.join("\n").contains("CASCADE"));
+    }
+
+    #[test]
+    fn external_view_dependencies_are_preserved_and_warn_on_creation() {
+        let mut source = snapshot("desired", vec![column("id", "int4", false)]);
+        source.relations.push(SchemaRelationSnapshot {
+            name: "audit_users".to_string(),
+            object_type: Some("VIEW".to_string()),
+            comment: None,
+            definition: Some("SELECT id FROM users".to_string()),
+            materialized_view_populated: None,
+            dependencies: vec!["users".to_string()],
+            external_dependencies: vec!["audit.events".to_string(), "shared.users".to_string()],
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "int4", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        let mut target = source.clone();
+        target
+            .relations
+            .retain(|relation| relation.name != "audit_users");
+        let source = finalize_schema_snapshot(source).unwrap();
+        let target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "audit_users")
+            .expect("view creation should be planned");
+
+        assert!(change.manual_review);
+        assert!(change.sql[0].contains("CREATE VIEW"));
+        assert!(plan.warnings.iter().any(|warning| {
+            warning.contains("out-of-scope PostgreSQL relation")
+                && warning.contains("audit.events")
+                && warning.contains("shared.users")
+        }));
     }
 
     #[test]
@@ -6060,6 +6125,7 @@ mod tests {
             definition: None,
             materialized_view_populated: None,
             dependencies: Vec::new(),
+            external_dependencies: Vec::new(),
             sequence_dependencies: Vec::new(),
             columns: vec![column("id", "int4", false)],
             indexes: Vec::new(),
