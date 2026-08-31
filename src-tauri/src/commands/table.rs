@@ -128,6 +128,10 @@ pub struct TablePageResult {
     pub total_rows: Option<u64>,
 }
 
+fn should_calculate_table_total(include_total: Option<bool>) -> bool {
+    include_total.unwrap_or(false)
+}
+
 /// A reviewed table endpoint used by the bounded, server-side data compare
 /// path. It intentionally mirrors the transfer endpoint rather than accepting
 /// arbitrary SQL: this keeps pagination and identifier quoting host-owned.
@@ -9302,6 +9306,7 @@ pub async fn preview_table_page(
     filter_sql: Option<String>,
     filters: Option<Vec<TableFilter>>,
     sort: Option<TableSort>,
+    include_total: Option<bool>,
 ) -> Result<Response<TablePageResult>, String> {
     let error_context = serde_json::json!({
         "connectionId": connection_id,
@@ -9311,6 +9316,7 @@ pub async fn preview_table_page(
         "table": table,
         "page": page,
         "pageSize": page_size,
+        "includeTotal": include_total,
     });
     let result: Result<TablePageResult, String> = async {
         let kind =
@@ -9321,6 +9327,7 @@ pub async fn preview_table_page(
             .unwrap_or(DEFAULT_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE);
         let offset = page as u64 * page_size as u64;
+        let include_total = should_calculate_table_total(include_total);
         let structured_filters = filters
             .as_deref()
             .map(|filters| {
@@ -9362,15 +9369,18 @@ pub async fn preview_table_page(
                 Some(where_clause.as_str())
             };
 
-            let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
-            let total_rows =
+            let total_rows = if include_total {
+                let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
                 query_target_parameterized(&manager, &connection_id, database, &count_sql, &params)
                     .await
                     .ok()
                     .and_then(|results| results.first().cloned())
                     .and_then(|result| result.rows.first().cloned())
                     .and_then(|row| row.first().cloned())
-                    .and_then(|value| value_to_u64(&value));
+                    .and_then(|value| value_to_u64(&value))
+            } else {
+                None
+            };
 
             let page_sql = kind.paged_table_query_with_order(
                 schema_option(&schema),
@@ -9390,14 +9400,18 @@ pub async fn preview_table_page(
             let validated_filter = validated_raw_filter_sql(kind, filter_sql.as_deref())?;
             let filter = validated_filter.as_deref();
 
-            let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
-            let total_rows = query_target(&manager, &connection_id, database, &count_sql)
-                .await
-                .ok()
-                .and_then(|results| results.first().cloned())
-                .and_then(|result| result.rows.first().cloned())
-                .and_then(|row| row.first().cloned())
-                .and_then(|value| value_to_u64(&value));
+            let total_rows = if include_total {
+                let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
+                query_target(&manager, &connection_id, database, &count_sql)
+                    .await
+                    .ok()
+                    .and_then(|results| results.first().cloned())
+                    .and_then(|result| result.rows.first().cloned())
+                    .and_then(|row| row.first().cloned())
+                    .and_then(|value| value_to_u64(&value))
+            } else {
+                None
+            };
 
             let page_sql = kind.paged_table_query_with_order(
                 schema_option(&schema),
@@ -14301,6 +14315,13 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         delete_rows: u64,
         rollback_error: Option<String>,
+    }
+
+    #[test]
+    fn table_page_total_count_is_opt_in() {
+        assert!(!super::should_calculate_table_total(None));
+        assert!(!super::should_calculate_table_total(Some(false)));
+        assert!(super::should_calculate_table_total(Some(true)));
     }
 
     #[test]

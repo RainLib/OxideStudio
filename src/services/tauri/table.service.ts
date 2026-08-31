@@ -106,7 +106,8 @@ export async function previewTablePage(
   filterSql?: string,
   filters?: TableFilter[],
   sort?: TableSort,
-  databaseName?: string
+  databaseName?: string,
+  includeTotal = false,
 ): Promise<TablePageResult> {
   return invokeWithInterceptors<TablePageResult>("preview_table_page", {
     connectionId,
@@ -119,6 +120,7 @@ export async function previewTablePage(
     filters,
     sort,
     database: databaseName,
+    includeTotal,
   });
 }
 

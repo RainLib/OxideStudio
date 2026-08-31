@@ -54,6 +54,7 @@ describe("table service database scope", () => {
       filters: undefined,
       sort: undefined,
       database: "analytics",
+      includeTotal: false,
     });
   });
 

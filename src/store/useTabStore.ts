@@ -735,6 +735,8 @@ interface TablePageLoadOptions {
   discardAction?: string;
   discardDraftsConfirmed?: boolean;
   sortOverride?: TableSort | null;
+  /** Exact totals are opt-in: pagination must not run an expensive COUNT(*) by default. */
+  includeTotal?: boolean;
 }
 
 interface TabState {
@@ -3319,12 +3321,16 @@ export const useTabStore = create<TabState>((set, get) => ({
     const taskId = taskStore.startTask({
       kind: "table",
       title: `Load ${tab.tableName}`,
-      detail: `Page ${nextPage + 1}`,
+      detail: options?.includeTotal
+        ? `Page ${nextPage + 1} · calculating exact total`
+        : `Page ${nextPage + 1}`,
     });
     const nextFilterSql =
       filterSql === undefined ? tab.tableFilterSql : filterSql;
     const nextFilters = filters === undefined ? tab.tableFilters : filters;
     const hasSortOverride = options?.sortOverride !== undefined;
+    const totalScopeChanged =
+      filterSql !== undefined || filters !== undefined || hasSortOverride;
     const requestedTableSort: TableSort | undefined = hasSortOverride
       ? options.sortOverride || undefined
       : tab.gridState?.sortColumn && tab.gridState?.sortDirection
@@ -3376,30 +3382,28 @@ export const useTabStore = create<TabState>((set, get) => ({
       }
 
       const driver = readiness.connection.driver || DEFAULT_DATABASE_DRIVER;
+      const pageRequest = [
+        tab.connectionId,
+        driver,
+        tab.schemaName,
+        tab.tableName,
+        nextPage,
+        pageSize,
+        nextFilterSql || undefined,
+        nextFilters || undefined,
+        tableSort,
+      ] as const;
       const pageResult = tab.databaseName
-        ? await tableService.previewTablePage(
-            tab.connectionId,
-            driver,
-            tab.schemaName,
-            tab.tableName,
-            nextPage,
-            pageSize,
-            nextFilterSql || undefined,
-            nextFilters || undefined,
-            tableSort,
-            tab.databaseName,
-          )
-        : await tableService.previewTablePage(
-            tab.connectionId,
-            driver,
-            tab.schemaName,
-            tab.tableName,
-            nextPage,
-            pageSize,
-            nextFilterSql || undefined,
-            nextFilters || undefined,
-            tableSort,
-          );
+        ? options?.includeTotal
+          ? await tableService.previewTablePage(
+              ...pageRequest,
+              tab.databaseName,
+              true,
+            )
+          : await tableService.previewTablePage(...pageRequest, tab.databaseName)
+        : options?.includeTotal
+          ? await tableService.previewTablePage(...pageRequest, undefined, true)
+          : await tableService.previewTablePage(...pageRequest);
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -3410,7 +3414,11 @@ export const useTabStore = create<TabState>((set, get) => ({
                 results: [pageResult.result],
                 tablePage: pageResult.page,
                 tablePageSize: pageResult.pageSize,
-                tableTotalRows: pageResult.totalRows ?? null,
+                tableTotalRows: options?.includeTotal
+                  ? pageResult.totalRows ?? null
+                  : totalScopeChanged
+                    ? null
+                    : t.tableTotalRows ?? null,
                 tableFilterSql: nextFilterSql || null,
                 tableFilters: nextFilters || null,
                 pendingEdits: new Map(),

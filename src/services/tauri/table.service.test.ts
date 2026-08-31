@@ -13,7 +13,43 @@ import {
   inferTableImportColumns,
   importTableData,
   preflightTableCsvImport,
+  previewTablePage,
 } from "./table.service";
+
+describe("previewTablePage", () => {
+  beforeEach(() => {
+    invokeWithInterceptors.mockReset();
+    invokeWithInterceptors.mockResolvedValue({ columns: [], rows: [], totalRows: null });
+  });
+
+  it("leaves exact total counting disabled until the caller explicitly requests it", async () => {
+    await previewTablePage("connection-1", "postgres", "public", "users", 0, 100);
+
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith("preview_table_page", {
+      connectionId: "connection-1",
+      driver: "postgres",
+      schema: "public",
+      table: "users",
+      page: 0,
+      pageSize: 100,
+      filterSql: undefined,
+      filters: undefined,
+      sort: undefined,
+      database: undefined,
+      includeTotal: false,
+    });
+
+    await previewTablePage(
+      "connection-1", "postgres", "public", "users", 0, 100,
+      undefined, undefined, undefined, undefined, true,
+    );
+
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
+      "preview_table_page",
+      expect.objectContaining({ includeTotal: true }),
+    );
+  });
+});
 
 describe("exportTableData", () => {
   beforeEach(() => {

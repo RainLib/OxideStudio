@@ -53,6 +53,7 @@ import {
   Code2,
   Pencil,
   Plus,
+  RefreshCw,
   TableProperties,
   Trash2,
 } from "lucide-react";
@@ -889,6 +890,21 @@ export function TableDataView() {
     }
     void loadTablePage(activeTab.id, page, undefined, undefined, {
       discardAction: "refresh the table",
+    });
+  };
+
+  const handleCalculateTotalRows = () => {
+    if (
+      isSearchObjectPreview ||
+      isNativeObjectPreview ||
+      activeTab.isExecuting ||
+      hasEdits
+    ) {
+      return;
+    }
+    void loadTablePage(activeTab.id, page, undefined, undefined, {
+      discardAction: "calculate the exact total",
+      includeTotal: true,
     });
   };
 
@@ -2321,7 +2337,26 @@ export function TableDataView() {
             >
               <ChevronLeft size={13} />
             </button>
-            <span className="min-w-[112px] px-2 text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))]">
+            {!isSearchObjectPreview && !isNativeObjectPreview && (
+              <button
+                type="button"
+                className="wb-icon-button"
+                disabled={activeTab.isExecuting || hasEdits}
+                onClick={handleCalculateTotalRows}
+                title={
+                  hasEdits
+                    ? "Apply or discard edits before calculating the exact total"
+                    : "Calculate exact total rows for the current filter"
+                }
+                aria-label="Calculate exact total rows"
+              >
+                <RefreshCw
+                  size={12}
+                  className={activeTab.isExecuting ? "animate-spin" : undefined}
+                />
+              </button>
+            )}
+            <span className="min-w-[112px] px-1 text-center text-[10px] tabular-nums text-[hsl(var(--wb-text-muted))]">
               {totalRows == null
                 ? `${visibleRows.toLocaleString()} rows`
                 : `${startRow.toLocaleString()}-${endRow.toLocaleString()} of ${totalRows.toLocaleString()}`}
