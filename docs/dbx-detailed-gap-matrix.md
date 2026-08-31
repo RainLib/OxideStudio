@@ -127,11 +127,11 @@
 
 ## 1. 支持口径
 
-- Oxide 的 `referenceDriverCatalog` 有 73 个候选产品，但候选、可安装、可连接、可浏览、
+- Oxide 的 `referenceDriverCatalog` 有 74 个候选产品，但候选、可安装、可连接、可浏览、
   可编辑和可迁移是六个不同状态。
 - 当前无需外置包即可运行的 bundled driver 是 PostgreSQL、MySQL/MariaDB、SQLite、
   MongoDB、Redis 和 Elasticsearch。
-- DBX 的 `DatabaseType` 覆盖 68 个类型，driver manifest 有 66 条描述；
+- DBX 当前基线已新增 ArgoDB；driver manifest、产品枚举和 agent 路由会继续随上游演进；
   `sources/dbx/agents/drivers` 中有 45 个独立 agent 工程，另外还有 native/file/HTTP
   driver。DBX 的产品数量来自这些实际运行时，不是只来自前端枚举。
 - 本文的“对齐”表示达到相同用户能力和可验证边界，不表示复制 DBX 源码或架构。
@@ -289,7 +289,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
    额外通过对应 semantic conformance。
 6. 连接凭据、SQL 正文和结果值不进入 driver 日志、遥测或迁移报告。
 
-因此，73 个 catalog candidate 只有在逐项产生上述证据后，才能转换为“70+ 数据库可用”。
+因此，74 个 catalog candidate 只有在逐项产生上述证据后，才能转换为“70+ 数据库可用”。
 
 ## Phase 114 增量：函数大小写与全方言补全偏好
 

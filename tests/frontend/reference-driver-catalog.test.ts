@@ -17,7 +17,7 @@ describe("reference database driver catalogue", () => {
     );
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(73);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(74);
     expect(DBX_REFERENCE_DRIVER_IDS).toEqual([
       "mysql", "postgres", "sqlite", "rqlite", "redis", "duckdb",
       "clickhouse", "sqlserver", "mongodb", "oracle", "elasticsearch",
@@ -27,7 +27,7 @@ describe("reference database driver catalogue", () => {
       "gaussdb", "kwdb", "yashandb", "databricks", "saphana", "teradata",
       "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle",
       "gbase", "access", "h2", "snowflake", "trino", "prestosql", "hive",
-      "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "kylin",
+      "argo", "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "kylin",
       "sundb", "oscar", "tdengine", "xugu", "iotdb", "etcd", "zookeeper",
       "nacos", "iris", "turso", "cloudflare-d1", "influxdb", "questdb", "jdbc",
       "mq",
@@ -122,6 +122,13 @@ describe("reference database driver catalogue", () => {
       lspLanguageId: "sql",
       lspServerDialect: "db2",
       lspParserBaseline: "postgres",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("argo")!)).toMatchObject({
+      runtimeRoute: "signedJdbc",
+      lspRoute: "compatibleSql",
+      lspLanguageId: "sql",
+      lspServerDialect: "argo",
+      lspParserBaseline: "hive",
     });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("neo4j")!)).toMatchObject({
       runtimeRoute: "dedicatedWorkspace",

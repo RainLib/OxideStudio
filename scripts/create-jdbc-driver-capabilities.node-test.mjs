@@ -14,6 +14,7 @@ import {
 test("maps each JDBC reference family to a conservative, known editor profile", () => {
   const expectedProfileNames = {
     cockroachdb: "postgres-compatible",
+    argo: "argo",
     dameng: "oracle",
     databend: "generic",
     doris: "mysql-compatible",
@@ -52,7 +53,7 @@ test("maps each JDBC reference family to a conservative, known editor profile", 
     });
   }
 
-  assert.equal(Object.keys(JDBC_REFERENCE_DIALECT_PROFILE_NAMES).length, 48);
+  assert.equal(Object.keys(JDBC_REFERENCE_DIALECT_PROFILE_NAMES).length, 49);
 });
 
 test("writes a conservative JDBC capability contract", async () => {
@@ -78,6 +79,22 @@ test("writes a conservative JDBC capability contract", async () => {
   assert.deepEqual(capabilities.tableExportFormats, []);
   assert.equal(capabilities.supportsTableConstraints, false);
   assert.equal(capabilities.supportsTransactions, false);
+
+  const argoOutput = join(directory, "argo.json");
+  const argoResult = spawnSync(process.execPath, [
+    "scripts/create-jdbc-driver-capabilities.mjs",
+    "--driver", "argo",
+    "--display-name", "ArgoDB (Transwarp)",
+    "--out", argoOutput,
+    "--reference-driver", "argo",
+  ], { encoding: "utf8" });
+  assert.equal(argoResult.status, 0, argoResult.stderr);
+  const argoCapabilities = JSON.parse(await readFile(argoOutput, "utf8"));
+  assert.equal(argoCapabilities.lspLanguageId, "sql");
+  assert.equal(argoCapabilities.lspServerDialect, "argo");
+  assert.equal(argoCapabilities.namespaceLabel, "database");
+  assert.equal(argoCapabilities.identifierQuote, "`");
+  assert.equal(argoCapabilities.defaultPort, 10000);
 
   const sqlServerOutput = join(directory, "sqlserver.json");
   const sqlServerResult = spawnSync(process.execPath, [

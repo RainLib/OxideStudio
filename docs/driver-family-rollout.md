@@ -68,7 +68,7 @@ coordination 和 queue 包不得把自己伪装成可编辑关系表。
 MySQL）。schema mapping 因而仍绑定到同一编辑器文档，且状态栏会显示 “SQL generic”，
 不宣称厂商特有语法诊断。
 
-这解决了“70+”的统计口径：73 个产品目标可被审计，但已支持数量只从 unique、ready、
+这解决了“70+”的统计口径：74 个产品目标可被审计，但已支持数量只从 unique、ready、
 active 的签名 package（或内置 recovery driver）得出，协议兼容别名与同产品多个版本均不
 重复计数。
 

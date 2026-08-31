@@ -5,9 +5,10 @@
 
 ## 结论
 
-DBX 将三个概念分开：产品类型、方言描述、连接运行时。它的 `DatabaseType` 有 68 个
-产品/扩展入口，而 `plugins/dialects` 只有 35 个声明式 SQL 方言。两者不应被理解成
-“68 个都具有相同的 SQL 编辑器、关系型 Grid 和可写能力”。DBX 的桌面端语义补全同样
+DBX 将三个概念分开：产品类型、方言描述、连接运行时。当前基线在原目录上新增了
+ArgoDB；产品类型、方言描述与连接运行时仍是三个独立概念。`plugins/dialects` 的声明式
+SQL 方言数量也明显小于产品目录。两者不应被理解成“所有目录项都具有相同的 SQL
+编辑器、关系型 Grid 和可写能力”。DBX 的桌面端语义补全同样
 先按方言族选择标识符、限定名和别名可见性，再基于已连接的 metadata 提供对象建议。
 
 Oxide 应继续采用更严格的口径：新建 Data Source 的搜索目录可以展示全部参考产品，
@@ -34,13 +35,13 @@ Oxide 应继续采用更严格的口径：新建 Data Source 的搜索目录可�
 | MySQL 协议兼容（Doris、StarRocks、GoldenDB、TiDB） | signed JDBC/sidecar | `sql` | 保留反引号与 database namespace 默认值，仍走 generic 语义。 |
 | DuckDB/rqlite | signed native/HTTP sidecar | `duckdb` / `sqlite` | 已有兼容 parser 路线；必须有包才可创建连接。 |
 | ClickHouse | signed HTTP sidecar | `clickhouse` | 已有专用 LSP 身份；Host 语句范围扫描使用 backtick-safe 边界，但不伪造 MySQL 语法验证。 |
-| Hive | signed JDBC package | `hive` | bundled LSP 已有 Hive completion scope 测试。 |
+| Hive、ArgoDB | signed JDBC package | `hive` / `sql` + `argo` identity | bundled LSP 已有 Hive completion scope 测试；Argo 保留独立产品身份并委托 Hive parser baseline。 |
 | SQL Server、Oracle、DB2、H2、Informix、Firebird、Dameng、IRIS 等 | signed JDBC package | `sql` | 先完成 metadata/query，随后再增加真正厂商 parser。 |
 | Warehouse（Trino、Presto、Spark、Snowflake、BigQuery、Databricks） | signed JDBC/HTTP package | `sql` | 默认只读；异步 job、成本、分页、认证需要独立 conformance。 |
 
 ## 已落地的收敛点
 
-- `referenceDriverDeliveryPlan` 为全部 73 个参考/兼容产品给出明确的 runtime 与
+- `referenceDriverDeliveryPlan` 为全部 74 个参考/兼容产品给出明确的 runtime 与
   LSP/workspace 路线，并显示未来签名 capability 可使用的受审查 parser baseline。
   DBX 的 35 个声明式方言现均有专用或 compatibility 路线：例如 Doris 的 document 仍为
   `sql`，server identity 为 `doris`，registry 明确委托给 MySQL baseline；Oracle 则保留
@@ -54,7 +55,7 @@ Oxide 应继续采用更严格的口径：新建 Data Source 的搜索目录可�
   证据，避免把“候选产品”误当作可用驱动。
 - ClickHouse 的外置连接已可使用有界 statement-at-cursor 扫描，多个 SQL 片段不会因其
   专用 LSP 身份而失去当前语句解析。
-- JDBC capabilities generator 对 46 个 DBX/兼容关系型 JDBC 候选提供保守 profile；它默认
+- JDBC capabilities generator 对 49 个 DBX/兼容关系型 JDBC 候选提供保守 profile；它默认
   禁止 Grid 写入、DDL、迁移和表间复制。
 - 从签名 Catalog 安装的 package 会在解压后把 manifest 与 Catalog 条目逐项绑定：driver/version
   之外还必须匹配 protocol、显示名、目标平台、server-version range、连接模板与（若 Catalog

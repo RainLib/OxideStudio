@@ -1,5 +1,19 @@
 # DBX alignment: deferred validation queue
 
+## Phase 138 -- ArgoDB signed package and Hive-baseline routing
+
+- The reference catalogue now includes `argo` as a distinct DBX product and
+  keeps it unavailable until a matching signed JDBC package is ready and active.
+- Package authoring uses port `10000`, database namespaces and backtick quoting.
+  Its document language remains generic `sql`, while the `argo` server identity
+  resolves to the bundled Hive parser baseline; Host import validation rejects
+  unknown or mismatched identities.
+- Static validation completed with the focused frontend catalogue tests, the
+  JDBC capability generator tests and the bundled SQL LSP alias unit test.
+- A real Transwarp/ArgoDB JDBC package, authentication, routine metadata, table
+  editing and transfer conformance remain deferred; the catalogue entry must not
+  be counted as a usable database until those signed release fixtures exist.
+
 ## Phase 137 -- locale-aware grid input and interaction feedback
 
 - In packaged Tauri WebViews with `en-US`, `de-DE`, `fr-FR` and a locale whose

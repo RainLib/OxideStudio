@@ -1941,6 +1941,7 @@ fn validate_capability_contract(
                 | "hive"
                 | "clickhouse"
                 | "access"
+                | "argo"
                 | "cockroachdb"
                 | "dameng"
                 | "databend"
@@ -4469,19 +4470,23 @@ mod tests {
         capabilities.lsp_server_dialect = Some("doris".to_string());
         assert!(validate_capability_contract("doris", &capabilities).is_ok());
 
+        capabilities.driver = "argo".to_string();
+        capabilities.lsp_server_dialect = Some("argo".to_string());
+        assert!(validate_capability_contract("argo", &capabilities).is_ok());
+
         capabilities.lsp_server_dialect = Some("vendor-private".to_string());
-        assert!(validate_capability_contract("doris", &capabilities)
+        assert!(validate_capability_contract("argo", &capabilities)
             .unwrap_err()
             .contains("not supported"));
 
         capabilities.lsp_server_dialect = Some("  ".to_string());
-        assert!(validate_capability_contract("doris", &capabilities)
+        assert!(validate_capability_contract("argo", &capabilities)
             .unwrap_err()
             .contains("must not be empty"));
 
         capabilities.lsp_server_dialect = Some("mysql".to_string());
         capabilities.lsp_language_id = "postgres".to_string();
-        assert!(validate_capability_contract("doris", &capabilities)
+        assert!(validate_capability_contract("argo", &capabilities)
             .unwrap_err()
             .contains("must match its document language"));
     }

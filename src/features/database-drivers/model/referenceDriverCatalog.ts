@@ -52,7 +52,7 @@ const candidate = (
   source,
 });
 
-// The 68 DBX reference types, plus five widely used compatible SQL products.
+// The 69 DBX reference types, plus five widely used compatible SQL products.
 // The latter are intentionally labelled compatibility instead of pretending
 // that DBX itself ships a profile for them.
 export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
@@ -105,6 +105,7 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("trino", "Trino", "relational", "jdbc"),
   candidate("prestosql", "PrestoSQL", "relational", "jdbc"),
   candidate("hive", "Apache Hive", "relational", "jdbc"),
+  candidate("argo", "ArgoDB (Transwarp)", "relational", "jdbc"),
   candidate("spark", "Apache Spark SQL", "relational", "jdbc"),
   candidate("db2", "IBM Db2", "relational", "jdbc"),
   candidate("informix", "IBM Informix", "relational", "jdbc"),
@@ -275,9 +276,10 @@ const DEDICATED_SQL_LSP_BY_DRIVER: Readonly<Record<string, string>> = {
 // an alias is replaceable by a real parser later and must never be presented as
 // vendor-native diagnostics in the meantime.
 export const SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER: Readonly<
-  Record<string, "postgres" | "mysql" | "sqlite">
+  Record<string, "postgres" | "mysql" | "sqlite" | "hive">
 > = {
   access: "postgres",
+  argo: "hive",
   cockroachdb: "postgres",
   dameng: "postgres",
   db2: "postgres",

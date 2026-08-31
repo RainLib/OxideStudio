@@ -12,12 +12,16 @@ describe("data source driver choices", () => {
       [],
     );
 
-    expect(choices).toHaveLength(73);
+    expect(choices).toHaveLength(74);
     expect(choices.find((choice) => choice.driver === "postgres")).toMatchObject({
       availability: "available",
     });
     expect(choices.find((choice) => choice.driver === "oracle")).toMatchObject({
       label: "Oracle Database",
+      availability: "installationRequired",
+    });
+    expect(choices.find((choice) => choice.driver === "argo")).toMatchObject({
+      label: "ArgoDB (Transwarp)",
       availability: "installationRequired",
     });
     expect(filterDataSourceDriverChoices(choices, "oracle")).toEqual(

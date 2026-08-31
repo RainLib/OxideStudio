@@ -77,6 +77,15 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     identifierQuote: "`",
     defaultPort: 10000,
   },
+  argo: {
+    // Keep the Argo product identity visible to the LSP session while the
+    // bundled registry delegates parsing to its reviewed Hive baseline.
+    lspLanguageId: "sql",
+    lspServerDialect: "argo",
+    namespaceLabel: "database",
+    identifierQuote: "`",
+    defaultPort: 10000,
+  },
 });
 
 /**
@@ -87,6 +96,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
  */
 export const JDBC_REFERENCE_DIALECT_PROFILE_NAMES = Object.freeze({
   access: "generic",
+  argo: "argo",
   bigquery: "generic",
   cockroachdb: "postgres-compatible",
   dameng: "oracle",
@@ -144,6 +154,7 @@ export const JDBC_REFERENCE_DIALECT_PROFILE_NAMES = Object.freeze({
 // profile baseline until a dialect fixture is available.
 export const JDBC_REFERENCE_LSP_SERVER_DIALECTS = Object.freeze({
   access: "access",
+  argo: "argo",
   cockroachdb: "cockroachdb",
   dameng: "dameng",
   db2: "db2",

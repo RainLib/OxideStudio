@@ -56,6 +56,7 @@ const SUPPORTED_SQL_LSP_SERVER_DIALECTS = new Set([
   // to an explicit parser baseline; retaining the vendor id keeps sessions,
   // status, and future dedicated parser upgrades product-specific.
   "access",
+  "argo",
   "cockroachdb",
   "dameng",
   "db2",
