@@ -64,4 +64,16 @@ describe("query result export helpers", () => {
       "name\tid\nAlice\t1"
     );
   });
+
+  it("copies NULL cells as empty spreadsheet fields", () => {
+    const result: QueryResult = {
+      columns: [
+        { name: "id", data_type: "int4" },
+        { name: "note", data_type: "text" },
+      ],
+      rows: [[1, null]],
+    };
+
+    expect(serializeQueryResultSelectionToTsv(result, [0], [0, 1])).toBe("1\t");
+  });
 });

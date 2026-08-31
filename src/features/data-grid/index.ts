@@ -25,10 +25,17 @@ export {
 } from "./model/dataGridSort";
 export {
   dataGridConditionHistoryScopeKey,
+  isDataGridConditionUndoRedoShortcut,
   loadDataGridConditionHistory,
   rememberDataGridConditionHistory,
   type DataGridConditionHistoryScope,
 } from "./model/conditionHistory";
+export {
+  normalizeDataGridNumericInput,
+  runtimeNumericInputNumberFormat,
+  type NumericInputNumberFormat,
+} from "./model/cellInputCoercion";
+export { dataGridCellUsesFullValueEditor } from "./model/valueEditorActivation";
 export {
   gridLayoutKey,
   loadGridLayout,

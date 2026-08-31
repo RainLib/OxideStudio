@@ -91,6 +91,8 @@ import {
   tableColumnReadOnlyReason,
   transposeQueryResult,
   filterDataGridColumnLookupItems,
+  dataGridCellUsesFullValueEditor,
+  normalizeDataGridNumericInput,
   gridLayoutKey,
   loadGridLayout,
   normalizeGridLayout,
@@ -994,7 +996,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
         // Force editable for compatible types
         if (gridCell.kind !== GridCellKind.Boolean) {
-          (gridCell as any).allowOverlay = cellEditable;
+          (gridCell as any).allowOverlay =
+            cellEditable &&
+            !dataGridCellUsesFullValueEditor(
+              val,
+              metadata?.data_type ||
+                result?.columns[originalColIndex]?.data_type ||
+                overrideColumns?.[originalColIndex]?.type,
+            );
           (gridCell as any).readonly = !cellEditable;
         }
 
@@ -1106,7 +1115,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             overrideColumns?.[origColIdx]?.name;
           const metadata = tableColumnsByName.get(columnName || "");
           if (!isTableColumnEditable(metadata)) return null;
-          return { rowIndex: actualRowKey, colIndex: origColIdx };
+          const dataType =
+            metadata?.data_type ||
+            result?.columns[origColIdx]?.data_type ||
+            overrideColumns?.[origColIdx]?.type;
+          return { rowIndex: actualRowKey, colIndex: origColIdx, dataType };
         };
 
         const edits: Array<{ rowIndex: number; colIndex: number; value: any }> =
@@ -1123,7 +1136,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               for (let c = x; c < x + width; c++) {
                 const indices = getIndices(r, c);
                 if (indices) {
-                  edits.push({ ...indices, value });
+                  edits.push({
+                    rowIndex: indices.rowIndex,
+                    colIndex: indices.colIndex,
+                    value: normalizeDataGridNumericInput(value, indices.dataType),
+                  });
                 }
               }
             }
@@ -1132,7 +1149,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
         if (!appliedToSelection) {
           const indices = getIndices(row, col);
-          if (indices) edits.push({ ...indices, value });
+          if (indices) {
+            edits.push({
+              rowIndex: indices.rowIndex,
+              colIndex: indices.colIndex,
+              value: normalizeDataGridNumericInput(value, indices.dataType),
+            });
+          }
         }
 
         if (edits.length > 0) {
@@ -1142,7 +1165,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               activeTab.id,
               firstEdit.rowIndex,
               firstEdit.colIndex,
-              value,
+              firstEdit.value,
             );
           } else {
             setBulkCellEdit(activeTab.id, edits);
@@ -1311,6 +1334,33 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         }
       },
       [openColumnLookup, openValueEditor],
+    );
+
+    const onCellActivated = useCallback(
+      (cell: Item) => {
+        const [visualColumnIndex] = cell;
+        const originalColumnIndex = visualColumnIndexToResultIndex(visualColumnIndex);
+        if (originalColumnIndex < 0) return;
+        const gridCell = getCellContent(cell);
+        const dataType =
+          result?.columns[originalColumnIndex]?.data_type ||
+          overrideColumns?.[originalColumnIndex]?.type;
+        if (
+          dataGridCellUsesFullValueEditor(
+            gridCellTooltipText(gridCell),
+            dataType,
+          )
+        ) {
+          openValueEditor(cell);
+        }
+      },
+      [
+        getCellContent,
+        openValueEditor,
+        overrideColumns,
+        result,
+        visualColumnIndexToResultIndex,
+      ],
     );
 
     const handleCopyAll = useCallback(async () => {
@@ -2588,6 +2638,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 onCellContextMenu={isTransposed ? undefined : onCellContextMenu}
                 onItemHovered={onItemHovered}
                 onCellEdited={isEditable ? onCellEdited : undefined}
+                onCellActivated={onCellActivated}
                 onKeyDown={onGridKeyDown}
                 onColumnResize={isTransposed ? undefined : onColumnResize}
                 onColumnMoved={isTransposed ? undefined : onColumnMoved}

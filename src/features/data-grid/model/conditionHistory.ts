@@ -10,6 +10,21 @@ export interface DataGridConditionHistoryScope {
   tableName?: string | null;
 }
 
+/** Keep text-field undo/redo inside the condition editor, not the SQL editor. */
+export function isDataGridConditionUndoRedoShortcut(event: {
+  key: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+}): boolean {
+  if (event.altKey) return false;
+  const key = event.key.toLocaleLowerCase();
+  return (
+    ((event.ctrlKey || event.metaKey) && key === "z") ||
+    (Boolean(event.ctrlKey) && !event.metaKey && key === "y")
+  );
+}
+
 interface StoredConditionHistory {
   version: 1;
   scopes: Record<string, string[]>;

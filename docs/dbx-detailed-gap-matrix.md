@@ -1,13 +1,26 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-08-31
-> DBX 参考提交：`eba4e95a0`
+> DBX 参考提交：`dc2e16ffafbc`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`eba4e95a0` → `dc2e16ffafbc`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `27f62fe6e` | 数值单元格按运行时 locale 解释单个逗号 | 本阶段对齐：`cellInputCoercion.ts` 从 `Intl.NumberFormat.formatToParts` 获取小数和分组符，只对 numeric family 规范化输入；`114,870` 在英文 locale 保持整数精度并去分组，在小数逗号 locale 转为 `114.870`，非数值列与未知逗号语义不改写。实现不经过 JavaScript `Number`，因此 bigint/decimal 文本不会丢精度。 |
+| `0e9f92c91` | 复制 NULL 单元格时生成空字段 | 已有等价行为并补回归：前端选区 TSV/CSV 和 Rust 流式导出均把 SQL NULL 写成空字段，保留分隔符，不再复制字面量 `NULL`；JSON/SQL 等格式仍按各自格式契约处理。 |
+| `d144e1bc0` | WHERE 与 ORDER BY 撤销历史解耦 | 按 Oxide 架构等价对齐：WHERE 输入拦截 Ctrl/Cmd+Z 与 Ctrl+Y 的向上冒泡但保留浏览器原生文本撤销；ORDER BY 是结构化下拉选择，没有共享文本历史，因此不会消费 WHERE 的 undo stack，也不复制一套全局 history。 |
+| `0812e57cf` | 长文本单元格使用视口安全的悬浮编辑器 | 本阶段对齐到现有 Value Editor：多行、超过 160 字符、JSON/array/binary 与结构值不再打开 Glide 小 overlay，而由普通激活、Shift+Enter 和右键统一进入可调整大小、受视口约束的完整值编辑器。短标量仍保留快速内联编辑。 |
+| `f489db4f0` | Windows 含空格路径在 Explorer 中可靠定位 | 已有等价能力：文件导出与备份入口直接调用 `@tauri-apps/plugin-opener` 的 `revealItemInDir`，由 Windows Shell item API 定位，不拼接 `explorer /select,<path>` 命令行。 |
+| `e0746a2db` | 连接树字体层级和当前登录 schema 权重修正 | 本阶段对齐：连接节点使用 variable weight 480，普通 schema/object 层使用 430，Oracle-family 当前登录 schema 使用 600；产品识别继续复用既有 login-schema 门禁，避免 PostgreSQL/MySQL 同名 schema 被误强调。 |
+| `99c3bd0f4` | Sidebar/toolbar 增加状态反馈动画 | 本阶段按 Oxide 设计系统对齐：工具按钮提供短按压和 active 反馈，定位动作每次重播有界 pulse，树展开 chevron 使用 180ms settle；全局 `prefers-reduced-motion` 继续把动画和 transition 降到近零。没有为静态装饰增加持续动画。 |
+| `bcea953a5` | Windows Server 2012 R2 使用 Win7 离线安装器兼容链 | 当前不属于已声明支持目标，不能标为对齐。DBX 依赖 `vendor/wry/src/webview2/mod.rs` 的旧内核补丁、WebView2 109 fixed runtime、旧 loader 和专用远端验证 workflow；Oxide 使用标准 Tauri/wry/WebView2 crates。只有产品明确新增 legacy Windows 发行目标后，才应以独立制品、依赖审计和真实 Server 2012 R2 机器验证接入，不能把普通 Windows bundle 冒充兼容包。 |
 
 ### 最新增量审计（`9190554e5` → `eba4e95a0`）
 

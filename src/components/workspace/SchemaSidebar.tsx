@@ -5071,7 +5071,7 @@ export function SchemaSidebar() {
                       ),
                     }}
                   />
-                  <span className="truncate font-medium">
+                  <span className="truncate font-normal [font-variation-settings:'wght'_480]">
                     {connection.name}
                   </span>
                 </div>
@@ -5233,7 +5233,7 @@ export function SchemaSidebar() {
                         role="button"
                         tabIndex={0}
                         className={cn(
-                          "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
+                          "wb-tree-row flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
                           isActive
                             ? "wb-tree-row-selected"
                             : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
@@ -5251,12 +5251,12 @@ export function SchemaSidebar() {
                         {isConnectionExpanded ? (
                           <ChevronDown
                             size={13}
-                            className="shrink-0 wb-muted"
+                            className="wb-tree-chevron shrink-0 wb-muted"
                           />
                         ) : (
                           <ChevronRight
                             size={13}
-                            className="shrink-0 wb-muted"
+                            className="wb-tree-chevron shrink-0 wb-muted"
                           />
                         )}
                         <ConnectionGlyph
@@ -5278,7 +5278,7 @@ export function SchemaSidebar() {
                           )}
                           isConnecting={isConnecting}
                         />
-                        <span className="min-w-0 truncate font-medium">
+                        <span className="min-w-0 truncate font-normal [font-variation-settings:'wght'_480]">
                           {connection.name}
                         </span>
                         {databaseExplorerSettings.showConnectionNotes &&
@@ -5870,8 +5870,8 @@ export function SchemaSidebar() {
                                         },
                                       )}
                                       className={cn(
-                                        "flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
-                                        isLoginSchema && "font-semibold",
+                                        "wb-tree-row flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] font-normal [font-variation-settings:'wght'_430] transition-colors",
+                                        isLoginSchema && "font-semibold [font-variation-settings:'wght'_600]",
                                         isCurrentSchema
                                           ? "wb-tree-row-selected font-medium text-[hsl(var(--wb-text))]"
                                           : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
@@ -5897,12 +5897,12 @@ export function SchemaSidebar() {
                                       {isSchemaExpanded ? (
                                         <ChevronDown
                                           size={12}
-                                          className="shrink-0 wb-muted"
+                                          className="wb-tree-chevron shrink-0 wb-muted"
                                         />
                                       ) : (
                                         <ChevronRight
                                           size={12}
-                                          className="shrink-0 wb-muted"
+                                          className="wb-tree-chevron shrink-0 wb-muted"
                                         />
                                       )}
                                       {isFlatKeyValueTree ? (

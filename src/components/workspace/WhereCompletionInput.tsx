@@ -23,6 +23,7 @@ import {
 } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
 import {
+  isDataGridConditionUndoRedoShortcut,
   loadDataGridConditionHistory,
   type DataGridConditionHistoryScope,
 } from "@/features/data-grid/model/conditionHistory";
@@ -368,6 +369,12 @@ export function WhereCompletionInput({
           cursorRef.current = event.currentTarget.selectionStart ?? value.length;
         }}
         onKeyDown={(event) => {
+          if (isDataGridConditionUndoRedoShortcut(event)) {
+            // Preserve this input's native undo stack without allowing the
+            // workbench or SQL editor to consume the same shortcut.
+            event.stopPropagation();
+            return;
+          }
           if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
             event.preventDefault();
             const cursorOffset = event.currentTarget.selectionStart ?? value.length;

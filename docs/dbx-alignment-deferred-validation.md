@@ -1,5 +1,31 @@
 # DBX alignment: deferred validation queue
 
+## Phase 137 -- locale-aware grid input and interaction feedback
+
+- In packaged Tauri WebViews with `en-US`, `de-DE`, `fr-FR` and a locale whose
+  separators are not comma/dot, paste ambiguous single-comma and unambiguous
+  grouped decimal values into integer, bigint, decimal and text columns. Confirm
+  exact numeric text is preserved, locale rules are respected and text columns
+  are never coerced.
+- Activate short, multiline, 160/161-character, JSON, array, binary and very
+  large values by mouse, keyboard and context menu. Confirm only short scalars
+  use Glide's small overlay, the full Value Editor stays inside the viewport,
+  wheel events do not leak to the grid and staging still enters the existing
+  mutation gate.
+- Exercise WHERE undo/redo after changing ORDER BY and vice versa. Confirm the
+  native WHERE input history remains local and workbench/editor shortcuts do not
+  consume it. Verify toolbar press/active feedback, repeated locate pulses, tree
+  font hierarchy and chevron motion with ordinary and reduced-motion settings.
+- Windows paths containing spaces must be checked through the existing opener
+  plugin on packaged Windows. Windows Server 2012 R2 remains an explicitly
+  unsupported target unless a separate legacy runtime/bundle project is
+  approved; do not count the ordinary Windows artifact as compatibility proof.
+
+Static coverage passed with 283 frontend test files / 1,523 tests, strict
+TypeScript, the Vite production build and startup-cycle verification. The main
+Rust library suite also passed with 695 tests / 2 live-database tests ignored,
+followed by the release-workflow Clippy command. No live database was opened.
+
 ## Phase 135 -- WebView delta batching and large JSON virtualization
 
 - In a packaged Tauri WebView, stream slow and bursty Codex/CodeBuddy/HTTP

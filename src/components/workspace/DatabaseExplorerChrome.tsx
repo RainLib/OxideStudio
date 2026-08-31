@@ -57,17 +57,32 @@ export function DatabaseExplorerHeader({
   onHide,
 }: DatabaseExplorerHeaderProps) {
   const { t } = useI18n();
+  const [revealFeedback, setRevealFeedback] = useState(0);
   return (
     <header className="wb-tool-header gap-2">
       <span className="truncate">{t("databaseExplorer.title")}</span>
       <div className="wb-tool-header-actions flex items-center gap-0.5">
         <button
           type="button"
-          className="wb-icon-button h-5 w-5"
-          onClick={onRevealActive}
+          className="wb-icon-button relative h-5 w-5 overflow-hidden"
+          onClick={() => {
+            setRevealFeedback((value) => value + 1);
+            onRevealActive();
+          }}
           title={t("databaseExplorer.revealActive")}
         >
-          <LocateFixed size={12} />
+          <LocateFixed
+            key={`reveal-icon-${revealFeedback}`}
+            size={12}
+            className={cn(revealFeedback > 0 && "wb-locate-feedback-icon")}
+          />
+          {revealFeedback > 0 ? (
+            <span
+              key={`reveal-pulse-${revealFeedback}`}
+              className="wb-locate-feedback-pulse pointer-events-none absolute left-1/2 top-1/2 h-1.5 w-1.5 rounded-full border border-[hsl(var(--wb-accent))]"
+              aria-hidden="true"
+            />
+          ) : null}
         </button>
         <button
           type="button"
@@ -348,7 +363,7 @@ export function DatabaseExplorerToolbar({
 
       <button
         type="button"
-        className="wb-icon-button"
+        className="wb-icon-button wb-state-feedback"
         onClick={onRefresh}
         title="Synchronize"
         disabled={isLoading}
@@ -357,7 +372,7 @@ export function DatabaseExplorerToolbar({
       </button>
       <button
         type="button"
-        className="wb-icon-button"
+        className="wb-icon-button wb-state-feedback"
         onClick={onNewQueryConsole}
         title="New Query Console"
       >
@@ -366,7 +381,7 @@ export function DatabaseExplorerToolbar({
       {canManageAdministration && onManageAdministration && (
         <button
           type="button"
-          className="wb-icon-button"
+          className="wb-icon-button wb-state-feedback"
           onClick={onManageAdministration}
           title="Database Administration"
         >
@@ -375,7 +390,7 @@ export function DatabaseExplorerToolbar({
       )}
       <button
         type="button"
-        className="wb-icon-button"
+        className="wb-icon-button wb-state-feedback"
         onClick={onCreateTable}
         title="New Table"
         disabled={!canCreateTable}
@@ -384,7 +399,7 @@ export function DatabaseExplorerToolbar({
       </button>
       <button
         type="button"
-        className="wb-icon-button"
+        className="wb-icon-button wb-state-feedback"
         onClick={onToggleFilter}
         title="Filter Objects"
         data-active={isFilterVisible}

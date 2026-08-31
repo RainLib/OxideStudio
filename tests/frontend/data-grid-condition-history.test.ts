@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   dataGridConditionHistoryScopeKey,
+  isDataGridConditionUndoRedoShortcut,
   loadDataGridConditionHistory,
   rememberDataGridConditionHistory,
 } from "@/features/data-grid";
@@ -45,5 +46,15 @@ describe("data grid condition history", () => {
   it("recovers safely from malformed browser storage", () => {
     localStorage.setItem(STORAGE_KEY, "not json");
     expect(loadDataGridConditionHistory(usersScope)).toEqual([]);
+  });
+
+  it("identifies condition-local undo and redo shortcuts", () => {
+    expect(isDataGridConditionUndoRedoShortcut({ key: "z", ctrlKey: true })).toBe(true);
+    expect(isDataGridConditionUndoRedoShortcut({ key: "Z", metaKey: true })).toBe(true);
+    expect(isDataGridConditionUndoRedoShortcut({ key: "y", ctrlKey: true })).toBe(true);
+    expect(isDataGridConditionUndoRedoShortcut({ key: "y", metaKey: true })).toBe(false);
+    expect(
+      isDataGridConditionUndoRedoShortcut({ key: "z", ctrlKey: true, altKey: true }),
+    ).toBe(false);
   });
 });
