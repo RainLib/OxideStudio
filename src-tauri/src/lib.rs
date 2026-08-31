@@ -306,6 +306,7 @@ pub fn run() {
             commands::table::preview_table_page,
             commands::table::compare_table_data_full,
             commands::table::cancel_table_data_compare,
+            commands::table::preview_table_data_compare_sync,
             commands::table::preview_table_data_transfer,
             commands::table::preview_table_data_transfer_batch_plan,
             commands::table::execute_table_data_transfer_batch,

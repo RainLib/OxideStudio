@@ -262,6 +262,110 @@ describe("DataCompareView", () => {
     cancel.mockRestore();
   });
 
+  it("offers review-only sync SQL only after an exact untruncated comparison", async () => {
+    const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
+      (tab) => tab.type === "table",
+    );
+    if (!leftTab || !rightTab) throw new Error("Expected source table tabs");
+    useTabStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === leftTab.id
+          ? { ...tab, connectionId: "left", schemaName: "public", tableName: "users" }
+          : tab.id === rightTab.id
+            ? { ...tab, connectionId: "right", schemaName: "public", tableName: "users" }
+            : tab.type === "data_compare"
+              ? {
+                  ...tab,
+                  dataCompareLeft: tab.dataCompareLeft && {
+                    ...tab.dataCompareLeft,
+                    connectionId: "left",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                  dataCompareRight: tab.dataCompareRight && {
+                    ...tab.dataCompareRight,
+                    connectionId: "right",
+                    schemaName: "public",
+                    objectName: "users",
+                  },
+                }
+              : tab,
+      ),
+    }));
+    useConnectionStore.setState({
+      connections: [
+        { id: "left", name: "Left", driver: "postgresql", connectionUrl: "postgresql://left" },
+        { id: "right", name: "Right", driver: "postgresql", connectionUrl: "postgresql://right" },
+      ] as never,
+    });
+    const comparison: TableDataCompareResult = {
+      added: [{ key: "2", values: { id: 2, score: 20 } }],
+      removed: [],
+      modified: [],
+      addedCount: 1,
+      removedCount: 0,
+      modifiedCount: 0,
+      equalCount: 1,
+      sourceRowCount: 2,
+      targetRowCount: 1,
+      comparedKeyCount: 2,
+      batchSize: 1_000,
+      detailLimitPerStatus: 1_000,
+      detailsTruncated: false,
+      degradationLevel: "full",
+      samplingRate: 1,
+      confidenceScore: 1,
+      verificationMethod: "full_keyset",
+      countsExact: true,
+      sampledKeyCount: 2,
+    };
+    const compare = vi
+      .spyOn(tableService, "compareTableDataFull")
+      .mockResolvedValue(comparison);
+    const preview = vi
+      .spyOn(tableService, "previewTableDataCompareSync")
+      .mockResolvedValue({
+        insertCount: 1,
+        updateCount: 0,
+        deleteCount: 0,
+        statementCount: 1,
+        statements: ['INSERT INTO "public"."users" ("id", "score") VALUES (2, 20);'],
+        sql: '-- Review-only\nBEGIN;\nINSERT INTO "public"."users" ("id", "score") VALUES (2, 20);\nCOMMIT;',
+        planDigest: "digest",
+        reviewOnly: true,
+        warnings: ["Review only; refresh before execution."],
+      });
+
+    await act(async () => root.render(<DataCompareView />));
+    const compareButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.includes("Compare table data"),
+    );
+    await act(async () => {
+      compareButton?.click();
+      await Promise.resolve();
+    });
+    const previewButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.includes("Preview sync SQL"),
+    );
+    expect(previewButton?.disabled).toBe(false);
+    await act(async () => {
+      previewButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(preview).toHaveBeenCalledWith(
+      expect.objectContaining({ comparison, keyColumns: ["id"] }),
+    );
+    expect(
+      container.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Data compare synchronization SQL"]',
+      )?.value,
+    ).toContain("INSERT INTO");
+    expect(container.textContent).toContain("Review-only synchronization SQL");
+    compare.mockRestore();
+    preview.mockRestore();
+  });
+
   it("requires the complete shared primary key before enabling full-table compare", async () => {
     const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
       (tab) => tab.type === "table",

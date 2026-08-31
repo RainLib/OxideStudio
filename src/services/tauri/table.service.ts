@@ -45,6 +45,8 @@ import type {
   TableDataCompareRequest,
   TableDataCompareProgress,
   TableDataCompareResult,
+  TableDataCompareSyncPreview,
+  TableDataCompareSyncPreviewRequest,
   TableColumnChangeResult,
   TableIndexChangeResult,
   TableConstraintChangeResult,
@@ -250,6 +252,15 @@ export async function listenTableDataCompareProgress(
   return listen<TableDataCompareProgress>(
     TABLE_DATA_COMPARE_PROGRESS_EVENT,
     (event) => listener(event.payload),
+  );
+}
+
+export async function previewTableDataCompareSync(
+  request: TableDataCompareSyncPreviewRequest,
+): Promise<TableDataCompareSyncPreview> {
+  return invokeWithInterceptors<TableDataCompareSyncPreview>(
+    "preview_table_data_compare_sync",
+    { request },
   );
 }
 
@@ -909,6 +920,7 @@ export const tableService = {
   compareTableDataFull,
   cancelTableDataCompare,
   listenTableDataCompareProgress,
+  previewTableDataCompareSync,
   previewTableDataTransfer,
   previewTableDataTransferBatchPlan,
   executeTableDataTransferBatch,

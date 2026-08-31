@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
+  Copy,
   Equal,
+  FileCode2,
   RefreshCw,
   Rows3,
   Search,
@@ -23,6 +25,7 @@ import {
   tableService,
   type TableDataCompareProgress,
   type TableDataCompareResult,
+  type TableDataCompareSyncPreview,
 } from "@/services/tauri";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import {
@@ -44,6 +47,8 @@ export function DataCompareView() {
   const [showEqual, setShowEqual] = useState(false);
   const [query, setQuery] = useState("");
   const [fullComparison, setFullComparison] = useState<DataCompareResult | null>(null);
+  const [fullComparisonPayload, setFullComparisonPayload] =
+    useState<TableDataCompareResult | null>(null);
   const [fullComparisonMeta, setFullComparisonMeta] = useState<{
     sourceRows: number;
     targetRows: number;
@@ -61,6 +66,9 @@ export function DataCompareView() {
   const [fullComparisonProgress, setFullComparisonProgress] =
     useState<TableDataCompareProgress | null>(null);
   const [fullComparisonError, setFullComparisonError] = useState<string | null>(null);
+  const [syncPreview, setSyncPreview] = useState<TableDataCompareSyncPreview | null>(null);
+  const [syncPreviewError, setSyncPreviewError] = useState<string | null>(null);
+  const [isPlanningSync, setIsPlanningSync] = useState(false);
   const activeCompareIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -92,10 +100,13 @@ export function DataCompareView() {
     if (compareId) void tableService.cancelTableDataCompare(compareId).catch(() => undefined);
     setKeyColumns(suggestedDataCompareKeys(left, right));
     setFullComparison(null);
+    setFullComparisonPayload(null);
     setFullComparisonMeta(null);
     setFullComparisonProgress(null);
     setIsComparingFull(false);
     setFullComparisonError(null);
+    setSyncPreview(null);
+    setSyncPreviewError(null);
   }, [left, right]);
 
   const comparison = useMemo(() => {
@@ -143,8 +154,11 @@ export function DataCompareView() {
 
   const toggleKey = (column: string) => {
     setFullComparison(null);
+    setFullComparisonPayload(null);
     setFullComparisonMeta(null);
     setFullComparisonError(null);
+    setSyncPreview(null);
+    setSyncPreviewError(null);
     setKeyColumns((current) =>
       current.includes(column)
         ? current.filter((candidate) => candidate !== column)
@@ -173,6 +187,8 @@ export function DataCompareView() {
     setIsComparingFull(true);
     setFullComparisonProgress(null);
     setFullComparisonError(null);
+    setSyncPreview(null);
+    setSyncPreviewError(null);
     try {
       const result = await tableService.compareTableDataFull({
         compareId,
@@ -194,6 +210,7 @@ export function DataCompareView() {
         keyColumns,
       });
       if (activeCompareIdRef.current !== compareId) return;
+      setFullComparisonPayload(result);
       setFullComparison(fullComparisonFromServer(result, left, right, keyColumns, sharedColumns));
       setFullComparisonMeta({
         sourceRows: result.sourceRowCount,
@@ -236,6 +253,51 @@ export function DataCompareView() {
       }
     }
   };
+  const canPreviewSync = Boolean(
+    fullComparisonPayload &&
+      fullComparisonPayload.degradationLevel === "full" &&
+      fullComparisonPayload.countsExact &&
+      !fullComparisonPayload.detailsTruncated &&
+      fullComparisonPayload.addedCount +
+        fullComparisonPayload.removedCount +
+        fullComparisonPayload.modifiedCount >
+        0 &&
+      rightConnection,
+  );
+  const previewSync = async () => {
+    if (!canPreviewSync || !fullComparisonPayload || !rightConnection) return;
+    setIsPlanningSync(true);
+    setSyncPreviewError(null);
+    try {
+      const preview = await tableService.previewTableDataCompareSync({
+        target: {
+          connectionId: right.connectionId!,
+          driver: rightConnection.driver,
+          database: right.databaseName,
+          schema: right.schemaName || "",
+          table: right.objectName!,
+        },
+        columns: sharedColumns,
+        keyColumns,
+        comparison: fullComparisonPayload,
+      });
+      setSyncPreview(preview);
+    } catch (error) {
+      setSyncPreview(null);
+      setSyncPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPlanningSync(false);
+    }
+  };
+  const copySyncSql = async () => {
+    if (!syncPreview?.sql) return;
+    try {
+      await navigator.clipboard.writeText(syncPreview.sql);
+      setSyncPreviewError(null);
+    } catch (error) {
+      setSyncPreviewError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[hsl(var(--wb-editor))] text-[hsl(var(--wb-text))]">
@@ -274,6 +336,19 @@ export function DataCompareView() {
         >
           {isComparingFull ? <Square size={10} /> : <Rows3 size={11} />}
           {isComparingFull ? "Cancel comparison" : "Compare table data"}
+        </button>
+        <button
+          type="button"
+          className="wb-text-button h-7 gap-1.5 px-2.5 text-[10px]"
+          disabled={!canPreviewSync || isPlanningSync || isComparingFull}
+          title={
+            canPreviewSync
+              ? "Generate a review-only target synchronization script"
+              : "Sync preview requires an exact, untruncated full-table comparison with differences"
+          }
+          onClick={() => void previewSync()}
+        >
+          <FileCode2 size={11} /> {isPlanningSync ? "Planning sync…" : "Preview sync SQL"}
         </button>
       </header>
 
@@ -459,6 +534,48 @@ export function DataCompareView() {
             </div>
           ) : displayedComparison ? (
             <>
+              {(syncPreview || syncPreviewError) && (
+                <section className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel)/0.76)] p-3">
+                  <div className="mb-2 flex items-center gap-2 text-[10px]">
+                    <FileCode2 size={12} className="text-cyan-300" />
+                    <span className="font-medium">Review-only synchronization SQL</span>
+                    {syncPreview && (
+                      <span className="wb-muted">
+                        {syncPreview.insertCount.toLocaleString()} inserts · {syncPreview.updateCount.toLocaleString()} updates · {syncPreview.deleteCount.toLocaleString()} deletes
+                      </span>
+                    )}
+                    {syncPreview && (
+                      <button
+                        type="button"
+                        className="wb-text-button ml-auto h-6 gap-1 px-2 text-[9px]"
+                        onClick={() => void copySyncSql()}
+                      >
+                        <Copy size={10} /> Copy SQL
+                      </button>
+                    )}
+                  </div>
+                  {syncPreviewError && (
+                    <div className="mb-2 text-[9px] leading-4 text-rose-300">{syncPreviewError}</div>
+                  )}
+                  {syncPreview && (
+                    <>
+                      <textarea
+                        readOnly
+                        aria-label="Data compare synchronization SQL"
+                        value={syncPreview.sql}
+                        className="h-44 w-full resize-y rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 font-mono text-[9px] leading-4 outline-none"
+                      />
+                      <div className="mt-2 space-y-1 text-[8px] leading-4 text-amber-200">
+                        {syncPreview.warnings.map((warning) => (
+                          <div key={warning} className="flex items-start gap-1.5">
+                            <AlertTriangle size={9} className="mt-0.5 shrink-0" /> {warning}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </section>
+              )}
               {displayedComparison.warnings.length > 0 && (
                 <div className="border-b border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-[9px] text-amber-200">
                   {displayedComparison.warnings.map((warning) => (

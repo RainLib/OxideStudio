@@ -456,6 +456,60 @@ describe("table service database scope", () => {
     expect(stop).toBe(unlisten);
   });
 
+  it("keeps synchronization preview review-only and passes the exact comparison payload", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        insertCount: 1,
+        updateCount: 0,
+        deleteCount: 0,
+        statementCount: 1,
+        statements: ['INSERT INTO "public"."users" ("id") VALUES (2);'],
+        sql: 'BEGIN;\nINSERT INTO "public"."users" ("id") VALUES (2);\nCOMMIT;',
+        planDigest: "digest",
+        reviewOnly: true,
+        warnings: ["Review only"],
+      },
+    });
+    const request = {
+      target: {
+        connectionId: "target-1",
+        driver: "postgres" as const,
+        schema: "public",
+        table: "users",
+      },
+      columns: ["id"],
+      keyColumns: ["id"],
+      comparison: {
+        added: [{ key: "2", values: { id: 2 } }],
+        removed: [],
+        modified: [],
+        addedCount: 1,
+        removedCount: 0,
+        modifiedCount: 0,
+        equalCount: 0,
+        sourceRowCount: 1,
+        targetRowCount: 0,
+        comparedKeyCount: 1,
+        batchSize: 1000,
+        detailLimitPerStatus: 1000,
+        detailsTruncated: false,
+        degradationLevel: "full" as const,
+        samplingRate: 1,
+        verificationMethod: "full_keyset" as const,
+        countsExact: true,
+        sampledKeyCount: 1,
+      },
+    };
+
+    const preview = await tableService.previewTableDataCompareSync(request);
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_table_data_compare_sync", {
+      request,
+    });
+    expect(preview.reviewOnly).toBe(true);
+    expect(preview.statementCount).toBe(1);
+  });
+
   it("previews create-table SQL without a connection or execution request", async () => {
     mocks.invoke.mockResolvedValueOnce({
       success: true,

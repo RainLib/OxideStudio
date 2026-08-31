@@ -721,6 +721,25 @@ export interface TableDataCompareResult {
   checksumsMatch?: boolean;
 }
 
+export interface TableDataCompareSyncPreviewRequest {
+  target: TableDataCompareEndpoint;
+  columns: string[];
+  keyColumns: string[];
+  comparison: TableDataCompareResult;
+}
+
+export interface TableDataCompareSyncPreview {
+  insertCount: number;
+  updateCount: number;
+  deleteCount: number;
+  statementCount: number;
+  statements: string[];
+  sql: string;
+  planDigest: string;
+  reviewOnly: true;
+  warnings: string[];
+}
+
 export interface TableExportResult {
   exportId: string;
   filePath: string;

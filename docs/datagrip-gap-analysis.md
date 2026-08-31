@@ -83,7 +83,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 | Table / Tree / Text / Transpose | 部分具备 | Mongo collection、Redis key、ES index 已进入只读有界 Data Grid，不再打开 SQL editor；表数据与 SQL 查询结果的加载页都有只读 transpose（表格未提交编辑时锁定），JSON Value Editor 有 1 MiB 有界只读 tree；仍缺文档 tree/text 切换、原生服务端分页/过滤/编辑与 XML/array/map 专用视图 | P1 |
 | 外键导航 | 已具备/部分 | PostgreSQL/MySQL 可从 FK cell 跳到 referenced row，也可从主键/唯一键 cell 查看 referencing rows；复合键原子映射、NULL 不误跳、保留 connection/database/schema scope。尚缺键盘快捷键、关系路径历史和图内联动 | P1 |
 | Aggregate View | 已具备/部分 | Table/Query grid 的 range/row/column 多选支持 cells/distinct/NULL/default 与类型感知 sum/avg/min/max；decimal/bigint 用定点精确累计，50k cell 有界采样且明确标记。尚缺自定义函数和 server-wide aggregate | P1 |
-| Data compare | 已具备/部分 | 任意两个已加载 Table/Query 结果可从 tab 菜单打开只读 artifact；支持共同 PK/`id` 推荐、用户复合 key、不同列序、changed/left-only/right-only/equal/duplicate 分类、absolute/relative 数值 tolerance、搜索和显式 refresh。表端点另有 Host 全量 keyset / 确定性极值抽样 / 超限风险降级，带稳定 operation ID、阶段进度、双端 backend cancel、批次/本地 checksum 协作取消和有界明细。重复 key/重复列不静默配对，truncated/current-page 边界可见；尚缺手动列映射/忽略规则、差异同步和进程中断后的 durable checkpoint | P1 |
+| Data compare | 已具备/部分 | 任意两个已加载 Table/Query 结果可从 tab 菜单打开只读 artifact；支持共同 PK/`id` 推荐、用户复合 key、不同列序、changed/left-only/right-only/equal/duplicate 分类、absolute/relative 数值 tolerance、搜索和显式 refresh。表端点另有 Host 全量 keyset / 确定性极值抽样 / 超限风险降级，带稳定 operation ID、阶段进度、双端 backend cancel、批次/本地 checksum 协作取消和有界明细。精确且未截断的小差异集可生成 Host 方言化、4 MiB 有界、带事务包装的 review-only 同步脚本；sample/skip/truncated 结果 fail closed。重复 key/重复列不静默配对，truncated/current-page 边界可见；尚缺手动列映射/忽略规则、多表/缺表计划，以及冻结快照和乐观并发校验后的参数化原子同步执行 | P1 |
 | 当前结果内查找 | 部分具备 | 有 grid search/filter；普通 PostgreSQL/MySQL 查询在驱动读取阶段硬限制为首 1,000 行并明确标记 truncated，避免先全量入内存；仍缺可配置 fetch page、列范围、正则和匹配导航 | P0 |
 
 ### 3.4 Import / Export
