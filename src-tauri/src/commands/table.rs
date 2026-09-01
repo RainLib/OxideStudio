@@ -8543,6 +8543,34 @@ fn build_data_transfer_column_mapping(
             unknown_write_metadata.join(", ")
         ));
     }
+    let mut all_target_by_name = BTreeMap::<String, Vec<&ColumnInfo>>::new();
+    for target in target_columns {
+        all_target_by_name
+            .entry(target.name.to_ascii_lowercase())
+            .or_default()
+            .push(target);
+    }
+    let missing_target_columns = source_columns
+        .iter()
+        .filter(|source| !all_target_by_name.contains_key(&source.name.to_ascii_lowercase()))
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    if !missing_target_columns.is_empty() {
+        return Err(format!(
+            "Target table is missing source column(s): {}. OxideStudio does not silently discard source columns; create a matching target or adjust its structure before transferring rows.",
+            missing_target_columns.join(", ")
+        ));
+    }
+    if let Some(source) = source_columns.iter().find(|source| {
+        all_target_by_name
+            .get(&source.name.to_ascii_lowercase())
+            .is_some_and(|matches| matches.len() > 1)
+    }) {
+        return Err(format!(
+            "Target table has ambiguous case-insensitive column matches for {}",
+            source.name
+        ));
+    }
     let mut target_by_name = BTreeMap::<String, Vec<&ColumnInfo>>::new();
     for target in target_columns
         .iter()
@@ -10039,7 +10067,7 @@ async fn resolve_table_data_transfer_plan(
     }
     if !skipped_source_columns.is_empty() {
         warnings.push(format!(
-            "Source-only columns will be skipped: {}.",
+            "Source values are not written for matching target-owned generated or hidden columns: {}.",
             skipped_source_columns.join(", ")
         ));
     }
@@ -20760,12 +20788,14 @@ mod tests {
         let target = vec![target_column("ID"), target_column("display_name"), required];
 
         let error = build_data_transfer_column_mapping(&source, &target).unwrap_err();
-        assert!(error.contains("email"));
+        assert!(error.contains("legacy"));
 
         let mut source_with_email = source.clone();
         source_with_email.push(target_column("EMAIL"));
+        let mut target_with_legacy = target.clone();
+        target_with_legacy.push(target_column("legacy"));
         let (mappings, skipped) =
-            build_data_transfer_column_mapping(&source_with_email, &target).unwrap();
+            build_data_transfer_column_mapping(&source_with_email, &target_with_legacy).unwrap();
         assert_eq!(
             mappings
                 .iter()
@@ -20774,10 +20804,28 @@ mod tests {
             vec![
                 ("id", "ID"),
                 ("display_name", "display_name"),
+                ("legacy", "legacy"),
                 ("EMAIL", "email")
             ]
         );
-        assert_eq!(skipped, vec!["legacy"]);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn data_transfer_fails_closed_when_the_target_would_drop_source_columns() {
+        let error = build_data_transfer_column_mapping(
+            &[
+                target_column("id"),
+                target_column("review_mode"),
+                target_column("score_snapshot_json"),
+            ],
+            &[target_column("id")],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("review_mode"));
+        assert!(error.contains("score_snapshot_json"));
+        assert!(error.contains("does not silently discard source columns"));
     }
 
     #[test]
