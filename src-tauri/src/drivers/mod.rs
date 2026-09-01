@@ -16,6 +16,7 @@ pub mod meilisearch;
 pub mod mongodb;
 mod mongodb_shell;
 pub mod mysql;
+pub mod nacos;
 pub mod postgres;
 pub mod redis;
 pub mod sqlite;
@@ -77,6 +78,15 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
             .connect()
             .await
             .context("Failed to connect to etcd")?;
+        return Ok(Box::new(driver));
+    }
+
+    if canonical_driver == "nacos" {
+        let mut driver = nacos::NacosDriver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to Nacos")?;
         return Ok(Box::new(driver));
     }
 

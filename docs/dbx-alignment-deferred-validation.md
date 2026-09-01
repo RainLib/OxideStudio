@@ -2064,3 +2064,18 @@ explicit deferred validation task rather than an implicit release check.
   only by manually inspecting the target and starting a new preview. Phase 150
   covers fake-driver ordering/failure and renderer policy tests; live implicit
   commit and disconnect behavior remain deferred.
+
+## Phase 163 -- Nacos OpenAPI configuration browser
+
+- Against Nacos 2.x with and without authentication, verify the fixed
+  `v1/auth/users/login` and `v1/cs/configs` read paths with base context paths,
+  default and explicit namespace/tenant, page boundaries, duplicate `dataId`
+  values in different groups, JSON/YAML/plain-text configuration payloads and
+  content over the 64 KiB preview cap.
+- Confirm expired credentials reauthenticate without exposing tokens in URLs,
+  tabs, diagnostics or persisted connection state. Verify 401/403/404 and
+  malformed payloads are bounded and return clear errors.
+- Nacos 3.x protocol variants, rnacos compatibility, service registration,
+  namespace management, ACL administration and all configuration writes remain
+  deliberately unsupported until a product-specific reviewed workflow and
+  live compatibility evidence exist.

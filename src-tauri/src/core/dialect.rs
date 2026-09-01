@@ -621,6 +621,51 @@ const CONSUL_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: &["key", "prefix", "value", "modify_index"],
 };
 
+const NACOS_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "nacos",
+    aliases: &[],
+    display_name: "Nacos",
+    data_model: DatabaseDataModel::KeyValue,
+    connection_mode: DatabaseConnectionMode::Network,
+    lsp_language_id: "nacos",
+    namespace_label: "config",
+    identifier_quote: '\0',
+    default_port: 8848,
+    supports_sql_query: false,
+    supports_table_browsing: false,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: true,
+    supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: false,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    supports_explain_plan: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: &["data_id", "group", "tenant", "content"],
+};
+
 const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "elasticsearch",
     aliases: &["elastic"],
@@ -910,6 +955,7 @@ const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &REDIS_SPEC,
     &ETCD_SPEC,
     &CONSUL_SPEC,
+    &NACOS_SPEC,
     &INFLUXDB_SPEC,
     &INFLUXDB3_SPEC,
     &MEILISEARCH_SPEC,
@@ -2495,6 +2541,7 @@ WITH NO DATA;"#
                 "redis",
                 "etcd",
                 "consul",
+                "nacos",
                 "influxdb",
                 "influxdb3",
                 "meilisearch",
@@ -2531,6 +2578,12 @@ WITH NO DATA;"#
         assert!(consul.supports_key_value_browsing);
         assert!(!consul.supports_sql_query);
         assert!(!consul.supports_table_row_mutation);
+
+        let nacos = database_capabilities_for_driver("nacos").unwrap();
+        assert_eq!(nacos.data_model, DatabaseDataModel::KeyValue);
+        assert!(nacos.supports_key_value_browsing);
+        assert!(!nacos.supports_sql_query);
+        assert!(!nacos.supports_table_row_mutation);
 
         assert!(DatabaseKind::from_str("redis").is_err());
         assert_eq!(

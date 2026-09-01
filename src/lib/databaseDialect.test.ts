@@ -73,6 +73,23 @@ describe("etcd dialect profile", () => {
   });
 });
 
+describe("Nacos dialect profile", () => {
+  it("exposes only the native read-only configuration browse surface", () => {
+    expect(connectionUrlScheme("nacos")).toBe("http");
+    expect(defaultDatabasePort("nacos")).toBe(8848);
+    expect(defaultDatabaseCapabilities("nacos")).toMatchObject({
+      dataModel: "keyValue",
+      lspLanguageId: "nacos",
+      supportsSqlQuery: false,
+      supportsKeyValueBrowsing: true,
+      supportsConnectionDatabase: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});
+
 describe("InfluxDB 1.x / 2.x dialect profile", () => {
   it("uses the time-series workspace without claiming SQL LSP support", () => {
     expect(connectionUrlScheme("influxdb")).toBe("http");

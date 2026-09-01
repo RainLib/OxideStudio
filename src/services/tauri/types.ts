@@ -30,6 +30,7 @@ export type KnownDatabaseDriver =
   | "redis"
   | "etcd"
   | "consul"
+  | "nacos"
   | "elasticsearch"
   | "mongodb"
   | "influxdb"

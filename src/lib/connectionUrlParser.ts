@@ -45,6 +45,7 @@ function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
     driver === "influxdb3" ||
     driver === "etcd" ||
     driver === "consul" ||
+    driver === "nacos" ||
     driver === "victoriametrics" ||
     driver === "meilisearch"
   );

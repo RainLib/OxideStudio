@@ -49,3 +49,25 @@ describe("etcd object preview", () => {
     ).toBeNull();
   });
 });
+
+describe("Nacos object preview", () => {
+  const capabilities = defaultDatabaseCapabilities("nacos");
+  const collection = {
+    name: '{"dataId":"app.yaml","group":"DEFAULT_GROUP","tenant":""}',
+    namespace: "config",
+    type: "CONFIG",
+    documentCount: null,
+  };
+
+  it("uses an exact read-only config key and exposes no mutations", () => {
+    expect(
+      collectionPreviewQueryTemplateForCapabilities(capabilities, "config", collection),
+    ).toBe(`GET ${collection.name}`);
+    expect(
+      collectionCreateQueryTemplateForCapabilities(capabilities, "config", "new-config"),
+    ).toBeNull();
+    expect(
+      collectionDeleteQueryTemplateForCapabilities(capabilities, "config", collection),
+    ).toBeNull();
+  });
+});
