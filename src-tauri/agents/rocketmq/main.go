@@ -50,6 +50,8 @@ type rpcResponse struct {
 type connectionConfig struct {
 	NameServers []string
 	Timeout     time.Duration
+	AccessKey   string
+	SecretKey   string
 }
 
 type rocketMQAgent struct {
@@ -145,7 +147,12 @@ func parseConnection(params map[string]any) (connectionConfig, error) {
 	if ok && number > 0 {
 		timeout = time.Duration(number) * time.Millisecond
 	}
-	return connectionConfig{NameServers: servers, Timeout: timeout}, nil
+	accessKey, _ := value["accessKey"].(string)
+	secretKey, _ := value["secretKey"].(string)
+	if strings.TrimSpace(accessKey) == "" && strings.TrimSpace(secretKey) != "" || strings.TrimSpace(accessKey) != "" && strings.TrimSpace(secretKey) == "" {
+		return connectionConfig{}, fmt.Errorf("RocketMQ Access Key and Secret Key must be provided together")
+	}
+	return connectionConfig{NameServers: servers, Timeout: timeout, AccessKey: strings.TrimSpace(accessKey), SecretKey: strings.TrimSpace(secretKey)}, nil
 }
 
 func normalizeNameServers(raw string) ([]string, error) {
@@ -198,7 +205,11 @@ func (a *rocketMQAgent) connect(params map[string]any, persist bool) (any, error
 	if err != nil {
 		return nil, err
 	}
-	client, err := admin.NewClient(admin.WithNameServers(config.NameServers), admin.WithTimeout(config.Timeout), admin.WithRetryTimes(1))
+	options := []admin.Option{admin.WithNameServers(config.NameServers), admin.WithTimeout(config.Timeout), admin.WithRetryTimes(1)}
+	if config.AccessKey != "" {
+		options = append(options, admin.WithACL(config.AccessKey, config.SecretKey))
+	}
+	client, err := admin.NewClient(options...)
 	if err != nil {
 		return nil, err
 	}

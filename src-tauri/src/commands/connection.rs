@@ -276,6 +276,7 @@ fn config_connection_from_store(
             elasticsearch_connectivity_check_path: None,
             elasticsearch_connectivity_check_disabled: false,
             index_grouping_pattern: None,
+            rocket_mq: None,
             ssh_tunnel: None,
             tags: None,
             note: None,

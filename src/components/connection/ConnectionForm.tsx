@@ -487,6 +487,7 @@ export function ConnectionForm({
   const influxDbVersion = selectedConnection.influxDbVersion || "1";
   const isInfluxDb2 = isInfluxDb && influxDbVersion === "2";
   const isVictoriaMetrics = fileDriver === "victoriametrics";
+  const isRocketMq = fileDriver === "rocketmq";
   const fileExtension =
     fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
   const formSections: ReadonlyArray<readonly [FormSection, string]> =
@@ -614,6 +615,19 @@ export function ConnectionForm({
     setStatus(null);
   };
 
+  const updateRocketMq = (
+    updates: Partial<NonNullable<ConnectionConfig["rocketMq"]>>,
+  ) => {
+    updateConnectionConfig({
+      rocketMq: {
+        namesrvAddr: "127.0.0.1:9876",
+        ...selectedConnection.rocketMq,
+        ...updates,
+      },
+    });
+    setStatus(null);
+  };
+
   const updateRemoteSqlite = (
     updates: Partial<NonNullable<typeof sshTunnel.remoteSqlite>>,
   ) => {
@@ -721,6 +735,9 @@ export function ConnectionForm({
           : selectedConnection.icon,
       driverPackageVersion: undefined,
       connectionUrl: "",
+      rocketMq: driver.toLowerCase() === "rocketmq"
+        ? (selectedConnection.rocketMq || { namesrvAddr: "127.0.0.1:9876" })
+        : undefined,
     });
     setStatus(null);
   };
@@ -736,6 +753,7 @@ export function ConnectionForm({
       database: defaultDatabaseName(driver),
       icon: undefined,
       connectionUrl: "",
+      rocketMq: driver.toLowerCase() === "rocketmq" ? { namesrvAddr: "127.0.0.1:9876" } : undefined,
     });
   };
 
@@ -1816,6 +1834,61 @@ export function ConnectionForm({
                         : `Use a local ${capabilities.displayName} file path or :memory:. SSH and SSL are not used for local files.`}
                     </p>
                   )}
+                </>
+              )}
+
+              {isRocketMq && (
+                <>
+                  <label className={labelClass} htmlFor="rocketmq-namesrv">
+                    NameServer
+                  </label>
+                  <div>
+                    <input
+                      id="rocketmq-namesrv"
+                      value={selectedConnection.rocketMq?.namesrvAddr || ""}
+                      onChange={(event) => updateRocketMq({ namesrvAddr: event.target.value })}
+                      className={fieldClass}
+                      placeholder="127.0.0.1:9876; 127.0.0.2:9876"
+                      autoComplete="off"
+                    />
+                    <p className="mt-1 text-[10px] wb-muted">
+                      One or more NameServer host:port endpoints, separated by commas or semicolons.
+                    </p>
+                  </div>
+                  <label className={labelClass} htmlFor="rocketmq-cluster">
+                    Cluster name
+                  </label>
+                  <input
+                    id="rocketmq-cluster"
+                    value={selectedConnection.rocketMq?.clusterName || ""}
+                    onChange={(event) => updateRocketMq({ clusterName: event.target.value || undefined })}
+                    className={fieldClass}
+                    placeholder="Optional, e.g. DefaultCluster"
+                    autoComplete="off"
+                  />
+                  <label className={labelClass} htmlFor="rocketmq-access-key">
+                    Access Key
+                  </label>
+                  <input
+                    id="rocketmq-access-key"
+                    value={selectedConnection.rocketMq?.accessKey || ""}
+                    onChange={(event) => updateRocketMq({ accessKey: event.target.value || undefined })}
+                    className={fieldClass}
+                    placeholder="Optional ACL access key"
+                    autoComplete="username"
+                  />
+                  <label className={labelClass} htmlFor="rocketmq-secret-key">
+                    Secret Key
+                  </label>
+                  <input
+                    id="rocketmq-secret-key"
+                    type="password"
+                    value={selectedConnection.rocketMq?.secretKey || ""}
+                    onChange={(event) => updateRocketMq({ secretKey: event.target.value || undefined })}
+                    className={fieldClass}
+                    placeholder="Optional ACL secret key"
+                    autoComplete="new-password"
+                  />
                 </>
               )}
 

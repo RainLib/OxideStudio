@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
+import { rocketMqService } from "@/services/tauri/mq.service";
+import { validateRocketMqConnection } from "@/features/mq/model/rocketmq";
 import { useSchemaStore } from "./useSchemaStore";
 import {
   applyInfluxDbConnectionOptions,
@@ -139,6 +141,15 @@ function connectionUrlForConfig(config: ConnectionConfig) {
             : {}),
         })
       : connectionUrl;
+}
+
+function isRocketMqConnection(config: ConnectionConfig) {
+  return config.driver.trim().toLowerCase() === "rocketmq";
+}
+
+function rocketMqConfigFor(config: ConnectionConfig) {
+  if (!config.rocketMq) throw new Error("RocketMQ NameServer configuration is required.");
+  return validateRocketMqConnection(config.rocketMq);
 }
 
 function enabledSshTunnel(config: ConnectionConfig) {
@@ -561,6 +572,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return "Managed data sources are tested by the enterprise Gateway.";
     }
     try {
+      if (isRocketMqConnection(config)) {
+        await rocketMqService.testConnection(rocketMqConfigFor(config));
+        return null;
+      }
       const connectionUrl = connectionUrlForConfig(config);
       const sshTunnel = enabledSshTunnel(config);
       if (usesRemoteSqliteWorker(config)) {
@@ -722,6 +737,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     flight.promise = (async () => {
       try {
+        if (isRocketMqConnection(scopedConfig)) {
+          await rocketMqService.connect(scopedConfig.id, rocketMqConfigFor(scopedConfig));
+        } else {
         const connectionUrl = connectionUrlForConfig(scopedConfig);
         const sshTunnel = enabledSshTunnel(scopedConfig);
         if (usesRemoteSqliteWorker(scopedConfig)) {
@@ -742,6 +760,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             connectionUrl,
             sshTunnel,
           );
+        }
         }
 
         if (
@@ -876,7 +895,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     if (connectionId) {
       try {
-        await connectionService.disconnect(connectionId);
+        const connection = get().connections.find((item) => item.id === connectionId);
+        if (connection && isRocketMqConnection(connection)) {
+          await rocketMqService.disconnect(connectionId);
+        } else {
+          await connectionService.disconnect(connectionId);
+        }
       } catch (e) {
         console.warn("Failed to disconnect backend connection:", e);
       }

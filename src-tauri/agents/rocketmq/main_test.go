@@ -32,6 +32,20 @@ func TestParseConnectionUsesNestedAliasesAndTimeout(t *testing.T) {
 	}
 }
 
+func TestParseConnectionBindsAclCredentialsTogether(t *testing.T) {
+	_, err := parseConnection(map[string]any{"namesrvAddr": "broker.example:9876", "accessKey": "access"})
+	if err == nil {
+		t.Fatal("expected incomplete ACL credentials to fail")
+	}
+	config, err := parseConnection(map[string]any{"namesrvAddr": "broker.example:9876", "accessKey": "access", "secretKey": "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AccessKey != "access" || config.SecretKey != "secret" {
+		t.Fatalf("config = %#v", config)
+	}
+}
+
 func TestHandshakeDoesNotRequireACluster(t *testing.T) {
 	result, err := (&rocketMQAgent{}).dispatch("handshake", nil)
 	if err != nil {

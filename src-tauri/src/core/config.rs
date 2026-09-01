@@ -165,6 +165,11 @@ pub struct SavedConnection {
     pub elasticsearch_connectivity_check_disabled: bool,
     #[serde(default)]
     pub index_grouping_pattern: Option<String>,
+    /// RocketMQ is administered through a dedicated workspace agent rather
+    /// than the SQL connection URL. Keep its structured fields together so
+    /// NameServer lists and ACL credentials are not reconstructed from a URL.
+    #[serde(default)]
+    pub rocket_mq: Option<RocketMqConnectionConfig>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub tags: Option<Vec<String>>,
     #[serde(default)]
@@ -175,6 +180,24 @@ pub struct SavedConnection {
     pub environment: ConnectionEnvironment,
     #[serde(default)]
     pub production_databases: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RocketMqConnectionConfig {
+    pub namesrv_addr: String,
+    #[serde(default)]
+    pub cluster_name: Option<String>,
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    #[serde(default)]
+    pub request_timeout_ms: Option<u32>,
+    #[serde(default)]
+    pub connect_timeout_ms: Option<u32>,
+    #[serde(default)]
+    pub tls_skip_verify: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -316,6 +339,7 @@ mod tests {
         assert!(connection.elasticsearch_kibana_base_path.is_none());
         assert!(connection.elasticsearch_connectivity_check_path.is_none());
         assert!(!connection.elasticsearch_connectivity_check_disabled);
+        assert!(connection.rocket_mq.is_none());
         assert_eq!(connection.environment, ConnectionEnvironment::Unclassified);
         assert!(connection.production_databases.is_empty());
     }
@@ -335,6 +359,30 @@ mod tests {
         assert!(config.strict_host_key_checking);
         assert!(config.jump_hosts.is_empty());
         assert!(config.remote_sqlite.is_none());
+    }
+
+    #[test]
+    fn rocketmq_connection_uses_structured_nameserver_and_acl_fields() {
+        let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id": "rocket",
+            "name": "RocketMQ",
+            "driver": "rocketmq",
+            "url": "",
+            "rocketMq": {
+                "namesrvAddr": "mq-a.example:9876;mq-b.example:9876",
+                "clusterName": "DefaultCluster",
+                "accessKey": "access",
+                "secretKey": "secret",
+                "connectTimeoutMs": 5000
+            }
+        }))
+        .unwrap();
+        let config = connection.rocket_mq.expect("RocketMQ config");
+        assert_eq!(config.namesrv_addr, "mq-a.example:9876;mq-b.example:9876");
+        assert_eq!(config.cluster_name.as_deref(), Some("DefaultCluster"));
+        assert_eq!(config.access_key.as_deref(), Some("access"));
+        assert_eq!(config.secret_key.as_deref(), Some("secret"));
+        assert_eq!(config.connect_timeout_ms, Some(5000));
     }
 
     #[test]

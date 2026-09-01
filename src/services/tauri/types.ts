@@ -1721,6 +1721,17 @@ export interface SavedConnection {
   elasticsearchConnectivityCheckDisabled?: boolean;
   /** Optional regex that collapses rolling Elasticsearch index names into a `*` pattern. */
   indexGroupingPattern?: string;
+  /** Dedicated RocketMQ workspace configuration. It is never encoded as a
+   * browser URL because NameServer lists and ACL material are structured. */
+  rocketMq?: {
+    namesrvAddr: string;
+    clusterName?: string;
+    accessKey?: string;
+    secretKey?: string;
+    requestTimeoutMs?: number;
+    connectTimeoutMs?: number;
+    tlsSkipVerify?: boolean;
+  };
   sshTunnel?: SshTunnelConfig;
   tags?: string[];
   /** Optional human-readable context shown beside the data source in Explorer. */
