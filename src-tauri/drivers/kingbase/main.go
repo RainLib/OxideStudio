@@ -323,6 +323,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 	if e != nil {
 		return nil, e
 	}
+	if p.Request.Kind == "indexes" {
+		out, err := listKingbaseIndexes(db, p.Request.Namespace, p.Request.Relation)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
 	var sqlText string
 	args := []any{}
 	switch p.Request.Kind {
@@ -370,6 +377,72 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		return nil, fail("METADATA_FAILED", err.Error())
 	}
 	return map[string]any{"kind": "metadata", "value": out}, nil
+}
+
+// listKingbaseIndexes uses the same catalog shape as the DBX native agent.
+// Kingbase releases expose either sys_catalog or PostgreSQL-compatible
+// pg_catalog names, so the query falls back only when the first catalog is
+// unavailable. Parameters keep schema and relation names out of SQL text.
+func listKingbaseIndexes(db *sql.DB, schema, table string) ([]any, error) {
+	if strings.TrimSpace(schema) == "" || strings.TrimSpace(table) == "" {
+		return []any{}, nil
+	}
+	var rows *sql.Rows
+	var err error
+	for _, catalog := range []string{"sys_catalog.sys", "pg_catalog.pg"} {
+		rows, err = db.Query(kingbaseIndexCatalogQuery(catalog), schema, table)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type indexEntry struct {
+		name, kind      string
+		unique, primary bool
+		columns         []string
+	}
+	byName := map[string]*indexEntry{}
+	order := []string{}
+	for rows.Next() {
+		var name, kind, columnName string
+		var unique, primary bool
+		var ordinal int
+		if err := rows.Scan(&name, &kind, &unique, &primary, &columnName, &ordinal); err != nil {
+			return nil, err
+		}
+		item := byName[name]
+		if item == nil {
+			item = &indexEntry{name: name, kind: kind, unique: unique, primary: primary, columns: []string{}}
+			byName[name] = item
+			order = append(order, name)
+		}
+		item.columns = append(item.columns, columnName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(order))
+	for _, name := range order {
+		item := byName[name]
+		out = append(out, map[string]any{
+			"name": item.name, "columns": item.columns, "is_unique": item.unique, "is_primary": item.primary,
+			"filter": nil, "index_type": item.kind, "included_columns": []string{}, "comment": nil,
+		})
+	}
+	return out, nil
+}
+
+func kingbaseIndexCatalogQuery(catalog string) string {
+	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, a.attname, pos.n
+FROM %s_index ix JOIN %s_class t ON t.oid = ix.indrelid
+JOIN %s_class i ON i.oid = ix.indexrelid JOIN %s_namespace n ON n.oid = t.relnamespace
+JOIN %s_am am ON am.oid = i.relam
+JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
+JOIN %s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
+WHERE n.nspname = $1 AND t.relname = $2 ORDER BY i.relname, pos.n`, catalog, catalog, catalog, catalog, catalog, catalog)
 }
 
 func nullable(value sql.NullString) any {

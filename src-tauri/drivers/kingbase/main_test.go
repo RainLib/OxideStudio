@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,5 +41,12 @@ func TestKingbaseTimestampKeepsItsWallClockRepresentation(t *testing.T) {
 	instant := time.Date(2026, time.September, 2, 9, 30, 0, 123456000, time.FixedZone("CST", 8*3600))
 	if got, want := jsonValue(instant), "2026-09-02 09:30:00.123456"; got != want {
 		t.Fatalf("timestamp = %#v, want %q", got, want)
+	}
+}
+
+func TestKingbaseIndexCatalogQueryUsesBoundIdentifiers(t *testing.T) {
+	query := kingbaseIndexCatalogQuery("sys_catalog.sys")
+	if !strings.Contains(query, "n.nspname = $1 AND t.relname = $2") || strings.Contains(query, "%s") {
+		t.Fatalf("index query must use bound identifiers: %s", query)
 	}
 }
