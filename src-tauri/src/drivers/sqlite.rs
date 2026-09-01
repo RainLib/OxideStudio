@@ -590,6 +590,15 @@ impl DatabaseDriver for SqliteDriver {
             ))
             .fetch_all(&pool)
             .await?;
+            let definition = sqlx::query_scalar::<_, Option<String>>(&format!(
+                "SELECT sql FROM {schema}.sqlite_schema WHERE type = 'index' AND name = ? AND tbl_name = ?"
+            ))
+            .bind(&name)
+            .bind(table)
+            .fetch_optional(&pool)
+            .await?
+            .flatten()
+            .filter(|sql| !sql.trim().is_empty());
             indexes.push(IndexInfo {
                 columns: column_rows
                     .iter()
@@ -603,7 +612,7 @@ impl DatabaseDriver for SqliteDriver {
                 filter: None,
                 index_type: Some("BTREE".to_string()),
                 included_columns: None,
-                definition: None,
+                definition,
                 comment: None,
                 key_is_expression: Vec::new(),
                 name,
@@ -990,7 +999,7 @@ mod tests {
     async fn sqlite_driver_exposes_bounded_query_and_explorer_metadata() {
         let mut driver = SqliteDriver::new(":memory:");
         driver.connect().await.unwrap();
-        driver.query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE); INSERT INTO users VALUES (1, 'hello@example.test');").await.unwrap();
+        driver.query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE); CREATE INDEX users_email_search_idx ON users (lower(email)) WHERE email IS NOT NULL; INSERT INTO users VALUES (1, 'hello@example.test');").await.unwrap();
         let rows = driver.query("SELECT id, email FROM users").await.unwrap();
         assert_eq!(rows[0].rows.len(), 1);
         assert_eq!(driver.get_tables("main").await.unwrap()[0].name, "users");
@@ -1000,12 +1009,17 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column.is_primary_key));
-        assert!(driver
-            .get_indexes("main", "users")
-            .await
-            .unwrap()
-            .iter()
-            .any(|index| index.is_unique));
+        let indexes = driver.get_indexes("main", "users").await.unwrap();
+        assert!(indexes.iter().any(|index| index.is_unique));
+        assert_eq!(
+            indexes
+                .iter()
+                .find(|index| index.name == "users_email_search_idx")
+                .and_then(|index| index.definition.as_deref()),
+            Some(
+                "CREATE INDEX users_email_search_idx ON users (lower(email)) WHERE email IS NOT NULL"
+            )
+        );
 
         // The Data Grid uses numbered bind markers on its shared relational
         // path. Verify SQLite executes that exact shape in an in-memory pool.

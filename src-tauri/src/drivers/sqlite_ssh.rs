@@ -641,6 +641,32 @@ impl DatabaseDriver for RemoteSqliteDriver {
                 .iter()
                 .position(|column| column.name == "name")
                 .unwrap_or(2);
+            let definition_result = self
+                .run_statement(
+                    None,
+                    &format!(
+                        "SELECT sql FROM {}.sqlite_schema WHERE type = 'index' AND name = $1 AND tbl_name = $2",
+                        quote_identifier(schema)?
+                    ),
+                    &[
+                        QueryParameter {
+                            value: serde_json::Value::String(name.clone()),
+                            data_type: Some("TEXT".into()),
+                        },
+                        QueryParameter {
+                            value: serde_json::Value::String(table_name.to_string()),
+                            data_type: Some("TEXT".into()),
+                        },
+                    ],
+                )
+                .await?;
+            let definition = definition_result
+                .rows
+                .first()
+                .and_then(|row| row.first())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .filter(|sql| !sql.trim().is_empty());
             indexes.push(IndexInfo {
                 name,
                 columns: columns
@@ -655,7 +681,7 @@ impl DatabaseDriver for RemoteSqliteDriver {
                 filter: None,
                 index_type: Some("BTREE".into()),
                 included_columns: None,
-                definition: None,
+                definition,
                 comment: None,
                 key_is_expression: Vec::new(),
             });

@@ -676,6 +676,19 @@ explicit deferred validation task rather than an implicit release check.
 
 ## SQLite rebuild review plans
 
+- Against local and Remote SQLite fixtures, create a missing same-name target
+  from a source containing composite PK/UNIQUE, named and unnamed CHECK/FK with
+  ON UPDATE/DELETE actions, generated columns, collations, STRICT/WITHOUT ROWID,
+  quoted identifiers, expression indexes and partial indexes. Confirm preview
+  DDL exactly retains semantics while rebuilding destination-owned object names,
+  then verify a failed index creation rolls the table creation back.
+- Repeat with an index-name collision, foreign-key target absent/present,
+  `foreign_keys` enabled/disabled, disk-full, cancellation/connection loss and
+  commit disconnection. An uncertain commit must require manual target inspection
+  and must never be retried automatically. Trigger, virtual-table, renamed-table,
+  cross-schema and existing-target rebuild cases must remain explicitly blocked
+  or reduced with a visible lossiness warning.
+
 - Validate generated rebuild artifacts against copies of SQLite databases with
   quoted identifiers, primary/unique/foreign/check constraints, compatible
   indexes, added nullable columns, dropped columns, and affinity-changing

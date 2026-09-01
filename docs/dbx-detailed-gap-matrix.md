@@ -233,7 +233,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | M01 | 部分对齐：schema snapshot/diff | `crates/dbx-core/src/schema.rs`、`schema_diff.rs`；`components/diff/*` | relation/index/constraint/routine signature snapshot/diff；PostgreSQL/MySQL 的 view relation 额外读取 catalog SELECT body，未获取到 source 时保留明确 warning。PostgreSQL materialized view 额外快照 `relispopulated`，缺失 relation 会用相同的填充状态创建；状态不可读或来自旧快照时强制 `WITH NO DATA` 并要求人工 refresh。其 source/population 状态变更会生成无 `CASCADE` 的 destructive、review-only `DROP MATERIALIZED VIEW` + `CREATE MATERIALIZED VIEW`，需显式 destructive approval；当同快照内所有普通依赖 view 未变且其 SELECT source 完整时，计划会显式按反向 drop / 正向 recreate 依赖链重建它们；任一不可安全重建的依赖会阻断 materialized view change。单独 refresh 则保留在 Explorer 的专用操作。PostgreSQL 同 schema 依赖写入 snapshot，并将同一计划中的 table/view DDL 拓扑排序；明确的 native PostgreSQL schema→schema 映射现可在 catalog-backed view/index/column/default `regclass`/constraint/FK/routine/trigger/sequence DDL 中受审阅地重写到目标 schema，字符串、注释和 dollar-quoted body 保持不变。相同 native dialect 的常规 view create/replace 生成 review-required DDL；PostgreSQL function/procedure、trigger、sequence 也在 catalog definition 可用时生成 review-required 原生 DDL。sequence 本体会排在捕获的 `nextval()` table dependency 之前；当 catalog 可读时，会在 owning relation 创建后通过独立 review change 恢复 `OWNED BY` 和整数 `setval` state。未调用/不可读 state 只保留结构，drop 和任何未捕获 definition 仍为 blocked manual review。新增 `schemaObjects` 快照及 create/drop/modify 差异，PostgreSQL sequence/trigger/domain/enum/composite/range/multirange/extension/partition 在可见时进入快照。 | 补跨数据库映射与真实 target conformance、materialized view 的权限/index/外部对象依赖 conformance、sequence `is_called`/权限降级的真实 fixture、逐产品 event/synonym/package，并为 MySQL/Oracle/SQL Server object source 建立同等的受审核 source/DDL conformance 与真实 fixture。 |
 | M02 | Host 产品主路径已对齐，逐产品实现/证据延期：migration apply | DBX `SchemaDiffDeployStep.vue`、`deployTxResult.ts` | PG transactional；MySQL journal + post verify。外置 sidecar 使用 descriptor-only semantic `plan/preflight/token-bound apply/verify`、签名/runtime/evidence 三门禁；Host-only 15 分钟单次 session 隐藏全部 sidecar token，执行前重抓 target，执行后同时要求 sidecar verify 与 Host recapture 通过。partial/count mismatch 强制失败；journal 不保存 token/DDL/原始 observed 文本 | 为每个外置产品实现协议并取得精确 package/entrypoint/platform/server-version evidence；没有证据的产品保持 review-only。 |
 | M03 | 部分对齐：SQLite rebuild review planner | DBX SQLite schema/transfer 与 backup 实现可作行为参考 | SQLite schema diff 现生成临时表→同名列复制→rename→兼容索引重建→`foreign_key_check` 的受限审阅产物；所有变化均 manual-review 且自动 apply 继续禁用。 | 验证备份、外键依赖/失败恢复、类型转换与完整 DDL 保真后，才可评估受控执行。 |
-| M04 | 本阶段增强、仍为部分对齐：跨产品 schema mapping | `transfer.rs:map_column_type`、`generate_create_table_ddl`、`convert_cross_family_object_ddl` | 单目标表创建使用显式 `<source>-to-<target>/v1` profile：同产品保留原类型并标记 exact/review；跨产品仅为 PostgreSQL/MySQL/SQLite 的已识别标量族生成 DDL，每列返回 exact/safe/review/unsupported；unsupported 不生成 DDL、无确认 token且后端拒绝执行，review 只能经显式预览和键入确认后执行。受支持的同产品 auto-increment/identity 会创建新的 target-owned generator，并明确不复制源 generator 名称和当前值；PostgreSQL bundled metadata 结构化区分 `GENERATED ALWAYS`、`BY DEFAULT` 与 sequence-backed serial，目标计划/确认 token/DDL 精确保留已证明的 mode；旧外置 payload 未证明 mode 且没有 `nextval()` evidence 时不重建 identity。跨产品、生成列、SQLite 非单一 INTEGER 主键等场景把源值物化为普通列。默认值现使用 Host-owned 审阅映射：同产品仅保留通过 16 KiB、有界单表达式扫描的原表达式；PostgreSQL/MySQL/SQLite 跨产品仅保留 NULL、布尔/数值/标准单引号字面量和 CURRENT_DATE/TIME/TIMESTAMP。生成列、`nextval()`、注释、语句分隔符、未闭合引用和其他产品函数均 fail closed 并显式标记 omitted。逐列保留状态、原因和最终 DDL 共同绑定确认 token，所有默认值计划提升为 Review。同 native PostgreSQL 或 MySQL-family、同表名的数据迁移现在可显式启用二级 schema-object 恢复：Host 从两端 catalog 冻结 index/constraint metadata，冲突时 fail closed，数据写入后按普通 constraint → index/comment → FK 顺序在同一目标事务执行，并把精确 DDL 纳入确认 token；约束 backing index 不重复创建。 | 仍需补充 owned sequence/当前值的跨产品映射、SQLite 表重建式约束/索引恢复、循环 FK 的 deferred capability、cross-product FK/check/index/trigger、collation、cast/function、扩展/自定义类型依赖和更多逐产品 profile；真实产品版本验证已记录到 deferred queue。 |
+| M04 | 本阶段增强、仍为部分对齐：跨产品 schema mapping | `transfer.rs:map_column_type`、`generate_create_table_ddl`、`convert_cross_family_object_ddl` | 单目标表创建使用显式 `<source>-to-<target>/v1` profile：同产品保留原类型并标记 exact/review；跨产品仅为 PostgreSQL/MySQL/SQLite 的已识别标量族生成 DDL，每列返回 exact/safe/review/unsupported；unsupported 不生成 DDL、无确认 token且后端拒绝执行，review 只能经显式预览和键入确认后执行。受支持的同产品 auto-increment/identity 会创建新的 target-owned generator，并明确不复制源 generator 名称和当前值；PostgreSQL bundled metadata 结构化区分 `GENERATED ALWAYS`、`BY DEFAULT` 与 sequence-backed serial，目标计划/确认 token/DDL 精确保留已证明的 mode；旧外置 payload 未证明 mode 且没有 `nextval()` evidence 时不重建 identity。跨产品、生成列、SQLite 非单一 INTEGER 主键等场景把源值物化为普通列。默认值现使用 Host-owned 审阅映射：同产品仅保留通过 16 KiB、有界单表达式扫描的原表达式；PostgreSQL/MySQL/SQLite 跨产品仅保留 NULL、布尔/数值/标准单引号字面量和 CURRENT_DATE/TIME/TIMESTAMP。生成列、`nextval()`、注释、语句分隔符、未闭合引用和其他产品函数均 fail closed 并显式标记 omitted。逐列保留状态、原因和最终 DDL 共同绑定确认 token，所有默认值计划提升为 Review。同 native PostgreSQL 或 MySQL-family、同表名的数据迁移现在可显式启用二级 schema-object 恢复：Host 从两端 catalog 冻结 index/constraint metadata，冲突时 fail closed，数据写入后按普通 constraint → index/comment → FK 顺序在同一目标事务执行，并把精确 DDL 纳入确认 token；约束 backing index 不重复创建。同 native SQLite 且 schema/table 名完全匹配的新目标则读取 `sqlite_schema` 原始 table/index DDL，Host 重建目标对象名前缀并校验单语句、引号、注释、括号和允许的 table option，保留 CHECK/FK/UNIQUE/generated/collation/STRICT/WITHOUT ROWID 与 expression/partial index；全部 DDL 在一个目标事务中执行。 | 仍需补充 owned sequence/当前值的跨产品映射、SQLite 改名/跨 schema 安全重写及既有表 rebuild、MySQL 循环 FK 的部分完成回执、cross-product FK/check/index/trigger、cast/function、扩展/自定义类型依赖和更多逐产品 profile；真实产品版本验证已记录到 deferred queue。 |
 
 ## 6. 架构与测试差距
 
@@ -493,3 +493,26 @@ Oxide 此前只返回 `cyclicTables` 并完全阻断。本阶段先闭环具备�
 
 纯函数回归覆盖确定性循环顺序、完整 deferred FK 集合放行以及缺少任一循环约束时的精确阻断；
 真实 PostgreSQL mutual/self FK、权限失败和 commit 断连验证仍按统一真实数据库阶段延期。
+
+## Phase 141 增量：SQLite 新目标的精确目录结构保留
+
+此前 SQLite “创建迁移目标”只根据列 metadata 合成 DDL，会丢失表级 CHECK/FK/UNIQUE、generated、
+collation、STRICT/WITHOUT ROWID 和显式 expression/partial index。本阶段为可证明安全的同名迁移
+补齐原生目录路径：
+
+- 仅 bundled native SQLite、source/target schema 等价且 table 名完全相同时启用；改名、跨 schema、
+  外置 package 与 virtual table 继续 fail closed 或使用明确标注的 column-only 计划，避免错误重写
+  self-reference 与 package 方言。
+- 本地与 SSH SQLite index metadata 读取 `sqlite_schema.sql`。建表计划读取完整 table DDL，但不信任
+  catalog 中的对象名前缀；Host 使用冻结的目标 schema/table/index 重建前缀，只保留经过单语句、
+  quote/comment、括号平衡、statement separator 和尾部 clause 校验的结构主体。
+- table 主体保留 table-level constraints、generated/hidden、collation 与合法的 STRICT/WITHOUT ROWID；
+  自动 PK/UNIQUE backing index 已在 table 主体内，不重复创建。显式 unique/expression/partial index
+  使用精确 catalog 定义重建；缺少定义时阻断而不是静默丢失。
+- table 与全部显式 index DDL、逐列计划和目标 identity 一起绑定现有一次性确认 token；执行改为单个
+  SQLite target transaction，任一 index 失败都会回滚新表，commit outcome 不确定时禁止自动重试。
+- 触发器、virtual-table shadow objects、改名/跨 schema 约束重写和既有目标 rebuild 仍未开放；真实
+  SQLite/Remote SQLite 版本、外键依赖、磁盘不足和 commit 断连验证进入统一延期清单。
+
+纯逻辑与内存 SQLite 回归覆盖 CHECK/FK/generated/STRICT、字符串内分号、表达式/partial index、
+恶意第二语句、括号/尾部 clause 校验以及 catalog DDL 计划组装。

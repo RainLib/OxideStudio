@@ -4757,6 +4757,268 @@ fn sqlite_qualified_relation(schema: &str, relation: &str) -> Result<String, Str
     }
 }
 
+fn normalized_sqlite_schema(schema: &str) -> &str {
+    let schema = schema.trim();
+    if schema.is_empty() {
+        "main"
+    } else {
+        schema
+    }
+}
+
+fn sqlite_qualified_index(schema: &str, index: &str) -> Result<String, String> {
+    let index = index.trim();
+    if index.is_empty() {
+        return Err("Index name is required".to_string());
+    }
+    let index = sqlite_quote_identifier(index);
+    match schema.trim() {
+        "" => Ok(index),
+        schema => Ok(format!("{}.{}", sqlite_quote_identifier(schema), index)),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SqliteCatalogDdlKind {
+    Table,
+    Index { unique: bool },
+}
+
+fn sqlite_catalog_prefix_tokens(prefix: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let bytes = prefix.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push(prefix[start..index].to_ascii_uppercase());
+        } else {
+            index += 1;
+        }
+    }
+    tokens
+}
+
+/// Extract the catalog-owned portion of a SQLite CREATE statement while
+/// rejecting additional statements and malformed quote/comment state. Object
+/// identity is never copied from the catalog: callers rebuild that prefix from
+/// the frozen target endpoint and only retain the validated structural suffix.
+fn sqlite_catalog_ddl_suffix(
+    source_sql: &str,
+    kind: SqliteCatalogDdlKind,
+) -> Result<String, String> {
+    let sql = source_sql.trim();
+    if sql.is_empty() {
+        return Err("SQLite catalog returned an empty DDL definition".to_string());
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ScanState {
+        Normal,
+        SingleQuote,
+        DoubleQuote,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::Normal;
+    let mut index = 0;
+    let mut depth = 0usize;
+    let mut first_open = None;
+    let mut first_close = None;
+    let mut terminator = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            ScanState::Normal => match (byte, next) {
+                (b'\'', _) => state = ScanState::SingleQuote,
+                (b'"', _) => state = ScanState::DoubleQuote,
+                (b'`', _) => state = ScanState::Backtick,
+                (b'[', _) => state = ScanState::Bracket,
+                (b'-', Some(b'-')) => {
+                    state = ScanState::LineComment;
+                    index += 1;
+                }
+                (b'/', Some(b'*')) => {
+                    state = ScanState::BlockComment;
+                    index += 1;
+                }
+                (b'(', _) => {
+                    if first_open.is_none() {
+                        first_open = Some(index);
+                    }
+                    depth = depth.saturating_add(1);
+                }
+                (b')', _) => {
+                    if depth == 0 {
+                        return Err(
+                            "SQLite catalog DDL has an unmatched closing parenthesis".to_string()
+                        );
+                    }
+                    depth -= 1;
+                    if depth == 0 && first_close.is_none() {
+                        first_close = Some(index);
+                    }
+                }
+                (b';', _) if depth == 0 => {
+                    if terminator.replace(index).is_some() {
+                        return Err(
+                            "SQLite catalog DDL contains more than one statement".to_string()
+                        );
+                    }
+                }
+                _ => {}
+            },
+            ScanState::SingleQuote => {
+                if byte == b'\'' {
+                    if next == Some(b'\'') {
+                        index += 1;
+                    } else {
+                        state = ScanState::Normal;
+                    }
+                }
+            }
+            ScanState::DoubleQuote => {
+                if byte == b'"' {
+                    if next == Some(b'"') {
+                        index += 1;
+                    } else {
+                        state = ScanState::Normal;
+                    }
+                }
+            }
+            ScanState::Backtick => {
+                if byte == b'`' {
+                    if next == Some(b'`') {
+                        index += 1;
+                    } else {
+                        state = ScanState::Normal;
+                    }
+                }
+            }
+            ScanState::Bracket => {
+                if byte == b']' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::LineComment => {
+                if byte == b'\n' || byte == b'\r' {
+                    state = ScanState::Normal;
+                }
+            }
+            ScanState::BlockComment => {
+                if byte == b'*' && next == Some(b'/') {
+                    state = ScanState::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    if !matches!(state, ScanState::Normal | ScanState::LineComment) {
+        return Err("SQLite catalog DDL contains an unterminated quote or comment".to_string());
+    }
+    if depth != 0 {
+        return Err("SQLite catalog DDL has unbalanced parentheses".to_string());
+    }
+
+    let open = first_open
+        .ok_or_else(|| "SQLite catalog DDL is missing its structural body".to_string())?;
+    let close = first_close
+        .ok_or_else(|| "SQLite catalog DDL is missing its closing parenthesis".to_string())?;
+    let prefix_tokens = sqlite_catalog_prefix_tokens(&sql[..open]);
+    let expected_prefix = match kind {
+        SqliteCatalogDdlKind::Table => ["CREATE", "TABLE"].as_slice(),
+        SqliteCatalogDdlKind::Index { unique: false } => ["CREATE", "INDEX"].as_slice(),
+        SqliteCatalogDdlKind::Index { unique: true } => ["CREATE", "UNIQUE", "INDEX"].as_slice(),
+    };
+    if prefix_tokens.len() < expected_prefix.len()
+        || !prefix_tokens
+            .iter()
+            .zip(expected_prefix)
+            .all(|(actual, expected)| actual == expected)
+    {
+        return Err("SQLite catalog DDL has an unexpected CREATE statement type".to_string());
+    }
+
+    let content_end = terminator.unwrap_or(sql.len());
+    if let Some(terminator) = terminator {
+        if !sql[terminator + 1..].trim().is_empty() {
+            return Err("SQLite catalog DDL contains a trailing statement".to_string());
+        }
+    }
+    if content_end <= close {
+        return Err("SQLite catalog DDL has an invalid structural suffix".to_string());
+    }
+    let suffix = sql[open..content_end].trim();
+    if matches!(kind, SqliteCatalogDdlKind::Table) {
+        let table_options = sql[close + 1..content_end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        if !matches!(
+            table_options.as_str(),
+            "" | "STRICT" | "WITHOUT ROWID" | "STRICT, WITHOUT ROWID" | "WITHOUT ROWID, STRICT"
+        ) {
+            return Err(format!(
+                "SQLite table DDL has unsupported trailing options: {table_options}"
+            ));
+        }
+    } else {
+        let tail = sql[close + 1..content_end].trim();
+        let has_where_clause = tail
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("WHERE"))
+            && tail
+                .as_bytes()
+                .get(5)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(');
+        if !tail.is_empty() && !has_where_clause {
+            return Err("SQLite index DDL has an unsupported trailing clause".to_string());
+        }
+    }
+    Ok(suffix.to_string())
+}
+
+fn rewrite_sqlite_create_table_for_transfer(
+    source_sql: &str,
+    target_schema: &str,
+    target_table: &str,
+) -> Result<String, String> {
+    let suffix = sqlite_catalog_ddl_suffix(source_sql, SqliteCatalogDdlKind::Table)?;
+    Ok(format!(
+        "CREATE TABLE {} {suffix};",
+        sqlite_qualified_relation(target_schema, target_table)?
+    ))
+}
+
+fn rewrite_sqlite_create_index_for_transfer(
+    source_sql: &str,
+    target_schema: &str,
+    target_table: &str,
+    index_name: &str,
+    unique: bool,
+) -> Result<String, String> {
+    let suffix = sqlite_catalog_ddl_suffix(source_sql, SqliteCatalogDdlKind::Index { unique })?;
+    Ok(format!(
+        "CREATE {}INDEX {} ON {} {suffix};",
+        if unique { "UNIQUE " } else { "" },
+        sqlite_qualified_index(target_schema, index_name)?,
+        sqlite_quote_identifier(target_table.trim())
+    ))
+}
+
 fn sqlite_column_definition(
     column: &CreateTableColumn,
     default_value: Option<&str>,
@@ -7447,6 +7709,114 @@ async fn get_transfer_indexes(
     .map_err(|error| error.to_string())
 }
 
+async fn get_sqlite_table_source_ddl(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<String, String> {
+    let schema = sqlite_quote_identifier(normalized_sqlite_schema(&endpoint.schema));
+    let sql = format!(
+        "SELECT sql FROM {schema}.sqlite_schema WHERE type = 'table' AND name = {} AND sql IS NOT NULL;",
+        sql_string_literal(endpoint.table.trim())
+    );
+    let results = query_target(
+        manager,
+        &endpoint.connection_id,
+        endpoint.database.as_deref(),
+        &sql,
+    )
+    .await
+    .map_err(|error| format!("Could not read the SQLite table definition: {error}"))?;
+    let definition = results
+        .iter()
+        .flat_map(|result| result.rows.iter())
+        .find_map(|row| row.first().and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "SQLite catalog did not return an exact table definition for {}",
+                endpoint_label(endpoint)
+            )
+        })?;
+    Ok(definition.to_string())
+}
+
+fn sqlite_transfer_can_preserve_exact_schema(
+    source: &TableDataTransferEndpoint,
+    target: &TableDataTransferEndpoint,
+) -> bool {
+    is_sqlite_driver(&source.driver)
+        && is_sqlite_driver(&target.driver)
+        && source.table.trim() == target.table.trim()
+        && normalized_sqlite_schema(&source.schema)
+            .eq_ignore_ascii_case(normalized_sqlite_schema(&target.schema))
+}
+
+async fn resolve_exact_sqlite_transfer_target_statements(
+    manager: &ConnectionManager,
+    request: &TableDataTransferTargetPlanRequest,
+) -> Result<Vec<String>, String> {
+    if !sqlite_transfer_can_preserve_exact_schema(&request.source, &request.target) {
+        return Err(
+            "Exact SQLite schema preservation requires matching source and target schema/table names."
+                .to_string(),
+        );
+    }
+    if manager
+        .is_external_driver_connection(&request.source.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        || manager
+            .is_external_driver_connection(&request.target.connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "External SQLite packages cannot reuse catalog DDL until their signed protocol declares an exact semantic DDL contract."
+                .to_string(),
+        );
+    }
+
+    let table_definition = get_sqlite_table_source_ddl(manager, &request.source).await?;
+    let mut statements = vec![rewrite_sqlite_create_table_for_transfer(
+        &table_definition,
+        &request.target.schema,
+        &request.target.table,
+    )?];
+    let indexes = get_transfer_indexes(manager, &request.source).await?;
+    for index in indexes {
+        if index.is_primary || index.name.starts_with("sqlite_autoindex_") {
+            continue;
+        }
+        let definition = index.definition.as_deref().ok_or_else(|| {
+            format!(
+                "SQLite index {} has no exact catalog definition; target creation is blocked to avoid silently dropping it.",
+                index.name
+            )
+        })?;
+        statements.push(rewrite_sqlite_create_index_for_transfer(
+            definition,
+            &request.target.schema,
+            &request.target.table,
+            &index.name,
+            index.is_unique,
+        )?);
+    }
+    if statements.len() > MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS {
+        return Err(format!(
+            "SQLite target creation is limited to {MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS} catalog statements."
+        ));
+    }
+    let total_bytes = statements.iter().map(String::len).sum::<usize>();
+    if total_bytes > MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES {
+        return Err(format!(
+            "SQLite target creation SQL exceeds the {} byte review limit.",
+            MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES
+        ));
+    }
+    Ok(statements)
+}
+
 async fn get_transfer_constraints(
     manager: &ConnectionManager,
     endpoint: &TableDataTransferEndpoint,
@@ -9253,13 +9623,29 @@ async fn resolve_table_data_transfer_target_plan(
         create_columns,
         default_expressions,
         identity_generations,
-        warnings: target_column_warnings,
+        warnings: mut target_column_warnings,
     } = target_columns_plan;
     let can_execute = columns
         .iter()
         .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported);
+    let exact_sqlite_schema_preserved = if can_execute
+        && sqlite_transfer_can_preserve_exact_schema(&request.source, &request.target)
+    {
+        !manager
+            .is_external_driver_connection(&request.source.connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+            && !manager
+                .is_external_driver_connection(&request.target.connection_id)
+                .await
+                .map_err(|error| error.to_string())?
+    } else {
+        false
+    };
     let statements = if !can_execute {
         Vec::new()
+    } else if exact_sqlite_schema_preserved {
+        resolve_exact_sqlite_transfer_target_statements(manager, request).await?
     } else if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
         build_sqlite_create_table_statements_with_defaults(
             &request.target.schema,
@@ -9287,10 +9673,25 @@ async fn resolve_table_data_transfer_target_plan(
         "This creates only the empty target table {}. Data is copied later through a separate reviewed transfer.",
         endpoint_label(&request.target)
     )];
-    warnings.push(
-        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained. The empty-table step does not create secondary indexes or constraints by itself; an eligible same-product PostgreSQL/MySQL data transfer can separately review and restore catalog-backed indexes, unique/check constraints, and foreign keys after rows are copied. Source sequence names/current values, generated expressions, triggers, and unmapped defaults are not copied."
-            .to_string(),
-    );
+    if exact_sqlite_schema_preserved {
+        target_column_warnings.retain(|warning| {
+            !warning.starts_with("Hidden/invisible source column(s)")
+                && !warning.starts_with("Generated source column(s)")
+        });
+        warnings.push(
+            "The exact native SQLite catalog definition is retained for this matching schema/table name. Table-level primary/unique/check/foreign-key constraints, generated/hidden columns, collations, STRICT/WITHOUT ROWID options, and catalog-backed explicit indexes are included in the reviewed DDL. Triggers and virtual-table implementation objects are not copied."
+                .to_string(),
+        );
+        warnings.push(
+            "SQLite target creation executes the reviewed table and index statements in one target transaction; any statement failure rolls the new table back."
+                .to_string(),
+        );
+    } else {
+        warnings.push(
+            "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained. The empty-table step does not create secondary indexes or constraints by itself; an eligible same-product PostgreSQL/MySQL data transfer can separately review and restore catalog-backed indexes, unique/check constraints, and foreign keys after rows are copied. Renamed or cross-schema SQLite targets use this reduced column-only plan because self-referential constraints cannot be rewritten safely. Source sequence names/current values, generated expressions, triggers, and unmapped defaults are not copied."
+                .to_string(),
+        );
+    }
     warnings.extend(target_column_warnings);
     if !can_execute {
         warnings.push(
@@ -9357,15 +9758,85 @@ pub async fn create_table_data_transfer_target(
                 plan.confirmation_token
             ));
         }
-        for statement in &plan.statements {
-            query_target(
-                &manager,
-                &request.target.connection_id,
-                request.target.database.as_deref(),
-                statement,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        if is_sqlite_driver(&request.target.driver) {
+            let transaction_id = format!("sqlite-target-create-{}", uuid::Uuid::new_v4());
+            match request.target.database.as_deref() {
+                Some(database) => {
+                    manager
+                        .begin_database_transaction(
+                            &request.target.connection_id,
+                            &transaction_id,
+                            database,
+                            Some(normalized_sqlite_schema(&request.target.schema).to_string()),
+                        )
+                        .await
+                }
+                None => {
+                    manager
+                        .begin_transaction(
+                            &request.target.connection_id,
+                            &transaction_id,
+                            Some(normalized_sqlite_schema(&request.target.schema).to_string()),
+                        )
+                        .await
+                }
+            }
+            .map_err(|error| format!("Could not start SQLite target creation: {error}"))?;
+            let statements = plan
+                .statements
+                .iter()
+                .map(|sql| ParameterizedStatement {
+                    sql: sql.clone(),
+                    params: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) = manager
+                .execute_parameterized_transaction(
+                    &request.target.connection_id,
+                    &transaction_id,
+                    &statements,
+                )
+                .await
+            {
+                let rollback = manager
+                    .rollback_transaction(&request.target.connection_id, &transaction_id)
+                    .await;
+                return Err(match rollback {
+                    Ok(()) => format!(
+                        "SQLite target creation failed and was rolled back: {error}"
+                    ),
+                    Err(rollback_error) => format!(
+                        "SQLite target creation failed: {error}. Rollback could not be confirmed: {rollback_error}. Verify the target before retrying."
+                    ),
+                });
+            }
+            if let Err(error) = manager
+                .commit_transaction(&request.target.connection_id, &transaction_id)
+                .await
+            {
+                let rollback = manager
+                    .rollback_transaction(&request.target.connection_id, &transaction_id)
+                    .await;
+                return Err(match rollback {
+                    Ok(()) => format!(
+                        "Could not commit SQLite target creation: {error}. A rollback was requested, but verify the target before retrying."
+                    ),
+                    Err(rollback_error) => format!(
+                        "Could not commit SQLite target creation: {error}. Rollback also failed: {rollback_error}. The outcome is unknown; verify the target and do not retry automatically."
+                    ),
+                });
+            }
+        } else {
+            for statement in &plan.statements {
+                query_target(
+                    &manager,
+                    &request.target.connection_id,
+                    request.target.database.as_deref(),
+                    statement,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
         }
         Ok(CreateTableResult {
             table: request.target.table.trim().to_string(),
@@ -18748,10 +19219,12 @@ mod tests {
         push_delimited_export_row, query_target, query_target_parameterized,
         read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
         resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
-        resolve_transfer_target_column_quoting, resolve_transfer_upsert_key_columns,
-        reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
-        skipped_table_data_compare_result, sql_export_insert_batch_rows, sql_insert_statements,
-        summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
+        resolve_table_data_transfer_target_plan, resolve_transfer_target_column_quoting,
+        resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
+        rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
+        sanitize_file_part, select_database_sql_export_tables, skipped_table_data_compare_result,
+        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
+        table_data_compare_sync_metadata_digest, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
@@ -18800,6 +19273,7 @@ mod tests {
             SCHEMA_SNAPSHOT_VERSION,
         },
     };
+    use crate::drivers::sqlite::SqliteDriver;
     use anyhow::Result;
     use async_trait::async_trait;
     use calamine::{open_workbook_auto, Data, Reader};
@@ -24371,6 +24845,134 @@ WITH DATA;"#
         assert!(
             build_sqlite_create_table_statements("main", "bad", &[invalid_autoincrement]).is_err()
         );
+    }
+
+    #[test]
+    fn sqlite_catalog_table_transfer_retains_exact_structural_body() {
+        let source = r#"CREATE TABLE "order items" (
+            "id" INTEGER PRIMARY KEY,
+            "parent_id" INTEGER REFERENCES "order items"("id") ON UPDATE CASCADE ON DELETE SET NULL,
+            "qty" INTEGER NOT NULL CHECK (("qty" > 0)),
+            "note" TEXT DEFAULT 'semi; (still one statement)',
+            "total" INTEGER GENERATED ALWAYS AS (("qty" * 2)) STORED,
+            UNIQUE ("note" COLLATE NOCASE)
+        ) STRICT, WITHOUT ROWID"#;
+
+        let rewritten =
+            rewrite_sqlite_create_table_for_transfer(source, "archive", "order items").unwrap();
+        assert!(rewritten.starts_with("CREATE TABLE \"archive\".\"order items\" ("));
+        assert!(rewritten.contains("ON UPDATE CASCADE ON DELETE SET NULL"));
+        assert!(rewritten.contains("CHECK ((\"qty\" > 0))"));
+        assert!(rewritten.contains("DEFAULT 'semi; (still one statement)'"));
+        assert!(rewritten.contains("GENERATED ALWAYS AS ((\"qty\" * 2)) STORED"));
+        assert!(rewritten.ends_with(") STRICT, WITHOUT ROWID;"));
+    }
+
+    #[test]
+    fn sqlite_catalog_index_transfer_retains_expression_and_filter() {
+        let source = r#"CREATE UNIQUE INDEX "orders_search_idx"
+            ON "order items" (lower("note"), "id" DESC)
+            WHERE "note" <> ';' AND ("qty" > 1)"#;
+
+        assert_eq!(
+            rewrite_sqlite_create_index_for_transfer(
+                source,
+                "archive",
+                "order items",
+                "orders_search_idx",
+                true,
+            )
+            .unwrap(),
+            "CREATE UNIQUE INDEX \"archive\".\"orders_search_idx\" ON \"order items\" (lower(\"note\"), \"id\" DESC)\n            WHERE \"note\" <> ';' AND (\"qty\" > 1);"
+        );
+    }
+
+    #[test]
+    fn sqlite_catalog_transfer_rejects_malformed_or_multi_statement_ddl() {
+        assert!(rewrite_sqlite_create_table_for_transfer(
+            "CREATE TABLE users (id INTEGER); DROP TABLE audit",
+            "main",
+            "users",
+        )
+        .unwrap_err()
+        .contains("trailing statement"));
+        assert!(rewrite_sqlite_create_table_for_transfer(
+            "CREATE TABLE users (id INTEGER",
+            "main",
+            "users",
+        )
+        .unwrap_err()
+        .contains("unbalanced parentheses"));
+        assert!(rewrite_sqlite_create_table_for_transfer(
+            "CREATE TABLE users (id INTEGER) AS SELECT 1",
+            "main",
+            "users",
+        )
+        .unwrap_err()
+        .contains("unsupported trailing options"));
+        assert!(rewrite_sqlite_create_index_for_transfer(
+            "CREATE INDEX users_idx ON users (id) ORDER BY id",
+            "main",
+            "users",
+            "users_idx",
+            false,
+        )
+        .unwrap_err()
+        .contains("unsupported trailing clause"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_target_plan_uses_catalog_table_and_index_definitions() {
+        let manager = ConnectionManager::new();
+        let mut source = SqliteDriver::new(":memory:");
+        source.connect().await.unwrap();
+        source
+            .query(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES events(id) ON DELETE CASCADE, label TEXT CHECK (length(label) > 0)) STRICT; CREATE INDEX events_label_idx ON events (lower(label)) WHERE label IS NOT NULL;",
+            )
+            .await
+            .unwrap();
+        let mut target = SqliteDriver::new(":memory:");
+        target.connect().await.unwrap();
+        manager
+            .add_connection("sqlite-source".to_string(), Box::new(source))
+            .await;
+        manager
+            .add_connection("sqlite-target".to_string(), Box::new(target))
+            .await;
+
+        let plan = resolve_table_data_transfer_target_plan(
+            &manager,
+            &TableDataTransferTargetPlanRequest {
+                source: TableDataTransferEndpoint {
+                    connection_id: "sqlite-source".to_string(),
+                    driver: "sqlite".to_string(),
+                    schema: "main".to_string(),
+                    table: "events".to_string(),
+                    database: None,
+                },
+                target: TableDataTransferEndpoint {
+                    connection_id: "sqlite-target".to_string(),
+                    driver: "sqlite".to_string(),
+                    schema: "main".to_string(),
+                    table: "events".to_string(),
+                    database: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(plan.can_execute);
+        assert_eq!(plan.statements.len(), 2);
+        assert!(plan.statements[0].contains("REFERENCES events(id) ON DELETE CASCADE"));
+        assert!(plan.statements[0].contains("CHECK (length(label) > 0)"));
+        assert!(plan.statements[0].ends_with(") STRICT;"));
+        assert!(plan.statements[1].contains("(lower(label)) WHERE label IS NOT NULL"));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("exact native SQLite catalog definition")));
     }
 
     fn test_export_writer_context(
