@@ -763,6 +763,132 @@ fn push_statement_span<'a>(
     });
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MysqlRoutineBlock {
+    Begin,
+    Case,
+}
+
+#[derive(Debug, Default)]
+struct MysqlRoutineScan {
+    word_count: usize,
+    routine_ddl: Option<bool>,
+    blocks: Vec<MysqlRoutineBlock>,
+    saw_begin: bool,
+    last_word_was_end: bool,
+    pending_end: bool,
+}
+
+impl MysqlRoutineScan {
+    fn observe_word(&mut self, word: &str) {
+        self.word_count += 1;
+        if self.word_count == 1 {
+            self.routine_ddl = Some(word.eq_ignore_ascii_case("CREATE"));
+        } else if self.word_count <= 16 && self.routine_ddl == Some(true) {
+            if mysql_routine_object_type(word) {
+                // Keep scanning the body, but no longer let a later non-routine
+                // word invalidate the already identified CREATE target.
+                self.routine_ddl = None;
+            } else if mysql_non_routine_create_type(word) {
+                self.routine_ddl = Some(false);
+            }
+        }
+
+        let is_routine = self.routine_ddl.is_none();
+        if !is_routine {
+            self.last_word_was_end = word.eq_ignore_ascii_case("END");
+            return;
+        }
+
+        if self.pending_end {
+            if word.eq_ignore_ascii_case("CASE") {
+                if self.blocks.last() == Some(&MysqlRoutineBlock::Case) {
+                    self.blocks.pop();
+                }
+            } else if !mysql_control_block_suffix(word) {
+                self.blocks.pop();
+            }
+            self.pending_end = false;
+        }
+
+        if word.eq_ignore_ascii_case("BEGIN") {
+            if !self.last_word_was_end {
+                self.saw_begin = true;
+                self.blocks.push(MysqlRoutineBlock::Begin);
+            }
+        } else if word.eq_ignore_ascii_case("CASE") {
+            if !self.last_word_was_end {
+                self.blocks.push(MysqlRoutineBlock::Case);
+            }
+        } else if word.eq_ignore_ascii_case("END") && self.saw_begin {
+            // END needs one word of lookahead to distinguish END CASE/IF/etc.
+            self.pending_end = true;
+        }
+        self.last_word_was_end = word.eq_ignore_ascii_case("END");
+    }
+
+    /// Returns true when this semicolon is internal to an identified compound
+    /// routine and the outer BEGIN block is still open.
+    fn observe_semicolon(&mut self) -> bool {
+        if self.routine_ddl.is_some() || !self.saw_begin {
+            self.last_word_was_end = false;
+            return false;
+        }
+        if self.pending_end {
+            self.blocks.pop();
+            self.pending_end = false;
+        }
+        self.last_word_was_end = false;
+        !self.blocks.is_empty()
+    }
+}
+
+fn mysql_routine_object_type(word: &str) -> bool {
+    ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+        .iter()
+        .any(|candidate| word.eq_ignore_ascii_case(candidate))
+}
+
+fn mysql_non_routine_create_type(word: &str) -> bool {
+    [
+        "DATABASE",
+        "INDEX",
+        "LOGFILE",
+        "ROLE",
+        "SCHEMA",
+        "SERVER",
+        "SPATIAL",
+        "TABLE",
+        "TEMPORARY",
+        "UNIQUE",
+        "USER",
+        "VIEW",
+    ]
+    .iter()
+    .any(|candidate| word.eq_ignore_ascii_case(candidate))
+}
+
+fn mysql_control_block_suffix(word: &str) -> bool {
+    ["IF", "LOOP", "REPEAT", "WHILE"]
+        .iter()
+        .any(|candidate| word.eq_ignore_ascii_case(candidate))
+}
+
+fn mysql_routine_word_end(sql: &str, index: usize) -> Option<usize> {
+    let first = sql[index..].chars().next()?;
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return None;
+    }
+    let mut end = index + first.len_utf8();
+    for character in sql[end..].chars() {
+        if !character.is_ascii_alphanumeric() && character != '_' && character != '$' {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    Some(end)
+}
+
 pub fn split_sql_statement_spans(
     sql: &str,
     dialect: StatementScanDialect,
@@ -771,6 +897,7 @@ pub fn split_sql_statement_spans(
     let mut statement_start = 0;
     let mut index = 0;
     let mut delimiter = ";";
+    let mut mysql_routine_scan = MysqlRoutineScan::default();
 
     while index < sql.len() {
         if dialect == StatementScanDialect::Mysql && (index == 0 || sql[..index].ends_with('\n')) {
@@ -779,6 +906,7 @@ pub fn split_sql_statement_spans(
                     delimiter = new_delimiter;
                     index = next_line;
                     statement_start = next_line;
+                    mysql_routine_scan = MysqlRoutineScan::default();
                     continue;
                 }
             }
@@ -815,10 +943,26 @@ pub fn split_sql_statement_spans(
             break;
         };
 
+        if dialect == StatementScanDialect::Mysql && delimiter == ";" {
+            if let Some(word_end) = mysql_routine_word_end(sql, index) {
+                mysql_routine_scan.observe_word(&sql[index..word_end]);
+                index = word_end;
+                continue;
+            }
+        }
+
         if sql[index..].starts_with(delimiter) {
+            if dialect == StatementScanDialect::Mysql
+                && delimiter == ";"
+                && mysql_routine_scan.observe_semicolon()
+            {
+                index += delimiter.len();
+                continue;
+            }
             push_statement_span(&mut statements, sql, statement_start, index, dialect);
             index += delimiter.len();
             statement_start = index;
+            mysql_routine_scan = MysqlRoutineScan::default();
             continue;
         }
 
@@ -1907,6 +2051,66 @@ mod tests {
                    INSERT INTO audit_log(message) VALUES ('refreshed; users');\n\
                  END",
                 "SELECT 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_mysql_compound_routine_bodies_without_delimiter_directives() {
+        assert_eq!(
+            split_sql_statements(
+                "CREATE DEFINER = app_user PROCEDURE refresh_users()\n\
+                 BEGIN\n\
+                   UPDATE users SET refreshed = 1;\n\
+                   IF ROW_COUNT() > 0 THEN\n\
+                     INSERT INTO audit_log(message) VALUES ('updated; users');\n\
+                   END IF;\n\
+                   CASE 1 WHEN 1 THEN SET @done = 1; END CASE;\n\
+                 END;\n\
+                 SELECT 1;",
+                StatementScanDialect::Mysql,
+            ),
+            vec![
+                "CREATE DEFINER = app_user PROCEDURE refresh_users()\n\
+                 BEGIN\n\
+                   UPDATE users SET refreshed = 1;\n\
+                   IF ROW_COUNT() > 0 THEN\n\
+                     INSERT INTO audit_log(message) VALUES ('updated; users');\n\
+                   END IF;\n\
+                   CASE 1 WHEN 1 THEN SET @done = 1; END CASE;\n\
+                 END",
+                "SELECT 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_compound_routine_scan_is_single_pass_for_large_bodies() {
+        let mut sql = String::from("CREATE PROCEDURE bulk_refresh()\nBEGIN\n");
+        for index in 0..20_000 {
+            sql.push_str(&format!("SET @value = {index};\n"));
+        }
+        sql.push_str("END;\nSELECT 2;");
+
+        let statements = split_sql_statement_spans(&sql, StatementScanDialect::Mysql);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0]
+            .text
+            .starts_with("CREATE PROCEDURE bulk_refresh"));
+        assert!(statements[0].text.ends_with("END"));
+        assert_eq!(statements[1].text, "SELECT 2");
+    }
+
+    #[test]
+    fn mysql_non_routine_create_statements_keep_normal_semicolon_boundaries() {
+        assert_eq!(
+            split_sql_statements(
+                "CREATE TABLE events (id BIGINT); INSERT INTO events VALUES (1);",
+                StatementScanDialect::Mysql,
+            ),
+            vec![
+                "CREATE TABLE events (id BIGINT)",
+                "INSERT INTO events VALUES (1)",
             ]
         );
     }
