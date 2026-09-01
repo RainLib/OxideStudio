@@ -1349,6 +1349,22 @@ explicit deferred validation task rather than an implicit release check.
   Manticore, SQLite and D1 server versions only during the consolidated database
   validation phase; no database was opened during Phase 104 implementation.
 
+## MongoDB collection discovery and Console isolation
+
+- Against a MongoDB fixture containing ordinary collections, time-series
+  collections and views, confirm Explorer and completion metadata preserve the
+  server object type. Views must never issue `estimatedDocumentCount` and must
+  not expose base-collection-only mutation affordances.
+- Create more than eight collections behind a request-delay proxy. Confirm the
+  initial discovery has at most eight concurrent count requests, returns a
+  deterministic name order, retains an unavailable count as `null`, and does
+  not starve normal query traffic.
+- Keep two MongoDB connections open with disjoint collection names. Open a
+  query tab for the non-active connection and verify its Console completion
+  never reuses the active Explorer's collection list; it must load only the
+  tab connection's cache scope. Repeat after Explorer refresh, reconnect and
+  metadata invalidation.
+
 ## MySQL and MariaDB existing-view save semantics
 
 - In supported MySQL and MariaDB fixtures, create views with explicit

@@ -10,8 +10,10 @@ use crate::core::{
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use futures::{stream, StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Bson, Document},
+    results::CollectionType,
     Client,
 };
 use serde::Deserialize;
@@ -23,6 +25,11 @@ use tokio::sync::Mutex;
 use super::mongodb_shell;
 
 const MONGODB_DATABASE_INITIALIZATION_COLLECTION: &str = "oxide_init";
+/// Listing a document database with many collections must not turn one Explorer
+/// expansion into an unbounded burst of count requests. This cap preserves the
+/// optional count badge while keeping metadata discovery responsive and polite
+/// to shared MongoDB deployments.
+const MONGODB_COLLECTION_COUNT_CONCURRENCY: usize = 8;
 
 pub struct MongoDbDriver {
     url: String,
@@ -544,24 +551,53 @@ impl DatabaseDriver for MongoDbDriver {
         };
         *self.active_database.lock().await = database_name.clone();
         let database = self.client().await?.database(&database_name);
-        let names = database
-            .list_collection_names()
+        // `listCollections` supplies the collection/view distinction in one
+        // catalog request. The former name-only path mislabeled views and then
+        // executed one count request at a time for every object (an N+1
+        // latency cliff on large databases).
+        let mut cursor = database
+            .list_collections()
             .await
             .with_context(|| format!("Failed to list MongoDB collections for {database_name}"))?;
-
-        let mut collections = Vec::with_capacity(names.len());
-        for name in names {
-            let document_count = database
-                .collection::<Document>(&name)
-                .estimated_document_count()
-                .await
-                .ok();
-            collections.push(mongodb_collection_info(
-                &database_name,
-                name,
-                document_count,
+        let mut specs = Vec::new();
+        while let Some(spec) = cursor.try_next().await.with_context(|| {
+            format!("Failed to read MongoDB collection metadata for {database_name}")
+        })? {
+            specs.push((
+                spec.name,
+                mongodb_collection_type_label(&spec.collection_type).to_string(),
             ));
         }
+        specs.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut collections = stream::iter(specs.into_iter().map(|(name, collection_type)| {
+            let database = database.clone();
+            async move {
+                // MongoDB views do not provide a reliable estimated document
+                // count. Keep the badge absent rather than issuing a command
+                // guaranteed to fail or presenting a view as a base collection.
+                let document_count =
+                    if mongodb_collection_supports_estimated_count(&collection_type) {
+                        database
+                            .collection::<Document>(&name)
+                            .estimated_document_count()
+                            .await
+                            .ok()
+                    } else {
+                        None
+                    };
+                (name, collection_type, document_count)
+            }
+        }))
+        .buffer_unordered(MONGODB_COLLECTION_COUNT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|(name, collection_type, document_count)| {
+            mongodb_collection_info(&database_name, name, collection_type, document_count)
+        })
+        .collect::<Vec<_>>();
+        collections.sort_by(|left, right| left.name.cmp(&right.name));
 
         Ok(collections)
     }
@@ -660,13 +696,30 @@ impl DatabaseDriver for MongoDbDriver {
 fn mongodb_collection_info(
     database_name: &str,
     name: String,
+    collection_type: String,
     document_count: Option<u64>,
 ) -> CollectionInfo {
     CollectionInfo {
         name,
         namespace: Some(database_name.to_string()),
-        collection_type: Some("collection".to_string()),
+        collection_type: Some(collection_type),
         document_count,
+    }
+}
+
+fn mongodb_collection_supports_estimated_count(collection_type: &str) -> bool {
+    !collection_type.trim().eq_ignore_ascii_case("view")
+}
+
+fn mongodb_collection_type_label(collection_type: &CollectionType) -> &'static str {
+    match collection_type {
+        CollectionType::View => "view",
+        CollectionType::Collection => "collection",
+        CollectionType::Timeseries => "timeseries",
+        // The MongoDB driver marks this enum non-exhaustive so a newer server
+        // type does not make the desktop client unusable. Preserve a safe base
+        // collection label until the runtime contract adds explicit support.
+        _ => "collection",
     }
 }
 
@@ -2044,12 +2097,39 @@ mod tests {
 
     #[test]
     fn builds_collection_info_with_estimated_count() {
-        let collection = mongodb_collection_info("app", "users".to_string(), Some(42));
+        let collection = mongodb_collection_info(
+            "app",
+            "users".to_string(),
+            "collection".to_string(),
+            Some(42),
+        );
 
         assert_eq!(collection.name, "users");
         assert_eq!(collection.namespace.as_deref(), Some("app"));
         assert_eq!(collection.collection_type.as_deref(), Some("collection"));
         assert_eq!(collection.document_count, Some(42));
+    }
+
+    #[test]
+    fn mongodb_view_metadata_does_not_request_an_estimated_count() {
+        assert_eq!(
+            mongodb_collection_type_label(&CollectionType::Collection),
+            "collection"
+        );
+        assert_eq!(
+            mongodb_collection_type_label(&CollectionType::Timeseries),
+            "timeseries"
+        );
+        assert_eq!(mongodb_collection_type_label(&CollectionType::View), "view");
+        assert!(mongodb_collection_supports_estimated_count("collection"));
+        assert!(mongodb_collection_supports_estimated_count("timeseries"));
+        assert!(!mongodb_collection_supports_estimated_count("view"));
+        assert!(!mongodb_collection_supports_estimated_count(" VIEW "));
+
+        let view =
+            mongodb_collection_info("app", "active_users".to_string(), "view".to_string(), None);
+        assert_eq!(view.collection_type.as_deref(), Some("view"));
+        assert_eq!(view.document_count, None);
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@
 > Phase 123 LSP 补充：DBChart/DBX 上游仍未前进。审计发现限定/取消限定列的 code action 会把普通 `u` 与 quoted `"U"` 折叠为同一来源；现已保持 `aliasSql` 的精确 quoted 身份，避免生成或移除指向错误 relation 的限定符。
 > Phase 124 Grid 补充：对齐 DBX 的 explicit expression cell 语义。Oxide 现将普通 grid 值与 SQL expression 分离：仅既有行可经 Value Editor 的 `Expression` 模式提交受限表达式；新增行继续使用“不发送 / 数据库默认值”语义，前后端均拒绝多语句和注释。
 > Phase 154 迁移补充：SQLite 不再从列描述合成有损 DDL，而是捕获并重放 `sqlite_schema` 的精确 table/view/index/trigger 定义；支持 `main` 中表 create/drop/rebuild、view create/drop/replace 和独立 trigger create/drop/replace，CHECK、COLLATE、generated、STRICT/WITHOUT ROWID、表达式/partial index 与复合 trigger body 均保留。执行仍由 Host 创建校验备份，在同一连接的写锁/事务/foreign-key check 边界内完成；缺少 catalog source、无安全 backfill、多语句注入、保留 view 依赖不确定或 attached schema 时继续 fail closed。真实文件/远程 SSH 与版本矩阵仍按延期清单验证。
+> Phase 155 DBX/LSP 复审：基线更新为 DBX `d4d3995be`。MongoDB 集合发现已对齐其 `listCollections` 类型目录，并保留 Oxide 的可选数量徽标：计数从串行 N+1 改为稳定排序后的 8 路有界并发，Mongo view 不再伪装成 collection 或发起无效 count。Document Console 的内存 metadata 快路径也严格绑定 Tab 的连接；跨连接 Tab 改走自身的 scoped cache/加载，不泄漏旧连接的 collection 补全。Elasticsearch Console 已具备比 DBX 更细的 request/DSL/version/mapping-field 上下文分流；本轮未发现需要迁移的上游功能性增量。
 
 > 对照日期：2026-08-10
 > 官方仓库：`https://github.com/chartdb/chartdb`

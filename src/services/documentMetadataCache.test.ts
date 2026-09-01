@@ -3,6 +3,7 @@ import {
   DocumentMetadataCache,
   documentMetadataCacheKey,
   documentMetadataCacheScope,
+  knownDocumentCollectionNamesForScope,
 } from "./documentMetadataCache";
 
 describe("DocumentMetadataCache", () => {
@@ -128,5 +129,28 @@ describe("DocumentMetadataCache", () => {
         kind: "collections",
       }),
     );
+  });
+
+  it("uses schema-store collections only for the tab's exact connection scope", () => {
+    const collections = [
+      { name: "orders", namespace: "sales" },
+      { name: "audit", namespace: "admin" },
+      { name: "shared", namespace: null },
+    ];
+
+    expect(
+      knownDocumentCollectionNamesForScope(collections, {
+        metadataConnectionId: "mongo-a",
+        targetConnectionId: "mongo-a",
+        namespace: "sales",
+      }),
+    ).toEqual(["orders", "shared"]);
+    expect(
+      knownDocumentCollectionNamesForScope(collections, {
+        metadataConnectionId: "mongo-a",
+        targetConnectionId: "mongo-b",
+        namespace: "sales",
+      }),
+    ).toEqual([]);
   });
 });

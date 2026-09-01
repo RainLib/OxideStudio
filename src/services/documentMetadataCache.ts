@@ -120,6 +120,43 @@ export type DocumentMetadataCacheIdentity = {
   driver: string;
 };
 
+export type KnownDocumentCollection = {
+  name: string;
+  namespace?: string | null;
+};
+
+/**
+ * The schema store represents the currently active connection only. Query tabs
+ * can keep another connection selected, so using those records for that tab
+ * would mix a previous database's collection names into the Console. Return
+ * the in-memory fast path only when its connection scope is exact; callers
+ * otherwise load their own connection-scoped cache entry.
+ */
+export function knownDocumentCollectionNamesForScope(
+  collections: readonly KnownDocumentCollection[],
+  options: {
+    metadataConnectionId: string | null | undefined;
+    targetConnectionId: string | null | undefined;
+    namespace: string;
+  },
+) {
+  if (
+    !options.metadataConnectionId ||
+    options.metadataConnectionId !== options.targetConnectionId
+  ) {
+    return [];
+  }
+  return collections
+    .filter(
+      (collection) =>
+        !options.namespace ||
+        !collection.namespace ||
+        collection.namespace === options.namespace,
+    )
+    .map((collection) => collection.name)
+    .filter(Boolean);
+}
+
 export function documentMetadataCacheScope(
   identity: DocumentMetadataCacheIdentity,
 ) {

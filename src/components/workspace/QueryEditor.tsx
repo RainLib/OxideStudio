@@ -115,6 +115,7 @@ import { loadTableMetadata } from "@/services/tableMetadataCache";
 import {
   documentMetadataCacheKey,
   invalidateDocumentMetadataScope,
+  knownDocumentCollectionNamesForScope,
   loadDocumentMetadata,
 } from "@/services/documentMetadataCache";
 import { ProjectFileImagePreview } from "./ProjectFileImagePreview";
@@ -1425,15 +1426,14 @@ export function QueryEditor({
       kind: "collections",
     });
     const loadCollections = (onBackgroundRefresh?: () => void) => {
-      const knownCollections = schemaCollections
-        .filter(
-          (collection) =>
-            !collectionNamespace ||
-            !collection.namespace ||
-            collection.namespace === collectionNamespace,
-        )
-        .map((collection) => collection.name)
-        .filter(Boolean);
+      const knownCollections = knownDocumentCollectionNamesForScope(
+        schemaCollections,
+        {
+          metadataConnectionId: activeConnectionId,
+          targetConnectionId: effectiveConnectionId,
+          namespace: collectionNamespace,
+        },
+      );
       const request = knownCollections.length > 0
         ? Promise.resolve(knownCollections)
         : schemaService
@@ -1593,6 +1593,7 @@ export function QueryEditor({
     return () => disposable.dispose();
   }, [
     activeConnection?.database,
+    activeConnectionId,
     activeProjectId,
     activeTab?.targetSchema,
     currentSchema,
