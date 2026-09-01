@@ -2102,3 +2102,18 @@ explicit deferred validation task rather than an implicit release check.
 - Phase 164 currently has fake-HTTP native driver tests, transfer-token and
   frontend build coverage. No real Nacos server, Nacos 3/rnacos compatibility,
   credential-expiry or concurrency fixture has been executed yet.
+
+## Phase 165 -- dangerous SQL dialog focus lifecycle
+
+- In packaged Tauri WebViews, run a destructive statement from the keyboard,
+  toolbar current-statement action, parameter dialog and query-history rerun.
+  Confirm no request is sent until the in-app confirmation explicitly approves
+  it; Cancel, Escape, outside dismissal and window close must never dispatch.
+- Reopen a second destructive confirmation immediately while the first close
+  animation is pending. The old dialog's delayed autofocus must not steal focus
+  from the new one. Once the final dialog closes, Monaco must regain focus
+  without changing its scroll position, selection, IME composition or the
+  captured toolbar execution snapshot.
+- Automated happy-dom tests cover the explicit decisions and asynchronous
+  dispatch gate. Native WebView animations, reduced motion and platform focus
+  ordering remain unverified until this packaged interaction pass.
