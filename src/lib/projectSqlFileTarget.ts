@@ -17,7 +17,7 @@ interface PersistedProjectSqlFileTargets {
 
 const STORAGE_KEY = "oxide-studio-project-sql-file-targets";
 const STORAGE_VERSION = 1;
-const MAX_RECORDS = 2_000;
+const MAX_RECORDS = 200;
 const MAX_PROJECT_ID_LENGTH = 256;
 const MAX_RELATIVE_PATH_LENGTH = 1_024;
 const MAX_CONNECTION_ID_LENGTH = 256;

@@ -140,7 +140,7 @@ describe("project SQL file targets", () => {
       projectSqlFileTargetStorageKey,
       JSON.stringify({
         version: 1,
-        records: Array.from({ length: 2_001 }, (_, index) => ({
+        records: Array.from({ length: 201 }, (_, index) => ({
           projectId: "project-1",
           relativePath: `queries/${index}.sql`,
           connectionId: `connection-${index}`,
@@ -158,7 +158,7 @@ describe("project SQL file targets", () => {
     const parsed = JSON.parse(
       localStorage.getItem(projectSqlFileTargetStorageKey) || "{}",
     ) as { records?: Array<{ relativePath: string }> };
-    expect(parsed.records).toHaveLength(2_000);
+    expect(parsed.records).toHaveLength(200);
     expect(parsed.records?.[0]?.relativePath).toBe("queries/current.sql");
   });
 });
