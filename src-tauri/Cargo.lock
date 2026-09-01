@@ -4605,6 +4605,7 @@ dependencies = [
  "tree-sitter-bash",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip 2.4.2",
 ]

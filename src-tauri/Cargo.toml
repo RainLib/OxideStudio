@@ -101,8 +101,15 @@ clap = { version = "=4.6.1", features = ["derive", "env"] }
 rmcp = { version = "=2.2.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+
 oxide-driver-protocol = { path = "crates/oxide-driver-protocol" }
 oxide-sqlite-worker = { path = "crates/oxide-sqlite-worker", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 dotenvy = "0.15.7"

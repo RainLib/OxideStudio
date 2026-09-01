@@ -98,6 +98,11 @@ pub struct SqliteBackupSchedule {
     pub project_id: String,
     pub connection_id: String,
     pub destination_directory: String,
+    /// Filesystem identity captured when the user explicitly saves the
+    /// destination. The renderer may observe this receipt but cannot supply
+    /// or override it because it is absent from the save request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination_identity: Option<SqliteBackupDestinationIdentity>,
     pub frequency: SqliteBackupScheduleFrequency,
     pub interval_hours: u16,
     pub time_of_day: String,
@@ -147,6 +152,19 @@ struct SqliteBackupScheduleData {
     schedules: Vec<SqliteBackupSchedule>,
     #[serde(default)]
     runs: Vec<SqliteBackupRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+enum SqliteBackupDestinationIdentity {
+    Device(u64),
+    PersistentVolumeUuid([u8; 16]),
+}
+
+impl SqliteBackupDestinationIdentity {
+    fn matches(&self, current: &Self) -> bool {
+        self == current
+    }
 }
 
 pub struct SqliteBackupScheduleState {
@@ -257,6 +275,184 @@ fn canonical_destination(value: &str) -> Result<PathBuf, String> {
         return Err("The backup destination must be a directory".to_string());
     }
     Ok(canonical)
+}
+
+fn require_destination_identity(
+    path: &std::path::Path,
+) -> Result<SqliteBackupDestinationIdentity, String> {
+    destination_identity_for_path(path).ok_or_else(|| {
+        "Oxide cannot identify the backup destination filesystem; choose another local folder"
+            .to_string()
+    })
+}
+
+fn verify_destination_identity(
+    expected: Option<&SqliteBackupDestinationIdentity>,
+    current: Option<&SqliteBackupDestinationIdentity>,
+) -> Result<(), String> {
+    let expected = expected.ok_or_else(|| {
+        "The backup destination was saved by an older Oxide version; review and save the schedule again"
+            .to_string()
+    })?;
+    if current.is_some_and(|current| expected.matches(current)) {
+        Ok(())
+    } else {
+        Err(
+            "The backup destination now resolves to a different filesystem; reconnect the expected volume or review and save the schedule again"
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn destination_identity_for_path(
+    path: &std::path::Path,
+) -> Option<SqliteBackupDestinationIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| SqliteBackupDestinationIdentity::Device(metadata.dev()))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn destination_identity_for_file(file: &std::fs::File) -> Option<SqliteBackupDestinationIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata()
+        .ok()
+        .map(|metadata| SqliteBackupDestinationIdentity::Device(metadata.dev()))
+}
+
+#[cfg(target_os = "macos")]
+fn destination_identity_for_path(
+    path: &std::path::Path,
+) -> Option<SqliteBackupDestinationIdentity> {
+    let directory = std::fs::File::open(path).ok()?;
+    destination_identity_for_file(&directory)
+}
+
+#[cfg(target_os = "macos")]
+fn destination_identity_for_file(file: &std::fs::File) -> Option<SqliteBackupDestinationIdentity> {
+    macos_destination_identity::persistent_volume_uuid(file)
+        .map(SqliteBackupDestinationIdentity::PersistentVolumeUuid)
+        .or_else(|| {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata()
+                .ok()
+                .map(|metadata| SqliteBackupDestinationIdentity::Device(metadata.dev()))
+        })
+}
+
+#[cfg(target_os = "macos")]
+mod macos_destination_identity {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct VolumeUuidBuffer {
+        length: u32,
+        uuid: [u8; 16],
+    }
+
+    pub(super) fn persistent_volume_uuid(file: &std::fs::File) -> Option<[u8; 16]> {
+        let mut attributes = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: 0,
+            volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        let mut buffer = VolumeUuidBuffer {
+            length: 0,
+            uuid: [0; 16],
+        };
+        let result = unsafe {
+            libc::fgetattrlist(
+                file.as_raw_fd(),
+                std::ptr::from_mut(&mut attributes).cast(),
+                std::ptr::from_mut(&mut buffer).cast(),
+                std::mem::size_of::<VolumeUuidBuffer>(),
+                0,
+            )
+        };
+        (result == 0
+            && buffer.length as usize >= std::mem::size_of::<VolumeUuidBuffer>()
+            && buffer.uuid != [0; 16])
+            .then_some(buffer.uuid)
+    }
+}
+
+#[cfg(windows)]
+fn destination_identity_for_path(
+    path: &std::path::Path,
+) -> Option<SqliteBackupDestinationIdentity> {
+    windows_destination_identity::device_id_for_path(path)
+        .map(SqliteBackupDestinationIdentity::Device)
+}
+
+#[cfg(windows)]
+fn destination_identity_for_file(file: &std::fs::File) -> Option<SqliteBackupDestinationIdentity> {
+    windows_destination_identity::device_id_for_handle(file)
+        .map(SqliteBackupDestinationIdentity::Device)
+}
+
+#[cfg(windows)]
+mod windows_destination_identity {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    pub(super) fn device_id_for_path(path: &Path) -> Option<u64> {
+        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide.push(0);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let identity = volume_serial_number(handle);
+        unsafe {
+            CloseHandle(handle);
+        }
+        identity
+    }
+
+    pub(super) fn device_id_for_handle(file: &std::fs::File) -> Option<u64> {
+        volume_serial_number(file.as_raw_handle() as HANDLE)
+    }
+
+    fn volume_serial_number(handle: HANDLE) -> Option<u64> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut information) };
+        (ok != 0).then_some(u64::from(information.dwVolumeSerialNumber))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn destination_identity_for_path(
+    _path: &std::path::Path,
+) -> Option<SqliteBackupDestinationIdentity> {
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn destination_identity_for_file(_file: &std::fs::File) -> Option<SqliteBackupDestinationIdentity> {
+    None
 }
 
 async fn confirm_bundled_sqlite(
@@ -464,7 +660,10 @@ fn safe_run_error(error: &str, cancelled: bool) -> String {
         "SQLite is busy; finish active transactions before the next backup".to_string()
     } else if normalized.contains("already running") {
         "This SQLite backup schedule is already running".to_string()
-    } else if normalized.contains("destination changed") {
+    } else if normalized.contains("destination changed")
+        || normalized.contains("destination now resolves")
+        || normalized.contains("destination was saved by an older oxide")
+    {
         "The backup destination changed; review and save the schedule again".to_string()
     } else if normalized.contains("schedule no longer exists") {
         "The SQLite backup schedule no longer exists".to_string()
@@ -639,6 +838,11 @@ async fn run_schedule(
         if destination.to_string_lossy() != schedule.destination_directory {
             return Err("The backup destination changed; review the schedule again".to_string());
         }
+        let current_identity = require_destination_identity(&destination)?;
+        verify_destination_identity(
+            schedule.destination_identity.as_ref(),
+            Some(&current_identity),
+        )?;
         confirm_bundled_sqlite(manager, &schedule.connection_id).await?;
         manager
             .backup_local_database_controlled(&schedule.connection_id, &path, &control)
@@ -672,15 +876,37 @@ async fn run_schedule(
 
     let finished_result = match published {
         Ok((receipt, published_path)) => {
-            finish_run(
-                state,
-                &run_id,
-                SqliteBackupRunStatus::Success,
-                Some(receipt),
-                Some(&published_path),
-                None,
-            )
-            .await
+            let opened_identity = std::fs::File::open(&published_path)
+                .ok()
+                .and_then(|file| destination_identity_for_file(&file));
+            match verify_destination_identity(
+                schedule.destination_identity.as_ref(),
+                opened_identity.as_ref(),
+            ) {
+                Ok(()) => {
+                    finish_run(
+                        state,
+                        &run_id,
+                        SqliteBackupRunStatus::Success,
+                        Some(receipt),
+                        Some(&published_path),
+                        None,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&published_path);
+                    finish_run(
+                        state,
+                        &run_id,
+                        SqliteBackupRunStatus::Failed,
+                        None,
+                        None,
+                        Some(safe_run_error(&error, false)),
+                    )
+                    .await
+                }
+            }
         }
         Err(error) => {
             let cancelled =
@@ -748,6 +974,7 @@ pub async fn save_sqlite_backup_schedule(
         confirm_bundled_sqlite(&manager, &connection_id).await?;
         let name = validate_schedule_name(&request.name)?;
         let destination = canonical_destination(&request.destination_directory)?;
+        let destination_identity = require_destination_identity(&destination)?;
         let time_of_day = validate_time_of_day(&request.time_of_day)?;
         if !(1..=168).contains(&request.interval_hours) {
             return Err("Hourly backup interval must be from 1 to 168 hours".to_string());
@@ -793,6 +1020,7 @@ pub async fn save_sqlite_backup_schedule(
             project_id,
             connection_id,
             destination_directory: destination.to_string_lossy().into_owned(),
+            destination_identity: Some(destination_identity),
             frequency: request.frequency,
             interval_hours: request.interval_hours,
             time_of_day,
@@ -970,6 +1198,7 @@ mod tests {
             project_id: "project-1".to_string(),
             connection_id: "sqlite-1".to_string(),
             destination_directory: directory.to_string_lossy().into_owned(),
+            destination_identity: destination_identity_for_path(directory),
             frequency: SqliteBackupScheduleFrequency::Hourly,
             interval_hours: 6,
             time_of_day: "02:00".to_string(),
@@ -1011,6 +1240,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.compression, SqliteBackupCompression::None);
+    }
+
+    #[test]
+    fn destination_identity_is_host_recorded_and_legacy_state_requires_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = require_destination_identity(directory.path()).unwrap();
+        assert!(verify_destination_identity(Some(&current), Some(&current)).is_ok());
+
+        let different = match current.clone() {
+            SqliteBackupDestinationIdentity::Device(value) => {
+                SqliteBackupDestinationIdentity::Device(value.wrapping_add(1))
+            }
+            SqliteBackupDestinationIdentity::PersistentVolumeUuid(mut value) => {
+                value[0] ^= 0xff;
+                SqliteBackupDestinationIdentity::PersistentVolumeUuid(value)
+            }
+        };
+        assert!(verify_destination_identity(Some(&current), Some(&different)).is_err());
+        assert!(verify_destination_identity(Some(&current), None).is_err());
+        assert!(verify_destination_identity(None, Some(&current))
+            .unwrap_err()
+            .contains("older Oxide"));
+
+        let persisted = serde_json::to_value(schedule(directory.path())).unwrap();
+        assert!(persisted.get("destinationIdentity").is_some());
+
+        let mut legacy = persisted;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("destinationIdentity");
+        let legacy: SqliteBackupSchedule = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.destination_identity.is_none());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn destination_path_and_open_file_report_the_same_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let path_identity = require_destination_identity(directory.path()).unwrap();
+        let file_path = directory.path().join("identity-probe");
+        let file = std::fs::File::create(&file_path).unwrap();
+        let file_identity = destination_identity_for_file(&file).unwrap();
+        assert_eq!(path_identity, file_identity);
     }
 
     #[test]

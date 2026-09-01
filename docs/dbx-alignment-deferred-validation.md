@@ -1684,3 +1684,24 @@ explicit deferred validation task rather than an implicit release check.
 - Change package version/capability while the dialog is open and ensure the
   visibility follows the active verified capability rather than the driver ID.
   Phase 132 only adds the pure capability test and frontend build.
+
+## Scheduled backup destination volume identity
+
+- On macOS, save a SQLite backup schedule to an APFS removable volume, unmount
+  it, then mount another volume at the same path. The scheduled run must fail
+  before reporting success and must not retain an output on the replacement
+  volume. Repeat after reconnecting the original volume UUID.
+- Repeat on Windows with drive-letter reuse and on Linux with bind, removable
+  and network mounts. A directory identity and the opened final file identity
+  must agree; an unreadable identity must fail closed once a plan has recorded
+  an expected identity.
+- Load a schedule written before Phase 133. It must request explicit review and
+  save instead of silently adopting the currently mounted volume. Saving it
+  again must record the current Host-observed identity without accepting an
+  identity value from renderer input.
+- Interrupt a native and Remote SQLite backup between the preflight check,
+  partial-file creation, publish and post-publish handle check. No mismatch or
+  cancellation path may leave a successful receipt or a retained partial/final
+  artifact. Phase 133 covers pure identity, migration and current-platform
+  handle consistency plus the full Rust library suite; it opens no live
+  database or removable volume.

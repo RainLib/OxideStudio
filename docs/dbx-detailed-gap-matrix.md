@@ -24,6 +24,7 @@
 | `14ad5ef9b` | MySQL VARBINARY 文本值复制为原始字符串 | 已对齐到 Oxide 查询网格：仅对活动 MySQL/MariaDB 连接、声明为 VARBINARY 且值为 Host canonical `0x<hex>` 的单元格尝试严格 UTF-8 解码；必须无危险控制字符并 byte-for-byte 回编码一致才复制文本。任意二进制、NUL、非法 UTF-8、BINARY/BLOB、SQL Server VARBINARY、普通文本及 SQL 文件导出继续保持无损 hex，不做启发式猜测。Copy All、选区复制和表头设置共用同一序列化路径。 |
 | `ef2fdb941` | Oracle 列定义中检测位于 `NOT NULL` 之后的 `DEFAULT` | 已对齐 Oracle 与 OceanBase Oracle 的编辑期诊断：覆盖 `CREATE TABLE`、`ALTER TABLE ... ADD`、多列、嵌套括号与多语句，诊断精确标记违规 `DEFAULT`。分词器跳过字符串、引号标识符、Oracle q-quote 和注释，排除表级约束及非建表语句；其他方言不产生该 marker。诊断使用独立 Monaco owner，不覆盖 LSP 与执行错误 marker。 |
 | `d69cf9da7` | 数据详情对话框使用方向键浏览相邻行/列 | 已按 Oxide 单值详情架构对齐：只读 Value Editor 在标题区提供上一/下一行及上一/下一列按钮，并支持 ↑/↓/←/→；边界不循环，隐藏列后的可见顺序和过滤/排序后的 visual row 顺序均被保留。Monaco、输入框、可编辑内容、菜单/listbox 与带修饰键操作不会被劫持；可编辑单元格继续把方向键留给编辑器，避免静默丢失草稿。纯函数测试覆盖方向映射、越界和 native-control 门禁。 |
+| `bc41e8d76` | macOS 定时导出持久化目标卷身份，避免相同路径落到错误挂载卷 | 已对齐到 Oxide 的 Host-owned 定时 SQLite 备份边界并覆盖 Windows/Linux：用户保存计划时记录不可由 renderer 提交的目标卷身份；macOS 优先使用持久 volume UUID，Windows 使用打开目录/文件 handle 的 volume serial，其他 Unix 使用 device id。执行前重新解析 canonical directory 并比较，发布后再从已打开的最终文件核对；身份缺失、无法读取或改变都会 fail closed，已发布到错误卷的产物会删除且不会形成成功回执。旧计划必须显式重新保存，不能在升级后静默认领当前挂载卷。 |
 | `d411f0497` | Elasticsearch REST 请求风险按 method/path 分类，读请求不再被误判为 mutation | 已对齐并保持更严格删除策略：前端与应用内 Agent Host 现在共同接受 GET/HEAD/OPTIONS，以及 POST `_search/_count/_sql/_msearch/_field_caps/_terms_enum/_validate/_explain/_rank_eval/_search_shards`、EQL/async search/scroll；多请求取最高风险，未知 POST fail closed。`#`、`//` 和跨行块注释中的伪请求不参与分类。DELETE 仍按 Oxide 的 destructive confirmation 处理，不因 DBX 把单文档删除列为普通 write 而削弱确认。 |
 | `cb3de0ef4` | Elasticsearch JSON key completion 不遗留自动闭合引号，并区分已有 `:` 的 key | Oxide 原 Monaco provider 已能覆盖紧邻 closing quote，本阶段把逻辑抽成 UTF-16 model offset 可验证的完整 key replacement：同时替换旧 key 后缀与 closing quote；若右侧已有 `:`，只替换 key，不再插入第二份 value scaffold。quoted filter text 与纯逻辑回归保证首次、再次补全和 key 中间光标一致。 |
 
@@ -352,3 +353,14 @@ widget 接管，从而避免原生 hover 与交互式 hover 重叠，也不重�
 
 该变化不让尚未安装的 MQ catalog candidate 变为可连接驱动；选择、连接和发布状态仍完全
 由 ready/verified/active 的签名 package 控制。
+
+## Phase 133 增量：定时备份目标卷身份
+
+| 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
+| --- | --- | --- | --- |
+| 定时任务只保存目标路径；可移动卷或网络挂载被替换后，相同路径可能写入错误文件系统 | `crates/dbx-core/src/database_export.rs`（`bc41e8d76`） | `src-tauri/src/commands/sqlite_backup_schedule.rs` | 已对齐并扩展到三平台：保存计划时由 Host 捕获持久卷身份；运行前比较 canonical directory，完成后从打开的产物 handle 再比较。macOS 使用 volume UUID，Windows 使用 volume serial，Unix 使用 device id；旧计划、未知身份和身份改变均拒绝自动运行。 |
+
+本阶段新增 identity round-trip、旧计划迁移门禁、不同卷拒绝以及目录/打开文件一致性测试；
+与 CI 相同的 `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
+和完整 Rust lib 测试（747 passed、2 ignored）均通过。真实 macOS removable/APFS volume、Windows
+盘符重用、Linux bind/network mount 的换卷竞态进入延期验证清单。
