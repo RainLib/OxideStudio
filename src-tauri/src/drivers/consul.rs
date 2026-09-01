@@ -290,6 +290,40 @@ async fn parse_consul_response(response: Response, operation: &str) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    async fn serve_test_http_responses(
+        responses: Vec<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in responses {
+                let Ok(Ok((mut socket, _))) =
+                    timeout(Duration::from_millis(500), listener.accept()).await
+                else {
+                    break;
+                };
+                let mut request = vec![0u8; 8 * 1024];
+                let Ok(Ok(size)) =
+                    timeout(Duration::from_millis(500), socket.read(&mut request)).await
+                else {
+                    break;
+                };
+                requests.push(String::from_utf8_lossy(&request[..size]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://:test-token@{address}/tenant"), handle)
+    }
 
     #[test]
     fn url_redacts_token_and_preserves_base_path() {
@@ -310,5 +344,36 @@ mod tests {
         assert!(validate_prefix("../admin").is_err());
         assert!(!valid_key(""));
         assert!(!valid_key("a\0b"));
+    }
+
+    #[tokio::test]
+    async fn native_browser_uses_only_agent_leader_and_kv_key_endpoints() {
+        let (url, server) = serve_test_http_responses(vec![
+            r#"{"Config":{"NodeName":"test"}}"#,
+            r#""127.0.0.1:8300""#,
+            r#"["api/","app/config","app/feature"]"#,
+        ])
+        .await;
+        let mut driver = ConsulDriver::new(&url).unwrap();
+        driver.connect().await.unwrap();
+        driver.ping().await.unwrap();
+        let page = driver
+            .get_collections_page("kv", None, 2, Some("app"))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app/config", "app/feature"]
+        );
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /tenant/v1/agent/self HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /tenant/v1/status/leader HTTP/1.1"));
+        assert!(requests[2].starts_with("GET /tenant/v1/kv/?keys=&separator=%2F HTTP/1.1"));
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("x-consul-token: test-token")));
     }
 }
