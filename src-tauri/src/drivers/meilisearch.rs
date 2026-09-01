@@ -12,7 +12,7 @@ use futures::StreamExt;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::atomic::{AtomicBool, Ordering},
@@ -25,6 +25,7 @@ const MEILISEARCH_INDEX_PAGE_SIZE: usize = 1_000;
 const MEILISEARCH_INDEX_LIST_MAX: usize = 10_000;
 const MEILISEARCH_FIELD_SAMPLE_SIZE: usize = 100;
 const MEILISEARCH_DOCUMENT_CURSOR_MAX_BYTES: usize = 4 * 1024;
+const MEILISEARCH_DOCUMENT_FILTER_MAX_BYTES: usize = 32 * 1024;
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -88,6 +89,9 @@ struct MeilisearchDocumentsPage {
 struct MeilisearchDocumentCursor {
     index: String,
     offset: usize,
+    filter: Option<String>,
+    sort: Vec<String>,
+    limit: usize,
 }
 
 impl MeilisearchDriver {
@@ -197,19 +201,49 @@ impl MeilisearchDriver {
         index: &str,
         offset: usize,
         limit: usize,
+        filter: Option<&Value>,
+        sort: &[String],
     ) -> Result<MeilisearchDocumentsPage> {
         let index = validate_index_name(index)?;
-        let value = self
-            .get_json(
-                &format!(
-                    "indexes/{}/documents?offset={offset}&limit={limit}",
-                    encode_path_segment(index)
-                ),
-                "document page",
-            )
-            .await?;
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &format!("indexes/{}/documents/fetch", encode_path_segment(index)),
+            )?
+            .json(&meilisearch_document_fetch_body(
+                offset, limit, filter, sort,
+            ))
+            .send()
+            .await
+            .context("Meilisearch document page request failed")?;
+        let value = meilisearch_response_json(response, "document page").await?;
         serde_json::from_value(value).context("Meilisearch returned an invalid document page")
     }
+}
+
+fn meilisearch_document_fetch_body(
+    offset: usize,
+    limit: usize,
+    filter: Option<&Value>,
+    sort: &[String],
+) -> Value {
+    let mut body = Map::new();
+    body.insert("offset".to_string(), Value::from(offset as u64));
+    body.insert("limit".to_string(), Value::from(limit as u64));
+    body.insert(
+        "fields".to_string(),
+        Value::Array(vec![Value::String("*".to_string())]),
+    );
+    if let Some(filter) = filter {
+        body.insert("filter".to_string(), filter.clone());
+    }
+    if !sort.is_empty() {
+        body.insert(
+            "sort".to_string(),
+            Value::Array(sort.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    Value::Object(body)
 }
 
 #[async_trait]
@@ -252,25 +286,36 @@ impl DatabaseDriver for MeilisearchDriver {
 
     async fn get_document_page(&self, request: DocumentPageRequest<'_>) -> Result<DocumentPage> {
         self.ensure_connected()?;
-        if request.filter.is_some_and(|value| !value.trim().is_empty())
-            || request.sort.is_some_and(|value| !value.trim().is_empty())
-        {
-            bail!(
-                "Meilisearch document filtering and sorting require its dedicated search workspace"
-            );
-        }
+        let index = self.index(request.collection).await?;
         let limit = request.limit.clamp(1, DEFAULT_QUERY_RESULT_ROW_LIMIT);
+        let filter =
+            parse_meilisearch_document_filter(request.filter, index.primary_key.as_deref())?;
+        let filter_key = filter
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("Failed to preserve Meilisearch document filter")?;
+        let sort = parse_meilisearch_document_sort(request.sort, index.primary_key.as_deref())?;
         let cursor = match request.cursor {
             Some(cursor) => decode_document_cursor(cursor)?,
             None => MeilisearchDocumentCursor {
-                index: request.collection.to_string(),
+                index: index.uid.clone(),
                 offset: 0,
+                filter: filter_key.clone(),
+                sort: sort.clone(),
+                limit,
             },
         };
-        if cursor.index != request.collection {
-            bail!("Meilisearch document cursor does not match the selected index");
+        if cursor.index != index.uid
+            || cursor.filter != filter_key
+            || cursor.sort != sort
+            || cursor.limit != limit
+        {
+            bail!("Meilisearch document cursor does not match the selected index, filter, sort, or page size");
         }
-        let page = self.documents(&cursor.index, cursor.offset, limit).await?;
+        let page = self
+            .documents(&cursor.index, cursor.offset, limit, filter.as_ref(), &sort)
+            .await?;
         let returned = page.results.len();
         let next_offset = cursor.offset.saturating_add(returned);
         let total = page.total;
@@ -280,6 +325,9 @@ impl DatabaseDriver for MeilisearchDriver {
             encode_document_cursor(&MeilisearchDocumentCursor {
                 index: cursor.index,
                 offset: next_offset,
+                filter: filter_key,
+                sort,
+                limit,
             })
         })
         .transpose()?;
@@ -294,7 +342,7 @@ impl DatabaseDriver for MeilisearchDriver {
         self.ensure_connected()?;
         let index = self.index(table).await?;
         let sample = self
-            .documents(&index.uid, 0, MEILISEARCH_FIELD_SAMPLE_SIZE)
+            .documents(&index.uid, 0, MEILISEARCH_FIELD_SAMPLE_SIZE, None, &[])
             .await?;
         Ok(meilisearch_columns(
             &sample.results,
@@ -342,6 +390,225 @@ fn validate_index_name(index: &str) -> Result<&str> {
         bail!("Meilisearch index name is invalid");
     }
     Ok(index)
+}
+
+/// Translate the generic document grid's JSON filters to Meilisearch's
+/// documented read-only `documents/fetch` filter grammar. A caller may also
+/// provide Meilisearch's native string/array grammar, but it never selects an
+/// endpoint or an HTTP method.
+fn parse_meilisearch_document_filter(
+    filter: Option<&str>,
+    primary_key: Option<&str>,
+) -> Result<Option<Value>> {
+    let Some(filter) = filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "{}")
+    else {
+        return Ok(None);
+    };
+    if filter.len() > MEILISEARCH_DOCUMENT_FILTER_MAX_BYTES {
+        bail!("Meilisearch document filter exceeds the local size limit");
+    }
+    if !filter.starts_with('{') && !filter.starts_with('[') {
+        return Ok(Some(Value::String(filter.to_string())));
+    }
+    let value: Value =
+        serde_json::from_str(filter).context("Invalid Meilisearch document filter JSON")?;
+    if value.is_array() {
+        return Ok(Some(value));
+    }
+    if let Some(raw) = value.get("$meiliFilter").and_then(Value::as_str) {
+        if raw.trim().is_empty() {
+            bail!("Meilisearch document filter is empty");
+        }
+        return Ok(Some(Value::String(raw.trim().to_string())));
+    }
+    Ok(Some(Value::String(meilisearch_filter_expression(
+        &value,
+        primary_key,
+    )?)))
+}
+
+fn meilisearch_filter_expression(value: &Value, primary_key: Option<&str>) -> Result<String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Meilisearch document filter must be a JSON object"))?;
+    let mut expressions = Vec::new();
+    for (field, condition) in object {
+        match field.as_str() {
+            "$and" | "$or" => {
+                let values = condition.as_array().ok_or_else(|| {
+                    anyhow!("Meilisearch {field} document filter must be an array")
+                })?;
+                let operator = if field == "$and" { " AND " } else { " OR " };
+                let values = values
+                    .iter()
+                    .map(|value| meilisearch_filter_expression(value, primary_key))
+                    .collect::<Result<Vec<_>>>()?;
+                if !values.is_empty() {
+                    expressions.push(
+                        values
+                            .into_iter()
+                            .map(|value| format!("({value})"))
+                            .collect::<Vec<_>>()
+                            .join(operator),
+                    );
+                }
+            }
+            "$meiliFilter" => {
+                let raw = condition
+                    .as_str()
+                    .ok_or_else(|| anyhow!("$meiliFilter must be a string"))?
+                    .trim();
+                if !raw.is_empty() {
+                    expressions.push(raw.to_string());
+                }
+            }
+            _ => expressions.push(meilisearch_field_filter_expression(
+                field,
+                condition,
+                primary_key,
+            )?),
+        }
+    }
+    if expressions.is_empty() {
+        bail!("Meilisearch document filter is empty");
+    }
+    Ok(expressions
+        .into_iter()
+        .map(|value| format!("({value})"))
+        .collect::<Vec<_>>()
+        .join(" AND "))
+}
+
+fn meilisearch_field_filter_expression(
+    field: &str,
+    condition: &Value,
+    primary_key: Option<&str>,
+) -> Result<String> {
+    let field = if field == "_id" {
+        primary_key.unwrap_or(field)
+    } else {
+        field
+    };
+    validate_meilisearch_field(field)?;
+    let Some(operators) = condition
+        .as_object()
+        .filter(|value| value.keys().any(|key| key.starts_with('$')))
+    else {
+        return Ok(if condition.is_null() {
+            format!("{field} IS NULL")
+        } else {
+            format!("{field} = {}", meilisearch_filter_value(condition)?)
+        });
+    };
+    let mut expressions = Vec::new();
+    for (operator, value) in operators {
+        let expression = match operator.as_str() {
+            "$ne" if value.is_null() => format!("NOT {field} IS NULL"),
+            "$ne" => format!("{field} != {}", meilisearch_filter_value(value)?),
+            "$gt" => format!("{field} > {}", meilisearch_filter_value(value)?),
+            "$gte" => format!("{field} >= {}", meilisearch_filter_value(value)?),
+            "$lt" => format!("{field} < {}", meilisearch_filter_value(value)?),
+            "$lte" => format!("{field} <= {}", meilisearch_filter_value(value)?),
+            "$options" => continue,
+            _ => bail!("Unsupported Meilisearch filter operator for field {field}: {operator}"),
+        };
+        expressions.push(expression);
+    }
+    if expressions.is_empty() {
+        bail!("Meilisearch document filter for {field} is empty");
+    }
+    Ok(expressions
+        .into_iter()
+        .map(|value| format!("({value})"))
+        .collect::<Vec<_>>()
+        .join(" AND "))
+}
+
+fn meilisearch_filter_value(value: &Value) -> Result<String> {
+    match value {
+        Value::String(_) | Value::Number(_) | Value::Bool(_) => Ok(value.to_string()),
+        _ => bail!("Meilisearch filter values must be strings, numbers, booleans, or null"),
+    }
+}
+
+fn validate_meilisearch_field(field: &str) -> Result<()> {
+    if !field.is_empty()
+        && field.len() <= 512
+        && field.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+    {
+        return Ok(());
+    }
+    bail!("Unsupported Meilisearch filter or sort field")
+}
+
+fn parse_meilisearch_document_sort(
+    sort: Option<&str>,
+    primary_key: Option<&str>,
+) -> Result<Vec<String>> {
+    let Some(sort) = sort
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "{}")
+    else {
+        return Ok(Vec::new());
+    };
+    if sort.len() > MEILISEARCH_DOCUMENT_FILTER_MAX_BYTES {
+        bail!("Meilisearch document sort exceeds the local size limit");
+    }
+    let field = |field: &str| -> Result<String> {
+        let field = if field == "_id" {
+            primary_key.unwrap_or(field)
+        } else {
+            field
+        };
+        validate_meilisearch_field(field)?;
+        Ok(field.to_string())
+    };
+    if sort.starts_with('{') {
+        let value: Value =
+            serde_json::from_str(sort).context("Invalid Meilisearch document sort JSON")?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("Meilisearch document sort must be a JSON object"))?;
+        if object.len() > 32 {
+            bail!("Meilisearch document sort has too many fields");
+        }
+        return object
+            .iter()
+            .map(|(name, direction)| {
+                let direction = match direction {
+                    Value::Number(value) if value.as_i64().unwrap_or(1) < 0 => "desc",
+                    Value::String(value) if value.eq_ignore_ascii_case("desc") => "desc",
+                    _ => "asc",
+                };
+                Ok(format!("{}:{direction}", field(name)?))
+            })
+            .collect();
+    }
+    let entries = sort
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty());
+    let mut result = Vec::new();
+    for entry in entries {
+        if result.len() == 32 {
+            bail!("Meilisearch document sort has too many fields");
+        }
+        let (name, direction) = entry.split_once(':').unwrap_or((entry, "asc"));
+        let direction = match direction.trim().to_ascii_lowercase().as_str() {
+            "asc" => "asc",
+            "desc" => "desc",
+            _ => bail!("Unsupported Meilisearch sort direction"),
+        };
+        result.push(format!("{}:{direction}", field(name.trim())?));
+    }
+    Ok(result)
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -592,6 +859,9 @@ mod tests {
         let cursor = encode_document_cursor(&MeilisearchDocumentCursor {
             index: "books".to_string(),
             offset: 100,
+            filter: None,
+            sort: Vec::new(),
+            limit: 100,
         })
         .unwrap();
         assert_eq!(
@@ -599,6 +869,9 @@ mod tests {
             MeilisearchDocumentCursor {
                 index: "books".to_string(),
                 offset: 100,
+                filter: None,
+                sort: Vec::new(),
+                limit: 100,
             }
         );
         assert!(decode_document_cursor("!").is_err());
@@ -643,12 +916,37 @@ mod tests {
         assert_eq!(validate_index_name("中文-books").unwrap(), "中文-books");
     }
 
+    #[test]
+    fn document_filter_and_sort_translate_only_the_supported_grid_grammar() {
+        let filter = parse_meilisearch_document_filter(
+            Some(r#"{"_id":7,"rating":{"$gte":4},"$or":[{"published":true},{"tier":"gold"}]}"#),
+            Some("id"),
+        )
+        .unwrap();
+        assert_eq!(
+            filter,
+            Some(json!(
+                "(id = 7) AND ((rating >= 4)) AND (((published = true)) OR ((tier = \"gold\")))"
+            ))
+        );
+        assert_eq!(
+            parse_meilisearch_document_sort(Some(r#"{"_id":-1,"title":"asc"}"#), Some("id"))
+                .unwrap(),
+            vec!["id:desc", "title:asc"]
+        );
+        assert!(
+            parse_meilisearch_document_filter(Some(r#"{"name":{"$regex":"x"}}"#), None).is_err()
+        );
+        assert!(parse_meilisearch_document_sort(Some("title:sideways"), None).is_err());
+    }
+
     #[tokio::test]
     async fn native_browser_uses_only_closed_health_index_and_document_endpoints() {
         let (url, server) = serve_test_http_responses(vec![
             r#"{"status":"available"}"#,
             r#"{"results":[],"total":0,"offset":0,"limit":1}"#,
             r#"{"results":[{"uid":"books","primaryKey":"id"}],"total":1,"offset":0,"limit":1000}"#,
+            r#"{"uid":"books","primaryKey":"id"}"#,
             r#"{"results":[{"id":1,"title":"Database Systems"}],"total":1}"#,
         ])
         .await;
@@ -663,8 +961,8 @@ mod tests {
                 collection: "books",
                 cursor: None,
                 limit: 50,
-                filter: None,
-                sort: None,
+                filter: Some(r#"{"title":"Database Systems"}"#),
+                sort: Some(r#"{"_id":-1}"#),
             })
             .await
             .unwrap();
@@ -675,8 +973,10 @@ mod tests {
         assert!(requests[0].starts_with("GET /tenant/health HTTP/1.1"));
         assert!(requests[1].starts_with("GET /tenant/indexes?offset=0&limit=1 HTTP/1.1"));
         assert!(requests[2].starts_with("GET /tenant/indexes?offset=0&limit=1000 HTTP/1.1"));
-        assert!(requests[3]
-            .starts_with("GET /tenant/indexes/books/documents?offset=0&limit=50 HTTP/1.1"));
+        assert!(requests[3].starts_with("GET /tenant/indexes/books HTTP/1.1"));
+        assert!(requests[4].starts_with("POST /tenant/indexes/books/documents/fetch HTTP/1.1"));
+        assert!(requests[4].contains(r#""filter":"(title = \"Database Systems\")""#));
+        assert!(requests[4].contains(r#""sort":["id:desc"]"#));
         assert!(requests
             .iter()
             .all(|request| request.contains("authorization: Bearer test-key")));

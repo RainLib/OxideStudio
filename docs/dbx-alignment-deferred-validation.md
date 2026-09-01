@@ -114,10 +114,11 @@ open real database endpoints.
 ## Phase 158 -- Meilisearch native browse runtime
 
 - Validate Meilisearch 1.x health/authentication, base-path deployments,
-  pagination totals, empty/large indexes, primary-key discovery and nested
-  field samples. Confirm only the closed health/index/document endpoints are
-  called and an API key never appears in diagnostics, telemetry or saved URL
-  display.
+  pagination totals, empty/large indexes, primary-key discovery, nested field
+  samples and `documents/fetch` filters/sorts. Confirm only the closed
+  health/index/document endpoints are called, a filter/sort/page-size cursor
+  cannot be replayed with different conditions, and an API key never appears
+  in diagnostics, telemetry or saved URL display.
 - Exercise 401/403/404, malformed JSON, declared and streamed bodies above
   8 MiB, cancellation/connection loss and index deletion between page loads.
   Cursor replay across a different index must fail locally.
