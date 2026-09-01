@@ -81,6 +81,8 @@ func (s *sidecar) dispatch(request iotdb.RequestEnvelope) (any, *iotdb.ProtocolE
 		return map[string]any{"kind": "empty"}, nil
 	case "ping":
 		return s.ping(request.Params)
+	case "serverVersion":
+		return s.serverVersion(request.Params)
 	case "query":
 		return s.query(request.Params)
 	case "metadata":
@@ -162,7 +164,43 @@ func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	if err != nil {
 		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
 	}
-	return map[string]any{"kind": "query", "value": []any{map[string]any{"columns": result.Columns, "columnTypes": result.ColumnTypes, "rows": result.Rows, "truncated": result.Truncated, "rowLimit": iotdb.MaxQueryRows, "rowsAffected": result.RowsAffected}}}, nil
+	return map[string]any{"kind": "query", "value": []any{map[string]any{"columns": protocolColumns(result), "rows": result.Rows, "truncated": result.Truncated, "rowLimit": iotdb.MaxQueryRows, "rowsAffected": result.RowsAffected}}}, nil
+}
+
+func (s *sidecar) serverVersion(raw json.RawMessage) (any, *iotdb.ProtocolError) {
+	var value struct {
+		ConnectionID string `json:"connection_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, iotdb.Fail("INVALID_REQUEST", err.Error())
+	}
+	session, failure := s.session(value.ConnectionID)
+	if failure != nil {
+		return nil, failure
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := session.Query(ctx, "SHOW VERSION", 1, "ms")
+	if err != nil {
+		return nil, iotdb.Fail("VERSION_FAILED", err.Error())
+	}
+	var version any
+	if len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
+		version = result.Rows[0][0]
+	}
+	return map[string]any{"kind": "serverVersion", "value": version}, nil
+}
+
+func protocolColumns(result iotdb.QueryResult) []map[string]string {
+	columns := make([]map[string]string, len(result.Columns))
+	for index, name := range result.Columns {
+		dataType := "UNKNOWN"
+		if index < len(result.ColumnTypes) {
+			dataType = result.ColumnTypes[index]
+		}
+		columns[index] = map[string]string{"name": name, "dataType": dataType}
+	}
+	return columns
 }
 func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	var value struct {
@@ -190,5 +228,5 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	if err != nil {
 		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
 	}
-	return map[string]any{"kind": "metadata", "value": map[string]any{"columns": result.Columns, "rows": result.Rows, "truncated": result.Truncated}}, nil
+	return map[string]any{"kind": "metadata", "value": map[string]any{"columns": protocolColumns(result), "rows": result.Rows, "truncated": result.Truncated}}, nil
 }
