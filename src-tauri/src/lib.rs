@@ -141,6 +141,7 @@ pub fn run() {
             // AgentHostManager is side-effect free here. The sidecar and
             // encrypted local store are initialized lazily by the first agent command.
             app.manage(agent::AgentHostManager::new(app.handle()));
+            app.manage(core::mq_agent::RocketMqAgentManager::new());
 
             // Platform-specific window configuration
             if let Some(_window) = app.get_webview_window("main") {
@@ -171,6 +172,11 @@ pub fn run() {
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::mq::probe_rocketmq_nameservers,
+            commands::mq::connect_rocketmq_workspace,
+            commands::mq::test_rocketmq_workspace,
+            commands::mq::get_rocketmq_cluster,
+            commands::mq::list_rocketmq_topics,
+            commands::mq::disconnect_rocketmq_workspace,
             commands::database::get_database_driver_store_info,
             commands::database::prune_database_driver_cache,
             commands::database::migrate_database_driver_store,

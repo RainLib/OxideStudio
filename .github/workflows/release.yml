@@ -284,6 +284,12 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Setup Go for the RocketMQ workspace agent
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache-dependency-path: src-tauri/agents/rocketmq/go.sum
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@1.91.1
         with:
@@ -321,6 +327,10 @@ jobs:
       - name: Build target-specific oxide-agent
         run: node scripts/prepare-oxide-agent.mjs --target ${{ matrix.target }}
 
+      - name: Build target-specific RocketMQ workspace agent
+        shell: bash
+        run: TAURI_ENV_TARGET_TRIPLE="${{ matrix.target }}" node scripts/prepare-rocketmq-agent.mjs
+
       - name: Verify Unix agent host
         if: matrix.family != 'windows'
         shell: bash
@@ -328,13 +338,17 @@ jobs:
           set -euo pipefail
           AGENT_HOST="src-tauri/binaries/oxide-agent-host-${{ matrix.target }}"
           OXIDE_AGENT="src-tauri/binaries/oxide-agent-${{ matrix.target }}"
+          ROCKETMQ_AGENT="src-tauri/binaries/oxide-agent-rocketmq-${{ matrix.target }}"
           test -f "$AGENT_HOST"
           test -f "$OXIDE_AGENT"
+          test -f "$ROCKETMQ_AGENT"
           chmod 0755 "$AGENT_HOST"
           chmod 0755 "$OXIDE_AGENT"
+          chmod 0755 "$ROCKETMQ_AGENT"
           if [[ "${{ matrix.family }}" == "macos" ]]; then
             lipo "$AGENT_HOST" -verify_arch "${{ matrix.mac_arch }}"
             lipo "$OXIDE_AGENT" -verify_arch "${{ matrix.mac_arch }}"
+            lipo "$ROCKETMQ_AGENT" -verify_arch "${{ matrix.mac_arch }}"
           fi
 
       - name: Verify Windows agent host
@@ -344,11 +358,15 @@ jobs:
           $ErrorActionPreference = "Stop"
           $agentHost = "src-tauri\binaries\oxide-agent-host-${{ matrix.target }}.exe"
           $oxideAgent = "src-tauri\binaries\oxide-agent-${{ matrix.target }}.exe"
+          $rocketMqAgent = "src-tauri\binaries\oxide-agent-rocketmq-${{ matrix.target }}.exe"
           if (-not (Test-Path $agentHost -PathType Leaf)) {
             throw "Packaged agent host was not found: $agentHost"
           }
           if (-not (Test-Path $oxideAgent -PathType Leaf)) {
             throw "Packaged oxide-agent was not found: $oxideAgent"
+          }
+          if (-not (Test-Path $rocketMqAgent -PathType Leaf)) {
+            throw "Packaged RocketMQ workspace agent was not found: $rocketMqAgent"
           }
 
       - name: Smoke target-specific agent runtimes

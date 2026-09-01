@@ -4,9 +4,9 @@
     "version": "0.1.16",
     "identifier": "com.houshuai.oxide-studio",
     "build": {
-        "beforeDevCommand": "npm run agent-host:build && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-sql-lsp.mjs && npm run dev",
+        "beforeDevCommand": "npm run agent-host:build && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-rocketmq-agent.mjs && node scripts/prepare-sql-lsp.mjs && npm run dev",
         "devUrl": "http://localhost:1420",
-        "beforeBuildCommand": "npm run build && node scripts/prepare-agent-host.mjs && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-sql-lsp.mjs",
+        "beforeBuildCommand": "npm run build && node scripts/prepare-agent-host.mjs && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-rocketmq-agent.mjs && node scripts/prepare-sql-lsp.mjs",
         "frontendDist": "../dist"
     },
     "app": {
@@ -44,7 +44,8 @@
         },
         "externalBin": [
             "binaries/oxide-agent-host",
-            "binaries/oxide-agent"
+            "binaries/oxide-agent",
+            "binaries/oxide-agent-rocketmq"
         ]
     },
     "plugins": {

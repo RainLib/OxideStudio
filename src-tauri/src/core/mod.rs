@@ -10,6 +10,7 @@ pub mod driver_sidecar;
 pub mod error;
 pub mod explain;
 pub mod manager;
+pub mod mq_agent;
 pub mod parser;
 pub(crate) mod private_file;
 pub mod protocol;
