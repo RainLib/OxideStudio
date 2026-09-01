@@ -149,6 +149,7 @@ const DATABASE_ICON_FILES: Record<string, string> = {
   questdb: "questdb.svg",
   redis: "redis.svg",
   redshift: "redshift.svg",
+  rocketmq: "rocketmq.svg",
   rqlite: "rqlite.png",
   saphana: "saphana.svg",
   snowflake: "snowflake.svg",

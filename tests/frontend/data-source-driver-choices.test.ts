@@ -12,7 +12,7 @@ describe("data source driver choices", () => {
       [],
     );
 
-    expect(choices).toHaveLength(85);
+    expect(choices).toHaveLength(86);
     expect(choices.find((choice) => choice.driver === "postgres")).toMatchObject({
       availability: "available",
     });

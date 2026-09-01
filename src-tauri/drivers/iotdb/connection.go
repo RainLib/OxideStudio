@@ -22,6 +22,11 @@ type ConnectionConfig struct {
 	TimeZone           string
 	TLS                bool
 	InsecureSkipVerify bool
+	TLSCAFile          string
+	TLSCertFile        string
+	TLSKeyFile         string
+	EnableCompression  bool
+	ConnectRetryMax    int
 }
 
 // ParseConnectionConfig accepts the opaque URL supplied by the signed-package
@@ -88,9 +93,33 @@ func ParseConnectionConfig(raw string, options map[string]string) (ConnectionCon
 	}
 	config.TLS = truthy(first(query, "ssl", "useSSL", "use_ssl", "tls"))
 	config.InsecureSkipVerify = truthy(first(query, "insecure_skip_verify", "tls_insecure_skip_verify"))
+	config.TLSCAFile = first(query, "ssl_ca", "tls_ca_file", "ca_file")
+	config.TLSCertFile = first(query, "ssl_cert", "tls_cert_file", "cert_file")
+	config.TLSKeyFile = first(query, "ssl_key", "tls_key_file", "key_file")
+	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
+		return config, fmt.Errorf("IoTDB TLS client certificate and key must be provided together")
+	}
+	config.EnableCompression = truthy(first(query, "rpc_compression", "enable_compression", "compression"))
+	if value := first(query, "connect_retry_max", "connectRetryMax"); value != "" {
+		retries, err := positive(value)
+		if err != nil {
+			return config, fmt.Errorf("invalid IoTDB connect retry maximum")
+		}
+		config.ConnectRetryMax = retries
+	}
 	config.Nodes = splitNodes(first(query, "node_urls", "nodes"))
 	if len(config.Nodes) == 0 {
 		config.Nodes = []string{net.JoinHostPort(config.Host, strconv.Itoa(config.Port))}
+	}
+	for _, node := range config.Nodes {
+		_, port, err := net.SplitHostPort(node)
+		if err != nil {
+			return config, fmt.Errorf("invalid IoTDB node URL %q: %w", node, err)
+		}
+		parsed, err := strconv.Atoi(port)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			return config, fmt.Errorf("invalid IoTDB node URL port %q", port)
+		}
 	}
 	return config, nil
 }

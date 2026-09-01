@@ -14,3 +14,10 @@ func TestIoTDBQueryStatementClassification(t *testing.T) {
 		}
 	}
 }
+
+func TestIoTDBQueryRejectsMutationBeforeOpeningACursor(t *testing.T) {
+	result, err := (*Session)(nil).Query(nil, "CREATE DATABASE metrics", 1, "ms")
+	if err == nil || result.Columns != nil {
+		t.Fatalf("expected mutation rejection, got result=%#v err=%v", result, err)
+	}
+}

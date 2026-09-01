@@ -145,14 +145,18 @@ func (s *sidecar) ping(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 }
 func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	var value struct {
-		ConnectionID string `json:"connection_id"`
-		Statement    string `json:"statement"`
+		ConnectionID string            `json:"connection_id"`
+		Statement    string            `json:"statement"`
+		Parameters   []json.RawMessage `json:"parameters"`
 		Context      struct {
 			Database string `json:"database"`
 		} `json:"context"`
 	}
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, iotdb.Fail("INVALID_REQUEST", err.Error())
+	}
+	if len(value.Parameters) != 0 {
+		return nil, iotdb.Fail("PARAMETERS_UNSUPPORTED", "IoTDB native package does not support bound query parameters")
 	}
 	session, failure := s.session(value.ConnectionID)
 	if failure != nil {

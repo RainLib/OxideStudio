@@ -2,6 +2,7 @@ package iotdb
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,14 +20,35 @@ type Session struct {
 }
 
 func OpenSession(config ConnectionConfig) (*Session, error) {
-	if len(config.Nodes) != 1 {
-		return nil, fmt.Errorf("IoTDB cluster session routing is not enabled yet")
+	tlsConfig := (*client.TLSConfig)(nil)
+	if config.TLS {
+		tlsConfig = &client.TLSConfig{
+			Config:   &tls.Config{InsecureSkipVerify: config.InsecureSkipVerify}, // #nosec G402 -- explicit per-connection opt-in
+			CAFile:   config.TLSCAFile,
+			CertFile: config.TLSCertFile,
+			KeyFile:  config.TLSKeyFile,
+		}
 	}
-	clientSession := client.NewSession(&client.Config{
-		Host: config.Host, Port: strconv.Itoa(config.Port), UserName: config.Username,
-		Password: config.Password, FetchSize: int32(config.FetchSize), TimeZone: config.TimeZone,
-	})
-	if err := clientSession.Open(false, 15_000); err != nil {
+	var clientSession client.Session
+	var err error
+	if len(config.Nodes) > 1 {
+		clientSession, err = client.NewClusterSession(&client.ClusterConfig{
+			NodeUrls: config.Nodes, UserName: config.Username, Password: config.Password,
+			FetchSize: int32(config.FetchSize), TimeZone: config.TimeZone,
+			ConnectRetryMax: config.ConnectRetryMax, TLSConfig: tlsConfig,
+		})
+		if err == nil {
+			err = clientSession.OpenCluster(config.EnableCompression)
+		}
+	} else {
+		clientSession = client.NewSession(&client.Config{
+			Host: config.Host, Port: strconv.Itoa(config.Port), UserName: config.Username,
+			Password: config.Password, FetchSize: int32(config.FetchSize), TimeZone: config.TimeZone,
+			ConnectRetryMax: config.ConnectRetryMax, TLSConfig: tlsConfig,
+		})
+		err = clientSession.Open(config.EnableCompression, 15_000)
+	}
+	if err != nil {
 		return nil, err
 	}
 	session := &Session{client: &clientSession, config: config}

@@ -24,6 +24,9 @@ func (s *Session) Query(ctx context.Context, statement string, limit int, precis
 	if statement == "" {
 		return QueryResult{}, fmt.Errorf("IoTDB statement is required")
 	}
+	if !IsQueryStatement(statement) {
+		return QueryResult{}, fmt.Errorf("IoTDB package only permits read-only query statements")
+	}
 	data, err := s.Execute(ctx, statement)
 	if err != nil {
 		return QueryResult{}, err
@@ -32,9 +35,6 @@ func (s *Session) Query(ctx context.Context, statement string, limit int, precis
 		return QueryResult{}, nil
 	}
 	defer data.Close()
-	if !IsQueryStatement(statement) {
-		return QueryResult{}, nil
-	}
 	if limit < 1 || limit > MaxQueryRows {
 		limit = MaxQueryRows
 	}
