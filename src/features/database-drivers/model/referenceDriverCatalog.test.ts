@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DBX_REFERENCE_DRIVER_IDS,
+  REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
   referenceDriverCandidate,
   referenceDriverDeliveryPlan,
@@ -10,6 +11,20 @@ describe("DBX reference driver catalogue", () => {
   it("tracks the complete 80-product DBX baseline without duplicate ids", () => {
     expect(DBX_REFERENCE_DRIVER_IDS).toHaveLength(80);
     expect(new Set(DBX_REFERENCE_DRIVER_IDS).size).toBe(80);
+  });
+
+  it("keeps the five explicit compatibility products separate from the DBX baseline", () => {
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(85);
+    const compatibilityCandidates = REFERENCE_DATABASE_DRIVER_CANDIDATES.filter(
+      (candidate) => candidate.source === "compatibility",
+    );
+    expect(compatibilityCandidates.map((candidate) => candidate.driver)).toEqual([
+      "cockroachdb",
+      "yugabytedb",
+      "timescaledb",
+      "tidb",
+      "greenplum",
+    ]);
   });
 
   it("keeps the latest DBX products unavailable until their own package is ready", () => {
