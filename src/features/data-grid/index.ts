@@ -63,3 +63,13 @@ export {
   filterDataGridColumnLookupItems,
   type DataGridColumnLookupItem,
 } from "./model/columnLookup";
+export {
+  DATA_GRID_MAX_EXPANDABLE_PASTE_CELLS,
+  DATA_GRID_MAX_EXPANDABLE_PASTE_ROWS,
+  isBlankDataGridDraftValue,
+  planExpandableNewRowPaste,
+  type DataGridNewRowPasteCell,
+  type DataGridNewRowPastePlan,
+  type DataGridPasteColumn,
+  type DataGridPasteRange,
+} from "./model/newRowPaste";

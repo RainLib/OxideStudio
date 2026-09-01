@@ -22,6 +22,7 @@ import {
   CompactSelection,
   type CellClickedEventArgs,
   type DataEditorRef,
+  type EditListItem,
   type GridKeyEventArgs,
   type GridMouseEventArgs,
   type HeaderClickedEventArgs,
@@ -98,6 +99,7 @@ import {
   gridLayoutKey,
   loadGridLayout,
   normalizeGridLayout,
+  planExpandableNewRowPaste,
   type DataGridContextMenuItem,
   type DataGridHoverTooltipState,
   type DataGridColumnLookupItem,
@@ -286,6 +288,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       setGridSort,
       setCellEdit,
       setBulkCellEdit,
+      applyNewRowPaste,
       setColumnWidth,
       setColumnOrder,
       setColumnHidden,
@@ -306,6 +309,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         setGridSort: state.setGridSort,
         setCellEdit: state.setCellEdit,
         setBulkCellEdit: state.setBulkCellEdit,
+        applyNewRowPaste: state.applyNewRowPaste,
         setColumnWidth: state.setColumnWidth,
         setColumnOrder: state.setColumnOrder,
         setColumnHidden: state.setColumnHidden,
@@ -1290,6 +1294,113 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         );
       },
       [columns, overrideColumns, result, isTransposed],
+    );
+
+    const pasteColumns = useMemo(
+      () =>
+        columns.map((_, visualColumnIndex) => {
+          const columnIndex = visualColumnIndexToResultIndex(visualColumnIndex);
+          const resultColumn = result?.columns[columnIndex];
+          const fallbackColumn = overrideColumns?.[columnIndex];
+          const metadata = tableColumnsByName.get(
+            resultColumn?.name || fallbackColumn?.name || "",
+          );
+          return {
+            columnIndex,
+            editable: columnIndex >= 0 && isTableColumnEditable(metadata),
+            dataType:
+              metadata?.data_type ||
+              resultColumn?.data_type ||
+              fallbackColumn?.type,
+          };
+        }),
+      [
+        columns,
+        overrideColumns,
+        result,
+        tableColumnsByName,
+        visualColumnIndexToResultIndex,
+      ],
+    );
+
+    const onCellsEdited = useCallback(
+      (items: readonly EditListItem[]): boolean | void => {
+        if (!activeTab || !isEditable || items.length <= 1) return;
+        const edits = items.flatMap(({ location: [column, row], value }) => {
+          const visualRow = visualRows[row];
+          const pasteColumn = pasteColumns[column];
+          if (!visualRow || !pasteColumn?.editable || !("data" in value)) {
+            return [];
+          }
+          return [
+            {
+              rowIndex: visualRow.rowKey,
+              colIndex: pasteColumn.columnIndex,
+              value: normalizeDataGridNumericInput(
+                value.data,
+                pasteColumn.dataType,
+              ),
+            },
+          ];
+        });
+        if (edits.length > 0) setBulkCellEdit(activeTab.id, edits);
+        // Suppress Glide's per-cell callback even when every item became
+        // readonly between paste parsing and this atomic store update.
+        return true;
+      },
+      [activeTab, isEditable, pasteColumns, setBulkCellEdit, visualRows],
+    );
+
+    const onPaste = useCallback(
+      (target: Item, values: readonly (readonly string[])[]): boolean => {
+        if (!activeTab || !isEditable) return true;
+        const plan = planExpandableNewRowPaste({
+          target,
+          selection: gridSelection.current?.range,
+          selectedRows: gridSelection.rows.toArray(),
+          hasColumnSelection: gridSelection.columns.length > 0,
+          pastedRows: values,
+          visualRows,
+          pendingEdits,
+          visibleColumns: pasteColumns,
+        });
+        if (!plan) return true;
+
+        const rows = plan.rows.map((row) =>
+          row.map((cell) => {
+            const normalized = normalizeDataGridNumericInput(
+              cell.value,
+              cell.dataType,
+            );
+            return {
+              ...cell,
+              value:
+                normalized === null || typeof normalized === "string"
+                  ? normalized
+                  : cell.value,
+            };
+          }),
+        );
+        const handled = applyNewRowPaste(
+          activeTab.id,
+          plan.targetRowKey,
+          plan.reusableRowKeys,
+          rows,
+        );
+        // Glide proceeds with its bounded paste only when true is returned.
+        return !handled;
+      },
+      [
+        activeTab,
+        applyNewRowPaste,
+        gridSelection.current?.range,
+        gridSelection.columns,
+        gridSelection.rows,
+        isEditable,
+        pasteColumns,
+        pendingEdits,
+        visualRows,
+      ],
     );
 
     const openValueEditor = useCallback(
@@ -2814,6 +2925,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 onCellContextMenu={isTransposed ? undefined : onCellContextMenu}
                 onItemHovered={onItemHovered}
                 onCellEdited={isEditable ? onCellEdited : undefined}
+                onCellsEdited={isEditable ? onCellsEdited : undefined}
+                onPaste={isEditable ? onPaste : undefined}
                 onCellActivated={onCellActivated}
                 onKeyDown={onGridKeyDown}
                 onColumnResize={isTransposed ? undefined : onColumnResize}
