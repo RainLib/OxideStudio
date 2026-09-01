@@ -235,4 +235,36 @@ describe("tab store organization actions", () => {
     expect(current?.results).toBeNull();
     expect(current?.resultRuns).toBeUndefined();
   });
+
+  it("keeps the result-run pin count bounded", () => {
+    const result = (name: string) => ({
+      columns: [{ name, data_type: "text" }],
+      rows: [[name]],
+    });
+    const runs = ["one", "two", "three", "four"].map((name, index) => ({
+      id: `run-${name}`,
+      completedAt: index,
+      results: [result(name)],
+      activeResultIndex: 0,
+      pinned: index < 3,
+    }));
+    useTabStore.setState({
+      tabs: [
+        {
+          ...tab("query"),
+          results: runs[0]!.results,
+          activeResultRunId: runs[0]!.id,
+          resultRuns: runs,
+        },
+      ],
+      activeTabId: "query",
+    });
+
+    useTabStore.getState().toggleResultRunPin("query", "run-four");
+    expect(
+      useTabStore
+        .getState()
+        .tabs[0]?.resultRuns?.find((run) => run.id === "run-four")?.pinned,
+    ).toBe(false);
+  });
 });
