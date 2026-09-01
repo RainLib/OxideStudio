@@ -112,6 +112,28 @@ pub async fn list_rocketmq_topics(
 }
 
 #[tauri::command]
+pub async fn list_rocketmq_consumer_groups(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+    keyword: Option<String>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_list_consumer_groups",
+            serde_json::json!({
+                "keyword": keyword.unwrap_or_default(),
+                "offset": offset.unwrap_or(0),
+                "limit": limit.unwrap_or(200),
+            }),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn disconnect_rocketmq_workspace(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,

@@ -24,6 +24,7 @@ describe("RocketMQ workspace service", () => {
   it("forwards workspace calls only through desktop raw commands", async () => {
     await rocketMqService.connect("rocket-1", { namesrvAddr: "localhost:9876" });
     await rocketMqService.listTopics("rocket-1", "orders");
+    await rocketMqService.listConsumerGroups("rocket-1", { offset: 200, limit: 100 });
     expect(invokeRawCommand).toHaveBeenNthCalledWith(1, "connect_rocketmq_workspace", {
       connectionId: "rocket-1",
       config: { namesrvAddr: "localhost:9876" },
@@ -31,6 +32,11 @@ describe("RocketMQ workspace service", () => {
     expect(invokeRawCommand).toHaveBeenNthCalledWith(2, "list_rocketmq_topics", {
       connectionId: "rocket-1",
       keyword: "orders",
+    });
+    expect(invokeRawCommand).toHaveBeenNthCalledWith(3, "list_rocketmq_consumer_groups", {
+      connectionId: "rocket-1",
+      offset: 200,
+      limit: 100,
     });
   });
 });

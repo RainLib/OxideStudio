@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	admin "github.com/amigoer/rocketmq-admin-go"
 )
 
 func TestNormalizeNameServersRejectsURLsAndDeduplicates(t *testing.T) {
@@ -54,5 +56,15 @@ func TestHandshakeDoesNotRequireACluster(t *testing.T) {
 	value := result.(map[string]any)
 	if value["protocolVersion"] != 1 {
 		t.Fatalf("unexpected handshake: %#v", value)
+	}
+}
+
+func TestMasterBrokerAddressesAreSortedAndMasterOnly(t *testing.T) {
+	info := &admin.ClusterInfo{BrokerAddrTable: map[string]*admin.BrokerData{
+		"a": {BrokerAddrs: map[string]string{"0": "b:10911", "1": "slave:10912"}},
+		"b": {BrokerAddrs: map[string]string{"0": "a:10911"}},
+	}}
+	if got, want := masterBrokerAddresses(info), []string{"a:10911", "b:10911"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %#v", got)
 	}
 }

@@ -26,7 +26,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_consumer_groups",
 }
 
 type rpcRequest struct {
@@ -121,6 +121,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.describeCluster()
 	case "mq_list_topics":
 		return a.listTopics(params)
+	case "mq_list_consumer_groups":
+		return a.listConsumerGroups(params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -302,6 +304,100 @@ func (a *rocketMQAgent) listTopics(params map[string]any) (any, error) {
 	}
 	sort.Strings(items)
 	return map[string]any{"topics": items, "total": len(items), "offset": 0, "limit": len(items)}, nil
+}
+
+// listConsumerGroups mirrors DBX's cluster-wide group listing. The admin
+// library exposes subscription groups per broker, so merge every master before
+// paginating; querying only the first broker silently loses groups in clusters.
+func (a *rocketMQAgent) listConsumerGroups(params map[string]any) (any, error) {
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	info, err := client.ExamineBrokerClusterInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	groups := map[string]struct{}{}
+	for _, broker := range masterBrokerAddresses(info) {
+		entries, fetchErr := client.GetAllSubscriptionGroup(ctx, broker)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		for name := range entries {
+			groups[name] = struct{}{}
+		}
+	}
+	keyword, _ := params["keyword"].(string)
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	items := make([]string, 0, len(groups))
+	for name := range groups {
+		if keyword == "" || strings.Contains(strings.ToLower(name), keyword) {
+			items = append(items, name)
+		}
+	}
+	sort.Strings(items)
+	offset := jsonInt(params["offset"], 0)
+	limit := jsonInt(params["limit"], 200)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 1 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	end := offset + limit
+	if offset > len(items) {
+		offset = len(items)
+	}
+	if end > len(items) {
+		end = len(items)
+	}
+	page := items[offset:end]
+	rows := make([]map[string]any, 0, len(page))
+	for _, group := range page {
+		rows = append(rows, map[string]any{"groupId": group, "state": "UNKNOWN", "simpleGroup": false, "messageModel": "CLUSTERING"})
+	}
+	return map[string]any{"groups": rows, "total": len(items), "offset": offset, "limit": limit}, nil
+}
+
+func masterBrokerAddresses(info *admin.ClusterInfo) []string {
+	addresses := map[string]struct{}{}
+	if info != nil {
+		for _, broker := range info.BrokerAddrTable {
+			if broker != nil && broker.BrokerAddrs["0"] != "" {
+				addresses[broker.BrokerAddrs["0"]] = struct{}{}
+			}
+		}
+	}
+	items := make([]string, 0, len(addresses))
+	for address := range addresses {
+		items = append(items, address)
+	}
+	sort.Strings(items)
+	return items
+}
+
+func jsonInt(value any, fallback int) int {
+	switch item := value.(type) {
+	case float64:
+		return int(item)
+	case json.Number:
+		parsed, err := item.Int64()
+		if err == nil {
+			return int(parsed)
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(item))
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func (a *rocketMQAgent) close() {

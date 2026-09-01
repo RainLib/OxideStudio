@@ -529,7 +529,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       if (state.connectedConnectionIds.includes(id)) {
         try {
-          await connectionService.disconnect(id);
+          if (connectionToRemove && isRocketMqConnection(connectionToRemove)) {
+            await rocketMqService.disconnect(id);
+          } else {
+            await connectionService.disconnect(id);
+          }
         } catch (error) {
           console.warn("Failed to disconnect removed data source:", error);
         }
