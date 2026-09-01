@@ -68,3 +68,19 @@ func TestMasterBrokerAddressesAreSortedAndMasterOnly(t *testing.T) {
 		t.Fatalf("addresses = %#v", got)
 	}
 }
+
+func TestConsumerAssignmentsAreSortedAndKeepSubscriptionDetails(t *testing.T) {
+	assignments := consumerAssignments(&admin.ConsumerConnection{SubscriptionTable: map[string]*admin.SubscriptionData{
+		"orders": {Topic: "orders", SubString: "paid || shipped", ExpressionType: "TAG"},
+		"audit":  {SubString: "*", ExpressionType: "SQL92"},
+	}})
+	if len(assignments) != 2 {
+		t.Fatalf("assignments = %#v", assignments)
+	}
+	if assignments[0]["topic"] != "audit" || assignments[1]["topic"] != "orders" {
+		t.Fatalf("assignments are not sorted: %#v", assignments)
+	}
+	if assignments[0]["expressionType"] != "SQL92" {
+		t.Fatalf("subscription details were not retained: %#v", assignments[0])
+	}
+}

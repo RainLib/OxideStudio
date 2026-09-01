@@ -26,7 +26,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_consumer_groups",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -123,6 +123,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.listTopics(params)
 	case "mq_list_consumer_groups":
 		return a.listConsumerGroups(params)
+	case "mq_describe_consumer_group":
+		return a.describeConsumerGroup(params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -365,6 +367,73 @@ func (a *rocketMQAgent) listConsumerGroups(params map[string]any) (any, error) {
 	return map[string]any{"groups": rows, "total": len(items), "offset": offset, "limit": limit}, nil
 }
 
+// describeConsumerGroup returns live consumer membership and subscriptions.
+// This deliberately does not infer members from subscription-group metadata:
+// that metadata exists even when no consumer process is currently connected.
+func (a *rocketMQAgent) describeConsumerGroup(params map[string]any) (any, error) {
+	groupID, ok := params["groupId"].(string)
+	groupID = strings.TrimSpace(groupID)
+	if !ok || groupID == "" {
+		return nil, fmt.Errorf("groupId is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	connection, err := client.ExamineConsumerConnectionInfo(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	assignments := consumerAssignments(connection)
+	members := make([]map[string]any, 0, len(connection.ConnectionSet))
+	for _, member := range connection.ConnectionSet {
+		if member == nil {
+			continue
+		}
+		members = append(members, map[string]any{
+			"memberId":    member.ClientId,
+			"clientId":    member.ClientId,
+			"host":        member.ClientAddr,
+			"language":    member.Language,
+			"version":     member.Version,
+			"assignments": assignments,
+		})
+	}
+	sort.Slice(members, func(left, right int) bool {
+		return fmt.Sprint(members[left]["memberId"]) < fmt.Sprint(members[right]["memberId"])
+	})
+	return map[string]any{
+		"groupId":          groupID,
+		"state":            valueOrDefault(connection.ConsumeType, "UNKNOWN"),
+		"messageModel":     emptyToNil(connection.MessageModel),
+		"consumeFromWhere": emptyToNil(connection.ConsumeFromWhere),
+		"members":          members,
+		"assignments":      assignments,
+	}, nil
+}
+
+func consumerAssignments(connection *admin.ConsumerConnection) []map[string]any {
+	if connection == nil {
+		return []map[string]any{}
+	}
+	topics := sortedKeys(connection.SubscriptionTable)
+	assignments := make([]map[string]any, 0, len(topics))
+	for _, topic := range topics {
+		subscription := connection.SubscriptionTable[topic]
+		if subscription == nil {
+			continue
+		}
+		assignments = append(assignments, map[string]any{
+			"topic":          valueOrDefault(subscription.Topic, topic),
+			"subExpression":  subscription.SubString,
+			"expressionType": subscription.ExpressionType,
+		})
+	}
+	return assignments
+}
+
 func masterBrokerAddresses(info *admin.ClusterInfo) []string {
 	addresses := map[string]struct{}{}
 	if info != nil {
@@ -398,6 +467,20 @@ func jsonInt(value any, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func valueOrDefault(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func emptyToNil(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func (a *rocketMQAgent) close() {

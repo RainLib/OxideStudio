@@ -177,6 +177,7 @@ pub fn run() {
             commands::mq::get_rocketmq_cluster,
             commands::mq::list_rocketmq_topics,
             commands::mq::list_rocketmq_consumer_groups,
+            commands::mq::get_rocketmq_consumer_group,
             commands::mq::disconnect_rocketmq_workspace,
             commands::database::get_database_driver_store_info,
             commands::database::prune_database_driver_cache,

@@ -108,6 +108,11 @@ const DatabaseBrowser = lazy(() =>
     default: module.DatabaseBrowser,
   })),
 );
+const RocketMqWorkspace = lazy(() =>
+  import("@/components/workspace/RocketMqWorkspace").then((module) => ({
+    default: module.RocketMqWorkspace,
+  })),
+);
 const LspConnectionSyncer = lazy(() =>
   import("@/components/lsp/LspConnectionSyncer").then((module) => ({
     default: module.LspConnectionSyncer,
@@ -239,21 +244,24 @@ export function WorkspaceRuntime() {
   const isQueryTab = activeTab?.type === "query";
   const hasQueryResultSurface =
     Boolean(isQueryTab && activeTab) &&
-    Boolean(
-      currentResult ||
-      activeTab?.explainPlan ||
-      activeTab?.error,
-    );
+    Boolean(currentResult || activeTab?.explainPlan || activeTab?.error);
   const isIntrospecting =
     isSchemaLoading || isCollectionsLoading || isFunctionsLoading;
   const leftToolWindow = toolWindowAtSide(workbenchSettings, "left");
   const rightToolWindow = toolWindowAtSide(workbenchSettings, "right");
-  const isDatabaseExplorerOpen = leftToolWindow === "databaseExplorer" || rightToolWindow === "databaseExplorer";
-  const isAssistantOpen = leftToolWindow === "assistant" || rightToolWindow === "assistant";
-  const isProjectFilesOpen = leftToolWindow === "projectFiles" || rightToolWindow === "projectFiles";
-  const isSqlLibraryOpen = leftToolWindow === "sqlLibrary" || rightToolWindow === "sqlLibrary";
-  const isCommitOpen = leftToolWindow === "commit" || rightToolWindow === "commit";
-  const isVersionControlOpen = leftToolWindow === "versionControl" || rightToolWindow === "versionControl";
+  const isDatabaseExplorerOpen =
+    leftToolWindow === "databaseExplorer" ||
+    rightToolWindow === "databaseExplorer";
+  const isAssistantOpen =
+    leftToolWindow === "assistant" || rightToolWindow === "assistant";
+  const isProjectFilesOpen =
+    leftToolWindow === "projectFiles" || rightToolWindow === "projectFiles";
+  const isSqlLibraryOpen =
+    leftToolWindow === "sqlLibrary" || rightToolWindow === "sqlLibrary";
+  const isCommitOpen =
+    leftToolWindow === "commit" || rightToolWindow === "commit";
+  const isVersionControlOpen =
+    leftToolWindow === "versionControl" || rightToolWindow === "versionControl";
   const showQueryResultPanel =
     toolWindows.results.enabled &&
     hasQueryResultSurface &&
@@ -301,8 +309,9 @@ export function WorkspaceRuntime() {
       return true;
     };
     const handleVimWindowNavigation = (event: Event) => {
-      const direction = (event as CustomEvent<{ direction?: VimWindowNavigation }>)
-        .detail?.direction;
+      const direction = (
+        event as CustomEvent<{ direction?: VimWindowNavigation }>
+      ).detail?.direction;
       if (!direction) return;
       if (direction === "close") {
         const tabId = useTabStore.getState().activeTabId;
@@ -509,12 +518,16 @@ export function WorkspaceRuntime() {
 
   useEffect(() => {
     const openCommit = () => setToolWindowVisible("commit", true);
-    const openVersionControl = () => setToolWindowVisible("versionControl", true);
+    const openVersionControl = () =>
+      setToolWindowVisible("versionControl", true);
     window.addEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
     window.addEventListener(APP_EVENT_OPEN_VERSION_CONTROL, openVersionControl);
     return () => {
       window.removeEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
-      window.removeEventListener(APP_EVENT_OPEN_VERSION_CONTROL, openVersionControl);
+      window.removeEventListener(
+        APP_EVENT_OPEN_VERSION_CONTROL,
+        openVersionControl,
+      );
     };
   }, [setToolWindowVisible]);
 
@@ -572,7 +585,10 @@ export function WorkspaceRuntime() {
     document.body.style.cursor = "row-resize";
   };
 
-  const renderSideToolWindow = (id: SideToolWindowId | null, side: WorkbenchSide) => {
+  const renderSideToolWindow = (
+    id: SideToolWindowId | null,
+    side: WorkbenchSide,
+  ) => {
     const width = side === "left" ? layout.leftWidth : layout.rightWidth;
     const isOpen = id !== null;
     if (!id) {
@@ -650,9 +666,10 @@ export function WorkspaceRuntime() {
               layout.pinnedTitleTools.includes("commit")
             }
             versionControlOpen={isVersionControlOpen}
-            versionControlPinned={layout.pinnedTitleTools.includes(
-              "versionControl",
-            ) && toolWindows.versionControl.enabled}
+            versionControlPinned={
+              layout.pinnedTitleTools.includes("versionControl") &&
+              toolWindows.versionControl.enabled
+            }
             onToggleDatabaseExplorer={() =>
               toggleToolWindow("databaseExplorer")
             }
@@ -661,9 +678,7 @@ export function WorkspaceRuntime() {
             onToggleSqlLibrary={() => toggleToolWindow("sqlLibrary")}
             onToggleCommit={() => toggleToolWindow("commit")}
             onToggleVersionControl={() => toggleToolWindow("versionControl")}
-            onSetCommitPinned={(pinned) =>
-              setTitleToolPinned("commit", pinned)
-            }
+            onSetCommitPinned={(pinned) => setTitleToolPinned("commit", pinned)}
             onSetVersionControlPinned={(pinned) =>
               setTitleToolPinned("versionControl", pinned)
             }
@@ -695,200 +710,264 @@ export function WorkspaceRuntime() {
 
                   <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                     <Suspense fallback={<WorkbenchSurfaceFallback />}>
-                    {activeTab?.type === "table" ? (
-                      <TableDataView />
-                    ) : activeTab?.type === "create_table" ? (
-                      <CreateTableTab
-                        tabId={activeTab.id}
-                        connectionId={activeTab.connectionId || ""}
-                        schemaName={activeTab.schemaName || ""}
-                      />
-                    ) : activeTab?.type === "schema_diff" ? (
-                      <SchemaDiffView />
-                    ) : activeTab?.type === "schema_diagram" ? (
-                      <SchemaDiagramView />
-                    ) : activeTab?.type === "data_compare" ? (
-                      <DataCompareView />
-                    ) : activeTab?.type === "database_browser" ? (
-                      <DatabaseBrowser />
-                    ) : (
-                      <div className="relative flex h-full min-h-0 flex-col gap-1">
-                        <div
-                          className={cn(
-                            "flex min-h-[160px] flex-1 flex-col overflow-hidden",
-                            layout.activeToolWindow === "editor" &&
-                              activePanelClass,
-                          )}
-                          onFocus={() => setActiveToolWindow("editor")}
-                        >
-                          {splitDirection ? <SplitEditor /> : <QueryEditor />}
-                        </div>
+                      {activeTab?.type === "table" ? (
+                        <TableDataView />
+                      ) : activeTab?.type === "create_table" ? (
+                        <CreateTableTab
+                          tabId={activeTab.id}
+                          connectionId={activeTab.connectionId || ""}
+                          schemaName={activeTab.schemaName || ""}
+                        />
+                      ) : activeTab?.type === "schema_diff" ? (
+                        <SchemaDiffView />
+                      ) : activeTab?.type === "schema_diagram" ? (
+                        <SchemaDiagramView />
+                      ) : activeTab?.type === "data_compare" ? (
+                        <DataCompareView />
+                      ) : activeTab?.type === "database_browser" ? (
+                        <DatabaseBrowser />
+                      ) : activeTab?.type === "rocketmq_workspace" ? (
+                        <RocketMqWorkspace />
+                      ) : (
+                        <div className="relative flex h-full min-h-0 flex-col gap-1">
+                          <div
+                            className={cn(
+                              "flex min-h-[160px] flex-1 flex-col overflow-hidden",
+                              layout.activeToolWindow === "editor" &&
+                                activePanelClass,
+                            )}
+                            onFocus={() => setActiveToolWindow("editor")}
+                          >
+                            {splitDirection ? <SplitEditor /> : <QueryEditor />}
+                          </div>
 
-                        {showQueryResultPanel && (
-                          <>
-                            <div
-                              className="wb-resizer-y relative z-50"
-                              onMouseDown={handleVerticalDragStart}
-                            />
-                            <div
-                              className={cn(
-                                "min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]",
-                                layout.activeToolWindow === "results" &&
-                                  activePanelClass,
-                              )}
-                              style={{ height: `${layout.bottomHeight}px` }}
-                              onFocus={() => setActiveToolWindow("results")}
-                              data-workbench-results
-                              tabIndex={-1}
-                            >
-                              <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
-                                <div className="flex min-w-0 items-center gap-1.5">
-                                  {(!isPlanView || queryResults.length > 0) && (
-                                    <button
-                                      type="button"
-                                      className={cn(
-                                        "mr-1 flex h-5 items-center rounded-[3px] px-2 font-medium",
-                                        !isPlanView
-                                          ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                          : "hover:bg-[hsl(var(--wb-hover))]",
+                          {showQueryResultPanel && (
+                            <>
+                              <div
+                                className="wb-resizer-y relative z-50"
+                                onMouseDown={handleVerticalDragStart}
+                              />
+                              <div
+                                className={cn(
+                                  "min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]",
+                                  layout.activeToolWindow === "results" &&
+                                    activePanelClass,
+                                )}
+                                style={{ height: `${layout.bottomHeight}px` }}
+                                onFocus={() => setActiveToolWindow("results")}
+                                data-workbench-results
+                                tabIndex={-1}
+                              >
+                                <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    {(!isPlanView ||
+                                      queryResults.length > 0) && (
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          "mr-1 flex h-5 items-center rounded-[3px] px-2 font-medium",
+                                          !isPlanView
+                                            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                            : "hover:bg-[hsl(var(--wb-hover))]",
+                                        )}
+                                        onClick={() =>
+                                          activeTab &&
+                                          setQueryOutputView(
+                                            activeTab.id,
+                                            "results",
+                                          )
+                                        }
+                                      >
+                                        Results
+                                      </button>
+                                    )}
+                                    {(activeTab?.explainPlan || isPlanView) && (
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          "mr-1 flex h-5 items-center gap-1.5 rounded-[3px] px-2 font-medium",
+                                          isPlanView
+                                            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                            : "hover:bg-[hsl(var(--wb-hover))]",
+                                        )}
+                                        onClick={() =>
+                                          activeTab &&
+                                          setQueryOutputView(
+                                            activeTab.id,
+                                            "plan",
+                                          )
+                                        }
+                                      >
+                                        <LineChart size={11} />
+                                        Explain Plan
+                                      </button>
+                                    )}
+                                    {!isPlanView &&
+                                      queryResultRuns.length > 1 && (
+                                        <div className="flex min-w-0 items-center gap-0.5 border-l border-[hsl(var(--wb-border-subtle))] pl-1">
+                                          {queryResultRuns.map((run, index) => (
+                                            <div
+                                              key={run.id}
+                                              className={cn(
+                                                "group/run flex h-5 max-w-[122px] items-center rounded-[3px]",
+                                                run.id ===
+                                                  activeTab?.activeResultRunId
+                                                  ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]",
+                                              )}
+                                            >
+                                              <button
+                                                type="button"
+                                                className="min-w-0 truncate px-2 text-[10px]"
+                                                onClick={() =>
+                                                  activeTab &&
+                                                  setActiveResultRun(
+                                                    activeTab.id,
+                                                    run.id,
+                                                  )
+                                                }
+                                                title={`Execution ${index + 1}: ${run.results
+                                                  .reduce(
+                                                    (count, result) =>
+                                                      count +
+                                                      result.rows.length,
+                                                    0,
+                                                  )
+                                                  .toLocaleString()} rows`}
+                                              >
+                                                {run.pinned && (
+                                                  <Pin
+                                                    size={9}
+                                                    className="mr-1 inline-block -translate-y-px text-[hsl(var(--wb-accent))]"
+                                                  />
+                                                )}
+                                                Run {index + 1}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-35"
+                                                title={
+                                                  run.pinned
+                                                    ? "Unpin result run"
+                                                    : pinnedQueryResultRunCount >=
+                                                        3
+                                                      ? "Only three result runs can be pinned"
+                                                      : "Pin result run"
+                                                }
+                                                disabled={
+                                                  !run.pinned &&
+                                                  pinnedQueryResultRunCount >= 3
+                                                }
+                                                onClick={() =>
+                                                  activeTab &&
+                                                  toggleResultRunPin(
+                                                    activeTab.id,
+                                                    run.id,
+                                                  )
+                                                }
+                                              >
+                                                <Pin size={9} />
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="mr-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100"
+                                                title="Close result run"
+                                                onClick={() =>
+                                                  activeTab &&
+                                                  closeResultRun(
+                                                    activeTab.id,
+                                                    run.id,
+                                                  )
+                                                }
+                                              >
+                                                <X size={10} />
+                                              </button>
+                                            </div>
+                                          ))}
+                                        </div>
                                       )}
-                                      onClick={() =>
-                                        activeTab &&
-                                        setQueryOutputView(
-                                          activeTab.id,
-                                          "results",
-                                        )
-                                      }
-                                    >
-                                      Results
-                                    </button>
-                                  )}
-                                  {(activeTab?.explainPlan || isPlanView) && (
-                                    <button
-                                      type="button"
-                                      className={cn(
-                                        "mr-1 flex h-5 items-center gap-1.5 rounded-[3px] px-2 font-medium",
-                                        isPlanView
-                                          ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                          : "hover:bg-[hsl(var(--wb-hover))]",
-                                      )}
-                                      onClick={() =>
-                                        activeTab &&
-                                        setQueryOutputView(activeTab.id, "plan")
-                                      }
-                                    >
-                                      <LineChart size={11} />
-                                      Explain Plan
-                                    </button>
-                                  )}
-                                  {!isPlanView && queryResultRuns.length > 1 && (
-                                    <div className="flex min-w-0 items-center gap-0.5 border-l border-[hsl(var(--wb-border-subtle))] pl-1">
-                                      {queryResultRuns.map((run, index) => (
-                                        <div
-                                          key={run.id}
-                                          className={cn(
-                                            "group/run flex h-5 max-w-[122px] items-center rounded-[3px]",
-                                            run.id === activeTab?.activeResultRunId
-                                              ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]",
-                                          )}
-                                        >
+                                    {!isPlanView && queryResults.length > 1 ? (
+                                      <div className="flex min-w-0 items-center gap-0.5">
+                                        {queryResults.map((result, index) => (
                                           <button
+                                            key={`${activeTab?.id}:result:${index}`}
                                             type="button"
-                                            className="min-w-0 truncate px-2 text-[10px]"
-                                            onClick={() =>
-                                              activeTab &&
-                                              setActiveResultRun(activeTab.id, run.id)
-                                            }
-                                            title={`Execution ${index + 1}: ${run.results.reduce(
-                                              (count, result) => count + result.rows.length,
-                                              0,
-                                            ).toLocaleString()} rows`}
-                                          >
-                                            {run.pinned && (
-                                              <Pin
-                                                size={9}
-                                                className="mr-1 inline-block -translate-y-px text-[hsl(var(--wb-accent))]"
-                                              />
+                                            className={cn(
+                                              "group/result flex h-5 max-w-[150px] items-center gap-1 rounded-[3px] pl-2 pr-1 text-[10px] hover:bg-[hsl(var(--wb-hover))]",
+                                              index === activeResultIndex
+                                                ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                                : "text-[hsl(var(--wb-text-muted))]",
                                             )}
-                                            Run {index + 1}
-                                          </button>
-                                          <button
-                                            type="button"
-                                            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-35"
-                                            title={
-                                              run.pinned
-                                                ? "Unpin result run"
-                                                : pinnedQueryResultRunCount >= 3
-                                                  ? "Only three result runs can be pinned"
-                                                  : "Pin result run"
-                                            }
-                                            disabled={
-                                              !run.pinned &&
-                                              pinnedQueryResultRunCount >= 3
-                                            }
                                             onClick={() =>
                                               activeTab &&
-                                              toggleResultRunPin(
+                                              setActiveResultIndex(
                                                 activeTab.id,
-                                                run.id,
+                                                index,
                                               )
                                             }
+                                            title={`${result.rows.length.toLocaleString()} rows`}
                                           >
-                                            <Pin size={9} />
+                                            <span className="truncate">
+                                              {result.responseMeta
+                                                ?.requestPath ||
+                                                `Result ${index + 1}`}
+                                            </span>
+                                            <span
+                                              role="button"
+                                              tabIndex={0}
+                                              className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
+                                              title="Close result"
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                if (activeTab) {
+                                                  closeResultAt(
+                                                    activeTab.id,
+                                                    index,
+                                                  );
+                                                }
+                                              }}
+                                              onKeyDown={(event) => {
+                                                if (
+                                                  event.key === "Enter" ||
+                                                  event.key === " "
+                                                ) {
+                                                  event.preventDefault();
+                                                  event.stopPropagation();
+                                                  if (activeTab) {
+                                                    closeResultAt(
+                                                      activeTab.id,
+                                                      index,
+                                                    );
+                                                  }
+                                                }
+                                              }}
+                                            >
+                                              <X size={10} />
+                                            </span>
                                           </button>
-                                          <button
-                                            type="button"
-                                            className="mr-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100"
-                                            title="Close result run"
-                                            onClick={() =>
-                                              activeTab &&
-                                              closeResultRun(activeTab.id, run.id)
-                                            }
-                                          >
-                                            <X size={10} />
-                                          </button>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                  {!isPlanView && queryResults.length > 1 ? (
-                                    <div className="flex min-w-0 items-center gap-0.5">
-                                      {queryResults.map((result, index) => (
-                                        <button
-                                          key={`${activeTab?.id}:result:${index}`}
-                                          type="button"
-                                          className={cn(
-                                            "group/result flex h-5 max-w-[150px] items-center gap-1 rounded-[3px] pl-2 pr-1 text-[10px] hover:bg-[hsl(var(--wb-hover))]",
-                                            index === activeResultIndex
-                                              ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                              : "text-[hsl(var(--wb-text-muted))]",
-                                          )}
-                                          onClick={() =>
-                                            activeTab &&
-                                            setActiveResultIndex(
-                                              activeTab.id,
-                                              index,
-                                            )
-                                          }
-                                          title={`${result.rows.length.toLocaleString()} rows`}
-                                        >
-                                          <span className="truncate">
-                                            {result.responseMeta?.requestPath ||
-                                              `Result ${index + 1}`}
-                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : !isPlanView &&
+                                      queryResults.length === 1 ? (
+                                      <button
+                                        type="button"
+                                        className="group/result flex h-5 items-center gap-1 rounded-[3px] bg-[hsl(var(--wb-active-strong))] pl-2 pr-1 text-[10px] text-[hsl(var(--wb-text))]"
+                                        onClick={() =>
+                                          activeTab &&
+                                          setActiveResultIndex(activeTab.id, 0)
+                                        }
+                                      >
+                                        <span>Result</span>
+                                        {currentResult && (
                                           <span
                                             role="button"
                                             tabIndex={0}
-                                          className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
+                                            className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
                                             title="Close result"
                                             onClick={(event) => {
                                               event.stopPropagation();
                                               if (activeTab) {
-                                                closeResultAt(
-                                                  activeTab.id,
-                                                  index,
-                                                );
+                                                closeResultAt(activeTab.id, 0);
                                               }
                                             }}
                                             onKeyDown={(event) => {
@@ -901,7 +980,7 @@ export function WorkspaceRuntime() {
                                                 if (activeTab) {
                                                   closeResultAt(
                                                     activeTab.id,
-                                                    index,
+                                                    0,
                                                   );
                                                 }
                                               }
@@ -909,107 +988,66 @@ export function WorkspaceRuntime() {
                                           >
                                             <X size={10} />
                                           </span>
-                                        </button>
-                                      ))}
-                                    </div>
-                                  ) : !isPlanView &&
-                                    queryResults.length === 1 ? (
-                                    <button
-                                      type="button"
-                                      className="group/result flex h-5 items-center gap-1 rounded-[3px] bg-[hsl(var(--wb-active-strong))] pl-2 pr-1 text-[10px] text-[hsl(var(--wb-text))]"
-                                      onClick={() =>
-                                        activeTab &&
-                                        setActiveResultIndex(activeTab.id, 0)
-                                      }
-                                    >
-                                      <span>Result</span>
-                                      {currentResult && (
-                                        <span
-                                          role="button"
-                                          tabIndex={0}
-                                          className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
-                                          title="Close result"
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            if (activeTab) {
-                                              closeResultAt(activeTab.id, 0);
-                                            }
-                                          }}
-                                          onKeyDown={(event) => {
-                                            if (
-                                              event.key === "Enter" ||
-                                              event.key === " "
-                                            ) {
-                                              event.preventDefault();
-                                              event.stopPropagation();
-                                              if (activeTab) {
-                                                closeResultAt(activeTab.id, 0);
-                                              }
-                                            }
-                                          }}
-                                        >
-                                          <X size={10} />
+                                        )}
+                                      </button>
+                                    ) : null}
+                                    {!isPlanView && currentResult && (
+                                      <>
+                                        <span className="whitespace-nowrap text-[10px]">
+                                          {currentResult.rows.length.toLocaleString()}{" "}
+                                          rows
                                         </span>
-                                      )}
-                                    </button>
-                                  ) : null}
-                                  {!isPlanView && currentResult && (
-                                    <>
-                                      <span className="whitespace-nowrap text-[10px]">
-                                        {currentResult.rows.length.toLocaleString()}{" "}
-                                        rows
+                                        {currentResult.responseMeta && (
+                                          <span className="whitespace-nowrap text-[10px] text-emerald-400">
+                                            HTTP{" "}
+                                            {currentResult.responseMeta.status}
+                                            {" · "}
+                                            {currentResult.responseMeta.durationMs.toLocaleString()}{" "}
+                                            ms
+                                          </span>
+                                        )}
+                                      </>
+                                    )}
+                                    {activeTab?.isExecuting && (
+                                      <span className="whitespace-nowrap">
+                                        Running...
                                       </span>
-                                      {currentResult.responseMeta && (
-                                        <span className="whitespace-nowrap text-[10px] text-emerald-400">
-                                          HTTP {currentResult.responseMeta.status}
-                                          {" · "}
-                                          {currentResult.responseMeta.durationMs.toLocaleString()}{" "}
-                                          ms
-                                        </span>
-                                      )}
-                                    </>
-                                  )}
-                                  {activeTab?.isExecuting && (
-                                    <span className="whitespace-nowrap">
-                                      Running...
-                                    </span>
-                                  )}
-                                  {activeTab?.error && (
-                                    <span className="truncate text-[hsl(var(--destructive))]">
-                                      {queryErrorPresentation?.title ||
-                                        "Query failed"}
-                                    </span>
-                                  )}
+                                    )}
+                                    {activeTab?.error && (
+                                      <span className="truncate text-[hsl(var(--destructive))]">
+                                        {queryErrorPresentation?.title ||
+                                          "Query failed"}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="wb-icon-button h-6 w-6"
+                                    onClick={() =>
+                                      setToolWindowVisible("results", false)
+                                    }
+                                    title="Hide Results"
+                                  >
+                                    <ChevronDown size={14} />
+                                  </button>
                                 </div>
-                                <button
-                                  type="button"
-                                  className="wb-icon-button h-6 w-6"
-                                  onClick={() =>
-                                    setToolWindowVisible("results", false)
-                                  }
-                                  title="Hide Results"
-                                >
-                                  <ChevronDown size={14} />
-                                </button>
-                              </div>
-                              <div className="h-[calc(100%-2rem)] min-h-0">
-                                <Suspense fallback={<QueryResultsFallback />}>
-                                  {isPlanView ? (
-                                    activeTab?.explainPlan ? (
-                                      <ExplainPlanView
-                                        tabId={activeTab.id}
-                                        plan={activeTab.explainPlan}
-                                      />
-                                    ) : (
-                                      <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
-                                        {activeTab?.isExecuting
-                                          ? "Generating Explain Plan…"
-                                          : activeTab?.error ||
-                                            "No Explain Plan is available."}
-                                      </div>
-                                    )
-                                  ) : (
-                                    currentResult ? (
+                                <div className="h-[calc(100%-2rem)] min-h-0">
+                                  <Suspense fallback={<QueryResultsFallback />}>
+                                    {isPlanView ? (
+                                      activeTab?.explainPlan ? (
+                                        <ExplainPlanView
+                                          tabId={activeTab.id}
+                                          plan={activeTab.explainPlan}
+                                        />
+                                      ) : (
+                                        <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
+                                          {activeTab?.isExecuting
+                                            ? "Generating Explain Plan…"
+                                            : activeTab?.error ||
+                                              "No Explain Plan is available."}
+                                        </div>
+                                      )
+                                    ) : currentResult ? (
                                       <ElasticsearchResponseView
                                         result={currentResult}
                                       >
@@ -1017,37 +1055,36 @@ export function WorkspaceRuntime() {
                                       </ElasticsearchResponseView>
                                     ) : (
                                       <DataGrid readOnly />
-                                    )
-                                  )}
-                                </Suspense>
+                                    )}
+                                  </Suspense>
+                                </div>
                               </div>
-                            </div>
-                          </>
-                        )}
+                            </>
+                          )}
 
-                        {showCollapsedResults && (
-                          <button
-                            type="button"
-                            className="flex h-6 shrink-0 items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]"
-                            onClick={() =>
-                              setToolWindowVisible("results", true)
-                            }
-                            title="Show Results"
-                          >
-                            <ChevronRight size={12} />
-                            <span className="font-medium text-[hsl(var(--wb-text))]">
-                              {isPlanView ? "Explain Plan" : "Results"}
-                            </span>
-                            {!isPlanView && currentResult && (
-                              <span>
-                                {currentResult.rows.length.toLocaleString()}{" "}
-                                rows
+                          {showCollapsedResults && (
+                            <button
+                              type="button"
+                              className="flex h-6 shrink-0 items-center gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]"
+                              onClick={() =>
+                                setToolWindowVisible("results", true)
+                              }
+                              title="Show Results"
+                            >
+                              <ChevronRight size={12} />
+                              <span className="font-medium text-[hsl(var(--wb-text))]">
+                                {isPlanView ? "Explain Plan" : "Results"}
                               </span>
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    )}
+                              {!isPlanView && currentResult && (
+                                <span>
+                                  {currentResult.rows.length.toLocaleString()}{" "}
+                                  rows
+                                </span>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </Suspense>
                   </div>
                 </div>
@@ -1096,10 +1133,7 @@ function DeferredDatabaseSearch() {
   if (!request) return null;
   return (
     <Suspense fallback={null}>
-      <DatabaseSearchDialog
-        request={request}
-        requestVersion={requestVersion}
-      />
+      <DatabaseSearchDialog request={request} requestVersion={requestVersion} />
     </Suspense>
   );
 }
@@ -1209,12 +1243,7 @@ function WorkspaceStartupHydration() {
       }
       if (timerHandle !== null) window.clearTimeout(timerHandle);
     };
-  }, [
-    loadConnections,
-    loadDatabaseDriverCatalog,
-    loadProjects,
-    loadSettings,
-  ]);
+  }, [loadConnections, loadDatabaseDriverCatalog, loadProjects, loadSettings]);
 
   useEffect(() => {
     const reloadExternalSettings = () => {

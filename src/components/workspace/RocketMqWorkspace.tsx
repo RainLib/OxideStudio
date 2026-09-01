@@ -1,0 +1,411 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Boxes,
+  ChevronRight,
+  CircleAlert,
+  Loader2,
+  RefreshCw,
+  Users,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  rocketMqService,
+  type RocketMqCluster,
+  type RocketMqConsumerGroupDetail,
+  type RocketMqConsumerGroups,
+  type RocketMqTopics,
+} from "@/services/tauri/mq.service";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useTabStore } from "@/store/useTabStore";
+
+type ConsoleSection = "overview" | "topics" | "groups";
+
+const sections: Array<{ id: ConsoleSection; label: string }> = [
+  { id: "overview", label: "Cluster" },
+  { id: "topics", label: "Topics" },
+  { id: "groups", label: "Consumer groups" },
+];
+
+function failureMessage(cause: unknown) {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * The first native RocketMQ work surface.  It intentionally uses the dedicated
+ * Agent API instead of pretending RocketMQ objects are relational schemas.
+ */
+export function RocketMqWorkspace() {
+  const activeTab = useTabStore((state) =>
+    state.tabs.find((tab) => tab.id === state.activeTabId),
+  );
+  const connection = useConnectionStore((state) =>
+    state.connections.find(
+      (candidate) => candidate.id === activeTab?.connectionId,
+    ),
+  );
+  const [section, setSection] = useState<ConsoleSection>("overview");
+  const [cluster, setCluster] = useState<RocketMqCluster | null>(null);
+  const [topics, setTopics] = useState<RocketMqTopics | null>(null);
+  const [groups, setGroups] = useState<RocketMqConsumerGroups | null>(null);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [groupDetail, setGroupDetail] =
+    useState<RocketMqConsumerGroupDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!connection) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [nextCluster, nextTopics, nextGroups] = await Promise.all([
+        rocketMqService.getCluster(connection.id),
+        rocketMqService.listTopics(connection.id),
+        rocketMqService.listConsumerGroups(connection.id),
+      ]);
+      setCluster(nextCluster);
+      setTopics(nextTopics);
+      setGroups(nextGroups);
+    } catch (cause) {
+      setCluster(null);
+      setTopics(null);
+      setGroups(null);
+      setError(failureMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [connection]);
+
+  useEffect(() => {
+    setSelectedGroup(null);
+    setGroupDetail(null);
+    void refresh();
+  }, [connection?.id, refresh]);
+
+  const loadGroup = useCallback(
+    async (groupId: string) => {
+      if (!connection) return;
+      setSelectedGroup(groupId);
+      setDetailLoading(true);
+      try {
+        setGroupDetail(
+          await rocketMqService.getConsumerGroup(connection.id, groupId),
+        );
+      } catch (cause) {
+        setGroupDetail(null);
+        setError(failureMessage(cause));
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const summary = useMemo(
+    () => [
+      { label: "Brokers", value: cluster?.nodeCount ?? "—" },
+      { label: "Topics", value: topics?.total ?? "—" },
+      { label: "Consumer groups", value: groups?.total ?? "—" },
+    ],
+    [cluster?.nodeCount, groups?.total, topics?.total],
+  );
+
+  if (!connection || connection.driver.toLowerCase() !== "rocketmq") {
+    return (
+      <div className="flex h-full items-center justify-center text-xs wb-muted">
+        RocketMQ connection is no longer available.
+      </div>
+    );
+  }
+
+  return (
+    <section className="flex h-full min-h-0 min-w-0 flex-col bg-[hsl(var(--wb-editor))] text-[hsl(var(--wb-text))]">
+      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-3">
+        <Boxes size={16} className="text-orange-300" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-medium">{connection.name}</div>
+          <div className="truncate text-[10px] wb-muted">
+            RocketMQ Console · native Agent session
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void refresh()}
+          disabled={loading}
+          className="flex h-7 items-center gap-1 rounded-[4px] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+          title="Refresh RocketMQ resources"
+        >
+          <RefreshCw size={13} className={cn(loading && "animate-spin")} />{" "}
+          Refresh
+        </button>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <nav className="w-44 shrink-0 border-r border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-2">
+          {sections.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setSection(item.id)}
+              className={cn(
+                "flex h-8 w-full items-center rounded-[4px] px-2 text-left text-xs",
+                section === item.id
+                  ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                  : "wb-muted hover:bg-[hsl(var(--wb-hover))]",
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <main className="min-w-0 flex-1 overflow-auto p-4">
+          {error && (
+            <div className="mb-4 flex items-start gap-2 rounded-[5px] border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              <CircleAlert size={15} className="mt-0.5 shrink-0" />
+              <div>
+                <div className="font-medium">
+                  RocketMQ session is unavailable
+                </div>
+                <div className="mt-1 opacity-80">{error}</div>
+              </div>
+            </div>
+          )}
+          {loading && !error ? (
+            <div className="flex h-32 items-center justify-center gap-2 text-xs wb-muted">
+              <Loader2 size={15} className="animate-spin" /> Loading cluster
+              resources…
+            </div>
+          ) : (
+            <>
+              {section === "overview" && (
+                <ClusterOverview cluster={cluster} summary={summary} />
+              )}
+              {section === "topics" && (
+                <TopicList topics={topics?.topics || []} />
+              )}
+              {section === "groups" && (
+                <ConsumerGroups
+                  groups={groups?.groups || []}
+                  selectedGroup={selectedGroup}
+                  detail={groupDetail}
+                  loading={detailLoading}
+                  onSelect={loadGroup}
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
+    </section>
+  );
+}
+
+function ClusterOverview({
+  cluster,
+  summary,
+}: {
+  cluster: RocketMqCluster | null;
+  summary: Array<{ label: string; value: string | number }>;
+}) {
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-sm font-semibold">Cluster overview</h2>
+        <p className="mt-1 text-xs wb-muted">
+          Live resources reported by the connected RocketMQ NameServer.
+        </p>
+      </div>
+      <div className="grid max-w-2xl grid-cols-3 gap-3">
+        {summary.map((item) => (
+          <div
+            key={item.label}
+            className="rounded-[5px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] p-3"
+          >
+            <div className="text-[11px] wb-muted">{item.label}</div>
+            <div className="mt-1 text-lg font-semibold">{item.value}</div>
+          </div>
+        ))}
+      </div>
+      <ResourceTable
+        headers={["Broker", "ID", "Address", "Role"]}
+        rows={(cluster?.brokers || []).map((broker) => [
+          broker.brokerName,
+          broker.brokerId,
+          broker.address,
+          broker.role,
+        ])}
+        empty="No brokers reported by the cluster."
+      />
+    </div>
+  );
+}
+
+function TopicList({ topics }: { topics: string[] }) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold">Topics</h2>
+        <p className="mt-1 text-xs wb-muted">
+          Topic changes and message inspection are intentionally added after
+          read-only console validation.
+        </p>
+      </div>
+      <ResourceTable
+        headers={["Topic"]}
+        rows={topics.map((topic) => [topic])}
+        empty="No topics reported by the cluster."
+      />
+    </div>
+  );
+}
+
+function ConsumerGroups({
+  groups,
+  selectedGroup,
+  detail,
+  loading,
+  onSelect,
+}: {
+  groups: RocketMqConsumerGroups["groups"];
+  selectedGroup: string | null;
+  detail: RocketMqConsumerGroupDetail | null;
+  loading: boolean;
+  onSelect: (groupId: string) => void;
+}) {
+  return (
+    <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
+      <div className="overflow-hidden rounded-[5px] border border-[hsl(var(--wb-border-subtle))]">
+        <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-xs font-medium">
+          Consumer groups
+        </div>
+        {groups.length ? (
+          groups.map((group) => (
+            <button
+              type="button"
+              key={group.groupId}
+              onClick={() => void onSelect(group.groupId)}
+              className={cn(
+                "flex w-full items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-left text-xs last:border-0 hover:bg-[hsl(var(--wb-hover))]",
+                selectedGroup === group.groupId &&
+                  "bg-[hsl(var(--wb-active-strong))]",
+              )}
+            >
+              <span className="truncate font-medium">{group.groupId}</span>
+              <ChevronRight size={13} className="shrink-0 wb-muted" />
+            </button>
+          ))
+        ) : (
+          <div className="p-3 text-xs wb-muted">
+            No consumer groups reported.
+          </div>
+        )}
+      </div>
+      <div className="rounded-[5px] border border-[hsl(var(--wb-border-subtle))] p-4">
+        {loading ? (
+          <div className="flex items-center gap-2 text-xs wb-muted">
+            <Loader2 size={14} className="animate-spin" /> Loading group
+            details…
+          </div>
+        ) : detail ? (
+          <GroupDetail detail={detail} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs wb-muted">
+            <Users size={14} className="mr-2" /> Select a consumer group for
+            live members and subscriptions.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GroupDetail({ detail }: { detail: RocketMqConsumerGroupDetail }) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold">{detail.groupId}</h2>
+        <div className="mt-1 flex gap-3 text-[11px] wb-muted">
+          <span>{detail.state}</span>
+          <span>{detail.messageModel || "model unavailable"}</span>
+          <span>{detail.members.length} active members</span>
+        </div>
+      </div>
+      <div>
+        <h3 className="mb-2 text-xs font-medium">Subscriptions</h3>
+        <ResourceTable
+          headers={["Topic", "Expression", "Type"]}
+          rows={detail.assignments.map((item) => [
+            item.topic,
+            item.subExpression || "*",
+            item.expressionType || "TAG",
+          ])}
+          empty="No live subscriptions reported."
+        />
+      </div>
+      <div>
+        <h3 className="mb-2 text-xs font-medium">Members</h3>
+        <ResourceTable
+          headers={["Client", "Host", "Language"]}
+          rows={detail.members.map((member) => [
+            member.clientId,
+            member.host,
+            member.language || "—",
+          ])}
+          empty="No active consumers are connected."
+        />
+      </div>
+    </div>
+  );
+}
+
+function ResourceTable({
+  headers,
+  rows,
+  empty,
+}: {
+  headers: string[];
+  rows: string[][];
+  empty: string;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[5px] border border-[hsl(var(--wb-border-subtle))]">
+      <div
+        className="grid bg-[hsl(var(--wb-toolbar))] text-[10px] font-medium uppercase tracking-wide wb-muted"
+        style={{
+          gridTemplateColumns: `repeat(${headers.length}, minmax(0, 1fr))`,
+        }}
+      >
+        {headers.map((header) => (
+          <div key={header} className="px-3 py-2">
+            {header}
+          </div>
+        ))}
+      </div>
+      {rows.length ? (
+        rows.map((row, index) => (
+          <div
+            key={`${row.join("-")}-${index}`}
+            className="grid border-t border-[hsl(var(--wb-border-subtle))] text-xs"
+            style={{
+              gridTemplateColumns: `repeat(${headers.length}, minmax(0, 1fr))`,
+            }}
+          >
+            {row.map((cell, cellIndex) => (
+              <div
+                key={`${cell}-${cellIndex}`}
+                className="truncate px-3 py-2"
+                title={cell}
+              >
+                {cell || "—"}
+              </div>
+            ))}
+          </div>
+        ))
+      ) : (
+        <div className="p-3 text-xs wb-muted">{empty}</div>
+      )}
+    </div>
+  );
+}

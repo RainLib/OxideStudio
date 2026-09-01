@@ -70,6 +70,9 @@ const TabIcon = ({
   if (type === "database_browser") {
     return <DatabaseZap size={12} className="text-emerald-400" />;
   }
+  if (type === "rocketmq_workspace") {
+    return <Network size={12} className="text-orange-300" />;
+  }
   if (isImage) return <ImageIcon size={12} className="text-violet-400" />;
   if (isFile) return <FileCode2 size={12} className="text-sky-400" />;
   return <Terminal size={12} className="text-sky-400" />;
@@ -154,7 +157,7 @@ export function TabBar({
     position: "before" | "after" | null;
   } | null>(null);
   const activeConnection = connections.find(
-    (connection) => connection.id === activeConnectionId
+    (connection) => connection.id === activeConnectionId,
   );
   const displayedActiveTabId =
     activeTabIdOverride === undefined ? activeTabId : activeTabIdOverride;
@@ -322,7 +325,7 @@ export function TabBar({
       {
         connectionId: activeConnectionId || undefined,
         schemaName: currentSchema || undefined,
-      }
+      },
     );
   };
 
@@ -344,7 +347,8 @@ export function TabBar({
       typeof ResizeObserver === "undefined"
         ? null
         : new ResizeObserver(checkOverflow);
-    if (scrollContainerRef.current) observer?.observe(scrollContainerRef.current);
+    if (scrollContainerRef.current)
+      observer?.observe(scrollContainerRef.current);
     window.addEventListener("resize", checkOverflow);
     return () => {
       observer?.disconnect();
@@ -409,7 +413,8 @@ export function TabBar({
           const tab = organized.tab;
           const tabIndex = visibleTabIndex.get(tab.id) ?? -1;
           const canCloseLeft =
-            tabIndex > 0 && visibleTabs.slice(0, tabIndex).some((t) => !t.isPinned);
+            tabIndex > 0 &&
+            visibleTabs.slice(0, tabIndex).some((t) => !t.isPinned);
           const canCloseRight =
             tabIndex < visibleTabs.length - 1 &&
             visibleTabs.slice(tabIndex + 1).some((t) => !t.isPinned);
@@ -435,9 +440,7 @@ export function TabBar({
                 <div
                   className={cn(
                     "shrink-0 border-[hsl(var(--wb-border-subtle))]",
-                    isVertical
-                      ? "mx-2 my-1 border-t"
-                      : "mx-1 h-5 border-l",
+                    isVertical ? "mx-2 my-1 border-t" : "mx-1 h-5 border-l",
                   )}
                   aria-hidden="true"
                 />
@@ -455,271 +458,279 @@ export function TabBar({
                   {organized.groupLabel}
                 </div>
               )}
-            <DropdownMenu
-              open={isContextMenuOpen}
-              onOpenChange={(open) => {
-                if (!open) setContextMenuTabId(null);
-              }}
-            >
-              <DropdownMenuTrigger asChild>
-                <div
-                  ref={(el) => {
-                    if (el) {
-                      tabRefs.current.set(tab.id, el);
-                    } else {
-                      tabRefs.current.delete(tab.id);
+              <DropdownMenu
+                open={isContextMenuOpen}
+                onOpenChange={(open) => {
+                  if (!open) setContextMenuTabId(null);
+                }}
+              >
+                <DropdownMenuTrigger asChild>
+                  <div
+                    ref={(el) => {
+                      if (el) {
+                        tabRefs.current.set(tab.id, el);
+                      } else {
+                        tabRefs.current.delete(tab.id);
+                      }
+                    }}
+                    className={cn(
+                      "group flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-[4px] border px-3 text-[11px] transition-[background-color,border-color,box-shadow,opacity]",
+                      isVertical
+                        ? "mx-1 my-0.5 h-7 min-w-0 max-w-none"
+                        : "my-[3px] h-[calc(100%-6px)] min-w-[118px] max-w-[220px]",
+                      canDragTabs && "cursor-grab active:cursor-grabbing",
+                      displayedActiveTabId === tab.id
+                        ? "border-[hsl(var(--wb-accent)/0.55)] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))] shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.18)]"
+                        : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                      tabDrag?.draggedId === tab.id && "opacity-45",
+                      isDropTarget &&
+                        (isVertical
+                          ? tabDrag.position === "before"
+                            ? "shadow-[inset_0_2px_0_hsl(var(--wb-accent))]"
+                            : "shadow-[inset_0_-2px_0_hsl(var(--wb-accent))]"
+                          : tabDrag.position === "before"
+                            ? "shadow-[inset_2px_0_0_hsl(var(--wb-accent))]"
+                            : "shadow-[inset_-2px_0_0_hsl(var(--wb-accent))]"),
+                    )}
+                    draggable={canDragTabs}
+                    aria-grabbed={tabDrag?.draggedId === tab.id}
+                    aria-selected={displayedActiveTabId === tab.id}
+                    aria-label={
+                      organized.groupLabel
+                        ? `${tab.title}, ${organized.groupLabel}`
+                        : tab.title
                     }
-                  }}
-                  className={cn(
-                    "group flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-[4px] border px-3 text-[11px] transition-[background-color,border-color,box-shadow,opacity]",
-                    isVertical
-                      ? "mx-1 my-0.5 h-7 min-w-0 max-w-none"
-                      : "my-[3px] h-[calc(100%-6px)] min-w-[118px] max-w-[220px]",
-                    canDragTabs && "cursor-grab active:cursor-grabbing",
-                    displayedActiveTabId === tab.id
-                      ? "border-[hsl(var(--wb-accent)/0.55)] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))] shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.18)]"
-                      : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
-                    tabDrag?.draggedId === tab.id && "opacity-45",
-                    isDropTarget &&
-                      (isVertical
-                        ? tabDrag.position === "before"
-                          ? "shadow-[inset_0_2px_0_hsl(var(--wb-accent))]"
-                          : "shadow-[inset_0_-2px_0_hsl(var(--wb-accent))]"
-                        : tabDrag.position === "before"
-                          ? "shadow-[inset_2px_0_0_hsl(var(--wb-accent))]"
-                          : "shadow-[inset_-2px_0_0_hsl(var(--wb-accent))]"),
-                  )}
-                  draggable={canDragTabs}
-                  aria-grabbed={tabDrag?.draggedId === tab.id}
-                  aria-selected={displayedActiveTabId === tab.id}
-                  aria-label={
-                    organized.groupLabel
-                      ? `${tab.title}, ${organized.groupLabel}`
-                      : tab.title
-                  }
-                  role="tab"
-                  tabIndex={displayedActiveTabId === tab.id ? 0 : -1}
-                  data-tab-id={tab.id}
-                  onDragStart={(event) => {
-                    if (!canDragTabs) {
+                    role="tab"
+                    tabIndex={displayedActiveTabId === tab.id ? 0 : -1}
+                    data-tab-id={tab.id}
+                    onDragStart={(event) => {
+                      if (!canDragTabs) {
+                        event.preventDefault();
+                        return;
+                      }
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", tab.id);
+                      setTabDrag({
+                        draggedId: tab.id,
+                        targetId: null,
+                        position: null,
+                      });
+                    }}
+                    onDragOver={(event) => handleDragOver(event, tab.id)}
+                    onDrop={(event) => {
                       event.preventDefault();
-                      return;
-                    }
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", tab.id);
-                    setTabDrag({
-                      draggedId: tab.id,
-                      targetId: null,
-                      position: null,
-                    });
-                  }}
-                  onDragOver={(event) => handleDragOver(event, tab.id)}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    finishDrag(event, tab.id);
-                  }}
-                  onDragEnd={() => setTabDrag(null)}
-                  onClick={() => activateTab(tab.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
+                      finishDrag(event, tab.id);
+                    }}
+                    onDragEnd={() => setTabDrag(null)}
+                    onClick={() => activateTab(tab.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        activateTab(tab.id);
+                        return;
+                      }
+                      const previousKey = isVertical ? "ArrowUp" : "ArrowLeft";
+                      const nextKey = isVertical ? "ArrowDown" : "ArrowRight";
+                      if (event.key !== previousKey && event.key !== nextKey) {
+                        return;
+                      }
                       event.preventDefault();
-                      activateTab(tab.id);
-                      return;
-                    }
-                    const previousKey = isVertical ? "ArrowUp" : "ArrowLeft";
-                    const nextKey = isVertical ? "ArrowDown" : "ArrowRight";
-                    if (event.key !== previousKey && event.key !== nextKey) {
-                      return;
-                    }
-                    event.preventDefault();
-                    const direction = event.key === previousKey ? -1 : 1;
-                    const nextIndex =
-                      (tabIndex + direction + visibleTabs.length) %
-                      visibleTabs.length;
-                    const nextTab = visibleTabs[nextIndex];
-                    if (!nextTab) return;
-                    activateTab(nextTab.id);
-                    requestAnimationFrame(() =>
-                      tabRefs.current.get(nextTab.id)?.focus(),
-                    );
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setContextMenuTabId(tab.id);
-                  }}
-                >
-                  {tab.isPinned && <Pin size={10} className="text-primary" />}
-                  <TabIcon
-                    type={tab.type}
-                    isFile={Boolean(tab.fileRelativePath)}
-                    isImage={Boolean(tab.filePreview)}
-                  />
-                  <span
-                    className="truncate flex-1"
-                    title={tab.fileRelativePath || tab.title}
+                      const direction = event.key === previousKey ? -1 : 1;
+                      const nextIndex =
+                        (tabIndex + direction + visibleTabs.length) %
+                        visibleTabs.length;
+                      const nextTab = visibleTabs[nextIndex];
+                      if (!nextTab) return;
+                      activateTab(nextTab.id);
+                      requestAnimationFrame(() =>
+                        tabRefs.current.get(nextTab.id)?.focus(),
+                      );
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenuTabId(tab.id);
+                    }}
                   >
-                    {tab.title}
-                  </span>
-                  {hasUnsavedTabChanges(tab) && (
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
-                      title="Unsaved changes"
+                    {tab.isPinned && <Pin size={10} className="text-primary" />}
+                    <TabIcon
+                      type={tab.type}
+                      isFile={Boolean(tab.fileRelativePath)}
+                      isImage={Boolean(tab.filePreview)}
                     />
-                  )}
-                  {!tab.isPinned && (
-                    <button
-                      type="button"
-                      aria-label={`Close ${tab.title}`}
-                      className="rounded-[3px] p-0.5 opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover:opacity-100 group-focus-within:opacity-100"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        closeVisibleTab(tab.id);
-                      }}
+                    <span
+                      className="truncate flex-1"
+                      title={tab.fileRelativePath || tab.title}
                     >
-                      <X size={10} />
-                    </button>
-                  )}
-                </div>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent className="w-48 bg-background-elevated border-border text-foreground">
-                {allowSplit && tab.type === "query" && <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
-                    <PanelRight size={12} className="mr-2" />
-                    Split Editor
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-40 bg-background-elevated border-border text-foreground">
-                    {([
-                      ["left", "Split Left", PanelLeft],
-                      ["right", "Split Right", PanelRight],
-                      ["up", "Split Up", PanelTop],
-                      ["down", "Split Down", PanelBottom],
-                    ] as const).map(([direction, label, Icon]) => (
-                      <DropdownMenuItem
-                        key={direction}
-                        className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                        onClick={() => splitTab(direction, tab.id)}
+                      {tab.title}
+                    </span>
+                    {hasUnsavedTabChanges(tab) && (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                        title="Unsaved changes"
+                      />
+                    )}
+                    {!tab.isPinned && (
+                      <button
+                        type="button"
+                        aria-label={`Close ${tab.title}`}
+                        className="rounded-[3px] p-0.5 opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover:opacity-100 group-focus-within:opacity-100"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeVisibleTab(tab.id);
+                        }}
                       >
-                        <Icon size={12} className="mr-2" />
-                        {label}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>}
-                {allowSplit && tab.type === "query" && <DropdownMenuSeparator className="bg-border" />}
-                {canCompareSource && compareTargets.length > 0 && (
-                  <>
+                        <X size={10} />
+                      </button>
+                    )}
+                  </div>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-48 bg-background-elevated border-border text-foreground">
+                  {allowSplit && tab.type === "query" && (
                     <DropdownMenuSub>
                       <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
-                        <Rows3 size={12} className="mr-2" />
-                        Compare Data With
+                        <PanelRight size={12} className="mr-2" />
+                        Split Editor
                       </DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto bg-background-elevated border-border text-foreground">
-                        {compareTargets.map((candidate) => (
+                      <DropdownMenuSubContent className="w-40 bg-background-elevated border-border text-foreground">
+                        {(
+                          [
+                            ["left", "Split Left", PanelLeft],
+                            ["right", "Split Right", PanelRight],
+                            ["up", "Split Up", PanelTop],
+                            ["down", "Split Down", PanelBottom],
+                          ] as const
+                        ).map(([direction, label, Icon]) => (
                           <DropdownMenuItem
-                            key={candidate.id}
+                            key={direction}
                             className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                            onClick={() => {
-                              openDataCompareTab(tab.id, candidate.id);
-                              setContextMenuTabId(null);
-                            }}
+                            onClick={() => splitTab(direction, tab.id)}
                           >
-                            <TabIcon
-                              type={candidate.type}
-                              isFile={Boolean(candidate.fileRelativePath)}
-                              isImage={Boolean(candidate.filePreview)}
-                            />
-                            <span className="ml-2 truncate">{candidate.title}</span>
+                            <Icon size={12} className="mr-2" />
+                            {label}
                           </DropdownMenuItem>
                         ))}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
+                  )}
+                  {allowSplit && tab.type === "query" && (
                     <DropdownMenuSeparator className="bg-border" />
-                  </>
-                )}
-                <DropdownMenuItem
-                  onClick={() => {
-                    togglePinTab(tab.id);
-                    setContextMenuTabId(null);
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                >
-                  <Pin size={12} className="mr-2" />
-                  {tab.isPinned ? "Unpin Tab" : "Pin Tab"}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-border" />
-                <DropdownMenuItem
-                  onClick={() => {
-                    closeVisibleTab(tab.id);
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                  disabled={tab.isPinned}
-                >
-                  <X size={12} className="mr-2" />
-                  Close
-                </DropdownMenuItem>
-                {tab.isPinned && (
+                  )}
+                  {canCompareSource && compareTargets.length > 0 && (
+                    <>
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
+                          <Rows3 size={12} className="mr-2" />
+                          Compare Data With
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto bg-background-elevated border-border text-foreground">
+                          {compareTargets.map((candidate) => (
+                            <DropdownMenuItem
+                              key={candidate.id}
+                              className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                              onClick={() => {
+                                openDataCompareTab(tab.id, candidate.id);
+                                setContextMenuTabId(null);
+                              }}
+                            >
+                              <TabIcon
+                                type={candidate.type}
+                                isFile={Boolean(candidate.fileRelativePath)}
+                                isImage={Boolean(candidate.filePreview)}
+                              />
+                              <span className="ml-2 truncate">
+                                {candidate.title}
+                              </span>
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                      <DropdownMenuSeparator className="bg-border" />
+                    </>
+                  )}
                   <DropdownMenuItem
                     onClick={() => {
-                      forceCloseTab(tab.id);
+                      togglePinTab(tab.id);
                       setContextMenuTabId(null);
                     }}
-                    className="text-[11px] cursor-pointer focus:bg-background-tertiary text-red-500"
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                  >
+                    <Pin size={12} className="mr-2" />
+                    {tab.isPinned ? "Unpin Tab" : "Pin Tab"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator className="bg-border" />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      closeVisibleTab(tab.id);
+                    }}
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                    disabled={tab.isPinned}
                   >
                     <X size={12} className="mr-2" />
-                    Close with Pin
+                    Close
                   </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  onClick={() => {
-                    closeVisibleOtherTabs(tab.id);
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                >
-                  <X size={12} className="mr-2" />
-                  Close Others
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    closeVisibleTabs(
-                      visibleTabs
-                        .slice(0, tabIndex)
-                        .filter((candidate) => !candidate.isPinned)
-                        .map((candidate) => candidate.id),
-                    );
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                  disabled={!canCloseLeft}
-                >
-                  <X size={12} className="mr-2" />
-                  Close to the Left
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    closeVisibleTabs(
-                      visibleTabs
-                        .slice(tabIndex + 1)
-                        .filter((candidate) => !candidate.isPinned)
-                        .map((candidate) => candidate.id),
-                    );
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                  disabled={!canCloseRight}
-                >
-                  <X size={12} className="mr-2" />
-                  Close to the Right
-                </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-border" />
-                <DropdownMenuItem
-                  onClick={() => {
-                    closeVisibleAllTabs();
-                  }}
-                  className="text-[11px] cursor-pointer focus:bg-background-tertiary"
-                >
-                  <X size={12} className="mr-2" />
-                  Close All
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  {tab.isPinned && (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        forceCloseTab(tab.id);
+                        setContextMenuTabId(null);
+                      }}
+                      className="text-[11px] cursor-pointer focus:bg-background-tertiary text-red-500"
+                    >
+                      <X size={12} className="mr-2" />
+                      Close with Pin
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    onClick={() => {
+                      closeVisibleOtherTabs(tab.id);
+                    }}
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                  >
+                    <X size={12} className="mr-2" />
+                    Close Others
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      closeVisibleTabs(
+                        visibleTabs
+                          .slice(0, tabIndex)
+                          .filter((candidate) => !candidate.isPinned)
+                          .map((candidate) => candidate.id),
+                      );
+                    }}
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                    disabled={!canCloseLeft}
+                  >
+                    <X size={12} className="mr-2" />
+                    Close to the Left
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      closeVisibleTabs(
+                        visibleTabs
+                          .slice(tabIndex + 1)
+                          .filter((candidate) => !candidate.isPinned)
+                          .map((candidate) => candidate.id),
+                      );
+                    }}
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                    disabled={!canCloseRight}
+                  >
+                    <X size={12} className="mr-2" />
+                    Close to the Right
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator className="bg-border" />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      closeVisibleAllTabs();
+                    }}
+                    className="text-[11px] cursor-pointer focus:bg-background-tertiary"
+                  >
+                    <X size={12} className="mr-2" />
+                    Close All
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </Fragment>
           );
         })}
@@ -778,7 +789,9 @@ export function TabBar({
                       )}
                       onClick={() => activateTab(tab.id)}
                     >
-                      {tab.isPinned && <Pin size={10} className="text-primary" />}
+                      {tab.isPinned && (
+                        <Pin size={10} className="text-primary" />
+                      )}
                       <TabIcon
                         type={tab.type}
                         isFile={Boolean(tab.fileRelativePath)}

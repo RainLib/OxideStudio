@@ -83,10 +83,7 @@ import {
   invalidateRoutineSourceCache,
   loadPostgresRoutineDefinitions,
 } from "@/services/routineSourceCache";
-import {
-  loadTableDdl,
-  loadTableMetadata,
-} from "@/services/tableMetadataCache";
+import { loadTableDdl, loadTableMetadata } from "@/services/tableMetadataCache";
 import type {
   CollectionInfo,
   DatabaseCapabilities,
@@ -258,18 +255,18 @@ const DatabaseAdministrationDialog = lazy(() =>
   })),
 );
 const ElasticsearchIndexMetadataDialog = lazy(() =>
-  import(
-    "@/features/database-explorer/ui/ElasticsearchIndexMetadataDialog"
-  ).then((module) => ({
-    default: module.ElasticsearchIndexMetadataDialog,
-  })),
+  import("@/features/database-explorer/ui/ElasticsearchIndexMetadataDialog").then(
+    (module) => ({
+      default: module.ElasticsearchIndexMetadataDialog,
+    }),
+  ),
 );
 const ElasticsearchIndexClearDialog = lazy(() =>
-  import(
-    "@/features/database-explorer/ui/ElasticsearchIndexClearDialog"
-  ).then((module) => ({
-    default: module.ElasticsearchIndexClearDialog,
-  })),
+  import("@/features/database-explorer/ui/ElasticsearchIndexClearDialog").then(
+    (module) => ({
+      default: module.ElasticsearchIndexClearDialog,
+    }),
+  ),
 );
 const DatabaseMaintenanceDialog = lazy(() =>
   import("@/features/database-admin").then((module) => ({
@@ -851,12 +848,7 @@ export function SchemaSidebar() {
       driverPackageVersion: activeConnection.driverPackageVersion,
       connectionDatabaseName: activeConnection.database,
     });
-  }, [
-    activeConnection,
-    activeConnectionId,
-    activeProjectId,
-    metadataVersion,
-  ]);
+  }, [activeConnection, activeConnectionId, activeProjectId, metadataVersion]);
   const activeCapabilities =
     connectionCapabilities &&
     connectionCapabilities.connectionId === activeConnectionId &&
@@ -1650,7 +1642,10 @@ export function SchemaSidebar() {
           const normalizedFilter = filterText.toLowerCase();
           return (
             collection.name.toLowerCase().includes(normalizedFilter) ||
-            collectionDisplayLabelForCapabilities(activeCapabilities, collection)
+            collectionDisplayLabelForCapabilities(
+              activeCapabilities,
+              collection,
+            )
               .toLowerCase()
               .includes(normalizedFilter)
           );
@@ -1722,6 +1717,9 @@ export function SchemaSidebar() {
   const loadDocumentPage = useTabStore((state) => state.loadDocumentPage);
   const createTableTab = useTabStore((state) => state.createTableTab);
   const openDatabaseBrowser = useTabStore((state) => state.openDatabaseBrowser);
+  const openRocketMqWorkspace = useTabStore(
+    (state) => state.openRocketMqWorkspace,
+  );
   const createTab = useTabStore((state) => state.createTab);
   const openSchemaDiagramTab = useTabStore(
     (state) => state.openSchemaDiagramTab,
@@ -1772,7 +1770,13 @@ export function SchemaSidebar() {
     tables?: string[];
     scope: "table" | "schema" | "database";
   }) => {
-    const { connection, database, scope, table, tables: requestedTables } = options;
+    const {
+      connection,
+      database,
+      scope,
+      table,
+      tables: requestedTables,
+    } = options;
     setNamespaceError(null);
     try {
       const connectionError = await setActiveConnection(connection.id);
@@ -2170,7 +2174,8 @@ export function SchemaSidebar() {
                 options.database,
                 schema,
               )
-            : await schemaService.getTables(options.connection.id, schema))
+            : await schemaService.getTables(options.connection.id, schema)
+          )
             .filter((item) => !item.type?.toUpperCase().includes("VIEW"))
             .map((item) => item.name);
       const sourceTables = [...new Set(tableNames)].sort((left, right) =>
@@ -2434,15 +2439,8 @@ export function SchemaSidebar() {
           ),
         6,
       );
-      const failureSummary = summarizeTableBatchFailures(
-        tableNames,
-        results,
-      );
-      const ddl = composeTableBatchDdl(
-        options.schema,
-        tableNames,
-        results,
-      );
+      const failureSummary = summarizeTableBatchFailures(tableNames, results);
+      const ddl = composeTableBatchDdl(options.schema, tableNames, results);
       const loadedCount = results.filter(
         (result) => result.status === "fulfilled" && result.value.trim(),
       ).length;
@@ -2529,7 +2527,10 @@ export function SchemaSidebar() {
   const handleCreateCollectionClick = () => {
     if (!activeConnectionId) return;
 
-    if (activeCapabilities.dataModel === "keyValue" && activeConnection?.driver === "redis") {
+    if (
+      activeCapabilities.dataModel === "keyValue" &&
+      activeConnection?.driver === "redis"
+    ) {
       setIsCreateRedisKeyOpen(true);
       return;
     }
@@ -2805,18 +2806,14 @@ export function SchemaSidebar() {
       setNamespaceError(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setNamespaceError(
-        `Could not refresh database "${database}": ${message}`,
-      );
+      setNamespaceError(`Could not refresh database "${database}": ${message}`);
     }
   };
 
   const requestExplorerTargetRefresh = (target: EventTarget | null) => {
     if (!(target instanceof HTMLElement)) return false;
 
-    const objectRow = target.closest<HTMLElement>(
-      "[data-database-object-key]",
-    );
+    const objectRow = target.closest<HTMLElement>("[data-database-object-key]");
     const objectTarget = objectRow?.dataset.databaseObjectKey
       ? parseDatabaseObjectNavigationKey(objectRow.dataset.databaseObjectKey)
       : null;
@@ -2848,9 +2845,7 @@ export function SchemaSidebar() {
       return true;
     }
 
-    const schemaRow = target.closest<HTMLElement>(
-      "[data-database-schema-key]",
-    );
+    const schemaRow = target.closest<HTMLElement>("[data-database-schema-key]");
     const schemaTarget = schemaRow?.dataset.databaseSchemaKey
       ? parseDatabaseSchemaNavigationKey(schemaRow.dataset.databaseSchemaKey)
       : null;
@@ -2877,9 +2872,7 @@ export function SchemaSidebar() {
       return true;
     }
 
-    const databaseRow = target.closest<HTMLElement>(
-      "[data-postgres-database]",
-    );
+    const databaseRow = target.closest<HTMLElement>("[data-postgres-database]");
     const connectionRegion = target.closest<HTMLElement>(
       "[data-database-connection-id]",
     );
@@ -3606,10 +3599,10 @@ export function SchemaSidebar() {
       const matchesTargetContext = (tab: typeof activeTabBefore) =>
         Boolean(
           tab &&
-            tab.connectionId === connectionId &&
-            (tab.databaseName || objectConnection.database || "") ===
-              (targetDatabase || "") &&
-            (tab.schemaName || "") === schema,
+          tab.connectionId === connectionId &&
+          (tab.databaseName || objectConnection.database || "") ===
+            (targetDatabase || "") &&
+          (tab.schemaName || "") === schema,
         );
       const contextChanged = !matchesTargetContext(activeTabBefore);
       const connectionError = await setActiveConnection(connectionId);
@@ -3635,18 +3628,16 @@ export function SchemaSidebar() {
           });
         }
       }
-      const request = useAssistantComposerStore
-        .getState()
-        .queueDatabaseTables(
-          tableNames.map((table) => ({
-            connectionId,
-            connectionName: objectConnection.name,
-            database: targetDatabase,
-            schema,
-            table,
-          })),
-          { replaceExisting: contextChanged },
-        );
+      const request = useAssistantComposerStore.getState().queueDatabaseTables(
+        tableNames.map((table) => ({
+          connectionId,
+          connectionName: objectConnection.name,
+          database: targetDatabase,
+          schema,
+          table,
+        })),
+        { replaceExisting: contextChanged },
+      );
       if (!request) return;
       setNamespaceError(null);
       window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_ASSISTANT));
@@ -4401,8 +4392,9 @@ export function SchemaSidebar() {
                     setNacosConfigTransferRequest({
                       sourceConnectionId: connectionId,
                       sourceConnectionName:
-                        connections.find((candidate) => candidate.id === connectionId)
-                          ?.name || "Nacos connection",
+                        connections.find(
+                          (candidate) => candidate.id === connectionId,
+                        )?.name || "Nacos connection",
                       source: nacosLocation,
                     })
                   }
@@ -4577,229 +4569,231 @@ export function SchemaSidebar() {
               <div className="mx-1 mb-1 mt-0.5 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] text-[10px]">
                 <div className="flex min-h-7 flex-wrap items-center gap-1 px-1.5 py-1">
                   <Checkbox
-                  className={checkboxClass}
-                  disabled={tableBatchAction?.running}
-                  checked={
-                    allVisibleTablesSelected
-                      ? true
-                      : selectedTableBatchNames.length > 0
-                        ? "indeterminate"
-                        : false
-                  }
-                  aria-label={
-                    allVisibleTablesSelected
-                      ? "Deselect all visible tables"
-                      : "Select all visible tables"
-                  }
-                  onCheckedChange={() =>
-                    setTableBatchSelection({
-                      scopeKey: groupKey,
-                      ...toggleAllVisibleTableBatchSelection(
-                        scopedTableBatchSelection,
-                        tableRelationNames,
-                      ),
-                    })
-                  }
-                />
-                <span className="min-w-0 flex-1 truncate wb-muted">
-                  {selectedTableBatchNames.length > 0
-                    ? `${selectedTableBatchNames.length} selected`
-                    : `Select up to ${MAX_EXPLORER_TABLE_BATCH_SELECTION}`}
-                  {tableBatchAction?.scopeKey === groupKey
-                    ? ` · ${tableBatchAction.message}`
-                    : ""}
-                </span>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    tableBatchAction?.running
-                  }
-                  onClick={() =>
-                    void refreshSelectedTableMetadata({
-                      scopeKey: groupKey,
-                      connectionId,
-                      driver: (driver || activeDriver) as DatabaseDriver,
-                      driverPackageVersion:
-                        objectConnection?.driverPackageVersion,
-                      connectionDatabaseName: objectConnection?.database,
-                      databaseName: navigationDatabaseName,
-                      schema,
-                      tables: selectedTableBatchNames,
-                    })
-                  }
-                >
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    tableBatchAction?.running
-                  }
-                  title="Copy selected table names"
-                  onClick={() =>
-                    void copySelectedTableNames({
-                      scopeKey: groupKey,
-                      tables: selectedTableBatchNames,
-                    })
-                  }
-                >
-                  Copy
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    !objectConnection ||
-                    tableBatchAction?.running
-                  }
-                  title="Add selected tables to Assistant context"
-                  onClick={() =>
-                    void addTablesToAssistant(selectedTableBatchNames)
-                  }
-                >
-                  AI
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    !objectConnection ||
-                    tableBatchAction?.running
-                  }
-                  title="Load the selected tables into one DDL viewer"
-                  onClick={() => {
-                    if (!objectConnection) return;
-                    const selectedNames = new Set(selectedTableBatchNames);
-                    void showSelectedTableDdl({
-                      scopeKey: groupKey,
-                      connectionId,
-                      driver: objectConnection.driver,
-                      driverPackageVersion:
-                        objectConnection.driverPackageVersion,
-                      connectionDatabaseName: objectConnection.database,
-                      databaseName: navigationDatabaseName,
-                      schema,
-                      tables: tableRelations.filter((table) =>
-                        selectedNames.has(table.name),
-                      ),
-                    });
-                  }}
-                >
-                  DDL
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    !objectConnection ||
-                    tableBatchAction?.running ||
-                    Boolean(schemaDiagramLoadingKey)
-                  }
-                  title="Open a schema diagram with the selected tables highlighted"
-                  onClick={() => {
-                    if (!objectConnection) return;
-                    void handleOpenSchemaDiagram(
-                      {
-                        projectId: activeProjectId,
+                    className={checkboxClass}
+                    disabled={tableBatchAction?.running}
+                    checked={
+                      allVisibleTablesSelected
+                        ? true
+                        : selectedTableBatchNames.length > 0
+                          ? "indeterminate"
+                          : false
+                    }
+                    aria-label={
+                      allVisibleTablesSelected
+                        ? "Deselect all visible tables"
+                        : "Select all visible tables"
+                    }
+                    onCheckedChange={() =>
+                      setTableBatchSelection({
+                        scopeKey: groupKey,
+                        ...toggleAllVisibleTableBatchSelection(
+                          scopedTableBatchSelection,
+                          tableRelationNames,
+                        ),
+                      })
+                    }
+                  />
+                  <span className="min-w-0 flex-1 truncate wb-muted">
+                    {selectedTableBatchNames.length > 0
+                      ? `${selectedTableBatchNames.length} selected`
+                      : `Select up to ${MAX_EXPLORER_TABLE_BATCH_SELECTION}`}
+                    {tableBatchAction?.scopeKey === groupKey
+                      ? ` · ${tableBatchAction.message}`
+                      : ""}
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      tableBatchAction?.running
+                    }
+                    onClick={() =>
+                      void refreshSelectedTableMetadata({
+                        scopeKey: groupKey,
                         connectionId,
-                        connectionName: objectConnection.name,
-                        driver: objectConnection.driver,
+                        driver: (driver || activeDriver) as DatabaseDriver,
+                        driverPackageVersion:
+                          objectConnection?.driverPackageVersion,
+                        connectionDatabaseName: objectConnection?.database,
                         databaseName: navigationDatabaseName,
-                        schemaName: schema,
-                      },
-                      selectedTableBatchNames,
-                    );
-                  }}
-                >
-                  Diagram
-                </button>
-                {objectDriver &&
-                  normalizeDatabaseDriverName(objectDriver) === "postgres" &&
-                  !objectConnection?.driverPackageVersion &&
-                  activeCapabilities.tableExportFormats?.includes("sql") && (
-                    <button
-                      type="button"
-                      className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                      disabled={
-                        selectedTableBatchNames.length === 0 ||
-                        tableBatchAction?.running
-                      }
-                      title="Export the selected tables as one data-only SQL file"
-                      onClick={() =>
-                        void exportSelectedTablesSql({
-                          scopeKey: groupKey,
+                        schema,
+                        tables: selectedTableBatchNames,
+                      })
+                    }
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      tableBatchAction?.running
+                    }
+                    title="Copy selected table names"
+                    onClick={() =>
+                      void copySelectedTableNames({
+                        scopeKey: groupKey,
+                        tables: selectedTableBatchNames,
+                      })
+                    }
+                  >
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      !objectConnection ||
+                      tableBatchAction?.running
+                    }
+                    title="Add selected tables to Assistant context"
+                    onClick={() =>
+                      void addTablesToAssistant(selectedTableBatchNames)
+                    }
+                  >
+                    AI
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      !objectConnection ||
+                      tableBatchAction?.running
+                    }
+                    title="Load the selected tables into one DDL viewer"
+                    onClick={() => {
+                      if (!objectConnection) return;
+                      const selectedNames = new Set(selectedTableBatchNames);
+                      void showSelectedTableDdl({
+                        scopeKey: groupKey,
+                        connectionId,
+                        driver: objectConnection.driver,
+                        driverPackageVersion:
+                          objectConnection.driverPackageVersion,
+                        connectionDatabaseName: objectConnection.database,
+                        databaseName: navigationDatabaseName,
+                        schema,
+                        tables: tableRelations.filter((table) =>
+                          selectedNames.has(table.name),
+                        ),
+                      });
+                    }}
+                  >
+                    DDL
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      !objectConnection ||
+                      tableBatchAction?.running ||
+                      Boolean(schemaDiagramLoadingKey)
+                    }
+                    title="Open a schema diagram with the selected tables highlighted"
+                    onClick={() => {
+                      if (!objectConnection) return;
+                      void handleOpenSchemaDiagram(
+                        {
+                          projectId: activeProjectId,
                           connectionId,
-                          driver: objectDriver,
-                          schema,
-                          tables: selectedTableBatchNames,
-                        })
-                      }
-                    >
-                      SQL
-                    </button>
-                  )}
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    !objectConnection ||
-                    tableBatchAction?.running ||
-                    !activeCapabilities.supportsTableDataTransfer
-                  }
-                  onClick={() => {
-                    if (!objectConnection) return;
-                    void handleOpenDataTransfer({
-                      connection: objectConnection,
-                      database: navigationDatabaseName,
-                      schema,
-                      table: selectedTableBatchNames[0],
-                      tables: selectedTableBatchNames,
-                      scope:
-                        selectedTableBatchNames.length > 1 ? "schema" : "table",
-                    });
-                  }}
-                >
-                  Transfer
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
-                  disabled={
-                    selectedTableBatchNames.length === 0 ||
-                    !objectConnection ||
-                    tableBatchAction?.running
-                  }
-                  onClick={() => {
-                    if (!objectConnection) return;
-                    void handleOpenDataCompare({
-                      connection: objectConnection,
-                      database: navigationDatabaseName,
-                      schema,
-                      tables: selectedTableBatchNames,
-                    });
-                  }}
-                >
-                  Compare
-                </button>
-                {tableBatchAction?.scopeKey === groupKey &&
-                  tableBatchAction.running &&
-                  tableBatchAction.cancelId && (
-                    <button
-                      type="button"
-                      className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-warning))] hover:bg-[hsl(var(--wb-hover))]"
-                      onClick={() => void cancelSelectedTableExport()}
-                    >
-                      Cancel
-                    </button>
-                  )}
+                          connectionName: objectConnection.name,
+                          driver: objectConnection.driver,
+                          databaseName: navigationDatabaseName,
+                          schemaName: schema,
+                        },
+                        selectedTableBatchNames,
+                      );
+                    }}
+                  >
+                    Diagram
+                  </button>
+                  {objectDriver &&
+                    normalizeDatabaseDriverName(objectDriver) === "postgres" &&
+                    !objectConnection?.driverPackageVersion &&
+                    activeCapabilities.tableExportFormats?.includes("sql") && (
+                      <button
+                        type="button"
+                        className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                        disabled={
+                          selectedTableBatchNames.length === 0 ||
+                          tableBatchAction?.running
+                        }
+                        title="Export the selected tables as one data-only SQL file"
+                        onClick={() =>
+                          void exportSelectedTablesSql({
+                            scopeKey: groupKey,
+                            connectionId,
+                            driver: objectDriver,
+                            schema,
+                            tables: selectedTableBatchNames,
+                          })
+                        }
+                      >
+                        SQL
+                      </button>
+                    )}
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      !objectConnection ||
+                      tableBatchAction?.running ||
+                      !activeCapabilities.supportsTableDataTransfer
+                    }
+                    onClick={() => {
+                      if (!objectConnection) return;
+                      void handleOpenDataTransfer({
+                        connection: objectConnection,
+                        database: navigationDatabaseName,
+                        schema,
+                        table: selectedTableBatchNames[0],
+                        tables: selectedTableBatchNames,
+                        scope:
+                          selectedTableBatchNames.length > 1
+                            ? "schema"
+                            : "table",
+                      });
+                    }}
+                  >
+                    Transfer
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-text))] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-40"
+                    disabled={
+                      selectedTableBatchNames.length === 0 ||
+                      !objectConnection ||
+                      tableBatchAction?.running
+                    }
+                    onClick={() => {
+                      if (!objectConnection) return;
+                      void handleOpenDataCompare({
+                        connection: objectConnection,
+                        database: navigationDatabaseName,
+                        schema,
+                        tables: selectedTableBatchNames,
+                      });
+                    }}
+                  >
+                    Compare
+                  </button>
+                  {tableBatchAction?.scopeKey === groupKey &&
+                    tableBatchAction.running &&
+                    tableBatchAction.cancelId && (
+                      <button
+                        type="button"
+                        className="rounded-[3px] px-1.5 py-0.5 text-[10px] text-[hsl(var(--wb-warning))] hover:bg-[hsl(var(--wb-hover))]"
+                        onClick={() => void cancelSelectedTableExport()}
+                      >
+                        Cancel
+                      </button>
+                    )}
                   <button
                     type="button"
                     className="flex h-5 w-5 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
@@ -4814,33 +4808,33 @@ export function SchemaSidebar() {
                   </button>
                 </div>
                 {tableBatchAction?.scopeKey === groupKey &&
-                  !tableBatchAction.running &&
-                  tableBatchAction.failures?.length ? (
-                    <details className="border-t border-[hsl(var(--wb-border-subtle))] px-1.5 py-1">
-                      <summary className="cursor-pointer select-none text-[hsl(var(--wb-warning))] outline-none focus-visible:underline">
-                        Show refresh failure details
-                      </summary>
-                      <ul className="mt-1 max-h-32 space-y-1 overflow-auto pl-3.5">
-                        {tableBatchAction.failures.map((failure) => (
-                          <li key={failure.name} className="list-disc">
-                            <span className="font-medium text-[hsl(var(--wb-text))]">
-                              {failure.name}
-                            </span>
-                            <span className="wb-muted">
-                              {" · "}
-                              {failure.message}
-                            </span>
-                          </li>
-                        ))}
-                        {Boolean(tableBatchAction.omittedFailures) && (
-                          <li className="list-disc wb-muted">
-                            {tableBatchAction.omittedFailures} more failures are
-                            omitted
-                          </li>
-                        )}
-                      </ul>
-                    </details>
-                  ) : null}
+                !tableBatchAction.running &&
+                tableBatchAction.failures?.length ? (
+                  <details className="border-t border-[hsl(var(--wb-border-subtle))] px-1.5 py-1">
+                    <summary className="cursor-pointer select-none text-[hsl(var(--wb-warning))] outline-none focus-visible:underline">
+                      Show refresh failure details
+                    </summary>
+                    <ul className="mt-1 max-h-32 space-y-1 overflow-auto pl-3.5">
+                      {tableBatchAction.failures.map((failure) => (
+                        <li key={failure.name} className="list-disc">
+                          <span className="font-medium text-[hsl(var(--wb-text))]">
+                            {failure.name}
+                          </span>
+                          <span className="wb-muted">
+                            {" · "}
+                            {failure.message}
+                          </span>
+                        </li>
+                      ))}
+                      {Boolean(tableBatchAction.omittedFailures) && (
+                        <li className="list-disc wb-muted">
+                          {tableBatchAction.omittedFailures} more failures are
+                          omitted
+                        </li>
+                      )}
+                    </ul>
+                  </details>
+                ) : null}
               </div>
             )}
             {!hasSchemaObjectContext ? (
@@ -5064,14 +5058,13 @@ export function SchemaSidebar() {
                                 event.nativeEvent,
                                 {
                                   payload,
-                                  label: explorerTableReferenceDragLabel(payload),
+                                  label:
+                                    explorerTableReferenceDragLabel(payload),
                                   onFinish: (dragged) => {
                                     if (dragged) {
-                                      suppressTableReferenceClickRef.current =
-                                        true;
+                                      suppressTableReferenceClickRef.current = true;
                                       window.setTimeout(() => {
-                                        suppressTableReferenceClickRef.current =
-                                          false;
+                                        suppressTableReferenceClickRef.current = false;
                                       }, 0);
                                     }
                                   },
@@ -5079,7 +5072,11 @@ export function SchemaSidebar() {
                               );
                             }}
                             onKeyDown={(event) => {
-                              if (event.key !== "Enter" || isTableBatchSelectionActive) return;
+                              if (
+                                event.key !== "Enter" ||
+                                isTableBatchSelectionActive
+                              )
+                                return;
                               event.preventDefault();
                               void handleTableDoubleClick(table, schema);
                             }}
@@ -5182,14 +5179,17 @@ export function SchemaSidebar() {
                             }
                             onClick={() =>
                               window.dispatchEvent(
-                                new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
-                                  detail: {
-                                    connectionId,
-                                    database: navigationDatabaseName,
-                                    schema,
-                                    table: table.name,
+                                new CustomEvent(
+                                  APP_EVENT_OPEN_DATABASE_SEARCH,
+                                  {
+                                    detail: {
+                                      connectionId,
+                                      database: navigationDatabaseName,
+                                      schema,
+                                      table: table.name,
+                                    },
                                   },
-                                }),
+                                ),
                               )
                             }
                           >
@@ -5237,7 +5237,11 @@ export function SchemaSidebar() {
                             }
                           >
                             <Sparkles className="mr-2 h-3.5 w-3.5" />
-                            Add {contextualTableNames.length > 1 ? "tables" : "table"} to AI context
+                            Add{" "}
+                            {contextualTableNames.length > 1
+                              ? "tables"
+                              : "table"}{" "}
+                            to AI context
                           </ContextMenuItem>
                           <ContextMenuSeparator
                             className={menuSeparatorClass}
@@ -5520,7 +5524,9 @@ export function SchemaSidebar() {
                                 disabled={
                                   isReadOnlyRelation ||
                                   !objectConnection ||
-                                  !supportsDatabaseAdministration(objectDriver) ||
+                                  !supportsDatabaseAdministration(
+                                    objectDriver,
+                                  ) ||
                                   Boolean(objectConnection.driverPackageVersion)
                                 }
                               >
@@ -6266,24 +6272,25 @@ export function SchemaSidebar() {
                           >
                             Table
                           </ContextMenuItem>
-                          {isFlatKeyValueTree && connection.driver === "redis" && (
-                            <ContextMenuItem
-                              className={menuItemClass}
-                              onClick={() => {
-                                if (!isActive) {
-                                  void setActiveConnection(connection.id).then(
-                                    (error) => {
+                          {isFlatKeyValueTree &&
+                            connection.driver === "redis" && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() => {
+                                  if (!isActive) {
+                                    void setActiveConnection(
+                                      connection.id,
+                                    ).then((error) => {
                                       if (!error) setIsCreateRedisKeyOpen(true);
-                                    },
-                                  );
-                                  return;
-                                }
-                                setIsCreateRedisKeyOpen(true);
-                              }}
-                            >
-                              Key
-                            </ContextMenuItem>
-                          )}
+                                    });
+                                    return;
+                                  }
+                                  setIsCreateRedisKeyOpen(true);
+                                }}
+                              >
+                                Key
+                              </ContextMenuItem>
+                            )}
                         </ContextMenuSubContent>
                       </ContextMenuSub>
                       <ContextMenuItem
@@ -6305,10 +6312,9 @@ export function SchemaSidebar() {
                             new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
                               detail: {
                                 connectionId: connection.id,
-                                database:
-                                  connectionCanBrowseDatabaseCatalogs
-                                    ? connectedPostgresDatabase
-                                    : undefined,
+                                database: connectionCanBrowseDatabaseCatalogs
+                                  ? connectedPostgresDatabase
+                                  : undefined,
                               },
                             }),
                           )
@@ -6332,6 +6338,21 @@ export function SchemaSidebar() {
                         <Database className="mr-2 h-3.5 w-3.5" />
                         Browse Databases
                       </ContextMenuItem>
+                      {normalizeDatabaseDriverName(connection.driver) ===
+                        "rocketmq" && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() =>
+                            openRocketMqWorkspace(
+                              connection.id,
+                              connection.name,
+                            )
+                          }
+                        >
+                          <Network className="mr-2 h-3.5 w-3.5" />
+                          Open RocketMQ Console
+                        </ContextMenuItem>
+                      )}
                       <ContextMenuSeparator className={menuSeparatorClass} />
                       <ContextMenuItem
                         className={menuItemClass}
@@ -6873,7 +6894,8 @@ export function SchemaSidebar() {
                                       )}
                                       className={cn(
                                         "wb-tree-row flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] font-normal [font-variation-settings:'wght'_430] transition-colors",
-                                        isLoginSchema && "font-semibold [font-variation-settings:'wght'_600]",
+                                        isLoginSchema &&
+                                          "font-semibold [font-variation-settings:'wght'_600]",
                                         isCurrentSchema
                                           ? "wb-tree-row-selected font-medium text-[hsl(var(--wb-text))]"
                                           : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
@@ -7341,7 +7363,9 @@ export function SchemaSidebar() {
           <NacosConfigTransferDialog
             open
             sourceConnectionId={nacosConfigTransferRequest.sourceConnectionId}
-            sourceConnectionName={nacosConfigTransferRequest.sourceConnectionName}
+            sourceConnectionName={
+              nacosConfigTransferRequest.sourceConnectionName
+            }
             source={nacosConfigTransferRequest.source}
             connections={connections}
             onClose={() => setNacosConfigTransferRequest(null)}

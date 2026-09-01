@@ -190,7 +190,8 @@ export type TabType =
   | "schema_diff"
   | "schema_diagram"
   | "data_compare"
-  | "database_browser";
+  | "database_browser"
+  | "rocketmq_workspace";
 export type QueryLanguage = "elasticsearch-dsl" | "elasticsearch-eql";
 
 const ELASTICSEARCH_REQUEST_LINE =
@@ -284,10 +285,9 @@ function boundedQueryResultRuns(
   const unpinnedRuns = runs.filter(
     (run) => !run.pinned || !retainedPinIds.has(run.id),
   );
-  return [
-    ...retainedPins,
-    ...unpinnedRuns.slice(-MAX_QUERY_RESULT_RUNS),
-  ].sort((left, right) => left.completedAt - right.completedAt);
+  return [...retainedPins, ...unpinnedRuns.slice(-MAX_QUERY_RESULT_RUNS)].sort(
+    (left, right) => left.completedAt - right.completedAt,
+  );
 }
 
 function cloneQueryResultGridState(
@@ -1054,6 +1054,10 @@ interface TabState {
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
   openDatabaseBrowser: (connectionId: string, connectionName: string) => string;
+  openRocketMqWorkspace: (
+    connectionId: string,
+    connectionName: string,
+  ) => string;
   openSchemaDiffTab: (
     plan: SchemaDiffPlan,
     source: SchemaSnapshot,
@@ -1623,6 +1627,23 @@ export const useTabStore = create<TabState>((set, get) => ({
     return get().createTab(
       "database_browser",
       `${connectionName} databases`,
+      "",
+      { connectionId },
+    );
+  },
+
+  openRocketMqWorkspace: (connectionId, connectionName) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.type === "rocketmq_workspace" && tab.connectionId === connectionId,
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return existing.id;
+    }
+    return get().createTab(
+      "rocketmq_workspace",
+      `${connectionName} RocketMQ`,
       "",
       { connectionId },
     );
@@ -2624,7 +2645,9 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((tab) => {
         if (tab.id !== id || tab.type !== "query") return tab;
         const current = snapshotActiveQueryResultRun(tab);
-        const run = current.resultRuns?.find((candidate) => candidate.id === runId);
+        const run = current.resultRuns?.find(
+          (candidate) => candidate.id === runId,
+        );
         return run ? projectQueryResultRun(current, run) : current;
       }),
     }));
@@ -2637,7 +2660,9 @@ export const useTabStore = create<TabState>((set, get) => ({
         const current = snapshotActiveQueryResultRun(tab);
         const target = current.resultRuns?.find((run) => run.id === runId);
         if (!target || !current.resultRuns) return current;
-        const pinnedCount = current.resultRuns.filter((run) => run.pinned).length;
+        const pinnedCount = current.resultRuns.filter(
+          (run) => run.pinned,
+        ).length;
         if (!target.pinned && pinnedCount >= MAX_PINNED_QUERY_RESULT_RUNS) {
           return current;
         }
@@ -2656,15 +2681,15 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((tab) => {
         if (tab.id !== id || tab.type !== "query") return tab;
         const current = snapshotActiveQueryResultRun(tab);
-        const runIndex = current.resultRuns?.findIndex(
-          (run) => run.id === runId,
-        ) ?? -1;
+        const runIndex =
+          current.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
         if (runIndex < 0 || !current.resultRuns) return current;
         const resultRuns = current.resultRuns.filter((run) => run.id !== runId);
         if (current.activeResultRunId !== runId) {
           return { ...current, resultRuns };
         }
-        const replacement = resultRuns[Math.min(runIndex, resultRuns.length - 1)];
+        const replacement =
+          resultRuns[Math.min(runIndex, resultRuns.length - 1)];
         return replacement
           ? projectQueryResultRun({ ...current, resultRuns }, replacement)
           : {
