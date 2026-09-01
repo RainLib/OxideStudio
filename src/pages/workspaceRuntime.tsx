@@ -42,7 +42,7 @@ import {
   APP_EVENT_VIM_WINDOW_NAVIGATE,
   type VimWindowNavigation,
 } from "@/lib/vimMode";
-import { ChevronDown, ChevronRight, LineChart, X } from "lucide-react";
+import { ChevronDown, ChevronRight, LineChart, Pin, X } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -172,6 +172,7 @@ export function WorkspaceRuntime() {
     (state) => state.setActiveResultIndex,
   );
   const setActiveResultRun = useTabStore((state) => state.setActiveResultRun);
+  const toggleResultRunPin = useTabStore((state) => state.toggleResultRunPin);
   const closeResultRun = useTabStore((state) => state.closeResultRun);
   const setQueryOutputView = useTabStore((state) => state.setQueryOutputView);
   const closeResultAt = useTabStore((state) => state.closeResultAt);
@@ -226,6 +227,9 @@ export function WorkspaceRuntime() {
     : null;
   const queryResults = activeTab?.results ?? [];
   const queryResultRuns = activeTab?.resultRuns ?? [];
+  const pinnedQueryResultRunCount = queryResultRuns.filter(
+    (run) => run.pinned,
+  ).length;
   const activeResultIndex = Math.min(
     activeTab?.activeResultIndex ?? 0,
     Math.max(0, queryResults.length - 1),
@@ -801,7 +805,37 @@ export function WorkspaceRuntime() {
                                               0,
                                             ).toLocaleString()} rows`}
                                           >
+                                            {run.pinned && (
+                                              <Pin
+                                                size={9}
+                                                className="mr-1 inline-block -translate-y-px text-[hsl(var(--wb-accent))]"
+                                              />
+                                            )}
                                             Run {index + 1}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-35"
+                                            title={
+                                              run.pinned
+                                                ? "Unpin result run"
+                                                : pinnedQueryResultRunCount >= 3
+                                                  ? "Only three result runs can be pinned"
+                                                  : "Pin result run"
+                                            }
+                                            disabled={
+                                              !run.pinned &&
+                                              pinnedQueryResultRunCount >= 3
+                                            }
+                                            onClick={() =>
+                                              activeTab &&
+                                              toggleResultRunPin(
+                                                activeTab.id,
+                                                run.id,
+                                              )
+                                            }
+                                          >
+                                            <Pin size={9} />
                                           </button>
                                           <button
                                             type="button"

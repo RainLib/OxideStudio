@@ -86,8 +86,26 @@ describe("tab store organization actions", () => {
         rawResponse: { hits: ["large value"] },
       },
     };
+    const historicalResult = {
+      columns: [{ name: "historical", data_type: "text" }],
+      rows: [["older value"]],
+    };
     useTabStore.setState({
-      tabs: [{ ...tab("query"), results: [result] }],
+      tabs: [
+        {
+          ...tab("query"),
+          results: [result],
+          resultRuns: [
+            {
+              id: "older-run",
+              completedAt: 1,
+              results: [historicalResult],
+              activeResultIndex: 0,
+              pinned: true,
+            },
+          ],
+        },
+      ],
       activeTabId: "query",
     });
 
@@ -97,6 +115,8 @@ describe("tab store organization actions", () => {
     expect(result.rows).toEqual([]);
     expect(result.message).toBeUndefined();
     expect(result.responseMeta).toBeUndefined();
+    expect(historicalResult.columns).toEqual([]);
+    expect(historicalResult.rows).toEqual([]);
     expect(useTabStore.getState().closedTabsStack[0]?.results).toBeNull();
 
     useTabStore.getState().reopenTab();
@@ -197,6 +217,13 @@ describe("tab store organization actions", () => {
     expect(current?.gridState?.columnFilters).toEqual({
       second: { operator: "equals", value: "two" },
     });
+
+    store.toggleResultRunPin("query", "run-1");
+    expect(
+      useTabStore
+        .getState()
+        .tabs[0]?.resultRuns?.find((run) => run.id === "run-1")?.pinned,
+    ).toBe(true);
 
     store.closeResultRun("query", "run-2");
     current = useTabStore.getState().tabs[0];

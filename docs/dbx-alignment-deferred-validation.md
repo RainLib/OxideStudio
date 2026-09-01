@@ -2120,11 +2120,12 @@ explicit deferred validation task rather than an implicit release check.
 
 ## Phase 166 -- bounded query result run history
 
-- In a packaged desktop build, run more than five queries in one Query tab with
-  small, large, multi-statement and HTTP-backed results. Verify the oldest run
-  is evicted without duplicating or corrupting live rows; switching and closing
-  runs must retain per-result filter/sort state and select a deterministic
-  neighboring run.
+- In a packaged desktop build, run more than five ordinary queries and pin up to
+  three result runs with small, large, multi-statement and HTTP-backed results.
+  Verify ordinary history evicts oldest unpinned runs without duplicating or
+  corrupting live rows, the pin ceiling cannot grow memory without bound, and
+  switching/closing runs retains per-result filter/sort state and selects a
+  deterministic neighboring run.
 - Start a slow sixth query, switch to an older run whose active result index
   matches the executing run, then cancel/fail/succeed. Only the executing
   `runId + resultIndex` may display a loading mask; the historical grid must

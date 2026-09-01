@@ -269,9 +269,26 @@ export interface QueryResultRun {
   activeResultIndex: number;
   gridState?: QueryResultGridState;
   resultGridStates?: Record<number, QueryResultGridState>;
+  pinned?: boolean;
 }
 
 const MAX_QUERY_RESULT_RUNS = 5;
+const MAX_PINNED_QUERY_RESULT_RUNS = 3;
+
+function boundedQueryResultRuns(
+  runs: readonly QueryResultRun[],
+): QueryResultRun[] {
+  const pinnedRuns = runs.filter((run) => run.pinned);
+  const retainedPins = pinnedRuns.slice(-MAX_PINNED_QUERY_RESULT_RUNS);
+  const retainedPinIds = new Set(retainedPins.map((run) => run.id));
+  const unpinnedRuns = runs.filter(
+    (run) => !run.pinned || !retainedPinIds.has(run.id),
+  );
+  return [
+    ...retainedPins,
+    ...unpinnedRuns.slice(-MAX_QUERY_RESULT_RUNS),
+  ].sort((left, right) => left.completedAt - right.completedAt);
+}
 
 function cloneQueryResultGridState(
   gridState: QueryResultGridState | undefined,
@@ -1145,6 +1162,7 @@ interface TabState {
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
   setActiveResultIndex: (id: string, index: number) => void;
   setActiveResultRun: (id: string, runId: string) => void;
+  toggleResultRunPin: (id: string, runId: string) => void;
   closeResultRun: (id: string, runId: string) => void;
   setQueryOutputView: (id: string, view: "results" | "plan") => void;
   closeResultAt: (id: string, index: number) => void;
@@ -2612,6 +2630,27 @@ export const useTabStore = create<TabState>((set, get) => ({
     }));
   },
 
+  toggleResultRunPin: (id: string, runId: string) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== id || tab.type !== "query") return tab;
+        const current = snapshotActiveQueryResultRun(tab);
+        const target = current.resultRuns?.find((run) => run.id === runId);
+        if (!target || !current.resultRuns) return current;
+        const pinnedCount = current.resultRuns.filter((run) => run.pinned).length;
+        if (!target.pinned && pinnedCount >= MAX_PINNED_QUERY_RESULT_RUNS) {
+          return current;
+        }
+        return {
+          ...current,
+          resultRuns: current.resultRuns.map((run) =>
+            run.id === runId ? { ...run, pinned: !run.pinned } : run,
+          ),
+        };
+      }),
+    }));
+  },
+
   closeResultRun: (id: string, runId: string) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => {
@@ -2925,9 +2964,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                       }
                     : undefined;
                 const resultRuns = run
-                  ? [...(current.resultRuns || []), run].slice(
-                      -MAX_QUERY_RESULT_RUNS,
-                    )
+                  ? boundedQueryResultRuns([...(current.resultRuns || []), run])
                   : current.resultRuns;
                 return {
                   ...current,

@@ -939,13 +939,14 @@ Tauri WebView 下的滚动、选区和 reduced-motion 动画仍在延期验证�
 对照 DBX `queryStore.ts` 与 `tabResultCache.ts` 的 result run 模型，Oxide 原先只保存当前 query execution；重新运行后，
 之前的结果只能从 Query History 再执行。现增加轻量的当前会话 result history：
 
-- 一个 Query tab 最多保留五个已完成 run。每个 run 只引用既有 `QueryResult` 对象，不复制 rows/columns/raw response；
-  新 run 超出上限时遗忘最早的引用，关闭 tab 时所有引用仍进入现有单次 payload release，closed-tab history 与应用重启均不保留结果。
+- 一个 Query tab 最多保留五个普通 run 与三个明确固定的 run。每个 run 只引用既有 `QueryResult` 对象，不复制
+  rows/columns/raw response；普通 run 超出上限时遗忘最早的引用，固定入口有独立上限，避免把“保留”变成无界内存。
+  关闭 tab 时所有引用仍进入现有单次 payload release，closed-tab history 与应用重启均不保留结果。
 - Results 面板在多个 run 时显示紧凑 Run selector，切换会投影该 run 的 results、SQL、active result index 及 local
   filter/sort state；关闭 run 自动选择相邻 run，关闭最后一个则清空结果 surface。
 - execution loading identity 从单独 result index 升级为 `runId + resultIndex`。用户在执行中打开同编号的旧 run 时不会被新
   execution 的 loading mask 遮住；legacy tab 没有 identity 时仍保守遮罩。
 
-`useTabStore.organization.test.ts` 覆盖 run projection、状态保留、相邻回退与 payload reference identity；
+`useTabStore.organization.test.ts` 覆盖 run projection、固定、状态保留、相邻回退与 payload reference identity；
 `queryResultLoadingState.test.ts` 覆盖跨 run loading isolation，`npm run build` 已通过。DBX 的 pin、磁盘 cache、
 跨重启恢复与 session-backed payload eviction 属于后续独立容量/恢复工程，当前不伪装成已实现。
