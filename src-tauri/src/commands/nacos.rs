@@ -55,6 +55,8 @@ pub struct ExecuteNacosConfigTransferRequest {
     #[serde(flatten)]
     pub transfer: NacosConfigTransferRequest,
     pub confirmation_token: String,
+    #[serde(default)]
+    pub confirmation_phrase: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -75,6 +77,8 @@ pub struct NacosConfigTransferPlan {
     pub creates: usize,
     pub conflicts: usize,
     pub items: Vec<NacosConfigTransferPlanItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_phrase: Option<String>,
     pub confirmation_token: String,
 }
 
@@ -304,6 +308,12 @@ async fn build_plan(
             creates,
             conflicts,
             items,
+            confirmation_phrase: (conflicts > 0).then(|| {
+                format!(
+                    "OVERWRITE {conflicts} CONFIGURATION{}",
+                    if conflicts == 1 { "" } else { "S" }
+                )
+            }),
             confirmation_token: token,
         },
         rows,
@@ -341,6 +351,21 @@ pub async fn execute_nacos_config_transfer(
                 "Nacos migration has target conflicts; choose Skip or Overwrite after review"
                     .to_string(),
             );
+        }
+        if let Some(phrase) = plan.confirmation_phrase.as_deref() {
+            if !matches!(
+                request.transfer.conflict_policy,
+                NacosConflictPolicy::Overwrite
+            ) {
+                return Err(
+                    "Nacos conflicts require an explicit Overwrite or Skip policy".to_string(),
+                );
+            }
+            if request.confirmation_phrase.trim() != phrase {
+                return Err(format!(
+                    "Type {phrase} exactly to overwrite existing Nacos configurations"
+                ));
+            }
         }
         let mut receipt = NacosConfigTransferReceipt {
             created: 0,

@@ -92,6 +92,7 @@ import type {
   DatabaseCapabilities,
   DatabaseDriver,
   FunctionInfo,
+  NacosConfigLocation,
   SchemaObjectInfo,
   TableDataTransferEndpoint,
   TableInfo,
@@ -290,6 +291,11 @@ const TableDataCompareDialog = lazy(() =>
     default: module.TableDataCompareDialog,
   })),
 );
+const NacosConfigTransferDialog = lazy(() =>
+  import("./NacosConfigTransferDialog").then((module) => ({
+    default: module.NacosConfigTransferDialog,
+  })),
+);
 
 interface PostgresRemoteDatabaseState {
   connectionId: string | null;
@@ -310,6 +316,36 @@ interface ExplorerDataCompareRequest {
   source: TableDataTransferEndpoint;
   sourceTables: string[];
   sourceCapabilities: DatabaseCapabilities;
+}
+
+interface ExplorerNacosConfigTransferRequest {
+  sourceConnectionId: string;
+  sourceConnectionName: string;
+  source: NacosConfigLocation;
+}
+
+function nacosLocationFromCollection(
+  collection: CollectionInfo,
+): NacosConfigLocation | null {
+  try {
+    const key = JSON.parse(collection.name) as {
+      dataId?: unknown;
+      group?: unknown;
+      tenant?: unknown;
+    };
+    if (
+      typeof key.dataId !== "string" ||
+      !key.dataId.trim() ||
+      typeof key.group !== "string" ||
+      !key.group.trim() ||
+      (key.tenant !== undefined && typeof key.tenant !== "string")
+    ) {
+      return null;
+    }
+    return { dataId: key.dataId, group: key.group, tenant: key.tenant || "" };
+  } catch {
+    return null;
+  }
 }
 
 interface ExplorerTableBatchSelection extends TableBatchSelection {
@@ -752,6 +788,8 @@ export function SchemaSidebar() {
     useState<ExplorerDataTransferRequest | null>(null);
   const [dataCompareRequest, setDataCompareRequest] =
     useState<ExplorerDataCompareRequest | null>(null);
+  const [nacosConfigTransferRequest, setNacosConfigTransferRequest] =
+    useState<ExplorerNacosConfigTransferRequest | null>(null);
   const [tableBatchSelection, setTableBatchSelection] =
     useState<ExplorerTableBatchSelection | null>(null);
   const [tableBatchAction, setTableBatchAction] = useState<{
@@ -4168,6 +4206,10 @@ export function SchemaSidebar() {
       const isElasticsearchIndex =
         normalizeDatabaseDriverName(collectionDriver) === "elasticsearch" &&
         collection.type === "index";
+      const nacosLocation =
+        normalizeDatabaseDriverName(collectionDriver) === "nacos"
+          ? nacosLocationFromCollection(collection)
+          : null;
       const isSelectedCollection =
         isCurrentSchema && selectedTable === collection.name;
       const canExpandCollectionMetadata =
@@ -4352,6 +4394,22 @@ export function SchemaSidebar() {
                     Clear Documents…
                   </ContextMenuItem>
                 </>
+              )}
+              {nacosLocation && (
+                <ContextMenuItem
+                  onClick={() =>
+                    setNacosConfigTransferRequest({
+                      sourceConnectionId: connectionId,
+                      sourceConnectionName:
+                        connections.find((candidate) => candidate.id === connectionId)
+                          ?.name || "Nacos connection",
+                      source: nacosLocation,
+                    })
+                  }
+                >
+                  <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                  Transfer Configuration…
+                </ContextMenuItem>
               )}
               <ContextMenuSeparator />
               <ContextMenuItem
@@ -7276,6 +7334,21 @@ export function SchemaSidebar() {
                 initialTarget: target,
               });
               setDataCompareRequest(null);
+            }}
+          />
+        )}
+        {nacosConfigTransferRequest !== null && (
+          <NacosConfigTransferDialog
+            open
+            sourceConnectionId={nacosConfigTransferRequest.sourceConnectionId}
+            sourceConnectionName={nacosConfigTransferRequest.sourceConnectionName}
+            source={nacosConfigTransferRequest.source}
+            connections={connections}
+            onClose={() => setNacosConfigTransferRequest(null)}
+            onTransferred={(targetConnectionId) => {
+              if (targetConnectionId === activeConnectionId) {
+                void refreshCollectionObjects();
+              }
             }}
           />
         )}
