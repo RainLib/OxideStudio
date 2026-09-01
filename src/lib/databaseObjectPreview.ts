@@ -142,6 +142,14 @@ export function collectionCreateQueryTemplateForCapabilities(
 
 const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
   {
+    id: "builtin.key-value.etcd",
+    priority: 311,
+    matches: (capabilities) => capabilities.driver === "etcd",
+    objectLabel: "KV key",
+    objectPluralLabel: "KV keys",
+    queryTemplate: ({ collection }) => `GET ${JSON.stringify(collection.name)}`,
+  },
+  {
     id: "builtin.key-value.consul",
     priority: 310,
     matches: (capabilities) => capabilities.driver === "consul",

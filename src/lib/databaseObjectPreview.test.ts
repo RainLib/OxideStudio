@@ -27,3 +27,25 @@ describe("Consul object preview", () => {
     ).toBeNull();
   });
 });
+
+describe("etcd object preview", () => {
+  const capabilities = defaultDatabaseCapabilities("etcd");
+  const collection = {
+    name: "app/config",
+    namespace: "kv",
+    type: "key",
+    documentCount: null,
+  };
+
+  it("uses the driver GET preview and exposes no mutations", () => {
+    expect(
+      collectionPreviewQueryTemplateForCapabilities(capabilities, "kv", collection),
+    ).toBe('GET "app/config"');
+    expect(
+      collectionCreateQueryTemplateForCapabilities(capabilities, "kv", "new-key"),
+    ).toBeNull();
+    expect(
+      collectionDeleteQueryTemplateForCapabilities(capabilities, "kv", collection),
+    ).toBeNull();
+  });
+});

@@ -43,6 +43,7 @@ function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
     driver === "elasticsearch" ||
     driver === "influxdb" ||
     driver === "influxdb3" ||
+    driver === "etcd" ||
     driver === "consul" ||
     driver === "victoriametrics" ||
     driver === "meilisearch"

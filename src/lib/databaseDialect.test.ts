@@ -56,6 +56,23 @@ describe("Consul dialect profile", () => {
   });
 });
 
+describe("etcd dialect profile", () => {
+  it("exposes only the native read-only KV browse surface", () => {
+    expect(connectionUrlScheme("etcd")).toBe("http");
+    expect(defaultDatabasePort("etcd")).toBe(2379);
+    expect(defaultDatabaseCapabilities("etcd")).toMatchObject({
+      dataModel: "keyValue",
+      lspLanguageId: "etcd",
+      supportsSqlQuery: false,
+      supportsKeyValueBrowsing: true,
+      supportsConnectionDatabase: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});
+
 describe("InfluxDB 1.x / 2.x dialect profile", () => {
   it("uses the time-series workspace without claiming SQL LSP support", () => {
     expect(connectionUrlScheme("influxdb")).toBe("http");

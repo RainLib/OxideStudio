@@ -28,6 +28,7 @@ export type KnownDatabaseDriver =
   | "mysql"
   | "sqlite"
   | "redis"
+  | "etcd"
   | "consul"
   | "elasticsearch"
   | "mongodb"

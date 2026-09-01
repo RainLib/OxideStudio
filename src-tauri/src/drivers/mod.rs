@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 pub mod consul;
 pub mod elasticsearch;
+pub mod etcd;
 pub mod external;
 pub mod influxdb;
 pub mod influxdb3;
@@ -67,6 +68,15 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
             .connect()
             .await
             .context("Failed to connect to Consul")?;
+        return Ok(Box::new(driver));
+    }
+
+    if canonical_driver == "etcd" {
+        let mut driver = etcd::EtcdDriver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to etcd")?;
         return Ok(Box::new(driver));
     }
 
