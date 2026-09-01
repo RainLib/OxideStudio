@@ -20,6 +20,10 @@ describe("data source driver choices", () => {
       label: "InfluxDB 3",
       availability: "available",
     });
+    expect(choices.find((choice) => choice.driver === "meilisearch")).toMatchObject({
+      label: "Meilisearch",
+      availability: "available",
+    });
     expect(choices.find((choice) => choice.driver === "oracle")).toMatchObject({
       label: "Oracle Database",
       availability: "installationRequired",

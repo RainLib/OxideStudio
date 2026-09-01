@@ -33,6 +33,19 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Drivers whose connection URLs use HTTP(S) as their native transport.
+ * Keeping this list central prevents a form edit from degrading a pasted
+ * HTTPS endpoint back to HTTP.
+ */
+function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
+  return (
+    driver === "elasticsearch" ||
+    driver === "influxdb3" ||
+    driver === "meilisearch"
+  );
+}
+
 export function normalizeConnectionUrlForDriver(
   driver: DatabaseDriver,
   connectionUrl: string,
@@ -59,7 +72,7 @@ export function normalizeConnectionUrlForDriver(
     break;
   }
 
-  if (driver === "elasticsearch") {
+  if (isHttpDatabaseDriver(driver)) {
     const protocol = url.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
     const protocolPattern = protocol
       ? new RegExp(`^${escapeRegExp(protocol)}:`, "i")
@@ -300,7 +313,7 @@ export function parseConnectionUrl(
       sslModeParamAliases(driver),
     );
     const sslMode =
-      driver === "elasticsearch"
+      isHttpDatabaseDriver(driver)
         ? configuredSslMode ||
           (urlObj.protocol.toLowerCase() === "https:" ? "require" : "disable")
         : configuredSslMode;
@@ -389,8 +402,7 @@ export function buildConnectionUrl(config: {
   const encodedPassword = encodeURIComponent(password);
 
   // Build base URL
-  const isHttpDatabase =
-    driver === "elasticsearch" || driver === "influxdb3";
+  const isHttpDatabase = isHttpDatabaseDriver(driver);
   const secureHttpDatabase =
     isHttpDatabase && sslMode && sslMode !== "disable";
   const scheme = secureHttpDatabase ? "https" : connectionUrlScheme(driver);

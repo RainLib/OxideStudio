@@ -9,6 +9,7 @@ use std::str::FromStr;
 pub mod elasticsearch;
 pub mod external;
 pub mod influxdb3;
+pub mod meilisearch;
 pub mod mongodb;
 mod mongodb_shell;
 pub mod mysql;
@@ -63,6 +64,15 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
             .connect()
             .await
             .context("Failed to connect to InfluxDB 3")?;
+        return Ok(Box::new(driver));
+    }
+
+    if canonical_driver == "meilisearch" {
+        let mut driver = meilisearch::MeilisearchDriver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to Meilisearch")?;
         return Ok(Box::new(driver));
     }
 

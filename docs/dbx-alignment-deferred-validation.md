@@ -111,6 +111,21 @@ open real database endpoints.
   cancellation, error redaction, metadata scope and, where DBX exposes writes,
   the existing mutation/approval and migration conformance boundaries.
 
+## Phase 158 -- Meilisearch native browse runtime
+
+- Validate Meilisearch 1.x health/authentication, base-path deployments,
+  pagination totals, empty/large indexes, primary-key discovery and nested
+  field samples. Confirm only the closed health/index/document endpoints are
+  called and an API key never appears in diagnostics, telemetry or saved URL
+  display.
+- Exercise 401/403/404, malformed JSON, declared and streamed bodies above
+  8 MiB, cancellation/connection loss and index deletion between page loads.
+  Cursor replay across a different index must fail locally.
+- Search filters/sorts, task administration, document mutation, index settings,
+  keys and migrations remain unavailable until each has a product-owned,
+  reviewed UI and mutation contract. Do not expose arbitrary REST forwarding
+  through the SQL editor.
+
 ## Phase 137 -- locale-aware grid input and interaction feedback
 
 - In packaged Tauri WebViews with `en-US`, `de-DE`, `fr-FR` and a locale whose
@@ -1582,11 +1597,12 @@ explicit deferred validation task rather than an implicit release check.
   int32/int64, Decimal128, binary subtypes, timestamp, regex, JavaScript/code,
   MinKey/MaxKey and deeply nested mixed arrays through find, aggregate, insert
   and update. Compare BSON type tags on the server, not only rendered JSON.
-- When a visual DocumentBrowser/Grid clone surface is introduced, preserve the
-  source document identity and explicit edited-field set. Unedited fields must
-  reuse their canonical Extended JSON values, `_id` handling must be explicit,
-  and preview must distinguish literal strings such as `ISODate(...)` from
-  actual `$date` wrappers.
+- The visual Grid clone surface is present. Validate source-document identity,
+  explicit edited-field ledger, canonical Extended JSON preservation and the
+  source-digest re-read immediately before insert. Unedited fields must reuse
+  their canonical values, `_id` handling must remain explicit, and preview must
+  distinguish literal strings such as `ISODate(...)` from actual `$date`
+  wrappers.
 - Exercise malformed wrappers, unsupported binary subtype, out-of-range numeric
   values, timezone offsets, duplicate keys, payload limits, cancellation and
   error redaction. No shell-like string may be evaluated or silently coerced.

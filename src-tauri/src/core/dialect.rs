@@ -330,6 +330,9 @@ const INFLUXDB3_COMMON_DATA_TYPES: &[&str] = &[
     "DICTIONARY",
 ];
 
+const MEILISEARCH_COMMON_DATA_TYPES: &[&str] =
+    &["string", "integer", "double", "boolean", "object", "array"];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     aliases: &["postgresql", "pgsql"],
@@ -652,6 +655,54 @@ const INFLUXDB3_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: INFLUXDB3_COMMON_DATA_TYPES,
 };
 
+const MEILISEARCH_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "meilisearch",
+    aliases: &[],
+    display_name: "Meilisearch",
+    data_model: DatabaseDataModel::Search,
+    connection_mode: DatabaseConnectionMode::Network,
+    // Meilisearch's search/filter language is not SQL or Elasticsearch DSL.
+    // A dedicated provider can opt in later without making a native browser
+    // claim bundled LSP parsing today.
+    lsp_language_id: "meilisearch",
+    namespace_label: "index",
+    identifier_quote: '\0',
+    default_port: 7700,
+    supports_sql_query: false,
+    supports_table_browsing: false,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: true,
+    supports_key_value_browsing: false,
+    supports_schemas: false,
+    supports_database_catalogs: false,
+    supports_connection_database: false,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    supports_explain_plan: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: MEILISEARCH_COMMON_DATA_TYPES,
+};
+
 const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &POSTGRES_SPEC,
     &MYSQL_SPEC,
@@ -660,6 +711,7 @@ const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &MONGODB_SPEC,
     &REDIS_SPEC,
     &INFLUXDB3_SPEC,
+    &MEILISEARCH_SPEC,
 ];
 
 pub fn redis_capabilities() -> DatabaseCapabilities {
@@ -2138,6 +2190,29 @@ WITH NO DATA;"#
     }
 
     #[test]
+    fn meilisearch_capabilities_describe_native_index_browser() {
+        let meilisearch = database_capabilities_for_driver("meilisearch").unwrap();
+
+        assert_eq!(meilisearch.driver, "meilisearch");
+        assert_eq!(meilisearch.display_name, "Meilisearch");
+        assert_eq!(meilisearch.data_model, DatabaseDataModel::Search);
+        assert_eq!(meilisearch.lsp_language_id, "meilisearch");
+        assert_eq!(meilisearch.namespace_label, "index");
+        assert_eq!(meilisearch.default_port, 7700);
+        assert!(meilisearch.supports_collection_browsing);
+        assert!(!meilisearch.supports_schemas);
+        assert!(!meilisearch.supports_sql_query);
+        assert!(!meilisearch.supports_table_browsing);
+        assert!(!meilisearch.supports_key_value_browsing);
+        assert!(!meilisearch.supports_explain_plan);
+        assert!(!meilisearch.supports_create_database);
+        assert!(!meilisearch.supports_transactions);
+        assert!(all_database_capabilities()
+            .iter()
+            .any(|capabilities| capabilities.driver == "meilisearch"));
+    }
+
+    #[test]
     fn mongodb_capabilities_describe_document_driver() {
         let mongodb = database_capabilities_for_driver("mongo").unwrap();
 
@@ -2212,6 +2287,7 @@ WITH NO DATA;"#
                 "mongodb",
                 "redis",
                 "influxdb3",
+                "meilisearch",
             ]
         );
 

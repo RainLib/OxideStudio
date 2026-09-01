@@ -71,7 +71,7 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("oracle", "Oracle Database", "relational", "jdbc"),
   candidate("elasticsearch", "Elasticsearch", "search", "bundled", "elasticsearch-dsl"),
   candidate("easysearch", "Easysearch", "search", "http", "elasticsearch-dsl"),
-  candidate("meilisearch", "Meilisearch", "search", "native"),
+  candidate("meilisearch", "Meilisearch", "search", "bundled"),
   candidate("hbase", "Apache HBase", "wideColumn", "jdbc"),
   candidate("qdrant", "Qdrant", "search", "http"),
   candidate("milvus", "Milvus", "search", "http"),
@@ -270,6 +270,7 @@ const BUNDLED_DRIVER_IDS = new Set([
   "elasticsearch",
   "mongodb",
   "influxdb3",
+  "meilisearch",
 ]);
 
 const SIDECAR_SOURCE_DRIVER_IDS = new Set(["duckdb", "rqlite", "clickhouse"]);

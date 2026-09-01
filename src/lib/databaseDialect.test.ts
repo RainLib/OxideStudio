@@ -21,3 +21,20 @@ describe("InfluxDB 3 dialect profile", () => {
     });
   });
 });
+
+describe("Meilisearch dialect profile", () => {
+  it("exposes a native index browser without inventing a SQL workspace", () => {
+    expect(connectionUrlScheme("meilisearch")).toBe("http");
+    expect(defaultDatabasePort("meilisearch")).toBe(7700);
+    expect(defaultDatabaseCapabilities("meilisearch")).toMatchObject({
+      dataModel: "search",
+      lspLanguageId: "meilisearch",
+      supportsCollectionBrowsing: true,
+      supportsSqlQuery: false,
+      supportsConnectionDatabase: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});

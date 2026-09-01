@@ -15,7 +15,6 @@ describe("DBX reference driver catalogue", () => {
   it("keeps the latest DBX products unavailable until their own package is ready", () => {
     const nativeWorkspaceProducts = [
       "dynamodb",
-      "meilisearch",
       "consul",
       "mqtt",
       "victoriametrics",
@@ -40,6 +39,12 @@ describe("DBX reference driver catalogue", () => {
     });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
       runtimeRoute: "dedicatedWorkspace",
+      lspRoute: "notApplicable",
+    });
+    const meilisearch = referenceDriverCandidate("meilisearch");
+    expect(driverCandidateAvailability(meilisearch!, [])).toBe("bundled");
+    expect(referenceDriverDeliveryPlan(meilisearch!)).toMatchObject({
+      runtimeRoute: "bundled",
       lspRoute: "notApplicable",
     });
   });

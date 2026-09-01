@@ -30,7 +30,8 @@ export type KnownDatabaseDriver =
   | "redis"
   | "elasticsearch"
   | "mongodb"
-  | "influxdb3";
+  | "influxdb3"
+  | "meilisearch";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel =
   | "relational"

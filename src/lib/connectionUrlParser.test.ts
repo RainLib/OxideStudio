@@ -25,6 +25,28 @@ describe("InfluxDB 3 connection URL", () => {
   });
 });
 
+describe("Meilisearch connection URL", () => {
+  it("preserves HTTP transport, API-key credentials and no database path", () => {
+    const url = buildConnectionUrl({
+      driver: "meilisearch",
+      host: "search.example.test",
+      port: 7700,
+      password: "private key",
+      database: "must-not-be-a-path",
+      sslMode: "require",
+    });
+
+    expect(url).toBe("https://:private%20key@search.example.test:7700");
+    expect(parseConnectionUrl(url, "meilisearch")).toMatchObject({
+      driver: "meilisearch",
+      host: "search.example.test",
+      port: 7700,
+      password: "private key",
+      sslMode: "require",
+    });
+  });
+});
+
 describe("Elasticsearch connection URL options", () => {
   it("serializes the complete proxy and safety configuration", () => {
     const value = applyElasticsearchConnectionOptions(
