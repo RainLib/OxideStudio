@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`c4cdcbc48`
+> DBX 参考提交：`034ff5030`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,11 +9,13 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`5d6f66777` → `c4cdcbc48`）
+### 最新增量审计（`5d6f66777` → `034ff5030`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
+| `034ff5030` | 发布 v0.5.100 | 仅同步 DBX 自身 `package.json`、Cargo/flake/Tauri 版本号与 lockfile，没有产品逻辑或可迁移实现；Oxide 不跟随 DBX 产品版本号。参考仓库已前移并固定到该提交。 |
 | `8187ef9ba`（历史性能缺口复核） | MySQL routine 编辑时增量复用 lexer/block 状态，避免每个内部分号重新扫描完整语句前缀造成 O(n²) | 已完成等价并减少中间状态：Oxide 的 Rust authoritative statement scanner 在既有单次 quote/comment-aware 遍历中直接识别 routine 的有界 16-word `CREATE` 前缀，并增量维护 `BEGIN`/`CASE`/`END IF|LOOP|REPEAT|WHILE` 块栈；不为 routine 另存持续增长的 token 数组。无 `DELIMITER` 的 compound procedure/function/trigger/event 保持一个 statement，显式 custom delimiter 与普通 `CREATE TABLE` 边界不变。20,000 条内部 `SET` 的回归覆盖线性扫描路径。DBX 位置：`apps/desktop/src/lib/sql/sqlStatementRanges.ts:mysqlRoutineTokensUpTo/advanceMysqlRoutineBlockCompleteness`。Oxide 位置：`src-tauri/src/core/statement.rs:MysqlRoutineScan/split_sql_statement_spans`。真实 MySQL/MariaDB routine 执行仍归统一数据库验证阶段。 |
+| `19f8736b6`（历史诊断缺口复核） | MySQL procedure/function 使用专用 syntax diagnostics，避免通用 SQL 语义分析误报 routine body | 已对齐并增加明确资源边界：Native/custom MySQL 编辑器使用 delimiter、quote、comment aware 的 O(n)/O(depth) 单次扫描，报告参数尾逗号、procedure 中非法 `RETURN`、function 中缺少表达式的 `RETURN`；`DELIMITER $$` 紧贴 `END`/`RETURN`、嵌套 `BEGIN`/`CASE`、多 routine 与普通 SQL 隔离均有回归。编辑输入按 180ms 合并，分析结果按 model/version 复用；仅 routine 精确范围内来自 `tree-sitter-sql` 的 `SYNTAX_ERROR/PARSE_ERROR` 被隐藏，OXIDE 安全/结构 inspection 继续显示。同步扫描上限为 4 MiB，超限 fail quiet；20,000 条内部语句验证不保留增长 token 列表。DBX 位置：`apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.vue:refreshSemanticDiagnostics`。Oxide 位置：`src/features/query-editor/model/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.tsx`。真实 MySQL 版本诊断与执行验证延期。 |
 | `1f274c57e` | Explorer 的刷新选中节点快捷键从裸 `F5` 扩展到 macOS `Cmd+R`、Windows/Linux `Ctrl+R` | 已按节点作用域对齐并收紧：`SchemaSidebar.tsx` 只在焦点位于可刷新 connection/database/schema/table/view 节点且不在输入框或 contenteditable 内时接管快捷键；连接、当前/远程 database、schema、表/视图分别进入既有强制 metadata 路径。跨 database schema 使用单槽、递增版本的显式 refresh request 让已挂载的远程树重新加载，状态空间不会随浏览过的 catalog 数量增长；表级刷新继续走有界 task、缓存失效和 tab refresh。导航键新增严格分段/URI decode，畸形键 fail closed。裸 `F5` 保留，带其他 modifier 的 F5 不拦截。DBX 位置：`apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue:onKeydown`、`lib/editor/keyboardShortcuts.ts:isModRShortcut`。Oxide 位置：`src/lib/keybindings.ts:isExplorerRefreshShortcut`、`src/lib/databaseNavigation.ts`、`SchemaSidebar.tsx`、`PostgresRemoteDatabaseContents.tsx`。真实 Windows/macOS WebView 默认 reload 抑制和焦点行为延期。 |
 | `c4cdcbc48` | SQL 保存按钮明确区分保存到原始文件或 SQL Library | 已对齐：Query tab 根据 `fileRelativePath` 与 `savedSqlFileId` 产生可辨识的 `original-file` / `sql-library` 目标，工具栏 dirty/clean tooltip 分别说明 “Save to Original File” 或 “Save to SQL Library”，不再使用含糊的 editor file 文案；实际保存仍由 `saveEditorFileTab` 路由到项目文件原子写入或项目级 SQL Library 更新。DBX 位置：`apps/desktop/src/components/layout/EditorToolbar.vue:saveTooltip`。Oxide 位置：`src/lib/editorSaveTarget.ts`、`EditorActionBar.tsx`、`QueryEditor.tsx`。 |
 | `6a7ea4ae9` | DBX 增加 Jalapeno Cloud 商业合作 AI preset、赞助标识、专属模型及 `HTTP-Referer: https://dbxio.com` | 不直接迁移 DBX 专属商业身份：该实现包含 DBX referral header、partner 文案、logo 与外部关系，复制到 Oxide 会错误冒充合作关系。Oxide 继续支持用户配置的 OpenAI-compatible endpoint/model/key，以及已独立集成的 Codex CLI / CodeBuddy CLI；若未来增加 Oxide 自有 preset，必须使用自身授权的品牌资产、Referer 和服务条款，并复用现有凭据/Provider 隔离。DBX 位置：`settingsStore.ts`、`EditorSettingsDialog.vue`、`AiAssistant.vue`、`AiProviderLogo.vue`、`crates/dbx-core/src/ai.rs`。 |

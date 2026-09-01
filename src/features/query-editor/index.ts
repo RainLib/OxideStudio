@@ -18,6 +18,13 @@ export {
   type OracleSyntaxDiagnostic,
 } from "./model/oracleSyntaxDiagnostics";
 export {
+  analyzeMysqlRoutineSyntax,
+  isMysqlRoutineParserDiagnostic,
+  supportsMysqlRoutineSyntaxDiagnostics,
+  type MysqlRoutineSyntaxAnalysis,
+  type MysqlRoutineSyntaxDiagnostic,
+} from "./model/mysqlRoutineSyntaxDiagnostics";
+export {
   DEFAULT_SQL_COMMAND_SNIPPETS,
   MANTICORE_SQL_COMMAND_SNIPPETS,
   sqlCommandSnippetCompletions,

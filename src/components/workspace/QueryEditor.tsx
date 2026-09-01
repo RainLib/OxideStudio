@@ -52,7 +52,10 @@ import {
 } from "@/services/lsp";
 import type { LspServerNotification } from "@/services/lsp";
 import type { LspCancellationToken } from "@/services/lsp/client";
-import { CompletionItemKind } from "@/services/lsp/types";
+import {
+  CompletionItemKind,
+  type Diagnostic as LspDiagnostic,
+} from "@/services/lsp/types";
 import {
   APP_EVENT_RUN_QUERY,
   APP_EVENT_RUN_CURRENT,
@@ -197,6 +200,7 @@ import { useSqlScriptImportController } from "@/features/sql-script-import";
 import {
   buildQueryEditorOptions,
   buildOracleSyntaxDiagnostics,
+  analyzeMysqlRoutineSyntax,
   appendSqlCompletionSpace,
   boundedSqlCompletionTextBeforeCursor,
   elasticsearchJsonStringCompletionRange,
@@ -205,6 +209,7 @@ import {
   completionLabelForMonaco,
   completionResolveRequestContext,
   isPublishDiagnosticsParams,
+  isMysqlRoutineParserDiagnostic,
   lspDiagnosticToMonacoMarker,
   lspCompletionItemsToMonacoSuggestions,
   markResolvableLspCompletionItems,
@@ -218,6 +223,8 @@ import {
   insertLineBelow,
   recordSqlCompletionTelemetry,
   shouldApplyLspDiagnostics,
+  supportsMysqlRoutineSyntaxDiagnostics,
+  type MysqlRoutineSyntaxAnalysis,
   shouldChainSqlCompletionAfterAccept,
   sqlInListFromClipboard,
   sqlSyntaxFallbackCompletions,
@@ -341,6 +348,25 @@ function mongodbJsonStringCompletionRange(
     position.lineNumber,
     word.endColumn,
   );
+}
+
+function lspDiagnosticOverlapsOffsetRange(
+  model: {
+    getOffsetAt(position: { lineNumber: number; column: number }): number;
+  },
+  diagnostic: LspDiagnostic,
+  range: { from: number; to: number },
+) {
+  const start = model.getOffsetAt({
+    lineNumber: diagnostic.range.start.line + 1,
+    column: diagnostic.range.start.character + 1,
+  });
+  const rawEnd = model.getOffsetAt({
+    lineNumber: diagnostic.range.end.line + 1,
+    column: diagnostic.range.end.character + 1,
+  });
+  const end = Math.max(start + 1, rawEnd);
+  return start < range.to && end > range.from;
 }
 
 interface QueryEditorProps {
@@ -552,6 +578,28 @@ export function QueryEditor({
     (state) => state.status,
   );
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
+  const mysqlRoutineAnalysisRef = useRef<{
+    model: any;
+    version: number;
+    analysis: MysqlRoutineSyntaxAnalysis;
+  } | null>(null);
+  const mysqlRoutineAnalysisForModel = useCallback(
+    (model: any) => {
+      if (!supportsMysqlRoutineSyntaxDiagnostics(driver)) {
+        mysqlRoutineAnalysisRef.current = null;
+        return null;
+      }
+      const version = model.getVersionId();
+      const cached = mysqlRoutineAnalysisRef.current;
+      if (cached && cached.model === model && cached.version === version) {
+        return cached.analysis;
+      }
+      const analysis = analyzeMysqlRoutineSyntax(model.getValue());
+      mysqlRoutineAnalysisRef.current = { model, version, analysis };
+      return analysis;
+    },
+    [driver],
+  );
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
     capabilities: DatabaseCapabilities;
@@ -3124,15 +3172,25 @@ export function QueryEditor({
       ) {
         return;
       }
+      const mysqlRoutineAnalysis = mysqlRoutineAnalysisForModel(model);
+      const visibleDiagnostics = mysqlRoutineAnalysis
+        ? diagnostics.filter(
+            (diagnostic) =>
+              !isMysqlRoutineParserDiagnostic(diagnostic) ||
+              !mysqlRoutineAnalysis.routineRanges.some((range) =>
+                lspDiagnosticOverlapsOffsetRange(model, diagnostic, range),
+              ),
+          )
+        : diagnostics;
       const tabId = extractSqlDocumentTabId(uri);
       if (tabId) {
-        setLspDiagnostics(tabId, diagnostics);
+        setLspDiagnostics(tabId, visibleDiagnostics);
       }
 
       monaco.editor.setModelMarkers(
         model,
         "sql-lsp",
-        diagnostics.map((diagnostic) =>
+        visibleDiagnostics.map((diagnostic) =>
           lspDiagnosticToMonacoMarker(monaco, diagnostic),
         ),
       );
@@ -3148,7 +3206,13 @@ export function QueryEditor({
       disposed = true;
       unlisten?.();
     };
-  }, [lspSessionKey, monaco, lspReady, setLspDiagnostics]);
+  }, [
+    lspSessionKey,
+    monaco,
+    lspReady,
+    mysqlRoutineAnalysisForModel,
+    setLspDiagnostics,
+  ]);
 
   useEffect(() => {
     if (!monaco || !mountedEditor) return;
@@ -3242,6 +3306,46 @@ export function QueryEditor({
     );
     return () => monaco.editor.setModelMarkers(model, owner, []);
   }, [activeTab?.sql, driver, monaco, mountedEditor]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor) return;
+    const model = mountedEditor.getModel();
+    if (!model) return;
+    const owner = "mysql-routine-syntax";
+    if (!supportsMysqlRoutineSyntaxDiagnostics(driver)) {
+      monaco.editor.setModelMarkers(model, owner, []);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const analysis = mysqlRoutineAnalysisForModel(model);
+      monaco.editor.setModelMarkers(
+        model,
+        owner,
+        (analysis?.diagnostics || []).map((diagnostic) => {
+          const start = model.getPositionAt(diagnostic.startOffset);
+          const end = model.getPositionAt(diagnostic.endOffset);
+          return {
+            severity: monaco.MarkerSeverity.Error,
+            message: diagnostic.message,
+            source: "oxide-mysql-routine-syntax",
+            code: diagnostic.code,
+            startLineNumber: start.lineNumber,
+            startColumn: start.column,
+            endLineNumber: end.lineNumber,
+            endColumn: end.column,
+          };
+        }),
+      );
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [activeTab?.sql, driver, monaco, mountedEditor, mysqlRoutineAnalysisForModel]);
+
+  useEffect(() => {
+    if (!monaco || !mountedEditor) return;
+    const model = mountedEditor.getModel();
+    if (!model) return;
+    return () => monaco.editor.setModelMarkers(model, "mysql-routine-syntax", []);
+  }, [monaco, mountedEditor]);
 
   // Initialize targetSchema from currentSchema if not set
   useEffect(() => {
