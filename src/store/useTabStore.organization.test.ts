@@ -143,4 +143,69 @@ describe("tab store organization actions", () => {
       second: { operator: "contains", value: "two" },
     });
   });
+
+  it("projects bounded query result runs without copying row payloads", () => {
+    const first = {
+      columns: [{ name: "first", data_type: "text" }],
+      rows: [["first"]],
+    };
+    const second = {
+      columns: [{ name: "second", data_type: "text" }],
+      rows: [["second"]],
+    };
+    useTabStore.setState({
+      tabs: [
+        {
+          ...tab("query"),
+          results: [second],
+          resultSql: "SELECT 2",
+          activeResultRunId: "run-2",
+          resultRuns: [
+            {
+              id: "run-1",
+              completedAt: 1,
+              sql: "SELECT 1",
+              results: [first],
+              activeResultIndex: 0,
+            },
+            {
+              id: "run-2",
+              completedAt: 2,
+              sql: "SELECT 2",
+              results: [second],
+              activeResultIndex: 0,
+            },
+          ],
+        },
+      ],
+      activeTabId: "query",
+    });
+
+    const store = useTabStore.getState();
+    store.setGridFilter("query", "second", {
+      operator: "equals",
+      value: "two",
+    });
+    store.setActiveResultRun("query", "run-1");
+    let current = useTabStore.getState().tabs[0];
+    expect(current?.results?.[0]).toBe(first);
+    expect(current?.resultSql).toBe("SELECT 1");
+
+    store.setActiveResultRun("query", "run-2");
+    current = useTabStore.getState().tabs[0];
+    expect(current?.results?.[0]).toBe(second);
+    expect(current?.gridState?.columnFilters).toEqual({
+      second: { operator: "equals", value: "two" },
+    });
+
+    store.closeResultRun("query", "run-2");
+    current = useTabStore.getState().tabs[0];
+    expect(current?.activeResultRunId).toBe("run-1");
+    expect(current?.results?.[0]).toBe(first);
+
+    store.closeResultRun("query", "run-1");
+    current = useTabStore.getState().tabs[0];
+    expect(current?.results).toBeNull();
+    expect(current?.resultRuns).toBeUndefined();
+  });
 });

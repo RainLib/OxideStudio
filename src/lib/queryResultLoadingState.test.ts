@@ -41,4 +41,27 @@ describe("isActiveQueryResultLoading", () => {
       }),
     ).toBe(false);
   });
+
+  it("does not mask a matching result index from an older result run", () => {
+    expect(
+      isActiveQueryResultLoading({
+        isExecuting: true,
+        tabType: "query",
+        activeResultIndex: 0,
+        activeResultRunId: "run-before",
+        executingResultIndex: 0,
+        executingResultRunId: "run-current",
+      }),
+    ).toBe(false);
+    expect(
+      isActiveQueryResultLoading({
+        isExecuting: true,
+        tabType: "query",
+        activeResultIndex: 0,
+        activeResultRunId: "run-current",
+        executingResultIndex: 0,
+        executingResultRunId: "run-current",
+      }),
+    ).toBe(true);
+  });
 });

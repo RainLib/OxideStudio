@@ -256,6 +256,23 @@ export interface QueryResultGridState {
   sortDirection: "asc" | "desc" | null;
 }
 
+/**
+ * A bounded, in-memory snapshot of one completed query execution. Result rows
+ * are shared with the projected tab surface; switching runs never clones grid
+ * payloads. Runs intentionally do not survive a closed tab or app restart.
+ */
+export interface QueryResultRun {
+  id: string;
+  completedAt: number;
+  sql?: string;
+  results: QueryResult[];
+  activeResultIndex: number;
+  gridState?: QueryResultGridState;
+  resultGridStates?: Record<number, QueryResultGridState>;
+}
+
+const MAX_QUERY_RESULT_RUNS = 5;
+
 function cloneQueryResultGridState(
   gridState: QueryResultGridState | undefined,
 ): QueryResultGridState | undefined {
@@ -265,6 +282,18 @@ function cloneQueryResultGridState(
         columnFilters: { ...gridState.columnFilters },
       }
     : undefined;
+}
+
+function cloneQueryResultGridStates(
+  states: Record<number, QueryResultGridState> | undefined,
+): Record<number, QueryResultGridState> | undefined {
+  if (!states) return undefined;
+  return Object.fromEntries(
+    Object.entries(states).map(([index, state]) => [
+      Number(index),
+      cloneQueryResultGridState(state)!,
+    ]),
+  );
 }
 
 export interface TabData {
@@ -300,11 +329,16 @@ export interface TabData {
   activeResultIndex?: number;
   /** Result selected when the current query execution began. */
   executingResultIndex?: number;
+  /** Completed result run displayed when the current execution began. */
+  executingResultRunId?: string;
   isPinned: boolean;
   /** State for the active result set, retained for table tabs and legacy tabs. */
   gridState?: QueryResultGridState;
   /** Query-local grid state keyed by result index; never contains row data. */
   resultGridStates?: Record<number, QueryResultGridState>;
+  /** Recent completed query executions, bounded by MAX_QUERY_RESULT_RUNS. */
+  resultRuns?: QueryResultRun[];
+  activeResultRunId?: string;
   pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex" or "new-N:colIndex", value: new value
   newRowsCount?: number;
   /** Parallel to pending new-row offsets; cloned rows carry a stable display anchor. */
@@ -371,6 +405,49 @@ export interface TabData {
   selectedDiagramRelationNames?: string[];
   dataCompareLeft?: DataCompareSource;
   dataCompareRight?: DataCompareSource;
+}
+
+function snapshotActiveQueryResultRun(tab: TabData): TabData {
+  if (
+    tab.type !== "query" ||
+    !tab.activeResultRunId ||
+    !tab.resultRuns?.some((run) => run.id === tab.activeResultRunId)
+  ) {
+    return tab;
+  }
+  return {
+    ...tab,
+    resultRuns: tab.resultRuns.map((run) =>
+      run.id === tab.activeResultRunId
+        ? {
+            ...run,
+            results: tab.results || [],
+            sql: tab.resultSql,
+            activeResultIndex: tab.activeResultIndex ?? 0,
+            gridState: cloneQueryResultGridState(tab.gridState),
+            resultGridStates: cloneQueryResultGridStates(tab.resultGridStates),
+          }
+        : run,
+    ),
+  };
+}
+
+function projectQueryResultRun(tab: TabData, run: QueryResultRun): TabData {
+  return {
+    ...tab,
+    activeResultRunId: run.id,
+    results: run.results,
+    resultSql: run.sql,
+    activeResultIndex: Math.max(
+      0,
+      Math.min(run.activeResultIndex, Math.max(0, run.results.length - 1)),
+    ),
+    gridState: cloneQueryResultGridState(run.gridState),
+    resultGridStates: cloneQueryResultGridStates(run.resultGridStates),
+    queryOutputView: "results",
+    error: null,
+    queryError: null,
+  };
 }
 
 function fileNameFromPath(relativePath: string) {
@@ -493,7 +570,10 @@ export function tabAfterReleasingRuntimePayload(tab: TabData): TabData {
     queryOutputView: "results",
     activeResultIndex: 0,
     executingResultIndex: undefined,
+    executingResultRunId: undefined,
     resultGridStates: undefined,
+    resultRuns: undefined,
+    activeResultRunId: undefined,
     isExecuting: false,
     runningQueryId: null,
     error: null,
@@ -521,6 +601,13 @@ function releaseTabResultPayloads(tabs: readonly TabData[]) {
       if (released.has(result)) continue;
       released.add(result);
       releaseQueryResultPayload(result);
+    }
+    for (const run of tab.resultRuns || []) {
+      for (const result of run.results) {
+        if (released.has(result)) continue;
+        released.add(result);
+        releaseQueryResultPayload(result);
+      }
     }
   }
 }
@@ -1057,6 +1144,8 @@ interface TabState {
   ) => EditorPatchApplyResult;
   setLspDiagnostics: (id: string, diagnostics: Diagnostic[]) => void;
   setActiveResultIndex: (id: string, index: number) => void;
+  setActiveResultRun: (id: string, runId: string) => void;
+  closeResultRun: (id: string, runId: string) => void;
   setQueryOutputView: (id: string, view: "results" | "plan") => void;
   closeResultAt: (id: string, index: number) => void;
   runTabQuery: (
@@ -2500,14 +2589,55 @@ export const useTabStore = create<TabState>((set, get) => ({
         if (currentGridState) {
           resultGridStates[t.activeResultIndex ?? 0] = currentGridState;
         }
-        return {
+        return snapshotActiveQueryResultRun({
           ...t,
           activeResultIndex,
           resultGridStates,
           gridState: cloneQueryResultGridState(
             resultGridStates[activeResultIndex],
           ),
-        };
+        });
+      }),
+    }));
+  },
+
+  setActiveResultRun: (id: string, runId: string) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== id || tab.type !== "query") return tab;
+        const current = snapshotActiveQueryResultRun(tab);
+        const run = current.resultRuns?.find((candidate) => candidate.id === runId);
+        return run ? projectQueryResultRun(current, run) : current;
+      }),
+    }));
+  },
+
+  closeResultRun: (id: string, runId: string) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== id || tab.type !== "query") return tab;
+        const current = snapshotActiveQueryResultRun(tab);
+        const runIndex = current.resultRuns?.findIndex(
+          (run) => run.id === runId,
+        ) ?? -1;
+        if (runIndex < 0 || !current.resultRuns) return current;
+        const resultRuns = current.resultRuns.filter((run) => run.id !== runId);
+        if (current.activeResultRunId !== runId) {
+          return { ...current, resultRuns };
+        }
+        const replacement = resultRuns[Math.min(runIndex, resultRuns.length - 1)];
+        return replacement
+          ? projectQueryResultRun({ ...current, resultRuns }, replacement)
+          : {
+              ...current,
+              resultRuns: undefined,
+              activeResultRunId: undefined,
+              results: null,
+              resultSql: undefined,
+              activeResultIndex: 0,
+              gridState: undefined,
+              resultGridStates: undefined,
+            };
       }),
     }));
   },
@@ -2556,7 +2686,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                   ]),
               );
 
-        return {
+        return snapshotActiveQueryResultRun({
           ...t,
           results: nextResults.length > 0 ? nextResults : null,
           activeResultIndex: nextActiveIndex,
@@ -2565,7 +2695,7 @@ export const useTabStore = create<TabState>((set, get) => ({
             t.type === "table"
               ? t.gridState
               : cloneQueryResultGridState(resultGridStates?.[nextActiveIndex]),
-        };
+        });
       }),
     }));
   },
@@ -2650,6 +2780,8 @@ export const useTabStore = create<TabState>((set, get) => ({
               activeResultIndex: t.activeResultIndex ?? 0,
               executingResultIndex:
                 t.type === "table" ? undefined : (t.activeResultIndex ?? 0),
+              executingResultRunId:
+                t.type === "table" ? undefined : t.activeResultRunId,
             }
           : t,
       ),
@@ -2681,6 +2813,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                   isExecuting: false,
                   runningQueryId: null,
                   executingResultIndex: undefined,
+                  executingResultRunId: undefined,
                 }
               : candidate,
           ),
@@ -2736,6 +2869,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                     isExecuting: false,
                     runningQueryId: null,
                     executingResultIndex: undefined,
+                    executingResultRunId: undefined,
                   }
                 : candidate,
             ),
@@ -2776,20 +2910,41 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === id && t.runningQueryId === queryId
-            ? {
-                ...t,
-                isExecuting: false,
-                runningQueryId: null,
-                results: results || null,
-                resultSql: sqlToRun,
-                activeResultIndex: 0,
-                executingResultIndex: undefined,
-                gridState: undefined,
-                resultGridStates: undefined,
-                queryError: null,
-              }
-            : t,
+          t.id !== id || t.runningQueryId !== queryId
+            ? t
+            : (() => {
+                const current = snapshotActiveQueryResultRun(t);
+                const run: QueryResultRun | undefined =
+                  current.type === "query" && results.length > 0
+                    ? {
+                        id: `run:${uuidv4()}`,
+                        completedAt: finishedAt,
+                        sql: sqlToRun,
+                        results,
+                        activeResultIndex: 0,
+                      }
+                    : undefined;
+                const resultRuns = run
+                  ? [...(current.resultRuns || []), run].slice(
+                      -MAX_QUERY_RESULT_RUNS,
+                    )
+                  : current.resultRuns;
+                return {
+                  ...current,
+                  isExecuting: false,
+                  runningQueryId: null,
+                  results: results || null,
+                  resultSql: sqlToRun,
+                  activeResultIndex: 0,
+                  executingResultIndex: undefined,
+                  executingResultRunId: undefined,
+                  gridState: undefined,
+                  resultGridStates: undefined,
+                  resultRuns,
+                  activeResultRunId: run?.id,
+                  queryError: null,
+                };
+              })(),
         ),
       }));
 
@@ -2829,6 +2984,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 isExecuting: false,
                 runningQueryId: null,
                 executingResultIndex: undefined,
+                executingResultRunId: undefined,
                 error: message,
                 queryError,
               }
@@ -2963,14 +3119,14 @@ export const useTabStore = create<TabState>((set, get) => ({
         const nextGridState = { ...gridState, columnFilters };
         if (t.type === "table") return { ...t, gridState: nextGridState };
         const resultIndex = t.activeResultIndex ?? 0;
-        return {
+        return snapshotActiveQueryResultRun({
           ...t,
           gridState: nextGridState,
           resultGridStates: {
             ...t.resultGridStates,
             [resultIndex]: cloneQueryResultGridState(nextGridState)!,
           },
-        };
+        });
       }),
     }));
   },
@@ -3000,14 +3156,14 @@ export const useTabStore = create<TabState>((set, get) => ({
           sortDirection: direction,
         };
         const resultIndex = t.activeResultIndex ?? 0;
-        return {
+        return snapshotActiveQueryResultRun({
           ...t,
           gridState: nextGridState,
           resultGridStates: {
             ...t.resultGridStates,
             [resultIndex]: cloneQueryResultGridState(nextGridState)!,
           },
-        };
+        });
       }),
     }));
     return true;

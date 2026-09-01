@@ -29,7 +29,7 @@
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
-| `cb754cd0c` | 历史结果窗口切换及结果快照保留本地列过滤器 | 已完成当前多结果集的等价修复：Query tab 的 `columnFilters`/sort state 由 `resultGridStates` 按 active result index 隔离；结果切换、关闭中间结果的索引左移和下一次查询替换结果都会保存/重映射/清除对应状态。Oxide 不保留 DBX 的 `resultRuns` 历史执行快照；未来引入时仍必须把此 presentation state 一并做不可变快照。DBX 位置：`apps/desktop/src/lib/tabs/tabResultCache.ts`、`queryStore.ts`。Oxide 位置：`useTabStore.ts`、`useTabStore.organization.test.ts`。 |
+| `cb754cd0c` | 历史结果窗口切换及结果快照保留本地列过滤器 | 已完成有界 in-memory result runs：每个 Query tab 最多五个 completed run，切换时投影同一结果对象而不复制行；`columnFilters`/sort state 随 run 一并保存，结果切换/关闭和新执行均保持索引对齐。关闭 tab 仍释放所有 run payload，重启不持久化。DBX 的固定、磁盘 cache/恢复属于后续容量/恢复子系统，不能与当前内存历史混称。DBX 位置：`apps/desktop/src/lib/tabs/tabResultCache.ts`、`queryStore.ts`。Oxide 位置：`useTabStore.ts`、`workspaceRuntime.tsx`。 |
 | `a7922b9cb` | Schema 与 Table 使用不同图标色 | 已对齐并统一复用：主树及 PostgreSQL 跨 database 树都从 `explorerObjectPresentation.ts` 读取对象角色色，schema 使用 amber、table 使用 green、view 使用 sky；连接颜色继续只表达数据源身份，pinned 状态仍可覆盖为 primary。DBX 位置：`apps/desktop/src/components/sidebar/TreeItem.vue`。Oxide 位置：`src/features/database-explorer/model/explorerObjectPresentation.ts`、`SchemaSidebar.tsx`、`PostgresRemoteDatabaseContents.tsx`。 |
 | `440c41f5b` | SQL Server 本地临时表的结果总数查询复用原查询 session | 当前无同类调用链：DBX 的自动 Query Result `COUNT(*)` 会启动独立 count session，修复位于 `queryResultCountSession.ts` 与 `queryStore.ts`；Oxide 任意查询结果不自动生成第二条 count SQL，Table Page 总数由 Host 在同一次结构化分页请求内按需计算，因此不会跨 session 访问 `#temp`。若以后增加任意查询精确总数，必须先移植该 session 检测。 |
 | `e9a90173a` | 外部 `.sql` 文件记忆 schema，Sidebar Locate 不再回退到错误 database-as-schema | 已完成等价目标上下文：Project `.sql` 文件首次打开绑定当前 connection/database/schema，关闭后重开恢复；切换 database/schema 会立即更新文件目标，连接删除后旧目标失效。缓存有版本、字段/路径校验和与 DBX 相同的 200 条最近使用上限，只保存目标身份，不保存 SQL、连接串或凭据；文件/目录重命名、删除及项目根目录成功切换会原子迁移或清除对应记录，根目录切换失败则保留原上下文。SQL Library 继续使用自身持久化字段。DBX 位置：`externalSqlFileTarget.ts`、`jdbcDialect.ts`、`App.vue`。Oxide 位置：`src/lib/projectSqlFileTarget.ts`、`useTabStore.ts`、`ProjectFilesSidebar.tsx`。 |
@@ -44,7 +44,7 @@
 | `6588f27fb` | 独立 SSH Tunnel Test，不要求目标数据库可达 | 已对齐：Rust 对 primary/jump hosts 完成真实握手、host-key 与认证验证，Tauri command、typed service 和 Connection Form 均有独立测试入口。DBX 位置：`crates/dbx-core/src/connection.rs`、`ConnectionDialog.vue`。 |
 | `264f5c483` | InfluxDB 3 Core HTTP SQL engine | 已完成逻辑、静态回归并提交：新增 native `POST /api/v3/query_sql`、database/table/column metadata、Bearer token、HTTP/HTTPS、只读 capability、N+1 行上限及 32 MiB streamed response guard；连接测试走真实 query endpoint。DBX 位置：`crates/dbx-core/src/db/influxdb3_driver.rs`、`ConnectionDialog.vue`。真实 InfluxDB 3 Core/Enterprise 验证延期。 |
 | `70d7a78c6` | Danger dialog 重开时保护 selection/focus | 已完成应用内等价实现：危险 SQL 改用受控 Dialog 而非阻塞式 `window.confirm`；所有完整文档、当前语句、参数化执行和历史重跑入口统一等待同一个异步确认结果。关闭时抑制 Radix 默认 trigger focus，在 animation frame 中仅当没有新确认打开且 generation 未变化时才把焦点还给 Monaco，因此连续确认不会由旧 close 事件抢焦点。DBX 位置：`DangerConfirmDialog.vue`。Oxide 位置：`DangerousSqlConfirmDialog.tsx`、`QueryEditor.tsx`、`useQueryExecutionController.ts`。真实 Tauri WebView 的滚动/选区回归仍延期。 |
-| `f19439ad7` | Loading mask 只覆盖正在执行的历史 result run | 已完成当前多结果集的等价修复：查询开始时冻结 `executingResultIndex`，只有 active result 与该 index 相同才显示 Grid loading mask；成功、错误、取消和重新连接中止都会清理 identity，table tab 继续遮罩唯一 live surface。Oxide 不保留 DBX `resultRuns` 历史快照；若新增该模型，必须升级为 run identity 而非复用 index。DBX 位置：`apps/desktop/src/components/workspace/DataGrid.vue`、`queryStore.ts`。Oxide 位置：`queryResultLoadingState.ts`、`DataGrid.tsx`、`useTabStore.ts`。 |
+| `f19439ad7` | Loading mask 只覆盖正在执行的历史 result run | 已完成 run-aware 修复：查询开始时冻结 `executingResultRunId + executingResultIndex`，只有 active run 与 active result 都匹配才显示 Grid loading mask；成功、错误、取消和重新连接中止都会清理 identity，table tab 继续遮罩唯一 live surface。DBX 位置：`apps/desktop/src/components/workspace/DataGrid.vue`、`queryStore.ts`。Oxide 位置：`queryResultLoadingState.ts`、`DataGrid.tsx`、`useTabStore.ts`。 |
 | `1e75a7822` | Kingbase timezoneless datetime 不做 UTC 转换 | 仍是正式 Kingbase signed package 的缺口；实现位于 DBX `agents/drivers/kingbase-go/main.go`，不能在 Host 用产品名分支伪装完成。 |
 | `613c4f7ca` | IoTDB 1.3 aggregate columns 与 `max_time` 格式 | 仍是正式 IoTDB signed package 的缺口；实现位于 DBX `agents/drivers/iotdb/query.go` 与 vendored IoTDB client，需 package conformance evidence。 |
 | `7f9e35d1e` | RocketMQ consumer group 跨页查找 | 仍是 MQ 专用 package/工作台缺口；DBX 位置：`crates/dbx-core/src/mq/adapters/rocketmq.rs`、`SubscriptionsPanel.vue`。Oxide Host 不应把它误归为 SQL/通用 HTTP driver。 |
@@ -933,3 +933,19 @@ build 验证 DataGrid 选择器和 TypeScript。真实 WebView 下并行切换�
 `DangerousSqlConfirmDialog.test.tsx` 覆盖明确 Execute/Cancel 决策，
 `useQueryExecutionController.test.tsx` 覆盖 async confirmation 未批准前不 dispatch。`npm run build` 通过；真实
 Tauri WebView 下的滚动、选区和 reduced-motion 动画仍在延期验证清单中，不能以 happy-dom 取代。
+
+## Phase 166 增量：有界 Query Result Run 历史
+
+对照 DBX `queryStore.ts` 与 `tabResultCache.ts` 的 result run 模型，Oxide 原先只保存当前 query execution；重新运行后，
+之前的结果只能从 Query History 再执行。现增加轻量的当前会话 result history：
+
+- 一个 Query tab 最多保留五个已完成 run。每个 run 只引用既有 `QueryResult` 对象，不复制 rows/columns/raw response；
+  新 run 超出上限时遗忘最早的引用，关闭 tab 时所有引用仍进入现有单次 payload release，closed-tab history 与应用重启均不保留结果。
+- Results 面板在多个 run 时显示紧凑 Run selector，切换会投影该 run 的 results、SQL、active result index 及 local
+  filter/sort state；关闭 run 自动选择相邻 run，关闭最后一个则清空结果 surface。
+- execution loading identity 从单独 result index 升级为 `runId + resultIndex`。用户在执行中打开同编号的旧 run 时不会被新
+  execution 的 loading mask 遮住；legacy tab 没有 identity 时仍保守遮罩。
+
+`useTabStore.organization.test.ts` 覆盖 run projection、状态保留、相邻回退与 payload reference identity；
+`queryResultLoadingState.test.ts` 覆盖跨 run loading isolation，`npm run build` 已通过。DBX 的 pin、磁盘 cache、
+跨重启恢复与 session-backed payload eviction 属于后续独立容量/恢复工程，当前不伪装成已实现。

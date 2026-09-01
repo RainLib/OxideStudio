@@ -2117,3 +2117,19 @@ explicit deferred validation task rather than an implicit release check.
 - Automated happy-dom tests cover the explicit decisions and asynchronous
   dispatch gate. Native WebView animations, reduced motion and platform focus
   ordering remain unverified until this packaged interaction pass.
+
+## Phase 166 -- bounded query result run history
+
+- In a packaged desktop build, run more than five queries in one Query tab with
+  small, large, multi-statement and HTTP-backed results. Verify the oldest run
+  is evicted without duplicating or corrupting live rows; switching and closing
+  runs must retain per-result filter/sort state and select a deterministic
+  neighboring run.
+- Start a slow sixth query, switch to an older run whose active result index
+  matches the executing run, then cancel/fail/succeed. Only the executing
+  `runId + resultIndex` may display a loading mask; the historical grid must
+  remain readable and no late result may replace a run after its tab closes.
+- Capture heap/cursor/session behavior for repeated large results, tab close,
+  close-all and application restart. The current implementation deliberately
+  keeps no disk cache, pinning or cross-restart restore; those DBX capabilities
+  require a separate quota, persistence and recovery design before exposure.

@@ -2,8 +2,11 @@ export interface QueryResultLoadingStateLike {
   isExecuting: boolean;
   tabType?: "table" | "query";
   activeResultIndex?: number;
+  activeResultRunId?: string;
   /** Result selected when this query execution began. */
   executingResultIndex?: number;
+  /** Completed run selected when this query execution began. */
+  executingResultRunId?: string;
 }
 
 /**
@@ -20,5 +23,11 @@ export function isActiveQueryResultLoading(
   if (!state.isExecuting) return false;
   if (state.tabType === "table") return true;
   if (state.executingResultIndex === undefined) return true;
+  if (
+    state.executingResultRunId !== undefined &&
+    state.activeResultRunId !== state.executingResultRunId
+  ) {
+    return false;
+  }
   return (state.activeResultIndex ?? 0) === state.executingResultIndex;
 }

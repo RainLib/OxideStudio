@@ -147,6 +147,8 @@ export function WorkspaceRuntime() {
         queryError: tab.queryError,
         results: tab.results,
         activeResultIndex: tab.activeResultIndex,
+        resultRuns: tab.resultRuns,
+        activeResultRunId: tab.activeResultRunId,
         queryOutputView: tab.queryOutputView,
         explainPlan: tab.explainPlan,
         isExecuting: tab.isExecuting,
@@ -169,6 +171,8 @@ export function WorkspaceRuntime() {
   const setActiveResultIndex = useTabStore(
     (state) => state.setActiveResultIndex,
   );
+  const setActiveResultRun = useTabStore((state) => state.setActiveResultRun);
+  const closeResultRun = useTabStore((state) => state.closeResultRun);
   const setQueryOutputView = useTabStore((state) => state.setQueryOutputView);
   const closeResultAt = useTabStore((state) => state.closeResultAt);
   const connections = useConnectionStore((state) => state.connections);
@@ -221,6 +225,7 @@ export function WorkspaceRuntime() {
       )
     : null;
   const queryResults = activeTab?.results ?? [];
+  const queryResultRuns = activeTab?.resultRuns ?? [];
   const activeResultIndex = Math.min(
     activeTab?.activeResultIndex ?? 0,
     Math.max(0, queryResults.length - 1),
@@ -771,6 +776,47 @@ export function WorkspaceRuntime() {
                                       <LineChart size={11} />
                                       Explain Plan
                                     </button>
+                                  )}
+                                  {!isPlanView && queryResultRuns.length > 1 && (
+                                    <div className="flex min-w-0 items-center gap-0.5 border-l border-[hsl(var(--wb-border-subtle))] pl-1">
+                                      {queryResultRuns.map((run, index) => (
+                                        <div
+                                          key={run.id}
+                                          className={cn(
+                                            "group/run flex h-5 max-w-[122px] items-center rounded-[3px]",
+                                            run.id === activeTab?.activeResultRunId
+                                              ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
+                                              : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]",
+                                          )}
+                                        >
+                                          <button
+                                            type="button"
+                                            className="min-w-0 truncate px-2 text-[10px]"
+                                            onClick={() =>
+                                              activeTab &&
+                                              setActiveResultRun(activeTab.id, run.id)
+                                            }
+                                            title={`Execution ${index + 1}: ${run.results.reduce(
+                                              (count, result) => count + result.rows.length,
+                                              0,
+                                            ).toLocaleString()} rows`}
+                                          >
+                                            Run {index + 1}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="mr-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100"
+                                            title="Close result run"
+                                            onClick={() =>
+                                              activeTab &&
+                                              closeResultRun(activeTab.id, run.id)
+                                            }
+                                          >
+                                            <X size={10} />
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
                                   )}
                                   {!isPlanView && queryResults.length > 1 ? (
                                     <div className="flex min-w-0 items-center gap-0.5">

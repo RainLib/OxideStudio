@@ -272,7 +272,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               results: tab.results,
               resultSql: tab.resultSql,
               activeResultIndex: tab.activeResultIndex,
+              activeResultRunId: tab.activeResultRunId,
               executingResultIndex: tab.executingResultIndex,
+              executingResultRunId: tab.executingResultRunId,
               error: tab.error,
               queryError: tab.queryError,
               isExecuting: tab.isExecuting,
@@ -358,7 +360,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       isExecuting: Boolean(activeTab?.isExecuting),
       tabType: activeTabKind,
       activeResultIndex: resultIndex,
+      activeResultRunId: activeTab?.activeResultRunId,
       executingResultIndex: activeTab?.executingResultIndex,
+      executingResultRunId: activeTab?.executingResultRunId,
     });
     const sourceResult =
       activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
