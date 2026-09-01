@@ -253,6 +253,19 @@ describe("database driver installation inventory", () => {
               mutations: [],
               migration: [],
             },
+            dependencies: [
+              {
+                coordinate: "org.postgresql:postgresql:42.7.7",
+                path: "lib/postgresql-42.7.7.jar",
+                downloadUrl:
+                  "https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.7/postgresql-42.7.7.jar",
+                sha256:
+                  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                sizeBytes: 1091689,
+                licenseSpdx: "BSD-2-Clause",
+                licenseUrl: "https://jdbc.postgresql.org/about/license.html",
+              },
+            ],
           },
         ],
       },
@@ -271,6 +284,13 @@ describe("database driver installation inventory", () => {
       packageVersion: "1.2.3",
       capabilities: { lspLanguageId: "clickhouse" },
       conformance: { query: ["24.3"] },
+      dependencies: [
+        expect.objectContaining({
+          coordinate: "org.postgresql:postgresql:42.7.7",
+          path: "lib/postgresql-42.7.7.jar",
+          licenseSpdx: "BSD-2-Clause",
+        }),
+      ],
       archiveSha256:
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });

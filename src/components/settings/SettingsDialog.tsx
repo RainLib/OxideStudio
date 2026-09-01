@@ -3245,9 +3245,11 @@ function DriverManagementSettings() {
         Check a signed HTTPS catalog for independently released packages. A release
         can be installed only when its signed entry includes an archive SHA-256;
         download, digest verification, package verification, and activation checks
-        still run locally. Verified release archives are reused from the Driver Store
-        only after their digest is checked again. Entries without a digest remain
-        review-and-import only.
+        still run locally. Java dependencies may be fetched only when the same signed
+        entry fixes their Maven coordinates, classpath paths, sizes, SHA-256 digests,
+        and SPDX licenses on an allowlisted repository. Verified release archives and
+        dependencies are reused only after their digests are checked again. Entries
+        without an archive digest remain review-and-import only.
       </p>
       <div className="flex items-center gap-2">
         <input
@@ -3312,6 +3314,7 @@ function DriverManagementSettings() {
             const mutationVersions = entry.conformance?.mutations || [];
             const migrationVersions = entry.conformance?.migration || [];
             const transferVersions = entry.conformance?.dataTransfer || [];
+            const dependencies = entry.dependencies || [];
             const conformanceLabel = [
               connectVersions.length
                 ? `Connect verified: ${connectVersions.join(", ")}`
@@ -3391,6 +3394,36 @@ function DriverManagementSettings() {
                     Review download
                   </a>
                 </span>
+                {dependencies.length > 0 && (
+                  <details className="group col-span-3 border-t border-[hsl(var(--wb-border-subtle))] pt-1">
+                    <summary className="cursor-pointer list-none text-[10px] text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]">
+                      {dependencies.length} signed JDBC dependenc{dependencies.length === 1 ? "y" : "ies"}
+                      {" · "}
+                      {(dependencies.reduce((total, dependency) => total + dependency.sizeBytes, 0) / 1024 / 1024).toFixed(1)} MiB
+                      <span className="ml-1 group-open:hidden">· Show licenses</span>
+                    </summary>
+                    <div className="mt-1 space-y-1 pb-1">
+                      {dependencies.map((dependency) => (
+                        <div
+                          key={`${dependency.coordinate}:${dependency.path}`}
+                          className="grid grid-cols-[minmax(180px,1fr)_minmax(90px,0.45fr)_auto] gap-2 font-mono text-[9px] text-[hsl(var(--wb-text-muted))]"
+                        >
+                          <span className="truncate" title={dependency.coordinate}>{dependency.coordinate}</span>
+                          <span className="truncate" title={dependency.path}>{dependency.path}</span>
+                          <a
+                            className="text-[hsl(var(--wb-accent))] hover:underline"
+                            href={dependency.licenseUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`Review ${dependency.licenseSpdx} license`}
+                          >
+                            {dependency.licenseSpdx}
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
             );
           })}

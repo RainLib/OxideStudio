@@ -263,6 +263,18 @@ export interface DatabaseDriverCatalogEntry {
   schemaMigration?: DriverPackageSchemaMigrationContract | null;
   /** Signed release coverage only; it does not grant execution permission. */
   conformance?: DatabaseDriverConformance | null;
+  /** Immutable, license-declared Java artifacts bound to the package classpath. */
+  dependencies?: DatabaseDriverCatalogDependency[];
+}
+
+export interface DatabaseDriverCatalogDependency {
+  coordinate: string;
+  path: string;
+  downloadUrl: string;
+  sha256: string;
+  sizeBytes: number;
+  licenseSpdx: string;
+  licenseUrl: string;
 }
 
 export interface DatabaseDriverConformance {

@@ -36,9 +36,14 @@ const MAX_DRIVER_CATALOG_BYTES: u64 = 512 * 1024;
 const MAX_DRIVER_CATALOG_ENTRIES: usize = 256;
 const MAX_DRIVER_CATALOG_FIELD_LENGTH: usize = 512;
 const DRIVER_PACKAGE_CACHE_DIRECTORY: &str = "_catalog-cache";
+const DRIVER_DEPENDENCY_CACHE_DIRECTORY: &str = "_dependency-cache";
 const DRIVER_PACKAGE_CATALOG_RECEIPT: &str = ".oxide-catalog-receipt.json";
 const MANAGED_JAVA_RUNTIME_MANIFEST: &str = "runtime.json";
 const MANAGED_JAVA_RUNTIME_KIND: &str = "java";
+const MAX_DRIVER_DEPENDENCIES: usize = 64;
+const MAX_DRIVER_DEPENDENCY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_DRIVER_DEPENDENCIES_BYTES: u64 = 256 * 1024 * 1024;
+const MAVEN_REPOSITORY_HOST_ALLOWLIST: &[&str] = &["repo.maven.apache.org", "repo1.maven.org"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +196,26 @@ pub struct DriverPackageCatalogEntry {
     /// executable authority.
     #[serde(default)]
     pub conformance: Option<DriverPackageConformance>,
+    /// Optional Java dependency payloads resolved by the catalog publisher.
+    /// Every item is immutable, license-declared, and must match a path/digest
+    /// already signed into the package manifest's Java classpath.
+    #[serde(default)]
+    pub dependencies: Vec<DriverPackageCatalogDependency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverPackageCatalogDependency {
+    /// Fixed Maven GAV coordinate used for inventory and diagnostics only.
+    pub coordinate: String,
+    /// Destination inside the package staging directory, normally `lib/*.jar`.
+    pub path: String,
+    pub download_url: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    /// Non-empty SPDX expression supplied by the signed catalog publisher.
+    pub license_spdx: String,
+    pub license_url: String,
 }
 
 /// Server-version coverage advertised by a signed package release. Each list
@@ -397,7 +422,23 @@ impl DatabaseDriverPackageRegistry {
                 })
                 .cloned(),
         );
-        prune_catalog_cache_files(&self.root.join(DRIVER_PACKAGE_CACHE_DIRECTORY), &retained)
+        let mut result =
+            prune_catalog_cache_files(&self.root.join(DRIVER_PACKAGE_CACHE_DIRECTORY), &retained)?;
+        let dependencies =
+            prune_dependency_cache_files(&self.root.join(DRIVER_DEPENDENCY_CACHE_DIRECTORY))?;
+        result.files_removed = result
+            .files_removed
+            .saturating_add(dependencies.files_removed);
+        result.partial_files_removed = result
+            .partial_files_removed
+            .saturating_add(dependencies.partial_files_removed);
+        result.bytes_removed = result
+            .bytes_removed
+            .saturating_add(dependencies.bytes_removed);
+        result.skipped_entries = result
+            .skipped_entries
+            .saturating_add(dependencies.skipped_entries);
+        Ok(result)
     }
 
     /// Copy the complete driver store into a fresh sibling staging directory
@@ -776,6 +817,7 @@ impl DatabaseDriverPackageRegistry {
         unpack_driver_package_archive(&archive_path, &unpacked)?;
         let downloaded_manifest = read_manifest(&unpacked.join("manifest.json"))?;
         validate_catalog_manifest_binding(entry, &downloaded_manifest)?;
+        hydrate_catalog_dependencies(&client, &self.root, entry, &unpacked).await?;
         let installed =
             self.install_from_directory_with_catalog_entry(&unpacked, false, Some(entry))?;
         Ok(installed)
@@ -1170,6 +1212,29 @@ fn validate_catalog_manifest_binding(
                 "Downloaded driver package entrypoint digest does not match signed conformance evidence"
                     .to_string(),
             );
+        }
+    }
+    if !entry.dependencies.is_empty() {
+        let DriverPackageRuntime::Java(java) = &manifest.runtime else {
+            return Err("Only Java driver packages may declare catalog dependencies".to_string());
+        };
+        for dependency in &entry.dependencies {
+            let classpath = java
+                .classpath
+                .iter()
+                .find(|classpath| classpath.path == dependency.path)
+                .ok_or_else(|| {
+                    format!(
+                        "Catalog dependency {} is not signed into the Java classpath",
+                        dependency.coordinate
+                    )
+                })?;
+            if !classpath.sha256.eq_ignore_ascii_case(&dependency.sha256) {
+                return Err(format!(
+                    "Catalog dependency {} digest does not match the signed Java classpath",
+                    dependency.coordinate
+                ));
+            }
         }
     }
     Ok(())
@@ -1835,7 +1900,7 @@ fn validate_runtime(runtime: &DriverPackageRuntime, package_root: &Path) -> Resu
     Ok(())
 }
 
-fn package_relative_file(package_root: &Path, value: &str, label: &str) -> Result<PathBuf, String> {
+fn validated_package_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
     if value.is_empty() || value.len() > 240 {
         return Err(format!("{label} path is invalid"));
     }
@@ -1852,6 +1917,17 @@ fn package_relative_file(package_root: &Path, value: &str, label: &str) -> Resul
             "{label} path must stay inside its package directory"
         ));
     }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir))
+    {
+        return Err(format!("{label} path contains an invalid segment"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn package_relative_file(package_root: &Path, value: &str, label: &str) -> Result<PathBuf, String> {
+    let path = validated_package_relative_path(value, label)?;
     let candidate = package_root.join(path);
     if !candidate.is_file() {
         return Err(format!("{label} entry does not exist"));
@@ -2241,6 +2317,333 @@ async fn fetch_limited_bytes(
     Ok(bytes)
 }
 
+async fn hydrate_catalog_dependencies(
+    client: &reqwest::Client,
+    registry_root: &Path,
+    entry: &DriverPackageCatalogEntry,
+    package_root: &Path,
+) -> Result<(), String> {
+    for dependency in &entry.dependencies {
+        let relative =
+            validated_package_relative_path(&dependency.path, "Driver catalog dependency")?;
+        let destination = package_root.join(relative);
+        if destination.exists() {
+            if dependency_file_matches(&destination, dependency)? {
+                continue;
+            }
+            return Err(format!(
+                "Bundled dependency {} does not match the signed catalog",
+                dependency.coordinate
+            ));
+        }
+
+        let cache_path = dependency_cache_path(registry_root, dependency)?;
+        if !copy_cached_dependency(&cache_path, &destination, dependency)? {
+            download_catalog_dependency(client, dependency, &cache_path).await?;
+            if !copy_cached_dependency(&cache_path, &destination, dependency)? {
+                return Err(format!(
+                    "Dependency {} was not published to its verified cache",
+                    dependency.coordinate
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_cache_path(
+    registry_root: &Path,
+    dependency: &DriverPackageCatalogDependency,
+) -> Result<PathBuf, String> {
+    validate_sha256(&dependency.sha256, "Driver catalog dependency SHA-256")?;
+    Ok(registry_root
+        .join(DRIVER_DEPENDENCY_CACHE_DIRECTORY)
+        .join(format!("{}.jar", dependency.sha256.to_ascii_lowercase())))
+}
+
+fn dependency_file_matches(
+    path: &Path,
+    dependency: &DriverPackageCatalogDependency,
+) -> Result<bool, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Cannot inspect cached driver dependency: {error}")),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != dependency.size_bytes
+        || metadata.len() > MAX_DRIVER_DEPENDENCY_BYTES
+    {
+        return Ok(false);
+    }
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Cannot read cached driver dependency: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot read cached driver dependency: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()).eq_ignore_ascii_case(&dependency.sha256))
+}
+
+fn ensure_dependency_cache_parent(cache_path: &Path) -> Result<(), String> {
+    let cache_root = cache_path
+        .parent()
+        .ok_or_else(|| "Driver dependency cache path has no parent".to_string())?;
+    fs::create_dir_all(cache_root)
+        .map_err(|error| format!("Cannot create driver dependency cache: {error}"))?;
+    let metadata = fs::symlink_metadata(cache_root)
+        .map_err(|error| format!("Cannot inspect driver dependency cache: {error}"))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("Driver dependency cache directory is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn copy_cached_dependency(
+    cache_path: &Path,
+    destination: &Path,
+    dependency: &DriverPackageCatalogDependency,
+) -> Result<bool, String> {
+    if !dependency_file_matches(cache_path, dependency)? {
+        if cache_path.exists() {
+            fs::remove_file(cache_path)
+                .map_err(|error| format!("Cannot remove invalid dependency cache file: {error}"))?;
+        }
+        return Ok(false);
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Driver dependency destination has no parent".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Cannot create driver dependency directory: {error}"))?;
+    let mut input = fs::File::open(cache_path)
+        .map_err(|error| format!("Cannot open cached driver dependency: {error}"))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| format!("Cannot stage driver dependency: {error}"))?;
+    std::io::copy(&mut input, &mut output)
+        .map_err(|error| format!("Cannot copy cached driver dependency: {error}"))?;
+    output
+        .sync_all()
+        .map_err(|error| format!("Cannot finalize driver dependency: {error}"))?;
+    if !dependency_file_matches(destination, dependency)? {
+        let _ = fs::remove_file(destination);
+        return Err("Copied driver dependency failed digest verification".to_string());
+    }
+    Ok(true)
+}
+
+async fn download_catalog_dependency(
+    client: &reqwest::Client,
+    dependency: &DriverPackageCatalogDependency,
+    destination: &Path,
+) -> Result<(), String> {
+    ensure_dependency_cache_parent(destination)?;
+    if dependency_file_matches(destination, dependency)? {
+        return Ok(());
+    }
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|error| format!("Cannot reset invalid dependency cache file: {error}"))?;
+    }
+    let partial = destination.with_file_name(format!(
+        ".{}.jar.partial",
+        dependency.sha256.to_ascii_lowercase()
+    ));
+    let mut retry_without_range = false;
+
+    for _ in 0..2 {
+        if retry_without_range && partial.exists() {
+            fs::remove_file(&partial)
+                .map_err(|error| format!("Cannot reset driver dependency download: {error}"))?;
+        }
+        let existing = dependency_partial_length(&partial, dependency.size_bytes)?;
+        let mut request = client.get(&dependency.download_url);
+        if existing > 0 {
+            request = request.header(RANGE, format!("bytes={existing}-"));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("Cannot download driver dependency: {error}"))?;
+        if existing > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            if dependency_file_matches(&partial, dependency)? {
+                fs::rename(&partial, destination).map_err(|error| {
+                    format!("Cannot publish verified driver dependency: {error}")
+                })?;
+                return Ok(());
+            }
+            retry_without_range = true;
+            continue;
+        }
+
+        let append = if existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT {
+            validate_dependency_content_range(
+                response.headers().get(CONTENT_RANGE),
+                existing,
+                dependency.size_bytes,
+            )?;
+            true
+        } else if response.status() == StatusCode::OK {
+            false
+        } else {
+            return Err(format!(
+                "Cannot download driver dependency: server returned {}",
+                response.status()
+            ));
+        };
+        let retained = if append { existing } else { 0 };
+        if response.content_length().is_some_and(|length| {
+            retained
+                .checked_add(length)
+                .is_none_or(|total| total != dependency.size_bytes)
+        }) {
+            return Err(
+                "Driver dependency response size does not match the signed catalog".to_string(),
+            );
+        }
+
+        let mut digest = Sha256::new();
+        if append {
+            update_dependency_digest_from_file(&partial, dependency.size_bytes, &mut digest)?;
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(append)
+            .truncate(!append)
+            .open(&partial)
+            .map_err(|error| format!("Cannot stage driver dependency download: {error}"))?;
+        let mut downloaded = retained;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let _ = output.sync_data();
+                    return Err(format!("Cannot read driver dependency download: {error}"));
+                }
+            };
+            downloaded = downloaded
+                .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| "Driver dependency size overflow".to_string())?;
+            if downloaded > dependency.size_bytes {
+                let _ = output.sync_data();
+                return Err("Driver dependency exceeds its signed size".to_string());
+            }
+            output
+                .write_all(&chunk)
+                .map_err(|error| format!("Cannot write driver dependency download: {error}"))?;
+            digest.update(&chunk);
+        }
+        output
+            .sync_all()
+            .map_err(|error| format!("Cannot finalize driver dependency download: {error}"))?;
+        drop(output);
+        if downloaded != dependency.size_bytes {
+            return Err("Driver dependency download ended before its signed size".to_string());
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if !actual.eq_ignore_ascii_case(&dependency.sha256) {
+            fs::remove_file(&partial)
+                .map_err(|error| format!("Cannot remove invalid driver dependency: {error}"))?;
+            return Err("Driver dependency digest does not match the signed catalog".to_string());
+        }
+        fs::rename(&partial, destination)
+            .map_err(|error| format!("Cannot publish verified driver dependency: {error}"))?;
+        return Ok(());
+    }
+    Err("Driver dependency server rejected the cached resume offset".to_string())
+}
+
+fn dependency_partial_length(path: &Path, expected_size: u64) -> Result<u64, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect driver dependency download: {error}"
+            ))
+        }
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > expected_size
+    {
+        return Err("Incomplete driver dependency cache entry is invalid".to_string());
+    }
+    Ok(metadata.len())
+}
+
+fn update_dependency_digest_from_file(
+    path: &Path,
+    expected_size: u64,
+    digest: &mut Sha256,
+) -> Result<(), String> {
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("Cannot read incomplete driver dependency: {error}"))?;
+    let mut read_total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot read incomplete driver dependency: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        read_total = read_total
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .ok_or_else(|| "Driver dependency size overflow".to_string())?;
+        if read_total > expected_size {
+            return Err("Incomplete driver dependency exceeds its signed size".to_string());
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(())
+}
+
+fn validate_dependency_content_range(
+    value: Option<&reqwest::header::HeaderValue>,
+    expected_start: u64,
+    expected_total: u64,
+) -> Result<(), String> {
+    let value = value.and_then(|value| value.to_str().ok()).ok_or_else(|| {
+        "Driver dependency resume response has no valid Content-Range".to_string()
+    })?;
+    let value = value.strip_prefix("bytes ").ok_or_else(|| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    let (range, total) = value.split_once('/').ok_or_else(|| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    let (start, end) = range.split_once('-').ok_or_else(|| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    let start = start.parse::<u64>().map_err(|_| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    let end = end.parse::<u64>().map_err(|_| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    let total = total.parse::<u64>().map_err(|_| {
+        "Driver dependency resume response has an invalid Content-Range".to_string()
+    })?;
+    if start != expected_start || end < start || end >= total || total != expected_total {
+        return Err("Driver dependency resume response has an unsafe Content-Range".to_string());
+    }
+    Ok(())
+}
+
 async fn download_driver_package_archive(
     client: &reqwest::Client,
     url: &str,
@@ -2557,6 +2960,67 @@ fn prune_catalog_cache_files(
             fs::remove_dir(driver.path()).map_err(|error| {
                 format!("Cannot remove empty driver package cache directory: {error}")
             })?;
+        }
+    }
+    Ok(result)
+}
+
+fn prune_dependency_cache_files(
+    cache_root: &Path,
+) -> Result<DriverPackageCachePruneResult, String> {
+    let metadata = match fs::symlink_metadata(cache_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DriverPackageCachePruneResult::default())
+        }
+        Err(error) => return Err(format!("Cannot inspect driver dependency cache: {error}")),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("Driver dependency cache root is invalid".to_string());
+    }
+    let mut result = DriverPackageCachePruneResult::default();
+    for entry in fs::read_dir(cache_root)
+        .map_err(|error| format!("Cannot read driver dependency cache: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("Cannot read driver dependency cache entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Cannot inspect driver dependency cache entry: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            result.skipped_entries = result.skipped_entries.saturating_add(1);
+            continue;
+        };
+        let complete_digest = name.strip_suffix(".jar");
+        let partial_digest = name
+            .strip_prefix('.')
+            .and_then(|value| value.strip_suffix(".jar.partial"));
+        let (digest, partial) = if let Some(digest) = complete_digest {
+            (digest, false)
+        } else if let Some(digest) = partial_digest {
+            (digest, true)
+        } else {
+            result.skipped_entries = result.skipped_entries.saturating_add(1);
+            continue;
+        };
+        if digest.len() != 64
+            || !digest.bytes().all(|value| value.is_ascii_hexdigit())
+            || !file_type.is_file()
+            || file_type.is_symlink()
+        {
+            result.skipped_entries = result.skipped_entries.saturating_add(1);
+            continue;
+        }
+        let bytes = entry
+            .metadata()
+            .map_err(|error| format!("Cannot inspect driver dependency cache file: {error}"))?
+            .len();
+        fs::remove_file(entry.path())
+            .map_err(|error| format!("Cannot remove driver dependency cache file: {error}"))?;
+        result.files_removed = result.files_removed.saturating_add(1);
+        result.bytes_removed = result.bytes_removed.saturating_add(bytes);
+        if partial {
+            result.partial_files_removed = result.partial_files_removed.saturating_add(1);
         }
     }
     Ok(result)
@@ -3003,6 +3467,7 @@ fn validate_driver_catalog(catalog: &DriverPackageCatalog) -> Result<(), String>
                 conformance,
             )?;
         }
+        validate_catalog_dependencies(entry)?;
         if entry.supported_targets.len() > 16
             || entry
                 .supported_targets
@@ -3017,6 +3482,133 @@ fn validate_driver_catalog(catalog: &DriverPackageCatalog) -> Result<(), String>
         {
             return Err("Driver catalog contains invalid supported targets".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_catalog_dependencies(entry: &DriverPackageCatalogEntry) -> Result<(), String> {
+    if entry.dependencies.len() > MAX_DRIVER_DEPENDENCIES {
+        return Err(format!(
+            "Driver catalog package contains more than {MAX_DRIVER_DEPENDENCIES} dependencies"
+        ));
+    }
+    let mut coordinates = std::collections::HashSet::new();
+    let mut paths = std::collections::HashSet::new();
+    let mut total_bytes = 0u64;
+    for dependency in &entry.dependencies {
+        let expected_maven_path = validate_maven_coordinate(&dependency.coordinate)?;
+        let relative =
+            validated_package_relative_path(&dependency.path, "Driver catalog dependency")?;
+        if relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("jar"))
+        {
+            return Err("Driver catalog dependency path must identify a JAR".to_string());
+        }
+        if matches!(
+            dependency.path.as_str(),
+            "manifest.json" | "manifest.json.minisig" | DRIVER_PACKAGE_CATALOG_RECEIPT
+        ) {
+            return Err("Driver catalog dependency uses a reserved package path".to_string());
+        }
+        let url = validated_catalog_url(
+            &dependency.download_url,
+            "Driver catalog dependency download URL",
+        )?;
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if !MAVEN_REPOSITORY_HOST_ALLOWLIST.contains(&host.as_str()) {
+            return Err(format!(
+                "Driver catalog dependency repository host is not allowlisted: {host}"
+            ));
+        }
+        if !url.path().to_ascii_lowercase().ends_with(".jar") {
+            return Err("Driver catalog dependency download URL must identify a JAR".to_string());
+        }
+        if url.path() != format!("/maven2/{expected_maven_path}") {
+            return Err(
+                "Driver catalog dependency URL does not match its Maven coordinate".to_string(),
+            );
+        }
+        validate_sha256(&dependency.sha256, "Driver catalog dependency SHA-256")?;
+        if dependency.size_bytes == 0 || dependency.size_bytes > MAX_DRIVER_DEPENDENCY_BYTES {
+            return Err(
+                "Driver catalog dependency size is outside the supported limit".to_string(),
+            );
+        }
+        total_bytes = total_bytes
+            .checked_add(dependency.size_bytes)
+            .ok_or_else(|| "Driver catalog dependency size overflow".to_string())?;
+        if total_bytes > MAX_DRIVER_DEPENDENCIES_BYTES {
+            return Err("Driver catalog dependencies exceed the 256 MiB total limit".to_string());
+        }
+        validate_spdx_expression(&dependency.license_spdx)?;
+        if dependency.license_url.len() > MAX_DRIVER_CATALOG_FIELD_LENGTH {
+            return Err("Driver catalog dependency license URL is too long".to_string());
+        }
+        validated_catalog_url(
+            &dependency.license_url,
+            "Driver catalog dependency license URL",
+        )?;
+        if !coordinates.insert(dependency.coordinate.to_ascii_lowercase()) {
+            return Err("Driver catalog contains a duplicate dependency coordinate".to_string());
+        }
+        let path_identity = dependency.path.replace('\\', "/").to_ascii_lowercase();
+        if !paths.insert(path_identity) {
+            return Err("Driver catalog contains a duplicate dependency path".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_maven_coordinate(coordinate: &str) -> Result<String, String> {
+    if coordinate.len() > 320 {
+        return Err("Driver catalog Maven coordinate is too long".to_string());
+    }
+    let parts = coordinate.split(':').collect::<Vec<_>>();
+    if !(3..=5).contains(&parts.len()) || parts.iter().any(|part| !is_safe_token(part)) {
+        return Err(
+            "Driver catalog Maven coordinate must use an immutable fixed version".to_string(),
+        );
+    }
+    let version = parts.last().copied().unwrap_or_default();
+    if matches!(version.to_ascii_lowercase().as_str(), "latest" | "release")
+        || version.to_ascii_lowercase().ends_with("-snapshot")
+    {
+        return Err(
+            "Driver catalog Maven coordinate must use an immutable fixed version".to_string(),
+        );
+    }
+    let (packaging, classifier) = match parts.len() {
+        3 => ("jar", None),
+        4 => (parts[2], None),
+        5 => (parts[2], Some(parts[3])),
+        _ => unreachable!(),
+    };
+    if !packaging.eq_ignore_ascii_case("jar") {
+        return Err("Driver catalog Maven dependency packaging must be JAR".to_string());
+    }
+    let group_path = parts[0].replace('.', "/");
+    let artifact = parts[1];
+    let classifier = classifier
+        .map(|classifier| format!("-{classifier}"))
+        .unwrap_or_default();
+    Ok(format!(
+        "{group_path}/{artifact}/{version}/{artifact}-{version}{classifier}.jar"
+    ))
+}
+
+fn validate_spdx_expression(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || value.eq_ignore_ascii_case("unknown")
+        || value.chars().any(|character| {
+            !(character.is_ascii_alphanumeric()
+                || matches!(character, ' ' | '.' | '-' | '+' | '(' | ')'))
+        })
+    {
+        return Err("Driver catalog dependency SPDX license expression is invalid".to_string());
     }
     Ok(())
 }
@@ -3300,6 +3892,67 @@ mod tests {
         net::TcpListener,
     };
 
+    fn signed_jdbc_dependency(payload: &[u8]) -> DriverPackageCatalogDependency {
+        DriverPackageCatalogDependency {
+            coordinate: "org.postgresql:postgresql:42.7.7".to_string(),
+            path: "lib/postgresql-42.7.7.jar".to_string(),
+            download_url: "https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.7/postgresql-42.7.7.jar".to_string(),
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            size_bytes: u64::try_from(payload.len()).unwrap(),
+            license_spdx: "BSD-2-Clause".to_string(),
+            license_url: "https://jdbc.postgresql.org/about/license.html".to_string(),
+        }
+    }
+
+    fn dependency_catalog_entry(
+        dependency: DriverPackageCatalogDependency,
+    ) -> DriverPackageCatalogEntry {
+        DriverPackageCatalogEntry {
+            driver_id: "jdbc-fixture".to_string(),
+            display_name: "JDBC fixture".to_string(),
+            package_version: "1.0.0".to_string(),
+            protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
+            download_url: "https://drivers.example.com/jdbc-fixture-1.0.0.tar.gz".to_string(),
+            archive_sha256: Some("a".repeat(64)),
+            supported_targets: Vec::new(),
+            server_version_range: None,
+            release_notes_url: None,
+            connection_url_template: None,
+            capabilities: None,
+            schema_migration: None,
+            conformance: None,
+            dependencies: vec![dependency],
+        }
+    }
+
+    fn dependency_manifest(dependency: &DriverPackageCatalogDependency) -> DriverPackageManifest {
+        DriverPackageManifest {
+            schema_version: DRIVER_PACKAGE_SCHEMA_VERSION,
+            package_id: "oxide.jdbc-fixture".to_string(),
+            package_version: "1.0.0".to_string(),
+            protocol_version: DRIVER_PROTOCOL_VERSION.to_string(),
+            driver_id: "jdbc-fixture".to_string(),
+            display_name: "JDBC fixture".to_string(),
+            client_library: "postgresql-jdbc".to_string(),
+            client_version: "42.7.7".to_string(),
+            entrypoint: "agent.jar".to_string(),
+            sha256: "b".repeat(64),
+            runtime: DriverPackageRuntime::Java(DriverPackageJavaRuntime {
+                java_major: 21,
+                main_class: "studio.oxide.jdbc.DriverMain".to_string(),
+                classpath: vec![DriverPackageClasspathEntry {
+                    path: dependency.path.clone(),
+                    sha256: dependency.sha256.clone(),
+                }],
+            }),
+            supported_targets: Vec::new(),
+            server_version_range: None,
+            connection_url_template: None,
+            capabilities: None,
+            schema_migration: None,
+        }
+    }
+
     #[test]
     fn catalog_validation_requires_https_safe_identities_and_unique_versions() {
         let valid = DriverPackageCatalog {
@@ -3353,6 +4006,7 @@ mod tests {
                         ],
                     }],
                 }),
+                dependencies: Vec::new(),
             }],
         };
         assert!(validate_driver_catalog(&valid).is_ok());
@@ -3470,6 +4124,221 @@ mod tests {
         assert!(validate_driver_catalog(&unsupported_mutations)
             .unwrap_err()
             .contains("mutation conformance"));
+    }
+
+    #[test]
+    fn signed_jdbc_dependencies_are_immutable_bounded_and_license_declared() {
+        let payload = b"signed jdbc dependency";
+        let dependency = signed_jdbc_dependency(payload);
+        let entry = dependency_catalog_entry(dependency.clone());
+        assert!(validate_catalog_dependencies(&entry).is_ok());
+
+        let mut untrusted_repository = entry.clone();
+        untrusted_repository.dependencies[0].download_url =
+            "https://packages.example.com/postgresql-42.7.7.jar".to_string();
+        assert!(validate_catalog_dependencies(&untrusted_repository)
+            .unwrap_err()
+            .contains("not allowlisted"));
+
+        let mut coordinate_mismatch = entry.clone();
+        coordinate_mismatch.dependencies[0].download_url =
+            "https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.6/postgresql-42.7.6.jar".to_string();
+        assert!(validate_catalog_dependencies(&coordinate_mismatch)
+            .unwrap_err()
+            .contains("does not match its Maven coordinate"));
+
+        let mut snapshot = entry.clone();
+        snapshot.dependencies[0].coordinate =
+            "org.postgresql:postgresql:42.8.0-SNAPSHOT".to_string();
+        assert!(validate_catalog_dependencies(&snapshot)
+            .unwrap_err()
+            .contains("immutable fixed version"));
+
+        let mut classified_snapshot = entry.clone();
+        classified_snapshot.dependencies[0].coordinate =
+            "org.postgresql:postgresql:jar:tests:42.8.0-SNAPSHOT".to_string();
+        assert!(validate_catalog_dependencies(&classified_snapshot)
+            .unwrap_err()
+            .contains("immutable fixed version"));
+
+        let mut unsupported_packaging = entry.clone();
+        unsupported_packaging.dependencies[0].coordinate =
+            "org.postgresql:postgresql:zip:42.7.7".to_string();
+        assert!(validate_catalog_dependencies(&unsupported_packaging)
+            .unwrap_err()
+            .contains("packaging must be JAR"));
+
+        let mut missing_license = entry.clone();
+        missing_license.dependencies[0].license_spdx.clear();
+        assert!(validate_catalog_dependencies(&missing_license)
+            .unwrap_err()
+            .contains("SPDX"));
+
+        let mut oversized = entry.clone();
+        oversized.dependencies[0].size_bytes = MAX_DRIVER_DEPENDENCY_BYTES + 1;
+        assert!(validate_catalog_dependencies(&oversized)
+            .unwrap_err()
+            .contains("supported limit"));
+
+        let mut duplicate_path = entry;
+        let mut second = dependency;
+        second.coordinate = "org.slf4j:slf4j-api:2.0.17".to_string();
+        second.download_url =
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.17/slf4j-api-2.0.17.jar"
+                .to_string();
+        duplicate_path.dependencies.push(second);
+        assert!(validate_catalog_dependencies(&duplicate_path)
+            .unwrap_err()
+            .contains("duplicate dependency path"));
+    }
+
+    #[test]
+    fn catalog_dependencies_must_match_the_signed_java_classpath() {
+        let dependency = signed_jdbc_dependency(b"signed jdbc dependency");
+        let entry = dependency_catalog_entry(dependency.clone());
+        let manifest = dependency_manifest(&dependency);
+        assert!(validate_catalog_manifest_binding(&entry, &manifest).is_ok());
+
+        let mut native = manifest.clone();
+        native.runtime = DriverPackageRuntime::Native;
+        assert!(validate_catalog_manifest_binding(&entry, &native)
+            .unwrap_err()
+            .contains("Only Java"));
+
+        let mut missing = manifest.clone();
+        let DriverPackageRuntime::Java(java) = &mut missing.runtime else {
+            unreachable!();
+        };
+        java.classpath[0].path = "lib/different.jar".to_string();
+        assert!(validate_catalog_manifest_binding(&entry, &missing)
+            .unwrap_err()
+            .contains("not signed into"));
+
+        let mut wrong_digest = manifest;
+        let DriverPackageRuntime::Java(java) = &mut wrong_digest.runtime else {
+            unreachable!();
+        };
+        java.classpath[0].sha256 = "f".repeat(64);
+        assert!(validate_catalog_manifest_binding(&entry, &wrong_digest)
+            .unwrap_err()
+            .contains("digest"));
+    }
+
+    #[test]
+    fn verified_dependency_cache_is_reused_and_pruned_conservatively() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = b"verified jdbc dependency";
+        let dependency = signed_jdbc_dependency(payload);
+        let cache_path = dependency_cache_path(directory.path(), &dependency).unwrap();
+        ensure_dependency_cache_parent(&cache_path).unwrap();
+        fs::write(&cache_path, payload).unwrap();
+
+        let staged = directory.path().join("package/lib/vendor.jar");
+        assert!(copy_cached_dependency(&cache_path, &staged, &dependency).unwrap());
+        assert_eq!(fs::read(&staged).unwrap(), payload);
+
+        fs::write(&cache_path, b"tampered").unwrap();
+        let retry = directory.path().join("package/lib/retry.jar");
+        assert!(!copy_cached_dependency(&cache_path, &retry, &dependency).unwrap());
+        assert!(!cache_path.exists());
+
+        let cache_root = directory.path().join(DRIVER_DEPENDENCY_CACHE_DIRECTORY);
+        let complete = cache_root.join(format!("{}.jar", "a".repeat(64)));
+        let partial = cache_root.join(format!(".{}.jar.partial", "b".repeat(64)));
+        let unknown = cache_root.join("README.txt");
+        let nested = cache_root.join("nested");
+        fs::write(&complete, b"complete").unwrap();
+        fs::write(&partial, b"partial").unwrap();
+        fs::write(&unknown, b"keep").unwrap();
+        fs::create_dir(&nested).unwrap();
+
+        let result = prune_dependency_cache_files(&cache_root).unwrap();
+        assert_eq!(result.files_removed, 2);
+        assert_eq!(result.partial_files_removed, 1);
+        assert_eq!(result.bytes_removed, 15);
+        assert_eq!(result.skipped_entries, 2);
+        assert!(!complete.exists());
+        assert!(!partial.exists());
+        assert!(unknown.exists());
+        assert!(nested.exists());
+    }
+
+    #[tokio::test]
+    async fn bundled_dependency_digest_mismatch_fails_before_network_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let dependency = signed_jdbc_dependency(b"expected");
+        let entry = dependency_catalog_entry(dependency.clone());
+        let package = directory.path().join("package");
+        fs::create_dir_all(package.join("lib")).unwrap();
+        fs::write(package.join(&dependency.path), b"tampered").unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let error = hydrate_catalog_dependencies(&client, directory.path(), &entry, &package)
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not match the signed catalog"));
+        assert!(!directory
+            .path()
+            .join(DRIVER_DEPENDENCY_CACHE_DIRECTORY)
+            .exists());
+    }
+
+    #[test]
+    fn dependency_content_range_must_match_offset_and_signed_total() {
+        let valid = reqwest::header::HeaderValue::from_static("bytes 7-15/16");
+        assert!(validate_dependency_content_range(Some(&valid), 7, 16).is_ok());
+        assert!(validate_dependency_content_range(Some(&valid), 8, 16).is_err());
+        assert!(validate_dependency_content_range(Some(&valid), 7, 17).is_err());
+        assert!(validate_dependency_content_range(None, 7, 16).is_err());
+    }
+
+    #[tokio::test]
+    async fn dependency_download_resumes_into_digest_bound_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = b"verified resumable jdbc dependency";
+        let retained = 10usize;
+        let mut dependency = signed_jdbc_dependency(payload);
+        let cache_path = dependency_cache_path(directory.path(), &dependency).unwrap();
+        ensure_dependency_cache_parent(&cache_path).unwrap();
+        let partial_path = cache_path.with_file_name(format!(
+            ".{}.jar.partial",
+            dependency.sha256.to_ascii_lowercase()
+        ));
+        fs::write(&partial_path, &payload[..retained]).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        dependency.download_url = format!("http://{address}/vendor.jar");
+        let suffix = payload[retained..].to_vec();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains(&format!("range: bytes={retained}-")));
+            let end = retained + suffix.len() - 1;
+            let response = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {retained}-{end}/{}\r\nConnection: close\r\n\r\n",
+                suffix.len(),
+                retained + suffix.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&suffix).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        download_catalog_dependency(&client, &dependency, &cache_path)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(fs::read(&cache_path).unwrap(), payload);
+        assert!(!partial_path.exists());
     }
 
     #[test]
@@ -3689,6 +4558,7 @@ mod tests {
                 }],
                 ..DriverPackageConformance::default()
             }),
+            dependencies: Vec::new(),
         };
         let manifest = DriverPackageManifest {
             schema_version: DRIVER_PACKAGE_SCHEMA_VERSION,
@@ -3964,6 +4834,7 @@ mod tests {
             capabilities: None,
             schema_migration: None,
             conformance: None,
+            dependencies: Vec::new(),
         };
         let registry = DatabaseDriverPackageRegistry::allow_unsigned_for_tests(
             registry_root.path().to_path_buf(),
@@ -4048,6 +4919,7 @@ mod tests {
                 evidence: vec![evidence],
                 ..DriverPackageConformance::default()
             }),
+            dependencies: Vec::new(),
         });
 
         assert!(package.has_exact_migration_evidence("24.3.1"));

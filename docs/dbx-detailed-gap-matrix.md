@@ -158,7 +158,7 @@
 | D02 | 部分对齐：实际 driver 数量 | `agents/drivers/*` 45 个独立工程；`crates/dbx-core/src/db/*_driver.rs` | bundled 6 个；DuckDB 侧车已在 Windows x64/DuckDB v1.5.5 通过真实 package conformance；RQLite/ClickHouse 已有 release payload，但仍缺真实 server evidence | 每个产品通过 `connect/ping/version/metadata/query/cancel/error-map` 后才从候选变为 ready。 |
 | D03 | 部分对齐：外置 driver 安装、激活、回滚 | `src-tauri/src/commands/agents.rs`；`crates/dbx-core/src/agent_manager.rs`；`components/config/DriverStoreDialog.vue` | `src-tauri/src/core/driver_package.rs`；Settings Driver Manager | 保留 Oxide 的 Minisign、SHA-256、原子激活和 connection pin；补真实发布包。 |
 | D04 | 部分对齐：托管 Java/JAR 产品交付宽度 | `agents/common/*`；每个 `agents/drivers/<product>/build.gradle` | managed Java/runtime、generic JDBC agent、H2 内存 conformance fixture 已具备；Agent 现以真实 sidecar wire casing 处理连接/查询/cancel，尚无 SQL Server/Oracle 等正式签名包 | vendor JAR、Java 版本、URL 模板、server range 与 conformance 同时进入签名 catalog。 |
-| D05 | 未对齐：Maven/依赖获取工作流 | DBX agent driver 的 Gradle 依赖与安装流程；`DriverStoreDialog.vue` | 只接受本地签名 JAR/package，不解析任意 Maven 坐标 | 如增加在线获取，必须使用 allowlist、锁定 digest、断点缓存和许可证清单。 |
+| D05 | 逻辑已对齐并收紧：签名 Maven/JDBC 依赖获取 | DBX `crates/dbx-core/src/jdbc.rs`、`src-tauri/src/commands/plugins.rs` 与 `DriverStoreDialog.vue` 支持 resolver、Maven Central/自定义仓库、bundle 清单及离线包 | 签名 catalog 可为 Java package 声明固定 Maven 坐标、classpath 路径、精确大小/SHA-256、SPDX 许可证和 HTTPS 许可证链接；仅允许 Maven Central 固定路径，坐标/URL/manifest classpath 必须一致。依赖使用摘要命名断点缓存，安装 staging 注入后再次校验，Driver Manager 展示数量、体积、坐标和许可证 | Oxide 不接受 renderer 提交任意坐标或仓库，避免未审依赖直接进入数据库 sidecar。真实 Maven Central 代理、断点和供应商 JDBC 发布验证延期。 |
 | D06 | 部分对齐：runtime 可观测性 | `crates/dbx-core/src/driver_runtime.rs`；`components/config/driverRuntimeDisplay.ts` | `ConnectionManager::external_driver_runtime_summaries` 和 Driver Manager；按 package/version 聚合当前连接/PID/不可用数、进程生命周期内的启动次数、观测到的退出次数与最近时间 | 仍需经过真实 sidecar fixture 的崩溃预算、受控重连原因与持久化脱敏诊断；绝不保存 stderr、连接信息或 SQL。 |
 | D07 | 逻辑已对齐：下载断点续传与缓存回收 | DBX driver store/install UI 与 agent artifacts | 摘要绑定的 `.partial` 文件支持严格 HTTP Range 续传；206 必须精确延续 offset，200 自动安全回退全量，416 仅在完整摘要匹配时发布；最终 SHA-256 复验后原子进入缓存。Settings 可清理归档缓存，后端串行化下载/清理，仅删除 64-hex 摘要命名的普通文件，并保留 active、previous、connection-pinned 与 live-sidecar 版本；未知内容和符号链接不递归触碰 | 延期在真实 CDN/代理下验证 206/200/416、中断恢复、错误 Content-Range、摘要不匹配与 Windows 文件占用；不连接数据库。 |
 | D08 | 已对齐：连接级事实源 | DBX `connectionStore.ts`、`connectionDatabaseInfo.ts` | `get_connection_database_capability_context`；`LiveConnectionCapabilitySnapshot` | package、server version、capability 和 migration mode 必须来自同一 live driver 实例。 |
@@ -598,3 +598,32 @@ Oxide 将标签组织从单一组件内的数组遍历拆为可测试的确定�
 折叠与搜索祖先、确定性命名、共享 Second Panel 关闭语义、Host 路径边界、symlink 忽略、原子导出、
 事务回滚、层级/连接约束和递归删除。真实 WebView 文件选择器、超大目录压力、Windows/macOS/Linux
 文件权限与可视拖放验证进入延期验证清单。
+
+## Phase 145 增量：签名 JDBC/Maven 依赖获取
+
+对照 DBX `8be503bf4` 的 `crates/dbx-core/src/jdbc.rs`、`src-tauri/src/commands/plugins.rs` 和
+`DriverStoreDialog.vue`，Oxide 为正式 Java driver package 补齐在线依赖交付，但不把 DBX 的任意坐标、
+任意自定义仓库直接暴露给 renderer：
+
+- 签名 catalog entry 可声明最多 64 个依赖；每项固定 Maven 坐标、package 内 classpath 路径、下载
+  URL、精确大小、SHA-256、SPDX license 和 HTTPS license URL。单项限制 128 MiB、合计 256 MiB。
+- Maven 坐标只接受固定版本的 3/4/5 段 GAV/JAR/classifier 形式，拒绝 `LATEST`、`RELEASE`、
+  `*-SNAPSHOT` 和非 JAR packaging；下载 URL 必须是 Maven Central allowlist 上与坐标精确对应的
+  `/maven2/<group>/<artifact>/<version>/<artifact>-<version>[-classifier].jar`，不接受 redirect、
+  query、fragment 或凭据。
+- catalog dependency 必须逐项匹配独立签名 package manifest 的 Java classpath path 与 digest；native
+  package、缺失 classpath 或 digest 不同均在依赖下载前失败。package 自带同路径 JAR 时也必须满足
+  catalog 的精确大小和摘要，不能以归档内容覆盖受审依赖。
+- 依赖以 SHA-256 命名进入全局缓存；已有完整文件在复制前重算摘要，污染缓存会删除。续传只接受与
+  当前 offset 和签名总长完全一致的 206 `Content-Range`，200 安全重启，416 仅在 partial 已完整且
+  摘要正确时发布；流式写入不能超过签名大小，完成后同步、摘要复验并原子 rename。
+- 安装下载与缓存清理复用 registry 的异步互斥，避免清理正在写入的 partial。清理仅删除 dependency
+  cache 根下 64-hex 摘要命名的普通 `.jar`/`.jar.partial`，未知文件、目录和 symlink 保留；已安装
+  package 持有自己的验证副本，不依赖可清理缓存。
+- Driver Manager 在签名发行条目内按需展开依赖数量、总大小、坐标、classpath 位置和许可证链接；
+  renderer 只展示签名返回值，不能覆盖 dependency URL、digest 或 repository。
+
+Rust 回归覆盖仓库 allowlist、坐标/URL 绑定、动态版本、packaging、SPDX、体积和重复路径，Java
+manifest 绑定、归档内污染、缓存复用/污染/保守清理、Content-Range 与真实 loopback 断点续传；
+前端 typed Tauri boundary 保留完整依赖和许可证元数据。真实 Maven Central、企业代理、网络中断、
+磁盘不足、Windows 文件占用以及正式 Oracle/SQL Server 等签名 JDBC package 发布记录为延期验证。
