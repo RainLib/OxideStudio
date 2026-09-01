@@ -42,7 +42,10 @@ fn parse_rocketmq_nameservers(value: &str) -> Result<Vec<String>, &'static str> 
         if raw.is_empty() { continue; }
         if raw.contains("//") || raw.contains(['/', '?', '#']) { return Err("RocketMQ NameServer addresses must be host:port values"); }
         let address: SocketAddr = raw.parse().or_else(|_| {
-            let (_, port) = raw.rsplit_once(':').ok_or("RocketMQ NameServer addresses are invalid")?;
+            let (host, port) = raw.rsplit_once(':').ok_or("RocketMQ NameServer addresses are invalid")?;
+            if host.trim().is_empty() || (host.contains(':') && !(host.starts_with('[') && host.ends_with(']'))) {
+                return Err("RocketMQ NameServer addresses are invalid");
+            }
             port.parse::<u16>().map_err(|_| "RocketMQ NameServer addresses are invalid")?;
             Ok::<SocketAddr, &'static str>("127.0.0.1:1".parse().unwrap())
         })?;
@@ -61,5 +64,7 @@ mod tests {
     fn nameservers_are_bounded_and_normalized() {
         assert_eq!(parse_rocketmq_nameservers("127.0.0.1:9876;127.0.0.1:9876").unwrap(), ["127.0.0.1:9876"]);
         assert!(parse_rocketmq_nameservers("http://localhost:9876").is_err());
+        assert!(parse_rocketmq_nameservers(":9876").is_err());
+        assert!(parse_rocketmq_nameservers("2001:db8::1:9876").is_err());
     }
 }
