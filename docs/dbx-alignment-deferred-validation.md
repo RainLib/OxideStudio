@@ -1672,3 +1672,15 @@ explicit deferred validation task rather than an implicit release check.
 - Test tables above 200 columns and DDL above 24 KiB. The hover must remain
   bounded and direct users to the complete searchable DDL tab when truncated.
   Phase 131 uses mocked cache/Monaco lifecycle tests and opens no live database.
+
+## Queue connection form
+
+- Install a signed queue package whose capability reports `dataModel=queue` and
+  verify General shows only its structured broker/bootstrap fields, not an
+  editable URL or URL grammar note. Saving, testing and reopening must preserve
+  the Host-generated transport identity without exposing credentials.
+- Repeat with relational, document, key-value, search, graph, wide-column,
+  time-series and coordination packages; their URL control must remain present.
+- Change package version/capability while the dialog is open and ensure the
+  visibility follows the active verified capability rather than the driver ID.
+  Phase 132 only adds the pure capability test and frontend build.

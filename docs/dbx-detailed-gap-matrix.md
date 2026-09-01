@@ -343,3 +343,12 @@ Tauri 配置解析；macOS 真实首击、关闭动画和多窗口行为仍进�
 
 这次实现保留标准 LSP hover 处理列/表达式语义；只有已确认的 relation target 由可搜索
 widget 接管，从而避免原生 hover 与交互式 hover 重叠，也不重复发送 metadata/DDL/LSP 请求。
+
+## Phase 132 增量：消息队列连接表单契约
+
+| 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
+| --- | --- | --- | --- |
+| MQ 连接仍展示可编辑 URL，与 broker/bootstrap 等结构化字段形成两个事实源 | `apps/desktop/src/components/connection/ConnectionDialog.vue`（`23f511de2`） | `src/features/database-drivers/model/connectionFormVisibility.ts`、`src/components/connection/ConnectionForm.tsx` | 已按签名 capability 对齐：`dataModel=queue` 时隐藏 URL 行和 URL 专属说明；Host 仍从结构化字段和 package URL grammar 构建内部传输地址。判断不依赖 `mq` 字符串，因此未来 Kafka/RabbitMQ/RocketMQ 等独立 package 也遵守同一契约；其他八类 data model 保留 URL 编辑器。 |
+
+该变化不让尚未安装的 MQ catalog candidate 变为可连接驱动；选择、连接和发布状态仍完全
+由 ready/verified/active 的签名 package 控制。
