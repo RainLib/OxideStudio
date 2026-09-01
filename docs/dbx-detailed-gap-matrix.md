@@ -195,10 +195,14 @@
 
 ## 1. 支持口径
 
-- Oxide 的 `referenceDriverCatalog` 有 74 个候选产品，但候选、可安装、可连接、可浏览、
-  可编辑和可迁移是六个不同状态。
-- 当前无需外置包即可运行的 bundled driver 是 PostgreSQL、MySQL/MariaDB、SQLite、
-  MongoDB、Redis 和 Elasticsearch。
+- Oxide 的 `referenceDriverCatalog` 有 85 个候选产品（DBX 当前公开的 80 项，加 5 项
+  明确标注的 wire-compatible 产品）；候选、可安装、可连接、可浏览、可编辑和可迁移是
+  六个不同状态。目录本身不授予连接能力，只有 bundled runtime、明确兼容 profile 或已激活
+  的签名 package 才能显示连接入口。
+- 当前无需外置包即可运行的独立 bundled runtime 有 13 个：PostgreSQL、MySQL/MariaDB、
+  SQLite、MongoDB、Redis、Elasticsearch、InfluxDB 1/2、InfluxDB 3、VictoriaMetrics、
+  Consul、etcd、Nacos 与 Meilisearch；另有 TiDB、CockroachDB、YugabyteDB、TimescaleDB、
+  Greenplum、Easysearch 六个受限 compatibility profile。
 - DBX 当前基线已新增 ArgoDB；driver manifest、产品枚举和 agent 路由会继续随上游演进；
   `sources/dbx/agents/drivers` 中有 45 个独立 agent 工程，另外还有 native/file/HTTP
   driver。DBX 的产品数量来自这些实际运行时，不是只来自前端枚举。
@@ -210,7 +214,7 @@
 
 | ID | 状态 / 差距 | DBX 实现位置 | Oxide 当前落点 | 对齐验收 |
 | --- | --- | --- | --- | --- |
-| D01 | 部分对齐：产品 capability 与运行时分层 | `crates/dbx-core/assets/database-drivers.manifest.json`；`apps/desktop/src/lib/database/databaseDriverManifest.ts` | `src/features/database-drivers/model/referenceDriverCatalog.ts`；`src-tauri/src/core/dialect.rs` | 当前 DBX 的 80 个公开产品均有候选记录；每项由安装状态和 capability 决定入口，候选项不能显示为可连接。 |
+| D01 | 部分对齐：产品 capability 与运行时分层 | `crates/dbx-core/assets/database-drivers.manifest.json`；`apps/desktop/src/lib/database/databaseDriverManifest.ts` | `src/features/database-drivers/model/referenceDriverCatalog.ts`；`src-tauri/src/core/dialect.rs` | 当前 DBX 的 80 个公开产品均有候选记录，另有 5 项显式 wire-compatible 产品；目录候选本身不能显示连接，入口由 bundled runtime、compatibility profile 或安装状态与 capability 决定。 |
 | D02 | 部分对齐：实际 driver 数量 | `agents/drivers/*` 45 个独立工程；`crates/dbx-core/src/db/*_driver.rs` | 13 个独立 bundled runtime，另有 6 个明确的 DBX wire/API-compatible profile：TiDB 复用 MySQL；CockroachDB、YugabyteDB、TimescaleDB、Greenplum 复用 PostgreSQL；Easysearch 复用 Elasticsearch 的受限 REST/browser runtime。profile 保留原产品连接身份与保守 LSP baseline，不启用未经核对的厂商专有功能；Easysearch 保持 native Elasticsearch DSL workspace，不能误作 SQL LSP。新增 InfluxDB 1/2、VictoriaMetrics、Consul、etcd 和 Nacos native HTTP runtime。Consul、etcd 是固定端点、有界响应、凭据脱敏的严格只读浏览器。Nacos 浏览器仍只允许 v1/v2 OpenAPI 的配置列表与精确内容预览；另有独立、受审查的配置迁移协议：完整源快照、目标冲突计划、哈希确认、覆盖确认短语、写前 revision 复核和 `casMd5`。该协议不把 POST 暴露给通用编辑器，也不开放服务注册、命名空间、ACL 或其他管理 API。MetricsQL 不伪装为 SQL LSP。Meilisearch 仍采用固定 health/index/`documents/fetch` 的只读 browser，带安全 filter/sort cursor。DuckDB 侧车已在 Windows x64/DuckDB v1.5.5 通过真实 package conformance；RQLite/ClickHouse 已有 release payload，但仍缺真实 server evidence | 每个产品通过与其宣称 capability 匹配的 `connect/ping/version/metadata/query/cancel/error-map` 后才从候选变为 ready。 |
 | D03 | 部分对齐：外置 driver 安装、激活、回滚 | `src-tauri/src/commands/agents.rs`；`crates/dbx-core/src/agent_manager.rs`；`components/config/DriverStoreDialog.vue` | `src-tauri/src/core/driver_package.rs`；Settings Driver Manager | 保留 Oxide 的 Minisign、SHA-256、原子激活和 connection pin；补真实发布包。 |
 | D04 | 部分对齐：托管 Java/JAR 产品交付宽度 | `agents/common/*`；每个 `agents/drivers/<product>/build.gradle`；schema/catalog 切换参考 `agents/common/src/main/java/com/dbx/agent/JdbcSchemaSwitcher.java` 与 `plugins/jdbc/.../DbxJdbcPlugin.java:applyExecutionContext` | managed Java/runtime、generic JDBC agent、H2 内存 conformance fixture 已具备。profile 现在显式区分 catalog 与 schema，Oracle/Hive/Argo/generic 不再产生虚假 catalog 层；SQL Server/PostgreSQL/MySQL/H2 的 query context 会在单连接串行执行边界内应用并读回 `setCatalog/setSchema`，结束后恢复，无法证明应用或恢复时关闭连接。Host 同时要求签名 manifest 与 runtime handshake 两方声明 database scope。尚无 SQL Server/Oracle 等正式签名包 | vendor JAR、Java 版本、URL 模板、server range 与 conformance 同时进入签名 catalog。 |

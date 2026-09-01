@@ -41,7 +41,8 @@ Oxide 应继续采用更严格的口径：新建 Data Source 的搜索目录可�
 
 ## 已落地的收敛点
 
-- `referenceDriverDeliveryPlan` 为全部 74 个参考/兼容产品给出明确的 runtime 与
+- `referenceDriverDeliveryPlan` 为全部 85 个参考/兼容产品（80 项 DBX 产品与 5 项明确
+  compatibility 产品）给出明确的 runtime 与
   LSP/workspace 路线，并显示未来签名 capability 可使用的受审查 parser baseline。
   DBX 的 35 个声明式方言现均有专用或 compatibility 路线：例如 Doris 的 document 仍为
   `sql`，server identity 为 `doris`，registry 明确委托给 MySQL baseline；Oracle 则保留
