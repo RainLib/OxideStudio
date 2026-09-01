@@ -59,30 +59,42 @@ fn object_type_is_view(object_type: Option<&str>) -> bool {
     object_type.is_some_and(|value| value.to_ascii_uppercase().contains("VIEW"))
 }
 
-/// Catalog source is enabled only for native PostgreSQL/MySQL views. Both
-/// adapters return a SELECT body rather than CREATE DDL, which keeps the
-/// snapshot source portable across schemas of the same dialect and lets the
-/// planner own the target-side identifier quoting. PostgreSQL additionally
+/// PostgreSQL/MySQL return a SELECT body so the planner owns target-side view
+/// identity. SQLite instead retains its exact sqlite_schema CREATE VIEW source
+/// and rewrites only the frozen target identity. PostgreSQL additionally
 /// returns `relispopulated` for materialized views so their initial refresh
-/// behavior is not silently changed. Other drivers remain metadata-only until
-/// their package exposes an equivalent safe contract.
+/// behavior is not silently changed.
 fn native_view_definition_query(driver: &str, schema: &str, view: &str) -> Option<String> {
-    let schema = sql_string_literal(schema);
-    let view = sql_string_literal(view);
     match driver.trim().to_ascii_lowercase().as_str() {
-        "postgres" => Some(format!(
-            "SELECT pg_catalog.pg_get_viewdef(class.oid, true) AS definition, \
+        "postgres" => {
+            let schema = sql_string_literal(schema);
+            let view = sql_string_literal(view);
+            Some(format!(
+                "SELECT pg_catalog.pg_get_viewdef(class.oid, true) AS definition, \
                     CASE WHEN class.relkind = 'm' THEN class.relispopulated::text ELSE NULL END \
                         AS materialized_view_populated \
              FROM pg_catalog.pg_class class \
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace \
              WHERE namespace.nspname = {schema} AND class.relname = {view} \
              AND class.relkind IN ('v', 'm');"
-        )),
-        "mysql" => Some(format!(
-            "SELECT VIEW_DEFINITION AS definition FROM information_schema.VIEWS \
+            ))
+        }
+        "mysql" => {
+            let schema = sql_string_literal(schema);
+            let view = sql_string_literal(view);
+            Some(format!(
+                "SELECT VIEW_DEFINITION AS definition FROM information_schema.VIEWS \
              WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {view};"
-        )),
+            ))
+        }
+        "sqlite" => {
+            let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+            let view = sql_string_literal(view);
+            Some(format!(
+                "SELECT sql AS definition FROM {schema}.sqlite_schema \
+                 WHERE type = 'view' AND name = {view} AND sql IS NOT NULL LIMIT 1;"
+            ))
+        }
         _ => None,
     }
 }
@@ -2806,7 +2818,7 @@ pub async fn execute_schema_migration(
     let Some(execution_mode) = schema_migration_execution_mode(&approved_plan.driver) else {
         return Ok(Response::err_with_details(
             "SCHEMA_MIGRATION_UNSAFE_DRIVER",
-            "Automatic migration apply is available only for PostgreSQL transactional plans, explicitly acknowledged MySQL non-transactional plans, and complete SQLite existing-table rebuild plans; open the reviewed SQL in a console for other drivers",
+            "Automatic migration apply is available only for PostgreSQL transactional plans, explicitly acknowledged MySQL non-transactional plans, and complete catalog-backed SQLite migration plans; open the reviewed SQL in a console for other drivers",
             false,
             Some(context),
         ));
@@ -3635,7 +3647,12 @@ mod tests {
         assert!(mysql.contains("TABLE_SCHEMA = 'app'"));
         assert!(mysql.contains("TABLE_NAME = 'active_users'"));
 
-        assert!(native_view_definition_query("sqlite", "main", "active_users").is_none());
+        let sqlite = native_view_definition_query("sqlite", "tenant\"data", "active_users")
+            .expect("SQLite view introspection should be supported");
+        assert!(sqlite.contains("FROM \"tenant\"\"data\".sqlite_schema"));
+        assert!(sqlite.contains("type = 'view'"));
+        assert!(sqlite.contains("name = 'active_users'"));
+        assert!(sqlite.contains("sql IS NOT NULL"));
         assert!(
             native_view_definition_query("postgres", "p'ublic", "active_users")
                 .expect("quoted PostgreSQL catalog query")

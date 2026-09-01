@@ -1485,6 +1485,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_guarded_batch_replaces_a_standalone_compound_trigger() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("before-trigger-change.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query("CREATE TABLE users (id INTEGER PRIMARY KEY); CREATE TABLE audit (user_id INTEGER);")
+            .await
+            .unwrap();
+        driver
+            .execute_parameterized(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id); END;",
+                &[],
+            )
+            .await
+            .unwrap();
+        let statements = vec![
+            ParameterizedStatement {
+                sql: "DROP TRIGGER \"main\".\"users_audit\";".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "CREATE TRIGGER \"main\".\"users_audit\" AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id + 100); UPDATE audit SET user_id = user_id WHERE user_id = NEW.id + 100; END;".to_string(),
+                params: Vec::new(),
+            },
+        ];
+
+        let receipt = driver
+            .execute_sqlite_rebuild_batch(&statements, &backup_path)
+            .await
+            .unwrap();
+        assert_eq!(receipt.statements_applied, 2);
+        driver.query("INSERT INTO users VALUES (1)").await.unwrap();
+        let audit = driver.query("SELECT user_id FROM audit").await.unwrap();
+        assert_eq!(audit[0].rows, vec![vec![Value::from(101)]]);
+
+        let mut backup = SqliteDriver::new(backup_path.to_string_lossy().as_ref());
+        backup.connect().await.unwrap();
+        let original = backup
+            .query("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'users_audit'")
+            .await
+            .unwrap();
+        assert!(original[0].rows[0][0]
+            .as_str()
+            .is_some_and(|sql| sql.contains("VALUES (NEW.id)")));
+        assert!(!original[0].rows[0][0]
+            .as_str()
+            .is_some_and(|sql| sql.contains("NEW.id + 100")));
+    }
+
+    #[tokio::test]
+    async fn sqlite_guarded_batch_creates_and_drops_catalog_backed_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let create_backup = directory.path().join("before-table-create.sqlite");
+        let drop_backup = directory.path().join("before-table-drop.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query("CREATE TABLE audit (user_id INTEGER)")
+            .await
+            .unwrap();
+        let create = vec![
+            ParameterizedStatement {
+                sql: "CREATE TABLE \"main\".\"users\" (id INTEGER PRIMARY KEY, email TEXT CHECK (length(email) > 0)) STRICT;".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "CREATE INDEX \"main\".\"users_email_idx\" ON \"users\" (lower(email)) WHERE email IS NOT NULL;".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "CREATE TRIGGER \"main\".\"users_audit\" AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id); END;".to_string(),
+                params: Vec::new(),
+            },
+        ];
+        driver
+            .execute_sqlite_rebuild_batch(&create, &create_backup)
+            .await
+            .unwrap();
+        driver
+            .query("INSERT INTO users(id, email) VALUES (1, 'one@example.test')")
+            .await
+            .unwrap();
+        assert_eq!(
+            driver.query("SELECT user_id FROM audit").await.unwrap()[0].rows,
+            vec![vec![Value::from(1)]]
+        );
+        assert!(driver
+            .get_indexes("main", "users")
+            .await
+            .unwrap()
+            .iter()
+            .any(|index| index.name == "users_email_idx"));
+
+        driver
+            .execute_sqlite_rebuild_batch(
+                &[ParameterizedStatement {
+                    sql: "DROP TABLE \"main\".\"users\";".to_string(),
+                    params: Vec::new(),
+                }],
+                &drop_backup,
+            )
+            .await
+            .unwrap();
+        assert!(!driver
+            .get_tables("main")
+            .await
+            .unwrap()
+            .iter()
+            .any(|table| table.name == "users"));
+        assert!(driver.get_schema_objects("main").await.unwrap().is_empty());
+
+        let mut backup = SqliteDriver::new(drop_backup.to_string_lossy().as_ref());
+        backup.connect().await.unwrap();
+        assert!(backup
+            .get_tables("main")
+            .await
+            .unwrap()
+            .iter()
+            .any(|table| table.name == "users"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_guarded_batch_creates_replaces_and_drops_views() {
+        let directory = tempfile::tempdir().unwrap();
+        let create_backup = directory.path().join("before-view-create.sqlite");
+        let replace_backup = directory.path().join("before-view-replace.sqlite");
+        let drop_backup = directory.path().join("before-view-drop.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query("CREATE TABLE users (id INTEGER PRIMARY KEY, active INTEGER); INSERT INTO users VALUES (1, 1); INSERT INTO users VALUES (2, 0);")
+            .await
+            .unwrap();
+
+        driver
+            .execute_sqlite_rebuild_batch(
+                &[ParameterizedStatement {
+                    sql: "CREATE VIEW \"main\".\"active_users\" AS SELECT id FROM users WHERE active = 1;".to_string(),
+                    params: Vec::new(),
+                }],
+                &create_backup,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            driver.query("SELECT id FROM active_users").await.unwrap()[0].rows,
+            vec![vec![Value::from(1)]]
+        );
+
+        driver
+            .execute_sqlite_rebuild_batch(
+                &[
+                    ParameterizedStatement {
+                        sql: "DROP VIEW \"main\".\"active_users\";".to_string(),
+                        params: Vec::new(),
+                    },
+                    ParameterizedStatement {
+                        sql: "CREATE VIEW \"main\".\"active_users\" AS SELECT id FROM users WHERE active = 0;".to_string(),
+                        params: Vec::new(),
+                    },
+                ],
+                &replace_backup,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            driver.query("SELECT id FROM active_users").await.unwrap()[0].rows,
+            vec![vec![Value::from(2)]]
+        );
+
+        driver
+            .execute_sqlite_rebuild_batch(
+                &[ParameterizedStatement {
+                    sql: "DROP VIEW \"main\".\"active_users\";".to_string(),
+                    params: Vec::new(),
+                }],
+                &drop_backup,
+            )
+            .await
+            .unwrap();
+        assert!(!driver
+            .get_tables("main")
+            .await
+            .unwrap()
+            .iter()
+            .any(|table| table.name == "active_users"));
+
+        let mut backup = SqliteDriver::new(replace_backup.to_string_lossy().as_ref());
+        backup.connect().await.unwrap();
+        let definition = backup
+            .query("SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'active_users'")
+            .await
+            .unwrap();
+        assert!(definition[0].rows[0][0]
+            .as_str()
+            .is_some_and(|sql| sql.contains("active = 1")));
+    }
+
+    #[tokio::test]
     async fn file_sqlite_rebuild_backs_up_through_a_separate_snapshot_connection() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("live.sqlite");

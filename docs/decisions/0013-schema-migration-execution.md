@@ -26,14 +26,17 @@ Query errors, missing result columns, and non-numeric count values block executi
 
 For PostgreSQL, the backend flattens the freshly recomputed ordered changes into the existing database-scoped parameterized batch API. That driver owns `BEGIN`, executes all statements on one connection, rolls back on the first error, and commits only after every statement succeeds. A failed batch reports zero committed statements. For MySQL, the caller must acknowledge a separate non-transactional approval. The backend executes one reviewed statement at a time and persists the journal after each successful statement. On failure it reports the exact number of statements that may already have committed; it never labels this path atomic or rolled back.
 
-For an eligible SQLite existing-table rebuild, the Host captures exact table,
-index and trigger definitions from `sqlite_schema`. Apply creates and verifies a
+For an eligible SQLite migration, the Host captures exact table, view, index and
+trigger definitions from `sqlite_schema`. Existing-table changes use a bounded
+replacement-table copy; catalog-backed table/view/trigger creates, replacements
+and drops use schema-qualified object identities. Apply creates and verifies a
 recovery backup, disables foreign-key enforcement only on the owned connection,
-holds an immediate write transaction, creates/copies/renames the replacement,
-replays exact indexes and triggers, runs `foreign_key_check`, and restores the
+holds an immediate write transaction, runs `foreign_key_check`, and restores the
 original pragma state. Missing catalog definitions, unsafe backfill, malformed
-or additional statements, unsupported relation create/drop and views remain
-review-only. Remote SQLite uses the same statement contract through the signed,
+or additional statements, retained views with unknown/matching dependencies,
+and attached schemas remain review-only. Attached schemas are blocked because
+the current recovery backup/restore contract is explicitly bound to `main`.
+Remote SQLite uses the same statement contract through the signed,
 version-pinned worker.
 
 After commit, Rust captures the live target again and compares it with the desired source. The journal distinguishes `succeeded` from `verificationFailed`; a committed migration is never relabeled as rolled back when only recapture or comparison failed.
@@ -46,8 +49,9 @@ Execution records are upserted into the project/connection-scoped MetaStore reso
 
 - PostgreSQL now has an explicit confirm → refresh/recompute → preflight → atomic apply → post-verify lifecycle.
 - MySQL has an explicit confirm → refresh/recompute → preflight → sequential, journaled apply → post-verify lifecycle, with partial commit risk visible before execution.
-- Eligible SQLite existing-table changes have a backup-bound, transactional,
-  catalog-exact rebuild path; incomplete changes continue to fail closed.
+- Eligible SQLite table/view/trigger changes have a backup-bound,
+  transactional, catalog-exact path; attached schemas and incomplete changes
+  continue to fail closed.
 - Stale artifacts and tampered snapshot contents cannot reach DDL execution through this command.
 - Transaction failure and post-commit verification failure are represented separately.
 - A process crash can leave a durable `running` record. The next journal read now converts records that are not active in the current process to `interrupted`, with an explicit recapture-and-review requirement; it never attempts to resume them. A currently executing migration is tracked in-process so it is not falsely converted by a concurrent journal refresh.

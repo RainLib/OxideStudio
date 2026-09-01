@@ -12,7 +12,7 @@ use crate::{
             SchemaDiffPlan, SchemaObjectSnapshot, SchemaRelationSnapshot, SchemaRoutineSnapshot,
             SchemaSnapshot,
         },
-        statement::{validate_sql_filter_expression, StatementScanDialect},
+        statement::{split_sql_statements, validate_sql_filter_expression, StatementScanDialect},
         store::{MetaStore, Resource},
     },
 };
@@ -5042,6 +5042,164 @@ pub(crate) fn rewrite_sqlite_create_table_for_transfer(
     Ok(format!(
         "CREATE TABLE {} {suffix};",
         sqlite_qualified_relation(target_schema, target_table)?
+    ))
+}
+
+fn sqlite_consume_catalog_keyword(
+    input: &str,
+    start: usize,
+    expected: &str,
+) -> Result<usize, String> {
+    let start = sqlite_skip_whitespace_and_comments(input, start)?;
+    let mut end = start;
+    for (offset, character) in input[start..].char_indices() {
+        if !character.is_ascii_alphabetic() {
+            break;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    if end == start || !input[start..end].eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "SQLite catalog DDL expected {expected} in its CREATE prefix"
+        ));
+    }
+    if input[end..]
+        .chars()
+        .next()
+        .is_some_and(sqlite_unquoted_identifier_continue)
+    {
+        return Err(format!(
+            "SQLite catalog DDL has an invalid {expected} keyword boundary"
+        ));
+    }
+    Ok(end)
+}
+
+pub(crate) fn rewrite_sqlite_create_trigger_for_transfer(
+    source_sql: &str,
+    source_trigger: &str,
+    target_schema: &str,
+    target_trigger: &str,
+) -> Result<String, String> {
+    let statements = split_sql_statements(source_sql, StatementScanDialect::Mysql);
+    if statements.len() != 1 {
+        return Err("SQLite trigger catalog DDL must contain exactly one statement".to_string());
+    }
+    let sql = statements[0].trim();
+    if sql.is_empty() || sql.contains('\0') || sql.len() > 1024 * 1024 {
+        return Err("SQLite trigger catalog DDL is empty or exceeds its safety bound".to_string());
+    }
+    let mut index = sqlite_consume_catalog_keyword(sql, 0, "CREATE")?;
+    let next = sqlite_skip_whitespace_and_comments(sql, index)?;
+    let prefix = sqlite_catalog_prefix_tokens(&sql[next..]);
+    if prefix
+        .first()
+        .is_some_and(|token| matches!(token.as_str(), "TEMP" | "TEMPORARY"))
+    {
+        index = sqlite_consume_catalog_keyword(
+            sql,
+            next,
+            if prefix[0] == "TEMP" {
+                "TEMP"
+            } else {
+                "TEMPORARY"
+            },
+        )?;
+    }
+    index = sqlite_consume_catalog_keyword(sql, index, "TRIGGER")?;
+    let mut identifier_start = sqlite_skip_whitespace_and_comments(sql, index)?;
+    let optional_prefix = sqlite_catalog_prefix_tokens(&sql[identifier_start..]);
+    if optional_prefix.first().is_some_and(|token| token == "IF") {
+        index = sqlite_consume_catalog_keyword(sql, identifier_start, "IF")?;
+        index = sqlite_consume_catalog_keyword(sql, index, "NOT")?;
+        index = sqlite_consume_catalog_keyword(sql, index, "EXISTS")?;
+        identifier_start = sqlite_skip_whitespace_and_comments(sql, index)?;
+    }
+    let (mut identifier_end, mut parsed_trigger) =
+        sqlite_parse_reference_identifier(sql, identifier_start)?;
+    let separator = sqlite_skip_whitespace_and_comments(sql, identifier_end)?;
+    if sql[separator..].starts_with('.') {
+        let qualified_start = sqlite_skip_whitespace_and_comments(sql, separator + 1)?;
+        (identifier_end, parsed_trigger) = sqlite_parse_reference_identifier(sql, qualified_start)?;
+    }
+    if !parsed_trigger.eq_ignore_ascii_case(source_trigger.trim()) {
+        return Err(format!(
+            "SQLite trigger catalog identity {parsed_trigger} does not match {source_trigger}"
+        ));
+    }
+    let suffix = sql[identifier_end..].trim().trim_end_matches(';').trim();
+    if suffix.is_empty() {
+        return Err("SQLite trigger catalog DDL is missing its trigger body".to_string());
+    }
+    Ok(format!(
+        "CREATE TRIGGER {} {suffix};",
+        sqlite_qualified_index(target_schema, target_trigger)?
+    ))
+}
+
+pub(crate) fn rewrite_sqlite_create_view_for_transfer(
+    source_sql: &str,
+    source_view: &str,
+    target_schema: &str,
+    target_view: &str,
+) -> Result<String, String> {
+    let statements = split_sql_statements(source_sql, StatementScanDialect::Postgres);
+    if statements.len() != 1 {
+        return Err("SQLite view catalog DDL must contain exactly one statement".to_string());
+    }
+    let sql = statements[0].trim();
+    if sql.is_empty() || sql.contains('\0') || sql.len() > 1024 * 1024 {
+        return Err("SQLite view catalog DDL is empty or exceeds its safety bound".to_string());
+    }
+    let mut index = sqlite_consume_catalog_keyword(sql, 0, "CREATE")?;
+    let next = sqlite_skip_whitespace_and_comments(sql, index)?;
+    let prefix = sqlite_catalog_prefix_tokens(&sql[next..]);
+    if prefix
+        .first()
+        .is_some_and(|token| matches!(token.as_str(), "TEMP" | "TEMPORARY"))
+    {
+        index = sqlite_consume_catalog_keyword(
+            sql,
+            next,
+            if prefix[0] == "TEMP" {
+                "TEMP"
+            } else {
+                "TEMPORARY"
+            },
+        )?;
+    }
+    index = sqlite_consume_catalog_keyword(sql, index, "VIEW")?;
+    let mut identifier_start = sqlite_skip_whitespace_and_comments(sql, index)?;
+    let optional_prefix = sqlite_catalog_prefix_tokens(&sql[identifier_start..]);
+    if optional_prefix.first().is_some_and(|token| token == "IF") {
+        index = sqlite_consume_catalog_keyword(sql, identifier_start, "IF")?;
+        index = sqlite_consume_catalog_keyword(sql, index, "NOT")?;
+        index = sqlite_consume_catalog_keyword(sql, index, "EXISTS")?;
+        identifier_start = sqlite_skip_whitespace_and_comments(sql, index)?;
+    }
+    let (mut identifier_end, mut parsed_view) =
+        sqlite_parse_reference_identifier(sql, identifier_start)?;
+    let separator = sqlite_skip_whitespace_and_comments(sql, identifier_end)?;
+    if sql[separator..].starts_with('.') {
+        let qualified_start = sqlite_skip_whitespace_and_comments(sql, separator + 1)?;
+        (identifier_end, parsed_view) = sqlite_parse_reference_identifier(sql, qualified_start)?;
+    }
+    if !parsed_view.eq_ignore_ascii_case(source_view.trim()) {
+        return Err(format!(
+            "SQLite view catalog identity {parsed_view} does not match {source_view}"
+        ));
+    }
+    let suffix = sql[identifier_end..].trim().trim_end_matches(';').trim();
+    if suffix.is_empty()
+        || !sqlite_catalog_prefix_tokens(suffix)
+            .iter()
+            .any(|token| token == "AS")
+    {
+        return Err("SQLite view catalog DDL is missing its AS query body".to_string());
+    }
+    Ok(format!(
+        "CREATE VIEW {} {suffix};",
+        sqlite_qualified_relation(target_schema, target_view)?
     ))
 }
 
@@ -20099,6 +20257,7 @@ mod tests {
         resolve_table_data_transfer_target_plan, resolve_transfer_target_column_quoting,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
         rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
+        rewrite_sqlite_create_trigger_for_transfer, rewrite_sqlite_create_view_for_transfer,
         sanitize_file_part, select_database_sql_export_tables, skipped_table_data_compare_result,
         sql_export_insert_batch_rows, sql_insert_statements, sqlite_transfer_target_index_name,
         summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
@@ -26139,6 +26298,82 @@ WITH DATA;"#
             .unwrap(),
             "CREATE UNIQUE INDEX \"archive\".\"orders_search_idx\" ON \"order items\" (lower(\"note\"), \"id\" DESC)\n            WHERE \"note\" <> ';' AND (\"qty\" > 1);"
         );
+    }
+
+    #[test]
+    fn sqlite_catalog_trigger_transfer_qualifies_identity_and_keeps_compound_body() {
+        let source = r#"CREATE TRIGGER IF NOT EXISTS `orders_audit`
+            AFTER UPDATE ON `order items`
+            BEGIN
+                INSERT INTO audit_log(order_id) VALUES (NEW.id);
+                UPDATE audit_log SET touched = 1 WHERE order_id = NEW.id;
+            END"#;
+
+        let rewritten = rewrite_sqlite_create_trigger_for_transfer(
+            source,
+            "orders_audit",
+            "archive",
+            "orders_audit",
+        )
+        .unwrap();
+        assert!(rewritten.starts_with("CREATE TRIGGER \"archive\".\"orders_audit\" AFTER UPDATE"));
+        assert!(rewritten.contains("INSERT INTO audit_log(order_id) VALUES (NEW.id);"));
+        assert!(rewritten.contains("UPDATE audit_log SET touched = 1"));
+        assert!(rewritten.ends_with("END;"));
+    }
+
+    #[test]
+    fn sqlite_catalog_trigger_transfer_rejects_identity_and_statement_injection() {
+        assert!(rewrite_sqlite_create_trigger_for_transfer(
+            "CREATE TRIGGER other AFTER INSERT ON users BEGIN SELECT NEW.id; END",
+            "users_audit",
+            "main",
+            "users_audit",
+        )
+        .unwrap_err()
+        .contains("does not match"));
+        assert!(rewrite_sqlite_create_trigger_for_transfer(
+            "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN SELECT NEW.id; END; DROP TABLE users;",
+            "users_audit",
+            "main",
+            "users_audit",
+        )
+        .unwrap_err()
+        .contains("exactly one statement"));
+    }
+
+    #[test]
+    fn sqlite_catalog_view_transfer_qualifies_identity_and_keeps_query_body() {
+        let source = r#"CREATE VIEW IF NOT EXISTS `active users` (id, email) AS
+            SELECT id, email FROM users
+            WHERE active = 1 AND email <> ';'"#;
+        let rewritten =
+            rewrite_sqlite_create_view_for_transfer(source, "active users", "main", "active users")
+                .unwrap();
+        assert!(rewritten.starts_with("CREATE VIEW \"main\".\"active users\" (id, email) AS"));
+        assert!(rewritten.contains("SELECT id, email FROM users"));
+        assert!(rewritten.contains("email <> ';'"));
+        assert!(rewritten.ends_with(';'));
+    }
+
+    #[test]
+    fn sqlite_catalog_view_transfer_rejects_identity_and_statement_injection() {
+        assert!(rewrite_sqlite_create_view_for_transfer(
+            "CREATE VIEW other AS SELECT id FROM users",
+            "active_users",
+            "main",
+            "active_users",
+        )
+        .unwrap_err()
+        .contains("does not match"));
+        assert!(rewrite_sqlite_create_view_for_transfer(
+            "CREATE VIEW active_users AS SELECT id FROM users; DROP TABLE users;",
+            "active_users",
+            "main",
+            "active_users",
+        )
+        .unwrap_err()
+        .contains("exactly one statement"));
     }
 
     #[test]

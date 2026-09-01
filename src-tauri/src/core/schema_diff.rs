@@ -1,5 +1,6 @@
 use crate::commands::table::{
     rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
+    rewrite_sqlite_create_trigger_for_transfer, rewrite_sqlite_create_view_for_transfer,
 };
 use crate::core::{
     dialect::{database_spec_for_driver, DatabaseKind},
@@ -479,7 +480,6 @@ pub fn compare_schema_snapshots(
         .collect::<Vec<_>>();
     relation_names.sort();
     relation_names.dedup();
-
     let mut changes = Vec::new();
     let mut warnings = source
         .warnings
@@ -1288,12 +1288,13 @@ fn compare_metadata_snapshots(
     })
 }
 
-/// Builds a SQLite-specific rebuild plan. SQLite can only add a narrow class
-/// of columns directly; changing a table definition safely needs a replacement
-/// table, a bounded copy of the columns that still exist, and recreation of
-/// compatible indexes. Only complete existing-table rebuilds are executable;
-/// creates, drops, views, incomplete metadata, and product objects remain
-/// review-only.
+/// Builds a catalog-backed SQLite migration plan. Existing-table changes use a
+/// replacement table and bounded same-name column copy; table/view/trigger
+/// create, replace, and drop operations replay exact `sqlite_schema` source.
+/// Every executable plan remains inside the driver's verified backup, write
+/// transaction, foreign-key check, and post-apply recapture boundary. Missing
+/// catalog source, unsafe backfills, unknown retained-view dependencies, and
+/// attached schemas remain review-only.
 fn compare_sqlite_schema_snapshots(
     source: &SchemaSnapshot,
     target: &SchemaSnapshot,
@@ -1308,8 +1309,19 @@ fn compare_sqlite_schema_snapshots(
         .collect::<Vec<_>>();
     relation_names.sort();
     relation_names.dedup();
+    let surviving_target_views = target
+        .relations
+        .iter()
+        .filter(|relation| {
+            let flags = relation_flags(relation.object_type.as_deref());
+            flags.is_view
+                && !flags.is_materialized_view
+                && source_relations.contains_key(&relation.name)
+        })
+        .collect::<Vec<_>>();
 
     let mut changes = Vec::new();
+    let mut handled_trigger_relations = BTreeSet::new();
     let mut warnings = source
         .warnings
         .iter()
@@ -1324,7 +1336,7 @@ fn compare_sqlite_schema_snapshots(
         ) {
             (Some(source_relation), None) => {
                 let (sql, relation_warnings) =
-                    sqlite_create_relation_sql(source_relation, &relation_name);
+                    sqlite_create_exact_relation_sql(source, source_relation, &target.schema_name);
                 warnings.extend(relation_warnings);
                 let mut create = change(
                     SchemaChangeKind::RelationCreate,
@@ -1333,19 +1345,26 @@ fn compare_sqlite_schema_snapshots(
                     &relation_name,
                     source_relation.object_type.clone(),
                     None,
-                    format!("Review creation of SQLite relation {relation_name}"),
+                    format!("Create SQLite relation {relation_name}"),
                     sql,
-                    false,
+                    true,
                     true,
                 );
-                create.phase = SchemaChangePhase::ManualReview;
-                create.blocked_reason = Some(
-                    "SQLite creation is supplied for review only; automatic apply is disabled."
-                        .to_string(),
-                );
+                create.phase = SchemaChangePhase::CreateRelations;
+                if create.sql.is_empty() {
+                    create.blocked_reason = Some(
+                        "SQLite relation creation requires an exact catalog-backed table definition."
+                            .to_string(),
+                    );
+                    create.phase = SchemaChangePhase::ManualReview;
+                }
+                handled_trigger_relations.insert(relation_name.clone());
                 changes.push(create);
             }
             (None, Some(target_relation)) => {
+                let target_flags = relation_flags(target_relation.object_type.as_deref());
+                let is_table = sqlite_object_is_table(target_relation);
+                let is_view = target_flags.is_view && !target_flags.is_materialized_view;
                 let mut drop = change(
                     SchemaChangeKind::RelationDrop,
                     SchemaChangeRisk::Destructive,
@@ -1353,17 +1372,94 @@ fn compare_sqlite_schema_snapshots(
                     &relation_name,
                     target_relation.object_type.clone(),
                     None,
-                    format!("Review removal of target-only SQLite relation {relation_name}"),
-                    Vec::new(),
+                    format!("Drop target-only SQLite relation {relation_name}"),
+                    (is_table || is_view)
+                        .then(|| {
+                            format!(
+                                "DROP {} {};",
+                                if is_view { "VIEW" } else { "TABLE" },
+                                sqlite_qualified_identifier(&target.schema_name, &relation_name)
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
                     false,
                     true,
                 );
-                drop.phase = SchemaChangePhase::ManualReview;
-                drop.blocked_reason = Some(
-                    "SQLite relation removal requires a backup and foreign-key dependency review."
-                        .to_string(),
-                );
+                drop.phase = SchemaChangePhase::DropRelations;
+                if !is_table && !is_view {
+                    drop.phase = SchemaChangePhase::ManualReview;
+                    drop.blocked_reason = Some(
+                        "SQLite view removal remains review-only until view dependency ordering is captured."
+                            .to_string(),
+                    );
+                } else if is_table {
+                    let uncertain_views = surviving_target_views
+                        .iter()
+                        .filter(|view| {
+                            view.dependencies.is_empty()
+                                || view
+                                    .dependencies
+                                    .iter()
+                                    .any(|dependency| dependency == &relation_name)
+                        })
+                        .map(|view| view.name.as_str())
+                        .collect::<Vec<_>>();
+                    if !uncertain_views.is_empty() {
+                        let reason = format!(
+                            "SQLite table {} cannot be dropped automatically while retained views have incomplete or matching dependency evidence: {}.",
+                            relation_name,
+                            uncertain_views.join(", ")
+                        );
+                        warnings.push(reason.clone());
+                        drop.blocked_reason = Some(reason);
+                        drop.phase = SchemaChangePhase::ManualReview;
+                    }
+                }
+                handled_trigger_relations.insert(relation_name.clone());
                 changes.push(drop);
+            }
+            (Some(source_relation), Some(target_relation))
+                if relation_flags(source_relation.object_type.as_deref()).is_view
+                    && !relation_flags(source_relation.object_type.as_deref())
+                        .is_materialized_view
+                    && relation_flags(target_relation.object_type.as_deref()).is_view
+                    && !relation_flags(target_relation.object_type.as_deref())
+                        .is_materialized_view
+                    && source_relation != target_relation =>
+            {
+                let mut sql = vec![format!(
+                    "DROP VIEW {};",
+                    sqlite_qualified_identifier(&target.schema_name, &relation_name)
+                )];
+                let mut blocked_reason = None;
+                match sqlite_exact_view_sql(source_relation, &target.schema_name) {
+                    Ok(create_sql) => sql.push(create_sql),
+                    Err(error) => {
+                        warnings.push(error.clone());
+                        sql.clear();
+                        blocked_reason = Some(error);
+                    }
+                }
+                let mut replace = change(
+                    SchemaChangeKind::RelationModify,
+                    SchemaChangeRisk::Destructive,
+                    &target.schema_name,
+                    &relation_name,
+                    source_relation.object_type.clone(),
+                    None,
+                    format!("Replace SQLite view {relation_name}"),
+                    sql,
+                    false,
+                    true,
+                );
+                replace.phase = SchemaChangePhase::AlterRelations;
+                if let Some(reason) = blocked_reason {
+                    replace.blocked_reason = Some(reason);
+                    replace.phase = SchemaChangePhase::ManualReview;
+                }
+                handled_trigger_relations.insert(relation_name.clone());
+                changes.push(replace);
             }
             (Some(source_relation), Some(target_relation))
                 if sqlite_relation_requires_rebuild(source_relation, target_relation) =>
@@ -1391,6 +1487,7 @@ fn compare_sqlite_schema_snapshots(
                     );
                     rebuild.phase = SchemaChangePhase::ManualReview;
                 }
+                handled_trigger_relations.insert(relation_name.clone());
                 changes.push(rebuild);
             }
             (Some(source_relation), Some(target_relation))
@@ -1422,25 +1519,44 @@ fn compare_sqlite_schema_snapshots(
         &mut changes,
         &mut warnings,
     );
-    compare_schema_objects(
-        None,
-        SchemaNameMapping {
-            source: &source.schema_name,
-            target: &target.schema_name,
-        },
+    compare_sqlite_schema_objects(
         &source.schema_objects,
         &target.schema_objects,
         &target.schema_name,
+        &handled_trigger_relations,
         &mut changes,
         &mut warnings,
     );
+    if !target.schema_name.trim().is_empty()
+        && !target.schema_name.trim().eq_ignore_ascii_case("main")
+    {
+        let reason = format!(
+            "SQLite attached schema {} is review-only because the current recovery backup and restore contract is bound to the main database file.",
+            target.schema_name
+        );
+        for change in &mut changes {
+            if change.blocked_reason.is_none() {
+                change.blocked_reason = Some(reason.clone());
+                change.manual_review = true;
+                change.phase = SchemaChangePhase::ManualReview;
+            }
+        }
+        warnings.push(reason);
+    }
     for (order, change) in changes.iter_mut().enumerate() {
         change.order = order + 1;
     }
     let executable = !changes.is_empty()
         && changes.iter().all(|change| {
-            change.kind == SchemaChangeKind::RelationModify
-                && change.blocked_reason.is_none()
+            matches!(
+                change.kind,
+                SchemaChangeKind::RelationCreate
+                    | SchemaChangeKind::RelationDrop
+                    | SchemaChangeKind::RelationModify
+                    | SchemaChangeKind::SchemaObjectCreate
+                    | SchemaChangeKind::SchemaObjectDrop
+                    | SchemaChangeKind::SchemaObjectModify
+            ) && change.blocked_reason.is_none()
                 && !change.sql.is_empty()
         });
     if executable {
@@ -1450,7 +1566,7 @@ fn compare_sqlite_schema_snapshots(
         );
     } else if !changes.is_empty() {
         warnings.push(
-            "Only complete existing-table SQLite rebuilds can be applied automatically; all other SQLite differences remain review-only."
+            "Only catalog-backed SQLite table, view, and trigger changes with complete safety evidence can be applied automatically; attached schemas and incomplete SQLite differences remain review-only."
                 .to_string(),
         );
     }
@@ -1500,6 +1616,18 @@ fn sqlite_quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
+fn sqlite_qualified_identifier(schema: &str, identifier: &str) -> String {
+    if schema.trim().is_empty() {
+        sqlite_quote_identifier(identifier)
+    } else {
+        format!(
+            "{}.{}",
+            sqlite_quote_identifier(schema),
+            sqlite_quote_identifier(identifier)
+        )
+    }
+}
+
 fn sqlite_object_is_table(relation: &SchemaRelationSnapshot) -> bool {
     let flags = relation_flags(relation.object_type.as_deref());
     !flags.is_view && !flags.is_materialized_view && !flags.is_foreign_table
@@ -1539,12 +1667,9 @@ fn sqlite_relation_requires_rebuild(
     })
 }
 
-fn sqlite_sql_fragment_is_safe(fragment: &str) -> bool {
-    !fragment.contains('\0') && !fragment.contains(';')
-}
-
 fn sqlite_exact_rebuild_table_sql(
     relation: &SchemaRelationSnapshot,
+    target_schema: &str,
     temporary_table: &str,
 ) -> Result<String, String> {
     let definition = relation
@@ -1562,17 +1687,23 @@ fn sqlite_exact_rebuild_table_sql(
     // shared catalog rewriter to preserve all REFERENCES targets verbatim.
     // Self-references already point at the final table name and remain correct
     // after the temporary table is renamed.
-    rewrite_sqlite_create_table_for_transfer(definition, temporary_table, "", temporary_table)
-        .map_err(|error| {
-            format!(
-                "SQLite relation {} has a catalog definition that cannot be rebuilt exactly: {error}",
-                relation.name
-            )
-        })
+    rewrite_sqlite_create_table_for_transfer(
+        definition,
+        temporary_table,
+        target_schema,
+        temporary_table,
+    )
+    .map_err(|error| {
+        format!(
+            "SQLite relation {} has a catalog definition that cannot be rebuilt exactly: {error}",
+            relation.name
+        )
+    })
 }
 
 fn sqlite_exact_rebuild_index_sql(
     relation: &SchemaRelationSnapshot,
+    target_schema: &str,
     index: &IndexInfo,
 ) -> Result<Option<String>, String> {
     let Some(definition) = index
@@ -1591,7 +1722,7 @@ fn sqlite_exact_rebuild_index_sql(
     };
     rewrite_sqlite_create_index_for_transfer(
         definition,
-        "",
+        target_schema,
         &relation.name,
         &index.name,
         index.is_unique,
@@ -1605,7 +1736,10 @@ fn sqlite_exact_rebuild_index_sql(
     })
 }
 
-fn sqlite_exact_rebuild_trigger_sql(object: &SchemaObjectSnapshot) -> Result<String, String> {
+fn sqlite_exact_rebuild_trigger_sql(
+    object: &SchemaObjectSnapshot,
+    target_schema: &str,
+) -> Result<String, String> {
     let definition = object
         .definition
         .as_deref()
@@ -1643,310 +1777,238 @@ fn sqlite_exact_rebuild_trigger_sql(object: &SchemaObjectSnapshot) -> Result<Str
             object.name
         ));
     }
-    let mut sql = statements[0]
-        .trim()
-        .trim_end_matches(';')
-        .trim()
-        .to_string();
-    sql.push(';');
-    Ok(sql)
+    rewrite_sqlite_create_trigger_for_transfer(
+        statements[0],
+        &object.name,
+        target_schema,
+        &object.name,
+    )
+    .map_err(|error| {
+        format!(
+            "SQLite trigger {} has a catalog definition that cannot be rebuilt exactly: {error}",
+            object.name
+        )
+    })
 }
 
-fn sqlite_column_definition(column: &ColumnInfo) -> Result<String, String> {
-    if column.identity_generation.is_some() {
-        return Err(format!(
-            "Column {} carries PostgreSQL identity metadata that SQLite cannot replay losslessly.",
-            column.name
-        ));
-    }
-    if column.is_generated != Some(false) || column.is_hidden != Some(false) {
-        return Err(format!(
-            "Column {} has generated/hidden metadata that is true or unknown, but its lossless SQLite expression or visibility clause was not captured.",
-            column.name
-        ));
-    }
-    let data_type = column.data_type.trim();
-    if data_type.is_empty() || !sqlite_sql_fragment_is_safe(data_type) {
-        return Err(format!(
-            "Column {} has an empty or unsafe SQLite type declaration.",
-            column.name
-        ));
-    }
-    let mut definition = format!("{} {data_type}", sqlite_quote_identifier(&column.name));
-    if column.is_auto_increment {
-        if column.is_primary_key && data_type.eq_ignore_ascii_case("INTEGER") {
-            definition.push_str(" PRIMARY KEY AUTOINCREMENT");
-        } else {
-            return Err(format!(
-                "Column {} requests AUTOINCREMENT but SQLite only permits it on an INTEGER PRIMARY KEY.",
-                column.name
-            ));
-        }
-    }
-    if let Some(default_value) = column.default_value.as_deref() {
-        if !sqlite_sql_fragment_is_safe(default_value) {
-            return Err(format!(
-                "Column {} has an unsafe default expression that cannot be placed in a rebuild artifact.",
-                column.name
-            ));
-        }
-        definition.push_str(" DEFAULT ");
-        definition.push_str(default_value.trim());
-    }
-    if !column.is_nullable {
-        definition.push_str(" NOT NULL");
-    }
-    Ok(definition)
-}
-
-fn sqlite_constraint_clause(
+fn sqlite_exact_view_sql(
     relation: &SchemaRelationSnapshot,
-    constraint: &ConstraintInfo,
+    target_schema: &str,
 ) -> Result<String, String> {
-    let normalized = constraint.constraint_type.to_ascii_uppercase();
-    let valid_columns = relation
-        .columns
-        .iter()
-        .map(|column| column.name.as_str())
-        .collect::<BTreeSet<_>>();
-    if (!normalized.contains("CHECK") && constraint.columns.is_empty())
-        || constraint
-            .columns
-            .iter()
-            .any(|column| !valid_columns.contains(column.as_str()))
-    {
-        return Err(format!(
-            "Constraint {}.{} references columns not present in the desired table.",
-            relation.name, constraint.name
-        ));
-    }
-    let name = if constraint.name.trim().is_empty() {
-        String::new()
-    } else {
-        format!("CONSTRAINT {} ", sqlite_quote_identifier(&constraint.name))
-    };
-    let columns = constraint
-        .columns
-        .iter()
-        .map(|column| sqlite_quote_identifier(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if normalized.contains("PRIMARY") {
-        return Ok(format!("{name}PRIMARY KEY ({columns})"));
-    }
-    if normalized.contains("UNIQUE") {
-        return Ok(format!("{name}UNIQUE ({columns})"));
-    }
-    if normalized.contains("FOREIGN") {
-        let referenced_table = constraint.referenced_table.as_deref().ok_or_else(|| {
-            format!(
-                "Foreign key {}.{} is missing its referenced table.",
-                relation.name, constraint.name
-            )
-        })?;
-        if constraint.referenced_columns.is_empty()
-            || constraint.referenced_columns.len() != constraint.columns.len()
-        {
-            return Err(format!(
-                "Foreign key {}.{} has an incomplete referenced-column mapping.",
-                relation.name, constraint.name
-            ));
-        }
-        let referenced_columns = constraint
-            .referenced_columns
-            .iter()
-            .map(|column| sqlite_quote_identifier(column))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Ok(format!(
-            "{name}FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
-            sqlite_quote_identifier(referenced_table)
-        ));
-    }
-    if normalized.contains("CHECK") {
-        let definition = constraint
-            .definition
-            .as_deref()
-            .map(str::trim)
-            .filter(|definition| !definition.is_empty() && sqlite_sql_fragment_is_safe(definition))
-            .ok_or_else(|| {
-                format!(
-                    "CHECK constraint {}.{} needs its exact source definition.",
-                    relation.name, constraint.name
-                )
-            })?;
-        let uppercase_definition = definition.to_ascii_uppercase();
-        if uppercase_definition.starts_with("CONSTRAINT ") {
-            return Ok(definition.to_string());
-        }
-        let definition = if uppercase_definition.starts_with("CHECK") {
-            definition.to_string()
-        } else {
-            format!("CHECK ({definition})")
-        };
-        return Ok(format!("{name}{definition}"));
-    }
-    Err(format!(
-        "Constraint {}.{} has an unsupported SQLite constraint type {}.",
-        relation.name, constraint.name, constraint.constraint_type
-    ))
-}
-
-fn sqlite_create_index_sql(
-    relation: &SchemaRelationSnapshot,
-    table_name: &str,
-    index: &IndexInfo,
-) -> Result<String, String> {
-    let valid_columns = relation
-        .columns
-        .iter()
-        .map(|column| column.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let index_type = index.index_type.as_deref().map(str::trim);
-    let supported_index_type =
-        index_type.is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("BTREE"));
-    if index.columns.is_empty()
-        || index
-            .columns
-            .iter()
-            .any(|column| !valid_columns.contains(column.as_str()))
-        || !supported_index_type
-    {
-        return Err(format!(
-            "Index {}.{} is expression-based, has an unsupported type, or references an unavailable column.",
-            relation.name, index.name
-        ));
-    }
-    let catalog_definition = index
+    let definition = relation
         .definition
         .as_deref()
         .map(str::trim)
         .filter(|definition| !definition.is_empty())
         .ok_or_else(|| {
             format!(
-                "Index {}.{} is missing its sqlite_schema definition, so expression, ordering, collation, and filter semantics cannot be excluded.",
-                relation.name, index.name
+                "SQLite view {} is missing its sqlite_schema definition.",
+                relation.name
             )
         })?;
-    if catalog_definition.contains('\0') || catalog_definition.contains(';') {
-        return Err(format!(
-            "Index {}.{} has an invalid or multi-statement catalog definition.",
-            relation.name, index.name
-        ));
-    }
-    let normalized_definition = catalog_definition
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    if [" WHERE ", " COLLATE ", " ASC", " DESC"]
-        .iter()
-        .any(|semantic| normalized_definition.contains(semantic))
-    {
-        return Err(format!(
-            "Index {}.{} contains ordering, collation, or filter semantics that the synthesized rebuild cannot preserve exactly.",
-            relation.name, index.name
-        ));
-    }
-    let columns = index
-        .columns
-        .iter()
-        .map(|column| sqlite_quote_identifier(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Ok(format!(
-        "CREATE {}INDEX {} ON {} ({});",
-        if index.is_unique { "UNIQUE " } else { "" },
-        sqlite_quote_identifier(&index.name),
-        sqlite_quote_identifier(table_name),
-        columns
-    ))
+    rewrite_sqlite_create_view_for_transfer(
+        definition,
+        &relation.name,
+        target_schema,
+        &relation.name,
+    )
+    .map_err(|error| {
+        format!(
+            "SQLite view {} has a catalog definition that cannot be replayed exactly: {error}",
+            relation.name
+        )
+    })
 }
 
-fn sqlite_create_relation_sql(
+fn sqlite_create_exact_relation_sql(
+    source: &SchemaSnapshot,
     relation: &SchemaRelationSnapshot,
-    table_name: &str,
+    target_schema: &str,
 ) -> (Vec<String>, Vec<String>) {
+    let flags = relation_flags(relation.object_type.as_deref());
+    if flags.is_view && !flags.is_materialized_view {
+        return match sqlite_exact_view_sql(relation, target_schema) {
+            Ok(sql) => (vec![sql], Vec::new()),
+            Err(error) => (Vec::new(), vec![error]),
+        };
+    }
     if !sqlite_object_is_table(relation) {
         return (
             Vec::new(),
             vec![format!(
-                "SQLite relation {} is a view or unsupported object and requires exact source DDL.",
+                "SQLite relation {} is a view or unsupported relation type; exact table creation is unavailable.",
                 relation.name
             )],
         );
     }
-    if relation.columns.is_empty() {
-        return (
-            Vec::new(),
-            vec![format!(
-                "SQLite relation {} has no captured columns, so no CREATE TABLE artifact was generated.",
-                relation.name
-            )],
-        );
-    }
+    let mut sql = match sqlite_exact_rebuild_table_sql(relation, target_schema, &relation.name) {
+        Ok(create_sql) => vec![create_sql],
+        Err(error) => return (Vec::new(), vec![error]),
+    };
     let mut warnings = Vec::new();
-    let mut definitions = Vec::new();
-    for column in &relation.columns {
-        match sqlite_column_definition(column) {
-            Ok(definition) => definitions.push(format!("  {definition}")),
-            Err(warning) => warnings.push(warning),
+    for index in &relation.indexes {
+        match sqlite_exact_rebuild_index_sql(relation, target_schema, index) {
+            Ok(Some(index_sql)) => sql.push(index_sql),
+            Ok(None) => {}
+            Err(error) => warnings.push(error),
         }
     }
-    let has_auto_increment_primary = relation
-        .columns
+    for trigger in source.schema_objects.iter().filter(|object| {
+        object.object_type.eq_ignore_ascii_case("trigger")
+            && object.parent_name.as_deref() == Some(relation.name.as_str())
+    }) {
+        match sqlite_exact_rebuild_trigger_sql(trigger, target_schema) {
+            Ok(trigger_sql) => sql.push(trigger_sql),
+            Err(error) => warnings.push(error),
+        }
+    }
+    if warnings.is_empty() {
+        (sql, warnings)
+    } else {
+        (Vec::new(), warnings)
+    }
+}
+
+fn sqlite_trigger_drop_sql(schema_name: &str, trigger_name: &str) -> String {
+    format!(
+        "DROP TRIGGER {};",
+        sqlite_qualified_identifier(schema_name, trigger_name)
+    )
+}
+
+fn compare_sqlite_schema_objects(
+    source: &[SchemaObjectSnapshot],
+    target: &[SchemaObjectSnapshot],
+    schema_name: &str,
+    rebuilt_relations: &BTreeSet<String>,
+    changes: &mut Vec<SchemaChange>,
+    warnings: &mut Vec<String>,
+) {
+    let source_triggers = source
         .iter()
-        .any(|column| column.is_auto_increment && column.is_primary_key);
-    let has_primary_constraint = relation.constraints.iter().any(|constraint| {
-        constraint
-            .constraint_type
-            .to_ascii_uppercase()
-            .contains("PRIMARY")
-    });
-    for constraint in &relation.constraints {
-        match sqlite_constraint_clause(relation, constraint) {
-            Ok(clause) => definitions.push(format!("  {clause}")),
-            Err(warning) => warnings.push(warning),
-        }
-    }
-    if !has_primary_constraint && !has_auto_increment_primary {
-        let primary_columns = relation
-            .columns
-            .iter()
-            .filter(|column| column.is_primary_key)
-            .map(|column| sqlite_quote_identifier(&column.name))
-            .collect::<Vec<_>>();
-        if !primary_columns.is_empty() {
-            definitions.push(format!("  PRIMARY KEY ({})", primary_columns.join(", ")));
-        }
-    }
-    if !warnings.is_empty() {
-        return (Vec::new(), warnings);
-    }
-    let mut sql = vec![format!(
-        "CREATE TABLE {} (\n{}\n);",
-        sqlite_quote_identifier(table_name),
-        definitions.join(",\n")
-    )];
-    let constraint_names = relation
-        .constraints
+        .filter(|object| object.object_type.eq_ignore_ascii_case("trigger"))
+        .map(|object| (schema_object_identity(object), object))
+        .collect::<BTreeMap<_, _>>();
+    let target_triggers = target
         .iter()
-        .map(|constraint| constraint.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for index in relation
-        .indexes
-        .iter()
-        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
-    {
-        match sqlite_create_index_sql(relation, table_name, index) {
-            Ok(index_sql) => sql.push(index_sql),
-            Err(warning) => warnings.push(warning),
+        .filter(|object| object.object_type.eq_ignore_ascii_case("trigger"))
+        .map(|object| (schema_object_identity(object), object))
+        .collect::<BTreeMap<_, _>>();
+    let mut identities = source_triggers
+        .keys()
+        .chain(target_triggers.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+    for identity in identities {
+        let source_trigger = source_triggers.get(&identity).copied();
+        let target_trigger = target_triggers.get(&identity).copied();
+        let parent_name = source_trigger
+            .and_then(|object| object.parent_name.as_deref())
+            .or_else(|| target_trigger.and_then(|object| object.parent_name.as_deref()));
+        if parent_name.is_some_and(|parent| rebuilt_relations.contains(parent)) {
+            continue;
         }
+        let (kind, risk, summary, sql, blocked_reason) = match (source_trigger, target_trigger) {
+            (Some(source_trigger), None) => {
+                match sqlite_exact_rebuild_trigger_sql(source_trigger, schema_name) {
+                    Ok(sql) => (
+                        SchemaChangeKind::SchemaObjectCreate,
+                        SchemaChangeRisk::Review,
+                        format!("Create SQLite trigger {}", source_trigger.name),
+                        vec![sql],
+                        None,
+                    ),
+                    Err(error) => (
+                        SchemaChangeKind::SchemaObjectCreate,
+                        SchemaChangeRisk::Review,
+                        format!("Review creation of SQLite trigger {}", source_trigger.name),
+                        Vec::new(),
+                        Some(error),
+                    ),
+                }
+            }
+            (None, Some(target_trigger)) => (
+                SchemaChangeKind::SchemaObjectDrop,
+                SchemaChangeRisk::Destructive,
+                format!("Drop SQLite trigger {}", target_trigger.name),
+                vec![sqlite_trigger_drop_sql(schema_name, &target_trigger.name)],
+                None,
+            ),
+            (Some(source_trigger), Some(target_trigger)) if source_trigger != target_trigger => {
+                match sqlite_exact_rebuild_trigger_sql(source_trigger, schema_name) {
+                    Ok(create_sql) => (
+                        SchemaChangeKind::SchemaObjectModify,
+                        SchemaChangeRisk::Destructive,
+                        format!("Replace SQLite trigger {}", source_trigger.name),
+                        vec![
+                            sqlite_trigger_drop_sql(schema_name, &target_trigger.name),
+                            create_sql,
+                        ],
+                        None,
+                    ),
+                    Err(error) => (
+                        SchemaChangeKind::SchemaObjectModify,
+                        SchemaChangeRisk::Review,
+                        format!("Review changed SQLite trigger {}", source_trigger.name),
+                        Vec::new(),
+                        Some(error),
+                    ),
+                }
+            }
+            _ => continue,
+        };
+        let object = source_trigger
+            .or(target_trigger)
+            .expect("trigger identity exists");
+        let mut trigger_change = change(
+            kind,
+            risk,
+            schema_name,
+            &object.name,
+            Some("trigger".to_string()),
+            object.parent_name.clone(),
+            summary,
+            sql,
+            false,
+            true,
+        );
+        trigger_change.phase = match kind {
+            SchemaChangeKind::SchemaObjectDrop => SchemaChangePhase::DropDependencies,
+            SchemaChangeKind::SchemaObjectCreate => SchemaChangePhase::CreateDependencies,
+            _ => SchemaChangePhase::AlterRelations,
+        };
+        if let Some(reason) = blocked_reason {
+            warnings.push(reason.clone());
+            trigger_change.blocked_reason = Some(reason);
+            trigger_change.phase = SchemaChangePhase::ManualReview;
+        }
+        changes.push(trigger_change);
     }
-    if !warnings.is_empty() {
-        sql.clear();
-    }
-    (sql, warnings)
+
+    let source_other = source
+        .iter()
+        .filter(|object| !object.object_type.eq_ignore_ascii_case("trigger"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let target_other = target
+        .iter()
+        .filter(|object| !object.object_type.eq_ignore_ascii_case("trigger"))
+        .cloned()
+        .collect::<Vec<_>>();
+    compare_schema_objects(
+        None,
+        SchemaNameMapping {
+            source: schema_name,
+            target: schema_name,
+        },
+        &source_other,
+        &target_other,
+        schema_name,
+        changes,
+        warnings,
+    );
 }
 
 fn sqlite_rebuild_relation_sql(
@@ -1975,7 +2037,11 @@ fn sqlite_rebuild_relation_sql(
         "__oxide_rebuild_{}_{}",
         source_relation.name, rebuild_suffix
     );
-    let create_sql = match sqlite_exact_rebuild_table_sql(source_relation, &temporary_table) {
+    let create_sql = match sqlite_exact_rebuild_table_sql(
+        source_relation,
+        &target.schema_name,
+        &temporary_table,
+    ) {
         Ok(sql) => sql,
         Err(warning) => return (Vec::new(), vec![warning]),
     };
@@ -2035,20 +2101,20 @@ fn sqlite_rebuild_relation_sql(
     let mut sql = vec![create_sql];
     sql.push(format!(
         "INSERT INTO {} ({copied_columns}) SELECT {copied_columns} FROM {};",
-        sqlite_quote_identifier(&temporary_table),
-        sqlite_quote_identifier(&target_relation.name)
+        sqlite_qualified_identifier(&target.schema_name, &temporary_table),
+        sqlite_qualified_identifier(&target.schema_name, &target_relation.name)
     ));
     sql.push(format!(
         "DROP TABLE {};",
-        sqlite_quote_identifier(&target_relation.name)
+        sqlite_qualified_identifier(&target.schema_name, &target_relation.name)
     ));
     sql.push(format!(
         "ALTER TABLE {} RENAME TO {};",
-        sqlite_quote_identifier(&temporary_table),
+        sqlite_qualified_identifier(&target.schema_name, &temporary_table),
         sqlite_quote_identifier(&source_relation.name)
     ));
     for index in &source_relation.indexes {
-        match sqlite_exact_rebuild_index_sql(source_relation, index) {
+        match sqlite_exact_rebuild_index_sql(source_relation, &target.schema_name, index) {
             Ok(Some(index_sql)) => sql.push(index_sql),
             Ok(None) => {}
             Err(warning) => warnings.push(warning),
@@ -2058,7 +2124,7 @@ fn sqlite_rebuild_relation_sql(
         object.object_type.eq_ignore_ascii_case("trigger")
             && object.parent_name.as_deref() == Some(source_relation.name.as_str())
     }) {
-        match sqlite_exact_rebuild_trigger_sql(trigger) {
+        match sqlite_exact_rebuild_trigger_sql(trigger, &target.schema_name) {
             Ok(trigger_sql) => sql.push(trigger_sql),
             Err(warning) => warnings.push(warning),
         }
@@ -2079,7 +2145,7 @@ fn render_sqlite_rebuild_migration_sql(
         "-- OxideStudio SQLite schema rebuild review".to_string(),
         format!("-- Desired source: {} / {}", source.connection_name, source.schema_name),
         format!("-- Actual target: {} / {}", target.connection_name, target.schema_name),
-        "-- Complete existing-table rebuilds are executed only through OxideStudio's backup + atomic SQLite rebuild boundary.".to_string(),
+        "-- Catalog-backed table, view, and trigger changes are executed only through OxideStudio's backup + atomic SQLite migration boundary.".to_string(),
         "-- PRAGMA and transaction control are intentionally omitted from this artifact and remain driver-owned.".to_string(),
     ];
     for warning in warnings {
@@ -7961,25 +8027,351 @@ mod tests {
         assert!(plan.transactional);
         assert_eq!(plan.summary.blocked, 0);
         let trigger_sql = plan.changes[0].sql.last().unwrap();
-        assert!(trigger_sql.starts_with("CREATE TRIGGER users_audit"));
+        assert!(trigger_sql.starts_with("CREATE TRIGGER \"main\".\"users_audit\""));
         assert!(trigger_sql.contains("INSERT INTO audit(user_id) VALUES (NEW.id);"));
         assert!(trigger_sql.contains("UPDATE audit SET touched = 1"));
         assert!(trigger_sql.ends_with("END;"));
     }
 
     #[test]
-    fn sqlite_generated_columns_never_emit_lossy_rebuild_definitions() {
-        let mut computed = column("computed_total", "INTEGER", true);
-        computed.is_generated = Some(true);
-        assert!(sqlite_column_definition(&computed)
-            .unwrap_err()
-            .contains("lossless SQLite expression"));
+    fn sqlite_standalone_trigger_create_modify_and_drop_are_executable() {
+        let desired_trigger = SchemaObjectSnapshot {
+            name: "users_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("users".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id); END"
+                    .to_string(),
+            ),
+            sequence_owner: None,
+            sequence_last_value: None,
+            sequence_is_called: None,
+            dependencies: Vec::new(),
+        };
+        let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL)".to_string());
+        source.schema_objects = vec![desired_trigger.clone()];
+        source = finalize_schema_snapshot(source).unwrap();
 
-        let mut unknown = column("legacy_package_column", "TEXT", true);
-        unknown.is_hidden = None;
-        assert!(sqlite_column_definition(&unknown)
-            .unwrap_err()
-            .contains("true or unknown"));
+        let mut empty_target = snapshot("actual", vec![column("id", "INTEGER", false)]);
+        empty_target.driver = "sqlite".to_string();
+        empty_target.database_name = None;
+        empty_target.schema_name = "main".to_string();
+        empty_target.relations[0].columns[0].is_auto_increment = false;
+        empty_target.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL)".to_string());
+        empty_target = finalize_schema_snapshot(empty_target).unwrap();
+
+        let create_plan = compare_schema_snapshots(&source, &empty_target, 2).unwrap();
+        assert!(create_plan.transactional);
+        assert_eq!(create_plan.summary.blocked, 0);
+        assert_eq!(
+            create_plan.changes[0].kind,
+            SchemaChangeKind::SchemaObjectCreate
+        );
+        assert!(
+            create_plan.changes[0].sql[0].starts_with("CREATE TRIGGER \"main\".\"users_audit\"")
+        );
+
+        let mut old_trigger = desired_trigger.clone();
+        old_trigger.definition = Some(
+            "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN SELECT NEW.id; END".to_string(),
+        );
+        let mut changed_target = empty_target.clone();
+        changed_target.schema_objects = vec![old_trigger];
+        changed_target = finalize_schema_snapshot(changed_target).unwrap();
+        let modify_plan = compare_schema_snapshots(&source, &changed_target, 2).unwrap();
+        assert!(modify_plan.transactional);
+        assert_eq!(
+            modify_plan.changes[0].kind,
+            SchemaChangeKind::SchemaObjectModify
+        );
+        assert_eq!(
+            modify_plan.changes[0].sql[0],
+            "DROP TRIGGER \"main\".\"users_audit\";"
+        );
+        assert!(modify_plan.changes[0].sql[1].contains("INSERT INTO audit"));
+
+        let drop_plan = compare_schema_snapshots(&empty_target, &source, 2).unwrap();
+        assert!(drop_plan.transactional);
+        assert_eq!(
+            drop_plan.changes[0].kind,
+            SchemaChangeKind::SchemaObjectDrop
+        );
+        assert_eq!(
+            drop_plan.changes[0].sql,
+            vec!["DROP TRIGGER \"main\".\"users_audit\";".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlite_catalog_backed_table_create_and_drop_are_executable() {
+        let trigger = SchemaObjectSnapshot {
+            name: "users_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("users".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN SELECT NEW.id; END"
+                    .to_string(),
+            ),
+            sequence_owner: None,
+            sequence_last_value: None,
+            sequence_is_called: None,
+            dependencies: Vec::new(),
+        };
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition = Some(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT CHECK (length(email) > 0)) STRICT"
+                .to_string(),
+        );
+        source.relations[0].indexes = vec![IndexInfo {
+            definition: Some(
+                "CREATE INDEX users_email_idx ON users (lower(email)) WHERE email IS NOT NULL"
+                    .to_string(),
+            ),
+            key_is_expression: vec![true],
+            ..index("users_email_idx", &[], "btree")
+        }];
+        source.schema_objects = vec![trigger];
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut empty = source.clone();
+        empty.connection_name = "actual".to_string();
+        empty.relations.clear();
+        empty.schema_objects.clear();
+        empty = finalize_schema_snapshot(empty).unwrap();
+
+        let create_plan = compare_schema_snapshots(&source, &empty, 2).unwrap();
+        assert!(create_plan.transactional);
+        assert_eq!(create_plan.summary.blocked, 0);
+        assert_eq!(create_plan.changes.len(), 1);
+        assert_eq!(
+            create_plan.changes[0].kind,
+            SchemaChangeKind::RelationCreate
+        );
+        assert_eq!(create_plan.changes[0].sql.len(), 3);
+        assert!(create_plan.changes[0].sql[0].starts_with("CREATE TABLE \"main\".\"users\""));
+        assert!(
+            create_plan.changes[0].sql[1].starts_with("CREATE INDEX \"main\".\"users_email_idx\"")
+        );
+        assert!(
+            create_plan.changes[0].sql[2].starts_with("CREATE TRIGGER \"main\".\"users_audit\"")
+        );
+
+        let drop_plan = compare_schema_snapshots(&empty, &source, 2).unwrap();
+        assert!(drop_plan.transactional);
+        assert_eq!(drop_plan.summary.blocked, 0);
+        assert_eq!(drop_plan.changes.len(), 1);
+        assert_eq!(drop_plan.changes[0].kind, SchemaChangeKind::RelationDrop);
+        assert_eq!(
+            drop_plan.changes[0].sql,
+            vec!["DROP TABLE \"main\".\"users\";".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlite_table_create_without_exact_catalog_source_remains_blocked() {
+        let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].definition = None;
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut empty = source.clone();
+        empty.connection_name = "actual".to_string();
+        empty.relations.clear();
+        empty = finalize_schema_snapshot(empty).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &empty, 2).unwrap();
+        assert!(!plan.transactional);
+        assert_eq!(plan.summary.blocked, 1);
+        assert!(plan.changes[0].sql.is_empty());
+        assert!(plan.changes[0].blocked_reason.is_some());
+    }
+
+    #[test]
+    fn sqlite_catalog_backed_view_create_modify_and_drop_are_executable() {
+        let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].name = "active_users".to_string();
+        source.relations[0].object_type = Some("VIEW".to_string());
+        source.relations[0].definition =
+            Some("CREATE VIEW active_users AS SELECT id FROM users WHERE active = 1".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut empty = source.clone();
+        empty.connection_name = "actual".to_string();
+        empty.relations.clear();
+        empty = finalize_schema_snapshot(empty).unwrap();
+
+        let create_plan = compare_schema_snapshots(&source, &empty, 2).unwrap();
+        assert!(create_plan.transactional);
+        assert_eq!(create_plan.summary.blocked, 0);
+        assert_eq!(
+            create_plan.changes[0].kind,
+            SchemaChangeKind::RelationCreate
+        );
+        assert_eq!(
+            create_plan.changes[0].sql,
+            vec![
+                "CREATE VIEW \"main\".\"active_users\" AS SELECT id FROM users WHERE active = 1;"
+                    .to_string()
+            ]
+        );
+
+        let mut target = source.clone();
+        target.connection_name = "actual".to_string();
+        target.relations[0].definition =
+            Some("CREATE VIEW active_users AS SELECT id FROM users".to_string());
+        target = finalize_schema_snapshot(target).unwrap();
+        let modify_plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(modify_plan.transactional);
+        assert_eq!(modify_plan.summary.blocked, 0);
+        assert_eq!(
+            modify_plan.changes[0].kind,
+            SchemaChangeKind::RelationModify
+        );
+        assert_eq!(
+            modify_plan.changes[0].sql[0],
+            "DROP VIEW \"main\".\"active_users\";"
+        );
+        assert!(modify_plan.changes[0].sql[1].contains("WHERE active = 1"));
+
+        let drop_plan = compare_schema_snapshots(&empty, &source, 2).unwrap();
+        assert!(drop_plan.transactional);
+        assert_eq!(drop_plan.summary.blocked, 0);
+        assert_eq!(drop_plan.changes[0].kind, SchemaChangeKind::RelationDrop);
+        assert_eq!(
+            drop_plan.changes[0].sql,
+            vec!["DROP VIEW \"main\".\"active_users\";".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlite_table_drop_is_blocked_by_retained_view_with_unknown_dependencies() {
+        let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].name = "active_users".to_string();
+        source.relations[0].object_type = Some("VIEW".to_string());
+        source.relations[0].definition =
+            Some("CREATE VIEW active_users AS SELECT id FROM users".to_string());
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = source.clone();
+        target.connection_name = "actual".to_string();
+        target.relations.push(SchemaRelationSnapshot {
+            name: "users".to_string(),
+            object_type: Some("BASE TABLE".to_string()),
+            comment: None,
+            definition: Some("CREATE TABLE users (id INTEGER NOT NULL)".to_string()),
+            materialized_view_populated: None,
+            dependencies: Vec::new(),
+            external_dependencies: Vec::new(),
+            sequence_dependencies: Vec::new(),
+            columns: vec![column("id", "INTEGER", false)],
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        });
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(!plan.transactional);
+        assert_eq!(plan.summary.blocked, 1);
+        let drop = plan
+            .changes
+            .iter()
+            .find(|change| change.relation_name == "users")
+            .unwrap();
+        assert!(drop
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("retained views")));
+    }
+
+    #[test]
+    fn sqlite_attached_schema_rebuild_is_qualified_but_backup_blocked() {
+        let trigger = SchemaObjectSnapshot {
+            name: "users_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("users".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN SELECT NEW.id; END"
+                    .to_string(),
+            ),
+            sequence_owner: None,
+            sequence_last_value: None,
+            sequence_is_called: None,
+            dependencies: Vec::new(),
+        };
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "archive".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL, email TEXT)".to_string());
+        source.relations[0].indexes = vec![IndexInfo {
+            definition: Some("CREATE INDEX users_email_idx ON users (email)".to_string()),
+            ..index("users_email_idx", &["email"], "btree")
+        }];
+        source.schema_objects = vec![trigger.clone()];
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot("actual", vec![column("id", "INTEGER", false)]);
+        target.driver = "sqlite".to_string();
+        target.database_name = None;
+        target.schema_name = "archive".to_string();
+        target.relations[0].columns[0].is_auto_increment = false;
+        target.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL)".to_string());
+        target.schema_objects = vec![trigger];
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(!plan.transactional);
+        assert_eq!(plan.execution_owner, SchemaDiffExecutionOwner::ReviewOnly);
+        assert_eq!(plan.summary.blocked, 1);
+        assert!(plan.changes[0]
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("recovery backup")));
+        let sql = &plan.changes[0].sql;
+        assert!(sql[0].starts_with("CREATE TABLE \"archive\".\"__oxide_rebuild_users_"));
+        assert!(sql[1].contains("INSERT INTO \"archive\".\"__oxide_rebuild_users_"));
+        assert!(sql[1].contains("FROM \"archive\".\"users\""));
+        assert_eq!(sql[2], "DROP TABLE \"archive\".\"users\";");
+        assert!(sql[3].starts_with("ALTER TABLE \"archive\".\"__oxide_rebuild_users_"));
+        assert!(sql[4].starts_with("CREATE INDEX \"archive\".\"users_email_idx\""));
+        assert!(sql[5].starts_with("CREATE TRIGGER \"archive\".\"users_audit\""));
     }
 
     #[test]

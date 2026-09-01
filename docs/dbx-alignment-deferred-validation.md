@@ -1,20 +1,23 @@
 # DBX alignment: deferred validation queue
 
-## Phase 154 -- catalog-backed SQLite schema rebuild
+## Phase 154 -- catalog-backed SQLite schema migration
 
-- On local file databases and remote SQLite-over-SSH workers, rebuild tables
+- On local file databases and remote SQLite-over-SSH workers, create/drop/rebuild tables,
+  create/drop/replace views, and create/drop/replace standalone triggers. Rebuild tables
   containing CHECK/COLLATE, generated columns, AUTOINCREMENT, composite UNIQUE
   and foreign keys, STRICT/WITHOUT ROWID, expression/partial/collated indexes,
   and multi-statement trigger bodies. Compare the complete `sqlite_schema`
   before and after and confirm inserted rows still fire each restored trigger.
-- Repeat with attached schemas, quoted/Unicode object names, self-references,
+- Confirm attached schemas remain blocked until backup/restore can bind the exact
+  attached database, then repeat with quoted/Unicode object names, self-references,
   WAL mode, concurrent readers, a busy writer, cancellation and forced disk
   exhaustion. Confirm the Host backup remains usable, `foreign_keys` returns to
   its original value, failed rebuilds roll back, and no temporary table or
   partially restored trigger/index survives.
 - Remove catalog source, alter the reviewed fingerprint, append a second SQL
-  statement to table/index/trigger DDL, and add a required column without a
-  default. Every case must fail before mutation. The 70+ database matrix and
+  statement to table/view/index/trigger DDL, retain a view whose dependency is
+  unknown while dropping a table, and add a required column without a default.
+  Every case must fail before mutation. The 70+ database matrix and
   real product endpoints remain deferred; this phase claims static/local
   contract coverage only.
 
@@ -740,32 +743,33 @@ explicit deferred validation task rather than an implicit release check.
   cancellation immediately before commit and after a successful commit to
   verify a late request cannot relabel committed data.
 
-## SQLite rebuild review plans
+## SQLite catalog migration plans
 
-- Against local and Remote SQLite fixtures, create a missing same-name target
+- Against local and Remote SQLite fixtures, create a missing target table
   from a source containing composite PK/UNIQUE, named and unnamed CHECK/FK with
   ON UPDATE/DELETE actions, generated columns, collations, STRICT/WITHOUT ROWID,
   quoted identifiers, expression indexes and partial indexes. Confirm preview
   DDL exactly retains semantics while rebuilding destination-owned object names,
-  then verify a failed index creation rolls the table creation back.
+  then verify a failed index creation rolls the table creation back. Also
+  create, replace and drop exact catalog-backed views and standalone compound
+  triggers and verify their runtime behavior after commit.
 - Repeat with an index-name collision, foreign-key target absent/present,
   `foreign_keys` enabled/disabled, disk-full, cancellation/connection loss and
   commit disconnection. An uncertain commit must require manual target inspection
-  and must never be retried automatically. Trigger, virtual-table, renamed-table,
-  cross-schema and existing-target rebuild cases must remain explicitly blocked
-  or reduced with a visible lossiness warning.
+  and must never be retried automatically. Virtual-table and renamed-table
+  cases must remain explicitly blocked or reduced with a visible lossiness
+  warning; attached-schema plans must stay blocked while recovery is main-bound.
 
 - Validate generated rebuild artifacts against copies of SQLite databases with
   quoted identifiers, primary/unique/foreign/check constraints, compatible
   indexes, added nullable columns, dropped columns, and affinity-changing
   columns. The plan must retain only same-name source columns and recreate
   compatible indexes after the rename.
-- Confirm each plan remains blocked from automatic execution and that the UI
-  labels it as a rebuild review. Before any future apply capability, require a
-  verified backup/restore path, pre/post `PRAGMA foreign_key_check`, failure
-  recovery, and an explicit policy for required-column backfills, type
-  conversions, expression/partial indexes, triggers, virtual tables, and
-  views.
+- Confirm complete catalog-backed plans are executable only through the verified
+  backup/restore, write-transaction and `PRAGMA foreign_key_check` boundary.
+  Missing catalog source, unsafe required-column backfills, ambiguous type
+  conversions, unknown retained-view dependencies, virtual tables and attached
+  schemas must remain blocked with a visible reason.
 
 ## LSP completion protocol and SQL snippets
 
