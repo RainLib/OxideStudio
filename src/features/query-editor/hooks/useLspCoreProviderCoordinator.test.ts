@@ -225,6 +225,43 @@ describe("LSP core provider coordinator", () => {
     expect(result.hints[0]?.position.column).toBe(valueOffset + 1);
   });
 
+  it("caches the document dollar-quote scan for an unchanged inlay range", async () => {
+    const { providers } = coordinatorFixture();
+    const prefix = "x".repeat(40_000);
+    const text = `${prefix}INSERT INTO users (id) VALUES (1);`;
+    const getValueInRange = vi.fn((range: any) =>
+      text.slice(range.startColumn - 1, range.endColumn - 1),
+    );
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getVersionId: () => 7,
+      getOffsetAt: ({ column }: { column: number }) => column - 1,
+      getPositionAt: (offset: number) => ({
+        lineNumber: 1,
+        column: offset + 1,
+      }),
+      getValueLength: () => text.length,
+      getValueInRange,
+    };
+    const range = {
+      startLineNumber: 1,
+      startColumn: prefix.length + 1,
+      endLineNumber: 1,
+      endColumn: text.length + 1,
+    };
+
+    await providers.get("inlayHints").provideInlayHints(model, range);
+    await providers.get("inlayHints").provideInlayHints(model, range);
+
+    // Each request reads the visible fallback range. The full document scan
+    // starts at column one and is reused for the unchanged model version.
+    expect(
+      getValueInRange.mock.calls.filter(
+        ([callRange]: [{ startColumn: number }]) => callRange.startColumn === 1,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("keeps the local INSERT SELECT fallback active inside a dollar-quoted routine", async () => {
     const { providers } = coordinatorFixture();
     const text = [
