@@ -404,6 +404,40 @@ async fn bounded_etcd_response_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    async fn serve_test_http_responses(
+        responses: Vec<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in responses {
+                let Ok(Ok((mut socket, _))) =
+                    timeout(Duration::from_millis(500), listener.accept()).await
+                else {
+                    break;
+                };
+                let mut request = vec![0u8; 8 * 1024];
+                let Ok(Ok(size)) =
+                    timeout(Duration::from_millis(500), socket.read(&mut request)).await
+                else {
+                    break;
+                };
+                requests.push(String::from_utf8_lossy(&request[..size]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://user:secret@{address}/tenant"), handle)
+    }
 
     #[test]
     fn url_redacts_credentials_and_preserves_base_path() {
@@ -421,5 +455,45 @@ mod tests {
         assert_eq!(prefix_end(b""), Some(vec![0]));
         assert_eq!(prefix_end(&[u8::MAX]), None);
         assert_eq!(next_key("app"), b"app\0".to_vec());
+    }
+
+    #[tokio::test]
+    async fn native_browser_uses_only_health_and_v3_range_endpoints() {
+        let (url, server) = serve_test_http_responses(vec![
+            r#"{"health":"true"}"#,
+            r#"{"health":"true"}"#,
+            r#"{"kvs":[{"key":"YXBwL2NvbmZpZw=="},{"key":"YXBwL2ZlYXR1cmU="}],"more":false}"#,
+            r#"{"kvs":[{"key":"YXBwL2NvbmZpZw==","value":"eyJlbmFibGVkIjp0cnVlfQ==","mod_revision":"42","version":"3"}]}"#,
+        ])
+        .await;
+        let mut driver = EtcdDriver::new(&url).unwrap();
+        driver.connect().await.unwrap();
+        driver.ping().await.unwrap();
+        let page = driver
+            .get_collections_page("kv", None, 10, Some("app"))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app/config", "app/feature"]
+        );
+        let preview = driver.query(r#"GET "app/config""#).await.unwrap();
+        assert_eq!(
+            preview[0].rows[0][1],
+            Value::String(r#"{"enabled":true}"#.to_string())
+        );
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /tenant/health HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /tenant/health HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /tenant/v3/kv/range HTTP/1.1"));
+        assert!(requests[3].starts_with("POST /tenant/v3/kv/range HTTP/1.1"));
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("authorization: Basic dXNlcjpzZWNyZXQ=")));
+        assert!(requests[2].contains(r#""keys_only":true"#));
+        assert!(!requests[3].contains(r#""range_end""#));
     }
 }
