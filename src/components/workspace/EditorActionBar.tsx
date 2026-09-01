@@ -20,6 +20,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import {
+  editorSaveTargetTooltip,
+  type EditorSaveTarget,
+} from "@/lib/editorSaveTarget";
 import { useI18n } from "@/i18n";
 import type { QueryHistoryItem } from "@/lib/queryHistory";
 import {
@@ -102,7 +106,7 @@ interface EditorActionBarProps {
   onSaveQuery: (name: string, sql: string) => void;
   onDeleteQuery: (id: string) => void;
   supportsTransactions: boolean;
-  isProjectFile: boolean;
+  fileSaveTarget: EditorSaveTarget | null;
   isFileDirty: boolean;
   onSaveFile: () => void;
   parameterCount: number;
@@ -162,7 +166,7 @@ export function EditorActionBar({
   onSaveQuery,
   onDeleteQuery,
   supportsTransactions,
-  isProjectFile,
+  fileSaveTarget,
   isFileDirty,
   onSaveFile,
   parameterCount,
@@ -520,16 +524,14 @@ export function EditorActionBar({
             </DropdownMenuContent>
           </DropdownMenu>
         )}
-        {isProjectFile && (
+        {fileSaveTarget && (
           <button
             type="button"
             className={cn(
               "wb-editor-library-action wb-icon-button",
               isFileDirty && "text-[hsl(var(--wb-accent))]",
             )}
-            title={
-              isFileDirty ? "Save editor file (Ctrl+S)" : "Editor file saved"
-            }
+            title={editorSaveTargetTooltip(fileSaveTarget, isFileDirty)}
             onClick={onSaveFile}
             disabled={!isFileDirty}
           >

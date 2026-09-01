@@ -92,3 +92,52 @@ export function databaseSchemaNavigationKey(
     .map((part) => encodeURIComponent(part))
     .join(":");
 }
+
+export type ParsedDatabaseSchemaNavigationKey = {
+  connectionId: string;
+  databaseName?: string;
+  schemaName?: string;
+};
+
+export type ParsedDatabaseObjectNavigationKey =
+  ParsedDatabaseSchemaNavigationKey & {
+    objectName: string;
+  };
+
+function decodeNavigationKey(
+  key: string,
+  expectedParts: number,
+): string[] | null {
+  const parts = key.split(":");
+  if (parts.length !== expectedParts) return null;
+  try {
+    return parts.map((part) => decodeURIComponent(part));
+  } catch {
+    return null;
+  }
+}
+
+export function parseDatabaseSchemaNavigationKey(
+  key: string,
+): ParsedDatabaseSchemaNavigationKey | null {
+  const parts = decodeNavigationKey(key, 3);
+  if (!parts?.[0]) return null;
+  return {
+    connectionId: parts[0],
+    databaseName: parts[1] || undefined,
+    schemaName: parts[2] || undefined,
+  };
+}
+
+export function parseDatabaseObjectNavigationKey(
+  key: string,
+): ParsedDatabaseObjectNavigationKey | null {
+  const parts = decodeNavigationKey(key, 4);
+  if (!parts?.[0] || !parts[3]) return null;
+  return {
+    connectionId: parts[0],
+    databaseName: parts[1] || undefined,
+    schemaName: parts[2] || undefined,
+    objectName: parts[3],
+  };
+}

@@ -51,6 +51,7 @@ interface PostgresRemoteDatabaseContentsProps {
   connectionId: string;
   database: string;
   schemas: string[];
+  refreshRequest?: { version: number; schema?: string };
   filterText?: string;
   activationMode: ExplorerActivationMode;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
@@ -94,6 +95,7 @@ export function PostgresRemoteDatabaseContents({
   connectionId,
   database,
   schemas,
+  refreshRequest,
   filterText = "",
   activationMode = "single",
   onTablesLoaded,
@@ -240,6 +242,16 @@ export function PostgresRemoteDatabaseContents({
       void loadTables(schema);
     }
   };
+
+  useEffect(() => {
+    if (!refreshRequest?.version) return;
+    const targets = refreshRequest.schema
+      ? [refreshRequest.schema]
+      : [...expandedSchemas];
+    targets
+      .filter((schema) => schemas.includes(schema))
+      .forEach((schema) => void loadTables(schema));
+  }, [connectionId, database, refreshRequest?.version]);
 
   useEffect(() => {
     const target = databaseRevealRequest?.target;

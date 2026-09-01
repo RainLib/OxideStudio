@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`77b90eac7`
+> DBX 参考提交：`a0c90c295`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,7 +9,16 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`5d6f66777` → `77b90eac7`）
+### 最新增量审计（`77b90eac7` → `a0c90c295`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `501f85322` | Explorer 的刷新选中节点快捷键从裸 `F5` 扩展到 macOS `Cmd+R`、Windows/Linux `Ctrl+R` | 已按节点作用域对齐并收紧：`SchemaSidebar.tsx` 只在焦点位于可刷新 connection/database/schema/table/view 节点且不在输入框或 contenteditable 内时接管快捷键；连接、当前/远程 database、schema、表/视图分别进入既有强制 metadata 路径。跨 database schema 使用显式 refresh request 让已挂载的远程树重新加载，表级刷新继续走有界 task、缓存失效和 tab refresh。导航键新增严格分段/URI decode，畸形键 fail closed。裸 `F5` 保留，带其他 modifier 的 F5 不拦截。DBX 位置：`apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue:onKeydown`、`lib/editor/keyboardShortcuts.ts:isModRShortcut`。Oxide 位置：`src/lib/keybindings.ts:isExplorerRefreshShortcut`、`src/lib/databaseNavigation.ts`、`SchemaSidebar.tsx`、`PostgresRemoteDatabaseContents.tsx`。真实 Windows/macOS WebView 默认 reload 抑制和焦点行为延期。 |
+| `82b81d824` | SQL 保存按钮明确区分保存到原始文件或 SQL Library | 已对齐：Query tab 根据 `fileRelativePath` 与 `savedSqlFileId` 产生可辨识的 `original-file` / `sql-library` 目标，工具栏 dirty/clean tooltip 分别说明 “Save to Original File” 或 “Save to SQL Library”，不再使用含糊的 editor file 文案；实际保存仍由 `saveEditorFileTab` 路由到项目文件原子写入或项目级 SQL Library 更新。DBX 位置：`apps/desktop/src/components/layout/EditorToolbar.vue:saveTooltip`。Oxide 位置：`src/lib/editorSaveTarget.ts`、`EditorActionBar.tsx`、`QueryEditor.tsx`。 |
+| `af1460890` | 为上述保存提示补一条 DBX 韩语翻译 | 无独立逻辑差距：Oxide 当前公开 locale 契约只有 system/en-US/zh-CN，不能孤立复制一个韩语 key 并宣称支持韩语。若扩展 locale，必须一次覆盖完整消息表与 locale fallback 测试。 |
+| `8b2cadf7f` | DBX 增加 Jalapeno Cloud 商业合作 AI preset、赞助标识、专属模型及 `HTTP-Referer: https://dbxio.com` | 不直接迁移 DBX 专属商业身份：该实现包含 DBX referral header、partner 文案、logo 与外部关系，复制到 Oxide 会错误冒充合作关系。Oxide 继续支持用户配置的 OpenAI-compatible endpoint/model/key，以及已独立集成的 Codex CLI / CodeBuddy CLI；若未来增加 Oxide 自有 preset，必须使用自身授权的品牌资产、Referer 和服务条款，并复用现有凭据/Provider 隔离。DBX 位置：`settingsStore.ts`、`EditorSettingsDialog.vue`、`AiAssistant.vue`、`AiProviderLogo.vue`、`crates/dbx-core/src/ai.rs`。 |
+
+### 上一增量审计（`5d6f66777` → `77b90eac7`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |

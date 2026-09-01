@@ -67,8 +67,11 @@ import {
 import {
   databaseObjectNavigationKey,
   databaseSchemaNavigationKey,
+  parseDatabaseObjectNavigationKey,
+  parseDatabaseSchemaNavigationKey,
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
+import { isExplorerRefreshShortcut } from "@/lib/keybindings";
 import { useTableOperations } from "@/hooks/useTableOperations";
 import {
   databaseService,
@@ -123,6 +126,7 @@ import {
 } from "@/lib/databaseObjectPreview";
 import {
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   lazy,
   Suspense,
@@ -479,6 +483,16 @@ function ConnectionRuntimeBadge({
   return null;
 }
 
+function isEditableExplorerShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target.isContentEditable ||
+    Boolean(target.closest("[contenteditable='true']"))
+  );
+}
+
 export function SchemaSidebar() {
   const activeConnectionId = useConnectionStore(
     (state) => state.activeConnectionId,
@@ -631,6 +645,10 @@ export function SchemaSidebar() {
   );
   const [postgresDatabaseRefreshVersion, setPostgresDatabaseRefreshVersion] =
     useState(0);
+  const [postgresRemoteRefreshRequests, setPostgresRemoteRefreshRequests] =
+    useState<
+      Record<string, { version: number; schema?: string }>
+    >({});
   const [postgresVisibilityKey, setPostgresVisibilityKey] = useState<
     string | null
   >(null);
@@ -2713,6 +2731,145 @@ export function SchemaSidebar() {
     }
   };
 
+  const queuePostgresRemoteRefresh = (
+    connectionId: string,
+    database: string,
+    schema?: string,
+  ) => {
+    const key = JSON.stringify([connectionId, database]);
+    setPostgresRemoteRefreshRequests((current) => ({
+      ...current,
+      [key]: {
+        version: (current[key]?.version || 0) + 1,
+        ...(schema ? { schema } : {}),
+      },
+    }));
+  };
+
+  const refreshPostgresRemoteDatabase = async (
+    connectionId: string,
+    database: string,
+    schema?: string,
+  ) => {
+    try {
+      await loadPostgresRemoteDatabase(connectionId, database);
+      queuePostgresRemoteRefresh(connectionId, database, schema);
+      setNamespaceError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNamespaceError(
+        `Could not refresh database "${database}": ${message}`,
+      );
+    }
+  };
+
+  const requestExplorerTargetRefresh = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false;
+
+    const objectRow = target.closest<HTMLElement>(
+      "[data-database-object-key]",
+    );
+    const objectTarget = objectRow?.dataset.databaseObjectKey
+      ? parseDatabaseObjectNavigationKey(objectRow.dataset.databaseObjectKey)
+      : null;
+    if (objectTarget?.schemaName) {
+      const connection = connections.find(
+        (item) => item.id === objectTarget.connectionId,
+      );
+      if (!connection) return false;
+      const capabilities = defaultDatabaseCapabilities(connection.driver);
+      if (supportsTableWorkspace(capabilities)) {
+        void refreshSelectedTableMetadata({
+          scopeKey: objectGroupKey(
+            connection.id,
+            connection.driver,
+            objectTarget.schemaName,
+            "objects",
+          ),
+          connectionId: connection.id,
+          driver: connection.driver,
+          driverPackageVersion: connection.driverPackageVersion,
+          connectionDatabaseName: connection.database,
+          databaseName: objectTarget.databaseName,
+          schema: objectTarget.schemaName,
+          tables: [objectTarget.objectName],
+        });
+      } else {
+        void handleRefreshSchema(connection.id, objectTarget.schemaName);
+      }
+      return true;
+    }
+
+    const schemaRow = target.closest<HTMLElement>(
+      "[data-database-schema-key]",
+    );
+    const schemaTarget = schemaRow?.dataset.databaseSchemaKey
+      ? parseDatabaseSchemaNavigationKey(schemaRow.dataset.databaseSchemaKey)
+      : null;
+    if (schemaTarget?.schemaName) {
+      const connection = connections.find(
+        (item) => item.id === schemaTarget.connectionId,
+      );
+      if (!connection) return false;
+      const connectedDatabase = supportsDatabaseCatalogTree(connection.driver)
+        ? connectionCatalogDatabaseName(connection)
+        : connection.database || "";
+      if (
+        schemaTarget.databaseName &&
+        schemaTarget.databaseName !== connectedDatabase
+      ) {
+        void refreshPostgresRemoteDatabase(
+          connection.id,
+          schemaTarget.databaseName,
+          schemaTarget.schemaName,
+        );
+      } else {
+        void handleRefreshSchema(connection.id, schemaTarget.schemaName);
+      }
+      return true;
+    }
+
+    const databaseRow = target.closest<HTMLElement>(
+      "[data-postgres-database]",
+    );
+    const connectionRegion = target.closest<HTMLElement>(
+      "[data-database-connection-id]",
+    );
+    const connectionId = connectionRegion?.dataset.databaseConnectionId;
+    const database = databaseRow?.dataset.postgresDatabase;
+    if (connectionId && database) {
+      const connection = connections.find((item) => item.id === connectionId);
+      if (!connection) return false;
+      const connectedDatabase = connectionCatalogDatabaseName(connection);
+      if (database === connectedDatabase) {
+        void handleRefreshConnection(connectionId);
+      } else {
+        void refreshPostgresRemoteDatabase(connectionId, database);
+      }
+      return true;
+    }
+
+    if (connectionId) {
+      void handleRefreshConnection(connectionId);
+      return true;
+    }
+    return false;
+  };
+
+  const handleExplorerKeyDownCapture = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    if (
+      !isExplorerRefreshShortcut(event.nativeEvent) ||
+      isEditableExplorerShortcutTarget(event.target) ||
+      !requestExplorerTargetRefresh(event.target)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   const handleForgetConnectionMetadata = async (
     connectionId: string,
     connectionName: string,
@@ -4268,6 +4425,11 @@ export function SchemaSidebar() {
       >
         <button
           type="button"
+          data-database-schema-key={databaseSchemaNavigationKey({
+            connectionId,
+            databaseName: navigationDatabaseName,
+            schemaName: schema,
+          })}
           className="flex h-6 w-full items-center justify-between rounded-[3px] pr-1 text-left hover:bg-[hsl(var(--wb-hover))]"
           onClick={() => {
             setExpandedObjectGroupKeys((current) =>
@@ -5654,7 +5816,10 @@ export function SchemaSidebar() {
   };
 
   return (
-    <div className="flex h-full min-w-0 flex-col">
+    <div
+      className="flex h-full min-w-0 flex-col"
+      onKeyDownCapture={handleExplorerKeyDownCapture}
+    >
       <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)]">
         <DatabaseExplorerHeader
           isLoading={isLoading}
@@ -5902,6 +6067,7 @@ export function SchemaSidebar() {
                 <div
                   id={`database-connection-${connection.id}`}
                   key={connection.id}
+                  data-database-connection-id={connection.id}
                   className="rounded-[3px] border border-transparent transition-colors"
                   style={connectionRegionStyle(connection.color, isActive)}
                 >
@@ -6447,6 +6613,11 @@ export function SchemaSidebar() {
                                   ? postgresRemoteDatabases.schemas[database] ||
                                     []
                                   : []
+                              }
+                              refreshRequest={
+                                postgresRemoteRefreshRequests[
+                                  JSON.stringify([connection.id, database])
+                                ]
                               }
                               filterText={
                                 database

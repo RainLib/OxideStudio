@@ -1864,3 +1864,21 @@ explicit deferred validation task rather than an implicit release check.
   the current request and retire the connection; concurrent metadata must not
   observe the temporary query context. H2 2.3.232 already covers the local
   protocol apply/reject/restore path without a live server.
+
+## Database Explorer refresh shortcut and SQL save target
+
+- On packaged Windows/Linux WebViews, focus connection, database, schema,
+  table/view and object-group rows and press Ctrl+R; repeat with Cmd+R on
+  macOS and with bare F5 on every platform. Only the focused refreshable node
+  may reload, the WebView must not navigate/reload, and remote PostgreSQL/JDBC
+  catalogs must retain their explicit database scope.
+- Repeat while the Explorer filter, Redis key filter, rename input and any
+  contenteditable control owns focus. Text input must retain Ctrl/Cmd+R and no
+  metadata request may be emitted. Shift/Alt-modified R and modified F5 must
+  also remain unclaimed.
+- Open a project `.sql` file and a project SQL Library entry, edit each and
+  inspect the save tooltip before and after Ctrl/Cmd+S. The tooltip must name
+  the original file or SQL Library destination accurately, and saving one
+  target must never update the other. Pure shortcut, navigation-key and target
+  label tests plus the production frontend build are complete; this item only
+  defers native WebView focus/default-action evidence.

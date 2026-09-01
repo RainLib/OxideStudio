@@ -4245,7 +4245,13 @@ export function QueryEditor({
           }}
           onDeleteQuery={deleteQuery}
           supportsTransactions={supportsTransactions && canExecuteDocument}
-          isProjectFile={Boolean(activeTab.fileRelativePath || activeTab.savedSqlFileId)}
+          fileSaveTarget={
+            activeTab.fileRelativePath
+              ? "original-file"
+              : activeTab.savedSqlFileId
+                ? "sql-library"
+                : null
+          }
           isFileDirty={Boolean(activeTab.isDirty)}
           onSaveFile={() => void saveEditorFileTab(activeTab.id)}
           parameterCount={canExecuteDocument ? parameterCount : 0}
