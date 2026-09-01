@@ -32,6 +32,7 @@ export type KnownDatabaseDriver =
   | "mongodb"
   | "influxdb"
   | "influxdb3"
+  | "victoriametrics"
   | "meilisearch";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel =
@@ -1643,6 +1644,10 @@ export interface SavedConnection {
   influxDbVersion?: "1" | "2";
   /** InfluxDB 2.x organization. It is serialized only into the live URL query. */
   influxDbOrganization?: string;
+  /** VictoriaMetrics-compatible Prometheus API mount path. */
+  victoriaMetricsApiPath?: string;
+  /** Bounded historical range used when discovering metric labels. */
+  victoriaMetricsLookback?: string;
   /** Elasticsearch HTTP transport. Kibana mode uses the Console proxy endpoint. */
   elasticsearchMode?: "direct" | "kibana";
   /** Optional Kibana/OpenSearch Dashboards deployment base path. */

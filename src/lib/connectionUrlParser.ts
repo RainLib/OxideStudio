@@ -43,6 +43,7 @@ function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
     driver === "elasticsearch" ||
     driver === "influxdb" ||
     driver === "influxdb3" ||
+    driver === "victoriametrics" ||
     driver === "meilisearch"
   );
 }
@@ -168,6 +169,58 @@ export function applyInfluxDbConnectionOptions(
       const organization = options.organization?.trim();
       if (organization) url.searchParams.set("org", organization);
     }
+    return url.toString();
+  } catch {
+    return connectionUrl;
+  }
+}
+
+export type VictoriaMetricsConnectionOptions = {
+  apiPath?: string;
+  lookback?: string;
+};
+
+export function normalizeVictoriaMetricsApiPath(value: string | undefined) {
+  const path = value?.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "") || "prometheus";
+  return `/${path}`;
+}
+
+export function normalizeVictoriaMetricsLookback(value: string | undefined) {
+  const candidate = value?.trim() || "1h";
+  // Prometheus durations are intentionally constrained here: this is only a
+  // metadata-discovery lookback, never a free-form MetricsQL expression.
+  return /^\d+(?:ms|s|m|h|d|w|y)$/iu.test(candidate)
+    ? candidate
+    : "1h";
+}
+
+export function victoriaMetricsConnectionOptionsFromUrl(
+  connectionUrl: string,
+): VictoriaMetricsConnectionOptions {
+  try {
+    const url = new URL(connectionUrl);
+    return {
+      apiPath: normalizeVictoriaMetricsApiPath(url.pathname),
+      lookback: normalizeVictoriaMetricsLookback(url.searchParams.get("lookback") || undefined),
+    };
+  } catch {
+    return { apiPath: "/prometheus", lookback: "1h" };
+  }
+}
+
+/** Keeps the endpoint mount separate from arbitrary user query parameters. */
+export function applyVictoriaMetricsConnectionOptions(
+  connectionUrl: string,
+  options: VictoriaMetricsConnectionOptions,
+) {
+  try {
+    const url = new URL(connectionUrl);
+    url.pathname = normalizeVictoriaMetricsApiPath(options.apiPath);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (key.toLowerCase() === "lookback") url.searchParams.delete(key);
+    }
+    const lookback = normalizeVictoriaMetricsLookback(options.lookback);
+    if (lookback !== "1h") url.searchParams.set("lookback", lookback);
     return url.toString();
   } catch {
     return connectionUrl;

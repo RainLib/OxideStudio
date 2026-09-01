@@ -18,6 +18,7 @@ pub mod postgres;
 pub mod redis;
 pub mod sqlite;
 pub mod sqlite_ssh;
+pub mod victoriametrics;
 
 pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseDriver>> {
     let requested_driver = driver.trim();
@@ -83,6 +84,15 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
             .connect()
             .await
             .context("Failed to connect to Meilisearch")?;
+        return Ok(Box::new(driver));
+    }
+
+    if canonical_driver == "victoriametrics" {
+        let mut driver = victoriametrics::VictoriaMetricsDriver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to VictoriaMetrics")?;
         return Ok(Box::new(driver));
     }
 

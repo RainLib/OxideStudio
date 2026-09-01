@@ -344,6 +344,9 @@ const INFLUXDB_COMMON_DATA_TYPES: &[&str] = &[
 const MEILISEARCH_COMMON_DATA_TYPES: &[&str] =
     &["string", "integer", "double", "boolean", "object", "array"];
 
+const VICTORIAMETRICS_COMMON_DATA_TYPES: &[&str] =
+    &["timestamp", "double", "string", "metric", "label"];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     aliases: &["postgresql", "pgsql"],
@@ -761,6 +764,53 @@ const MEILISEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: MEILISEARCH_COMMON_DATA_TYPES,
 };
 
+const VICTORIAMETRICS_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "victoriametrics",
+    aliases: &["victoria-metrics", "vm"],
+    display_name: "VictoriaMetrics",
+    data_model: DatabaseDataModel::TimeSeries,
+    connection_mode: DatabaseConnectionMode::Network,
+    // MetricsQL is deliberately not routed to the SQL LSP. The generic
+    // read-only execution surface still sends it to this native driver.
+    lsp_language_id: "victoriametrics",
+    namespace_label: "metric",
+    identifier_quote: '\0',
+    default_port: 8428,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
+    supports_schemas: true,
+    supports_database_catalogs: false,
+    supports_connection_database: false,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    supports_explain_plan: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "",
+    common_data_types: VICTORIAMETRICS_COMMON_DATA_TYPES,
+};
+
 const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &POSTGRES_SPEC,
     &MYSQL_SPEC,
@@ -771,6 +821,7 @@ const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &INFLUXDB_SPEC,
     &INFLUXDB3_SPEC,
     &MEILISEARCH_SPEC,
+    &VICTORIAMETRICS_SPEC,
 ];
 
 pub fn redis_capabilities() -> DatabaseCapabilities {
@@ -2319,6 +2370,10 @@ WITH NO DATA;"#
         assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
         assert_eq!(canonical_driver_name("influxdb2"), Some("influxdb"));
         assert_eq!(canonical_driver_name("influxdb-3"), Some("influxdb3"));
+        assert_eq!(
+            canonical_driver_name("victoria-metrics"),
+            Some("victoriametrics")
+        );
         assert_eq!(canonical_driver_name("unknown"), None);
 
         assert_eq!(
@@ -2349,6 +2404,7 @@ WITH NO DATA;"#
                 "influxdb",
                 "influxdb3",
                 "meilisearch",
+                "victoriametrics",
             ]
         );
 
@@ -2367,6 +2423,14 @@ WITH NO DATA;"#
         assert!(!influxdb3.supports_table_row_mutation);
         assert!(!influxdb3.supports_table_ddl);
         assert!(!influxdb3.supports_transactions);
+
+        let victoriametrics = database_capabilities_for_driver("vm").unwrap();
+        assert!(victoriametrics.supports_sql_query);
+        assert!(victoriametrics.supports_table_browsing);
+        assert!(!victoriametrics.supports_connection_database);
+        assert!(!victoriametrics.supports_table_row_mutation);
+        assert!(!victoriametrics.supports_table_ddl);
+        assert!(!victoriametrics.supports_transactions);
 
         assert!(DatabaseKind::from_str("redis").is_err());
         assert_eq!(

@@ -55,6 +55,19 @@ Static unit/build/Clippy validation is executed before this queue. These checks
 remain deliberately deferred because the current implementation phase does not
 open real database endpoints.
 
+## Phase 160 -- VictoriaMetrics native MetricsQL runtime
+
+- Start single-node VictoriaMetrics behind direct `/prometheus` and tenant
+  `/select/<account>/prometheus` API mounts. Verify build-info connect/ping,
+  Basic Auth, metric discovery, label discovery and URL redaction.
+- Run vector, matrix, scalar and string MetricsQL results, then verify
+  timestamp/value/metric/label columns, row caps, invalid JSON, 401/403/404,
+  endpoint-not-found guidance and the streamed response limits.
+- Confirm the time-series workspace remains read-only: no mutation, DDL,
+  transaction, cancellation or SQL-LSP claim is exposed. The configurable
+  lookback affects metadata discovery only and arbitrary URL parameters remain
+  intact after form editing.
+
 ## Phase 140 -- physical query-column formatter inheritance
 
 - In PostgreSQL, MySQL, SQL Server and SQLite query tabs, configure a physical

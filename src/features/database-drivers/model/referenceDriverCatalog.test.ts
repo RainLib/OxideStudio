@@ -17,7 +17,6 @@ describe("DBX reference driver catalogue", () => {
       "dynamodb",
       "consul",
       "mqtt",
-      "victoriametrics",
     ];
     const jdbcProducts = ["kyuubi", "impala", "spanner", "ignite", "ignite3"];
 
@@ -38,7 +37,7 @@ describe("DBX reference driver catalogue", () => {
       lspParserBaseline: "hive",
     });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
-      runtimeRoute: "dedicatedWorkspace",
+      runtimeRoute: "bundled",
       lspRoute: "notApplicable",
     });
     const meilisearch = referenceDriverCandidate("meilisearch");

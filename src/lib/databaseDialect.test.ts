@@ -22,6 +22,23 @@ describe("InfluxDB 3 dialect profile", () => {
   });
 });
 
+describe("VictoriaMetrics dialect profile", () => {
+  it("uses the native MetricsQL workspace without claiming SQL LSP support", () => {
+    expect(connectionUrlScheme("victoriametrics")).toBe("http");
+    expect(defaultDatabasePort("victoriametrics")).toBe(8428);
+    expect(defaultDatabaseCapabilities("victoriametrics")).toMatchObject({
+      dataModel: "timeSeries",
+      lspLanguageId: "victoriametrics",
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsConnectionDatabase: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});
+
 describe("InfluxDB 1.x / 2.x dialect profile", () => {
   it("uses the time-series workspace without claiming SQL LSP support", () => {
     expect(connectionUrlScheme("influxdb")).toBe("http");

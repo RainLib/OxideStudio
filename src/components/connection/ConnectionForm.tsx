@@ -34,10 +34,12 @@ import {
 } from "@/components/ui/popover";
 import {
   applyInfluxDbConnectionOptions,
+  applyVictoriaMetricsConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   elasticsearchConnectionOptionsFromQueryParams,
   influxDbConnectionOptionsFromQueryParams,
+  victoriaMetricsConnectionOptionsFromUrl,
   parseConnectionUrl,
 } from "@/lib/connectionUrlParser";
 import {
@@ -484,6 +486,7 @@ export function ConnectionForm({
   const isInfluxDb = fileDriver === "influxdb";
   const influxDbVersion = selectedConnection.influxDbVersion || "1";
   const isInfluxDb2 = isInfluxDb && influxDbVersion === "2";
+  const isVictoriaMetrics = fileDriver === "victoriametrics";
   const fileExtension =
     fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
   const formSections: ReadonlyArray<readonly [FormSection, string]> =
@@ -547,6 +550,11 @@ export function ConnectionForm({
           version: selectedConnection.influxDbVersion,
           organization: selectedConnection.influxDbOrganization,
         })
+      : selectedConnection.driver === "victoriametrics"
+        ? applyVictoriaMetricsConnectionOptions(baseGeneratedUrl, {
+            apiPath: selectedConnection.victoriaMetricsApiPath,
+            lookback: selectedConnection.victoriaMetricsLookback,
+          })
       : baseGeneratedUrl;
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
   const sshTunnel = {
@@ -741,6 +749,10 @@ export function ConnectionForm({
       parsed?.driver === "influxdb"
         ? influxDbConnectionOptionsFromQueryParams(parsed.queryParams)
         : null;
+    const victoriaMetricsOptions =
+      parsed?.driver === "victoriametrics"
+        ? victoriaMetricsConnectionOptionsFromUrl(value)
+        : null;
     updateConnectionConfig(
       parsed
         ? {
@@ -756,6 +768,12 @@ export function ConnectionForm({
               ? {
                   influxDbVersion: influxDbOptions.version,
                   influxDbOrganization: influxDbOptions.organization,
+                }
+              : {}),
+            ...(victoriaMetricsOptions
+              ? {
+                  victoriaMetricsApiPath: victoriaMetricsOptions.apiPath,
+                  victoriaMetricsLookback: victoriaMetricsOptions.lookback,
                 }
               : {}),
             ...(elasticsearchOptions
@@ -1503,6 +1521,40 @@ export function ConnectionForm({
                     {isInfluxDb2
                       ? "Uses the InfluxDB 2.x token, organization, bucket and Flux API."
                       : "Uses InfluxDB 1.x credentials and the InfluxQL HTTP API."}
+                  </p>
+                </>
+              )}
+              {isVictoriaMetrics && (
+                <>
+                  <label className={labelClass} htmlFor="connection-victoriametrics-api-path">
+                    Prometheus API path
+                  </label>
+                  <input
+                    id="connection-victoriametrics-api-path"
+                    value={selectedConnection.victoriaMetricsApiPath || "/prometheus"}
+                    onChange={(event) =>
+                      updateField("victoriaMetricsApiPath", event.target.value, true)
+                    }
+                    className={fieldClass}
+                    placeholder="/prometheus"
+                    autoComplete="off"
+                  />
+                  <label className={labelClass} htmlFor="connection-victoriametrics-lookback">
+                    Metadata lookback
+                  </label>
+                  <input
+                    id="connection-victoriametrics-lookback"
+                    value={selectedConnection.victoriaMetricsLookback || "1h"}
+                    onChange={(event) =>
+                      updateField("victoriaMetricsLookback", event.target.value, true)
+                    }
+                    className={fieldClass}
+                    placeholder="1h"
+                    autoComplete="off"
+                  />
+                  <span />
+                  <p className="text-[10px] leading-4 wb-muted">
+                    Queries use the native read-only MetricsQL API. The lookback limits label discovery only.
                   </p>
                 </>
               )}

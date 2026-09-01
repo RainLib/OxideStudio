@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyInfluxDbConnectionOptions,
+  applyVictoriaMetricsConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   elasticsearchConnectionOptionsFromQueryParams,
@@ -8,6 +9,7 @@ import {
   normalizeElasticsearchConnectivityCheckPath,
   normalizeKibanaBasePath,
   parseConnectionUrl,
+  victoriaMetricsConnectionOptionsFromUrl,
 } from "./connectionUrlParser";
 
 describe("InfluxDB 3 connection URL", () => {
@@ -24,6 +26,23 @@ describe("InfluxDB 3 connection URL", () => {
     ).toBe(
       "https://:token%20with%20spaces@metrics.example.test:8181/customer%20metrics",
     );
+  });
+});
+
+describe("VictoriaMetrics connection URL", () => {
+  it("keeps arbitrary endpoint parameters while isolating the API mount and lookback", () => {
+    const value = applyVictoriaMetricsConnectionOptions(
+      "https://metrics.example.test/old?tenant=team-a&LOOKBACK=30m",
+      { apiPath: " /select/tenant-a/prometheus/ ", lookback: "6h" },
+    );
+    const parsed = new URL(value);
+
+    expect(parsed.pathname).toBe("/select/tenant-a/prometheus");
+    expect(parsed.searchParams.get("tenant")).toBe("team-a");
+    expect(victoriaMetricsConnectionOptionsFromUrl(value)).toEqual({
+      apiPath: "/select/tenant-a/prometheus",
+      lookback: "6h",
+    });
   });
 });
 

@@ -4,9 +4,11 @@ import { connectionService, SavedConnection } from "@/services/tauri";
 import { useSchemaStore } from "./useSchemaStore";
 import {
   applyInfluxDbConnectionOptions,
+  applyVictoriaMetricsConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   normalizeConnectionUrlForDriver,
+  victoriaMetricsConnectionOptionsFromUrl,
 } from "@/lib/connectionUrlParser";
 import {
   DEFAULT_DATABASE_DRIVER,
@@ -123,7 +125,20 @@ function connectionUrlForConfig(config: ConnectionConfig) {
         version: config.influxDbVersion,
         organization: config.influxDbOrganization,
       })
-    : connectionUrl;
+    : config.driver === "victoriametrics"
+      ? applyVictoriaMetricsConnectionOptions(connectionUrl, {
+          // Legacy/pasted URLs can carry a tenant-specific API mount before
+          // the explicit form fields exist. Preserve it rather than silently
+          // rewriting the endpoint to the default Prometheus mount.
+          ...victoriaMetricsConnectionOptionsFromUrl(connectionUrl),
+          ...(config.victoriaMetricsApiPath
+            ? { apiPath: config.victoriaMetricsApiPath }
+            : {}),
+          ...(config.victoriaMetricsLookback
+            ? { lookback: config.victoriaMetricsLookback }
+            : {}),
+        })
+      : connectionUrl;
 }
 
 function enabledSshTunnel(config: ConnectionConfig) {

@@ -137,10 +137,9 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("cloudflare-d1", "Cloudflare D1", "relational", "http"),
   candidate("influxdb", "InfluxDB", "timeSeries", "bundled"),
   candidate("influxdb3", "InfluxDB 3", "timeSeries", "bundled", "sql"),
-  // DBX exposes VictoriaMetrics through its own MetricsQL workspace. Its
-  // SQL-file capability is not evidence that the bundled SQL LSP can parse
-  // MetricsQL, so a future package must provide a dedicated editor/provider.
-  candidate("victoriametrics", "VictoriaMetrics", "timeSeries", "native"),
+  // Bundled native MetricsQL runtime. MetricsQL deliberately remains outside
+  // the SQL LSP; the driver owns its own query and metadata protocol.
+  candidate("victoriametrics", "VictoriaMetrics", "timeSeries", "bundled"),
   // QuestDB's DBX dialect is SQL-shaped. This is editor-only guidance: it
   // does not turn a time-series package into a relational grid driver.
   candidate("questdb", "QuestDB", "timeSeries", "http", "sql"),
@@ -271,6 +270,7 @@ const BUNDLED_DRIVER_IDS = new Set([
   "mongodb",
   "influxdb",
   "influxdb3",
+  "victoriametrics",
   "meilisearch",
 ]);
 
