@@ -15,7 +15,7 @@ describe("DBX reference driver catalogue", () => {
   });
 
   it("keeps the five explicit compatibility products separate from the DBX baseline", () => {
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(85);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(86);
     const compatibilityCandidates = REFERENCE_DATABASE_DRIVER_CANDIDATES.filter(
       (candidate) => candidate.source === "compatibility",
     );
@@ -26,6 +26,11 @@ describe("DBX reference driver catalogue", () => {
       "tidb",
       "greenplum",
     ]);
+    expect(referenceDriverCandidate("rocketmq")).toMatchObject({
+      source: "dbx-agent",
+      dataModel: "queue",
+      preferredRuntime: "native",
+    });
   });
 
   it("keeps the latest DBX products unavailable until their own package is ready", () => {

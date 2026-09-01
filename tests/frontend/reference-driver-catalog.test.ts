@@ -18,7 +18,7 @@ describe("reference database driver catalogue", () => {
     );
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(85);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(86);
     expect(DBX_REFERENCE_DRIVER_IDS).toEqual([
       "mysql", "postgres", "sqlite", "rqlite", "redis", "duckdb",
       "clickhouse", "sqlserver", "mongodb", "dynamodb", "oracle", "elasticsearch",
@@ -47,6 +47,7 @@ describe("reference database driver catalogue", () => {
         "influxdb3",
         "cloudflare-d1",
         "mq",
+        "rocketmq",
       ]),
     );
     expect(referenceDriverCandidate("tidb")).toMatchObject({

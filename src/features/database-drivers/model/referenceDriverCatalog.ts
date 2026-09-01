@@ -32,7 +32,7 @@ export type DatabaseDriverCandidate = {
   preferredRuntime: DriverCandidateRuntime;
   /** The only LSP route a future package may declare without a custom server. */
   genericLspLanguageId: "sql" | "mongodb" | "redis" | "elasticsearch-dsl" | null;
-  source: "dbx-reference" | "compatibility";
+  source: "dbx-reference" | "dbx-agent" | "compatibility";
 };
 
 const candidate = (
@@ -152,6 +152,11 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("questdb", "QuestDB", "timeSeries", "http", "sql"),
   candidate("jdbc", "Generic JDBC", "relational", "jdbc"),
   candidate("mq", "Message Queue administration", "queue", "http"),
+  // DBX ships RocketMQ as an independent native agent with a dedicated
+  // operational workspace (topics, consumer groups, lag, messages and ACLs),
+  // rather than a SQL/HTTP driver. Keep it selectable as its own package
+  // target without inflating the DatabaseType reference roster.
+  candidate("rocketmq", "Apache RocketMQ", "queue", "native", null, "dbx-agent"),
   candidate("cockroachdb", "CockroachDB", "relational", "jdbc", "sql", "compatibility"),
   candidate("yugabytedb", "YugabyteDB", "relational", "jdbc", "sql", "compatibility"),
   candidate("timescaledb", "TimescaleDB", "relational", "jdbc", "sql", "compatibility"),
