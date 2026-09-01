@@ -164,7 +164,7 @@ func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	result, err := session.Query(ctx, value.Statement, iotdb.MaxQueryRows, "ms")
+	result, err := session.Query(ctx, value.Statement, iotdb.MaxQueryRows, session.TimestampPrecision())
 	if err != nil {
 		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
 	}
@@ -184,7 +184,7 @@ func (s *sidecar) serverVersion(raw json.RawMessage) (any, *iotdb.ProtocolError)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := session.Query(ctx, "SHOW VERSION", 1, "ms")
+	result, err := session.Query(ctx, "SHOW VERSION", 1, session.TimestampPrecision())
 	if err != nil {
 		return nil, iotdb.Fail("VERSION_FAILED", err.Error())
 	}
@@ -228,7 +228,7 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	result, err := session.Query(ctx, statement, iotdb.MaxQueryRows, "ms")
+	result, err := session.Query(ctx, statement, iotdb.MaxQueryRows, session.TimestampPrecision())
 	if err != nil {
 		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
 	}

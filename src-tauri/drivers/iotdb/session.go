@@ -15,15 +15,16 @@ import (
 // deliberately not constructed from UI fields: ParseConnectionConfig has
 // already validated and normalized the opaque signed-package URL.
 type Session struct {
-	client *client.Session
-	config ConnectionConfig
+	client             *client.Session
+	config             ConnectionConfig
+	timestampPrecision string
 }
 
 func OpenSession(config ConnectionConfig) (*Session, error) {
 	tlsConfig := (*client.TLSConfig)(nil)
 	if config.TLS {
 		tlsConfig = &client.TLSConfig{
-			Config:   &tls.Config{InsecureSkipVerify: config.InsecureSkipVerify}, // #nosec G402 -- explicit per-connection opt-in
+			Config:   &tls.Config{ServerName: config.Host, MinVersion: tls.VersionTLS12, InsecureSkipVerify: config.InsecureSkipVerify}, // #nosec G402 -- explicit per-connection opt-in
 			CAFile:   config.TLSCAFile,
 			CertFile: config.TLSCertFile,
 			KeyFile:  config.TLSKeyFile,
@@ -46,12 +47,12 @@ func OpenSession(config ConnectionConfig) (*Session, error) {
 			Password: config.Password, FetchSize: int32(config.FetchSize), TimeZone: config.TimeZone,
 			ConnectRetryMax: config.ConnectRetryMax, TLSConfig: tlsConfig,
 		})
-		err = clientSession.Open(config.EnableCompression, 15_000)
+		err = clientSession.Open(config.EnableCompression, config.ConnectTimeoutMS)
 	}
 	if err != nil {
 		return nil, err
 	}
-	session := &Session{client: &clientSession, config: config}
+	session := &Session{client: &clientSession, config: config, timestampPrecision: "ms"}
 	if config.Dialect == TableDialect {
 		context, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -74,6 +75,11 @@ func OpenSession(config ConnectionConfig) (*Session, error) {
 			}
 		}
 	}
+	precisionContext, cancel := context.WithTimeout(context.Background(), minDuration(time.Duration(config.ConnectTimeoutMS)*time.Millisecond, 5*time.Second))
+	if precision, err := session.readTimestampPrecision(precisionContext); err == nil {
+		session.timestampPrecision = precision
+	}
+	cancel()
 	return session, nil
 }
 
@@ -81,7 +87,7 @@ func (s *Session) Execute(ctx context.Context, statement string) (*client.Sessio
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("IoTDB session is closed")
 	}
-	return s.client.ExecuteStatementWithContext(ctx, statement)
+	return executeStatement(ctx, s.client, statement)
 }
 
 func (s *Session) Close() error {
@@ -98,5 +104,81 @@ func (s *Session) Dialect() string {
 		return TreeDialect
 	}
 	return s.config.Dialect
+}
+
+func (s *Session) TimestampPrecision() string {
+	if s == nil || s.timestampPrecision == "" {
+		return "ms"
+	}
+	return s.timestampPrecision
+}
+
+func (s *Session) readTimestampPrecision(ctx context.Context) (string, error) {
+	data, err := s.Execute(ctx, "SHOW VARIABLES")
+	if err != nil {
+		return "", err
+	}
+	defer data.Close()
+	columns := data.GetColumnNames()
+	variableIndex, valueIndex := int32(1), int32(2)
+	for index, column := range columns {
+		switch strings.ToLower(strings.TrimSpace(column)) {
+		case "variable":
+			variableIndex = int32(index + 1)
+		case "value":
+			valueIndex = int32(index + 1)
+		}
+	}
+	for {
+		hasNext, err := data.Next()
+		if err != nil {
+			return "", err
+		}
+		if !hasNext {
+			return "", fmt.Errorf("IoTDB timestamp precision was not reported")
+		}
+		variable, err := data.GetStringByIndex(variableIndex)
+		if err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(strings.ReplaceAll(strings.TrimSpace(variable), "_", ""), "TimestampPrecision") {
+			continue
+		}
+		value, err := data.GetStringByIndex(valueIndex)
+		if err != nil {
+			return "", err
+		}
+		return normalizeTimestampPrecision(value)
+	}
+}
+
+func executeStatement(ctx context.Context, session *client.Session, statement string) (data *client.SessionDataSet, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			} else {
+				err = fmt.Errorf("IoTDB Go client panicked while executing statement: %v", recovered)
+			}
+			data = nil
+		}
+	}()
+	return session.ExecuteStatementWithContext(ctx, statement)
+}
+
+func normalizeTimestampPrecision(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "ms", "us", "ns":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", fmt.Errorf("unsupported IoTDB timestamp precision: %s", value)
+	}
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 func quote(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }

@@ -27,13 +27,14 @@ type ConnectionConfig struct {
 	TLSKeyFile         string
 	EnableCompression  bool
 	ConnectRetryMax    int
+	ConnectTimeoutMS   int
 }
 
 // ParseConnectionConfig accepts the opaque URL supplied by the signed-package
 // Host. It does not retain or log it. Tree/Table dialect selection remains
 // explicit because IoTDB applies database context only in Table SQL.
 func ParseConnectionConfig(raw string, options map[string]string) (ConnectionConfig, error) {
-	config := ConnectionConfig{Host: "127.0.0.1", Port: DefaultPort, Username: "root", Password: "root", Dialect: TreeDialect, FetchSize: 1024, TimeZone: "Asia/Shanghai"}
+	config := ConnectionConfig{Host: "127.0.0.1", Port: DefaultPort, Username: "root", Password: "root", Dialect: TreeDialect, FetchSize: 1024, TimeZone: "Asia/Shanghai", ConnectTimeoutMS: 15_000}
 	value := strings.TrimSpace(strings.TrimPrefix(raw, "jdbc:"))
 	if value == "" {
 		return config, fmt.Errorf("IoTDB connection URL is required")
@@ -106,6 +107,13 @@ func ParseConnectionConfig(raw string, options map[string]string) (ConnectionCon
 			return config, fmt.Errorf("invalid IoTDB connect retry maximum")
 		}
 		config.ConnectRetryMax = retries
+	}
+	if value := first(query, "connect_timeout_ms", "connection_timeout_ms"); value != "" {
+		timeout, err := positive(value)
+		if err != nil {
+			return config, fmt.Errorf("invalid IoTDB connect timeout")
+		}
+		config.ConnectTimeoutMS = timeout
 	}
 	config.Nodes = splitNodes(first(query, "node_urls", "nodes"))
 	if len(config.Nodes) == 0 {
