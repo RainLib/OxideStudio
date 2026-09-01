@@ -102,6 +102,7 @@ import {
   planExpandableNewRowPaste,
   applyColumnFormatter,
   columnFormatterKeys,
+  queryColumnFormatterKeys,
   ColumnFormatterDialog,
   type ColumnFormatterConfig,
   type DataGridContextMenuItem,
@@ -110,6 +111,8 @@ import {
   type DataGridDetailNavigationAxis,
   type DataGridDetailNavigationDelta,
 } from "@/features/data-grid";
+import { databaseDriverProfile } from "@/lib/databaseDialect";
+import { cachedSqlProjectionSources } from "@/lib/queryEditorCachedCompletion";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
 import { isTableCellExpression } from "@/lib/tableCellExpression";
 import type {
@@ -482,18 +485,55 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       () => new Map(tableColumns?.map((column) => [column.name, column])),
       [tableColumns],
     );
+    const resultColumns = result?.columns;
+    const hasResultOverride = Boolean(resultOverride);
+    const queryDisplaySourceColumns = useMemo(() => {
+      if (
+        activeTab?.type !== "query" ||
+        !activeTab.resultSql ||
+        !resultColumns?.length ||
+        isTransposed ||
+        hasResultOverride
+      ) {
+        return [];
+      }
+      return cachedSqlProjectionSources(
+        activeTab.resultSql,
+        resultColumns.map((column) => column.name),
+      );
+    }, [
+      activeTab?.resultSql,
+      activeTab?.type,
+      hasResultOverride,
+      isTransposed,
+      resultColumns,
+    ]);
+    const activeNamespaceLabel = useMemo(
+      () =>
+        activeConnection
+          ? databaseDriverProfile(activeConnection.driver).capabilities
+              .namespaceLabel
+          : undefined,
+      [activeConnection],
+    );
 
     const formatterKeysForResultColumn = useCallback(
       (columnIndex: number) => {
         const resultColumn = result?.columns[columnIndex];
-        if (
-          !resultColumn ||
-          !activeTab?.connectionId ||
-          activeTab.type !== "table" ||
-          !activeTab.tableName
-        ) {
+        if (!resultColumn || !activeTab?.connectionId || isTransposed) {
           return [];
         }
+        if (activeTab.type === "query") {
+          return queryColumnFormatterKeys({
+            connectionId: activeTab.connectionId,
+            database: activeTab.databaseName,
+            databaseType: activeConnection?.driver,
+            namespaceLabel: activeNamespaceLabel,
+            resultColumn: resultColumn.name,
+            displaySource: queryDisplaySourceColumns[columnIndex],
+          });
+        }
+        if (activeTab.type !== "table" || !activeTab.tableName) return [];
         return columnFormatterKeys({
           connectionId: activeTab.connectionId,
           database: activeTab.databaseName,
@@ -507,7 +547,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           },
         });
       },
-      [activeConnection?.driver, activeTab, result?.columns],
+      [
+        activeConnection?.driver,
+        activeNamespaceLabel,
+        activeTab,
+        isTransposed,
+        queryDisplaySourceColumns,
+        result?.columns,
+      ],
     );
 
     const formatterForResultColumn = useCallback(

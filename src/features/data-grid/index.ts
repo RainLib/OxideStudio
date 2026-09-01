@@ -78,6 +78,7 @@ export {
   applyColumnFormatter,
   buildColumnFormatterKey,
   columnFormatterKeys,
+  queryColumnFormatterKeys,
   normalizeColumnFormatter,
   normalizeColumnFormatterRecord,
   normalizeDateTimePattern,
@@ -85,6 +86,7 @@ export {
   type ColumnFormatterKeyContext,
   type ColumnFormatterKeyParts,
   type ColumnFormatterSourceRef,
+  type QueryColumnFormatterKeyContext,
   type DateTimeFormatterUnit,
 } from "./model/columnFormatter";
 export { ColumnFormatterDialog } from "./ui/ColumnFormatterDialog";

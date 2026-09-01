@@ -41,6 +41,15 @@ export interface ColumnFormatterKeyContext {
   };
 }
 
+export interface QueryColumnFormatterKeyContext {
+  connectionId: string;
+  database?: string;
+  databaseType?: string;
+  namespaceLabel?: string;
+  resultColumn: string;
+  displaySource?: ColumnFormatterSourceRef;
+}
+
 const SUPPORTED_PATTERN_TOKENS = [
   "YYYY",
   "SSS",
@@ -127,6 +136,53 @@ export function columnFormatterKeys(context: ColumnFormatterKeyContext) {
     }
   }
   return [...keys];
+}
+
+/**
+ * Resolve query-result formatter keys only when the renderer knows enough
+ * physical namespace identity to share a table formatter safely. Database-
+ * scoped products can bind an unqualified relation to the execution database;
+ * schema-scoped products require an explicit source schema until the semantic
+ * LSP exposes authoritative result-column lineage.
+ */
+export function queryColumnFormatterKeys(
+  context: QueryColumnFormatterKeyContext,
+) {
+  const source = context.displaySource;
+  if (!source?.tableName || !source.sourceColumn) return [];
+  const namespaceLabel = context.namespaceLabel?.trim().toLocaleLowerCase();
+
+  if (namespaceLabel === "database") {
+    // In MySQL-shaped grammars a two-part relation is database.table; the
+    // conservative relation parser represents its first component as schema.
+    // Prefer that explicit component over the connection's active database.
+    if (source.database && source.schema) return [];
+    const database = source.database || source.schema || context.database;
+    if (!database) return [];
+    return [
+      buildColumnFormatterKey({
+        connectionId: context.connectionId,
+        database,
+        schema: "",
+        tableName: source.tableName,
+        column: source.sourceColumn,
+      }),
+    ];
+  }
+
+  if (!source.schema) return [];
+  return columnFormatterKeys({
+    connectionId: context.connectionId,
+    database: context.database,
+    databaseType: context.databaseType,
+    resultColumn: context.resultColumn,
+    displaySource: {
+      database: source.database || context.database,
+      schema: source.schema,
+      tableName: source.tableName,
+      sourceColumn: source.sourceColumn,
+    },
+  });
 }
 
 export function normalizeDateTimePattern(value: unknown) {

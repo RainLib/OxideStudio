@@ -1,5 +1,19 @@
 # DBX alignment: deferred validation queue
 
+## Phase 140 -- physical query-column formatter inheritance
+
+- In PostgreSQL, MySQL, SQL Server and SQLite query tabs, configure a physical
+  table column formatter and execute direct, aliased and sole-wildcard SELECTs.
+  Confirm Query Grid inherits only when the result ordinal has a trusted
+  physical source and that editing, copy/export and mutation payloads retain
+  the raw value.
+- Repeat with computed expressions, CTEs, derived tables, UNION/INTERSECT,
+  multiple statements, ambiguous joins, mixed wildcards and three/four-part
+  column references. These must remain unformatted unless authoritative
+  provider metadata supplies lineage; schema-scoped products must not infer the
+  active schema. Automated parser/key tests and the frontend production build
+  passed without opening a database.
+
 ## Phase 139 -- pinned Editor settings live preview
 
 - Open Settings → Editor at compact and narrow window sizes. Confirm the SQL

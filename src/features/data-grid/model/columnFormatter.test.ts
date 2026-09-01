@@ -4,6 +4,7 @@ import {
   columnFormatterKeys,
   normalizeColumnFormatter,
   normalizeColumnFormatterRecord,
+  queryColumnFormatterKeys,
 } from "./columnFormatter";
 
 describe("column formatter keys", () => {
@@ -48,6 +49,66 @@ describe("column formatter keys", () => {
         displaySource: { sourceColumn: "total" },
       }),
     ).toEqual([]);
+  });
+
+  it("maps database namespaces and refuses inferred schemas", () => {
+    expect(
+      queryColumnFormatterKeys({
+        connectionId: "conn",
+        database: "app",
+        databaseType: "mysql",
+        namespaceLabel: "database",
+        resultColumn: "createdAt",
+        displaySource: {
+          schema: "audit",
+          tableName: "events",
+          sourceColumn: "created_at",
+        },
+      }),
+    ).toEqual(["conn::audit::::events::created_at"]);
+
+    expect(
+      queryColumnFormatterKeys({
+        connectionId: "conn",
+        database: "app",
+        databaseType: "mysql",
+        namespaceLabel: "database",
+        resultColumn: "createdAt",
+        displaySource: {
+          tableName: "events",
+          sourceColumn: "created_at",
+        },
+      }),
+    ).toEqual(["conn::app::::events::created_at"]);
+
+    expect(
+      queryColumnFormatterKeys({
+        connectionId: "conn",
+        database: "analytics",
+        databaseType: "postgres",
+        namespaceLabel: "schema",
+        resultColumn: "createdAt",
+        displaySource: {
+          tableName: "events",
+          sourceColumn: "created_at",
+        },
+      }),
+    ).toEqual([]);
+
+    expect(
+      queryColumnFormatterKeys({
+        connectionId: "conn",
+        database: "analytics",
+        databaseType: "postgres",
+        namespaceLabel: "schema",
+        resultColumn: "createdAt",
+        displaySource: {
+          schema: "audit",
+          tableName: "events",
+          sourceColumn: "created_at",
+        },
+      }),
+    ).toEqual(["conn::analytics::audit::events::created_at"]);
   });
 });
 
