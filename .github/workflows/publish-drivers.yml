@@ -8,7 +8,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, clickhouse, duckdb, rqlite, kingbase]
+        options: [all, clickhouse, duckdb, rqlite, kingbase, iotdb]
       package_version:
         description: Immutable package version, for example 0.1.1.
         required: true
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "$SELECTED_DRIVER" in all|clickhouse|duckdb|rqlite|kingbase) ;; *) exit 1 ;; esac
+          case "$SELECTED_DRIVER" in all|clickhouse|duckdb|rqlite|kingbase|iotdb) ;; *) exit 1 ;; esac
           if ! [[ "$DRIVER_PACKAGE_VERSION" =~ ^[A-Za-z0-9._-]{1,96}$ ]]; then
             echo "package_version must contain only letters, digits, dot, underscore, or hyphen." >&2
             exit 1
@@ -81,6 +81,9 @@ jobs:
           - { driver: kingbase, runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { driver: kingbase, runner: windows-2022, target: x86_64-pc-windows-msvc }
           - { driver: kingbase, runner: macos-15, target: aarch64-apple-darwin }
+          - { driver: iotdb, runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { driver: iotdb, runner: windows-2022, target: x86_64-pc-windows-msvc }
+          - { driver: iotdb, runner: macos-15, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -88,22 +91,22 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@1.91.1
-        if: matrix.driver != 'kingbase'
+        if: matrix.driver != 'kingbase' && matrix.driver != 'iotdb'
       - uses: swatinem/rust-cache@v2
-        if: matrix.driver != 'kingbase'
+        if: matrix.driver != 'kingbase' && matrix.driver != 'iotdb'
         with:
           workspaces: src-tauri/crates/oxide-driver-${{ matrix.driver }} -> target
       - name: Build native sidecar
-        if: matrix.driver != 'kingbase' && (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == matrix.driver)
+        if: matrix.driver != 'kingbase' && matrix.driver != 'iotdb' && (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == matrix.driver)
         shell: bash
         run: |
           set -euo pipefail
           cargo build --manifest-path "src-tauri/crates/oxide-driver-${{ matrix.driver }}/Cargo.toml" --release --target "${{ matrix.target }}"
       - uses: actions/setup-go@v5
-        if: (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == 'kingbase') && matrix.driver == 'kingbase'
+        if: (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == matrix.driver) && (matrix.driver == 'kingbase' || matrix.driver == 'iotdb')
         with:
           go-version: '1.25.4'
-          cache-dependency-path: src-tauri/drivers/kingbase/go.sum
+          cache-dependency-path: src-tauri/drivers/${{ matrix.driver }}/go.sum
       - name: Build Kingbase native sidecar
         if: (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == 'kingbase') && matrix.driver == 'kingbase'
         shell: bash
@@ -119,6 +122,21 @@ jobs:
           go test ./...
           mkdir -p "dist/${{ matrix.target }}"
           GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -o "dist/${{ matrix.target }}/oxide-driver-kingbase${{ contains(matrix.target, 'windows') && '.exe' || '' }}" .
+      - name: Build IoTDB native sidecar
+        if: (needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == 'iotdb') && matrix.driver == 'iotdb'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) GOOS=linux GOARCH=amd64 ;;
+            x86_64-pc-windows-msvc) GOOS=windows GOARCH=amd64 ;;
+            aarch64-apple-darwin) GOOS=darwin GOARCH=arm64 ;;
+            *) exit 1 ;;
+          esac
+          pushd src-tauri/drivers/iotdb
+          go test ./...
+          mkdir -p "dist/${{ matrix.target }}"
+          GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -o "dist/${{ matrix.target }}/oxide-driver-iotdb${{ contains(matrix.target, 'windows') && '.exe' || '' }}" ./cmd/oxide-driver-iotdb
       - name: Package manifest-bound driver payload
         if: needs.validate.outputs.selected_driver == 'all' || needs.validate.outputs.selected_driver == matrix.driver
         shell: bash
