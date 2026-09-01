@@ -5,6 +5,7 @@ use crate::core::{
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde_json::Value;
@@ -321,19 +322,7 @@ async fn parse_consul_response(response: Response, operation: &str) -> Result<Va
     } else {
         CONSUL_ERROR_MAX_BYTES
     };
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        bail!("Consul {operation} response exceeds the safety limit")
-    }
-    let body = response
-        .bytes()
-        .await
-        .with_context(|| format!("Failed to read Consul {operation} response"))?;
-    if body.len() > limit {
-        bail!("Consul {operation} response exceeds the safety limit")
-    }
+    let body = bounded_consul_response_bytes(response, limit, operation).await?;
     if !status.is_success() {
         let hint = match status {
             StatusCode::UNAUTHORIZED => "Unauthorized; check the Consul token",
@@ -348,6 +337,33 @@ async fn parse_consul_response(response: Response, operation: &str) -> Result<Va
     }
     serde_json::from_slice(&body)
         .with_context(|| format!("Consul {operation} returned invalid JSON"))
+}
+
+/// Enforce the response budget while streaming. A missing or dishonest
+/// Content-Length must not cause reqwest to materialize an unbounded Consul
+/// response before this driver can reject it.
+async fn bounded_consul_response_bytes(
+    response: Response,
+    limit: usize,
+    operation: &str,
+) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        bail!("Consul {operation} response exceeds the safety limit")
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Failed to read Consul {operation} response"))?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            bail!("Consul {operation} response exceeds the safety limit")
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -388,6 +404,29 @@ mod tests {
         (format!("http://:test-token@{address}/tenant"), handle)
     }
 
+    async fn serve_unbounded_response(body: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8 * 1024];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        });
+        format!("http://{address}/")
+    }
+
     #[test]
     fn url_redacts_token_and_preserves_base_path() {
         let (url, token) = parse_consul_connection_url(
@@ -407,6 +446,24 @@ mod tests {
         assert!(validate_prefix("../admin").is_err());
         assert!(!valid_key(""));
         assert!(!valid_key("a\0b"));
+    }
+
+    #[tokio::test]
+    async fn streamed_response_budget_rejects_unknown_length_before_json_parsing() {
+        let url = serve_unbounded_response(vec![b' '; CONSUL_RESPONSE_MAX_BYTES + 1]).await;
+        let response = Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let error = parse_consul_response(response, "bounded fixture")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("response exceeds the safety limit"));
     }
 
     #[tokio::test]
