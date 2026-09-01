@@ -2484,7 +2484,7 @@ export function SchemaSidebar() {
   const handleCreateCollectionClick = () => {
     if (!activeConnectionId) return;
 
-    if (activeCapabilities.dataModel === "keyValue") {
+    if (activeCapabilities.dataModel === "keyValue" && activeConnection?.driver === "redis") {
       setIsCreateRedisKeyOpen(true);
       return;
     }
@@ -6194,7 +6194,7 @@ export function SchemaSidebar() {
                           >
                             Table
                           </ContextMenuItem>
-                          {isFlatKeyValueTree && (
+                          {isFlatKeyValueTree && connection.driver === "redis" && (
                             <ContextMenuItem
                               className={menuItemClass}
                               onClick={() => {

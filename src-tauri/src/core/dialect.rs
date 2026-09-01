@@ -535,7 +535,7 @@ const CONSUL_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "consul",
     aliases: &[],
     display_name: "Consul",
-    data_model: DatabaseDataModel::Coordination,
+    data_model: DatabaseDataModel::KeyValue,
     connection_mode: DatabaseConnectionMode::Network,
     lsp_language_id: "consul",
     namespace_label: "kv",
@@ -2480,7 +2480,7 @@ WITH NO DATA;"#
         assert!(!victoriametrics.supports_transactions);
 
         let consul = database_capabilities_for_driver("consul").unwrap();
-        assert_eq!(consul.data_model, DatabaseDataModel::Coordination);
+        assert_eq!(consul.data_model, DatabaseDataModel::KeyValue);
         assert!(consul.supports_key_value_browsing);
         assert!(!consul.supports_sql_query);
         assert!(!consul.supports_table_row_mutation);

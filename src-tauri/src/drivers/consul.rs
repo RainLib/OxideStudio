@@ -1,9 +1,10 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, CollectionPage, QueryResult},
+    protocol::{CollectionInfo, CollectionPage, ColumnDef, QueryResult},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde_json::Value;
@@ -13,6 +14,7 @@ use std::time::Duration;
 const CONSUL_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CONSUL_ERROR_MAX_BYTES: usize = 64 * 1024;
 const CONSUL_PAGE_LIMIT: usize = 1_000;
+const CONSUL_VALUE_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -115,6 +117,61 @@ impl ConsulDriver {
         }
         Ok(keys)
     }
+
+    async fn get_key(&self, key: &str) -> Result<QueryResult> {
+        validate_prefix(key)?;
+        if key.is_empty() || key.ends_with('/') {
+            bail!("Consul GET requires one concrete KV key")
+        }
+        let encoded = key
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        let data = self
+            .read_json(self.endpoint(&format!("v1/kv/{encoded}"))?, "KV key read")
+            .await?;
+        let entry = data
+            .as_array()
+            .and_then(|entries| entries.first())
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("Consul returned invalid KV key JSON"))?;
+        let value = entry.get("Value").and_then(Value::as_str).unwrap_or("");
+        let bytes = STANDARD
+            .decode(value)
+            .context("Consul KV value is not valid base64")?;
+        let truncated = bytes.len() > CONSUL_VALUE_PREVIEW_MAX_BYTES;
+        let visible = &bytes[..bytes.len().min(CONSUL_VALUE_PREVIEW_MAX_BYTES)];
+        let preview = String::from_utf8(visible.to_vec())
+            .map(Value::String)
+            .unwrap_or_else(|_| Value::String(STANDARD.encode(visible)));
+        let mut result = QueryResult::rows(
+            vec![
+                ColumnDef {
+                    name: "key".to_string(),
+                    data_type: "string".to_string(),
+                },
+                ColumnDef {
+                    name: "value".to_string(),
+                    data_type: "string".to_string(),
+                },
+                ColumnDef {
+                    name: "modify_index".to_string(),
+                    data_type: "string".to_string(),
+                },
+            ],
+            vec![vec![
+                Value::String(key.to_string()),
+                preview,
+                entry.get("ModifyIndex").cloned().unwrap_or(Value::Null),
+            ]],
+        );
+        result.truncated = truncated;
+        result.row_limit = truncated.then_some(CONSUL_VALUE_PREVIEW_MAX_BYTES);
+        result.message =
+            truncated.then(|| "Consul KV value preview is truncated at 64 KiB".to_string());
+        Ok(result)
+    }
 }
 
 #[async_trait]
@@ -146,10 +203,16 @@ impl DatabaseDriver for ConsulDriver {
         Ok(())
     }
 
-    async fn query(&self, _: &str) -> Result<Vec<QueryResult>> {
-        Err(anyhow!(
-            "Consul has no SQL/console execution surface; browse KV keys from Explorer"
-        ))
+    async fn query(&self, command: &str) -> Result<Vec<QueryResult>> {
+        self.ensure_connected()?;
+        let command = command.trim();
+        let key = command
+            .strip_prefix("GET ")
+            .or_else(|| command.strip_prefix("get "))
+            .ok_or_else(|| anyhow!("Consul only supports GET <JSON-quoted-key> previews"))?;
+        let key: String =
+            serde_json::from_str(key.trim()).context("Consul GET requires a JSON-quoted key")?;
+        Ok(vec![self.get_key(&key).await?])
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -352,6 +415,7 @@ mod tests {
             r#"{"Config":{"NodeName":"test"}}"#,
             r#""127.0.0.1:8300""#,
             r#"["api/","app/config","app/feature"]"#,
+            r#"[{"Key":"app/config","Value":"eyJlbmFibGVkIjp0cnVlfQ==","ModifyIndex":42}]"#,
         ])
         .await;
         let mut driver = ConsulDriver::new(&url).unwrap();
@@ -368,10 +432,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["app/config", "app/feature"]
         );
+        let preview = driver.query(r#"GET "app/config""#).await.unwrap();
+        assert_eq!(
+            preview[0].rows[0][0],
+            Value::String("app/config".to_string())
+        );
+        assert_eq!(
+            preview[0].rows[0][1],
+            Value::String(r#"{"enabled":true}"#.to_string())
+        );
+        assert_eq!(preview[0].rows[0][2], Value::from(42));
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /tenant/v1/agent/self HTTP/1.1"));
         assert!(requests[1].starts_with("GET /tenant/v1/status/leader HTTP/1.1"));
         assert!(requests[2].starts_with("GET /tenant/v1/kv/?keys=&separator=%2F HTTP/1.1"));
+        assert!(requests[3].starts_with("GET /tenant/v1/kv/app/config HTTP/1.1"));
         assert!(requests
             .iter()
             .all(|request| request.contains("x-consul-token: test-token")));

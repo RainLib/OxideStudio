@@ -428,7 +428,7 @@ const DATABASE_DRIVER_PROFILES: Record<
       "bg-rose-500/10 text-rose-600 dark:text-rose-400 group-hover:bg-rose-500/20",
     capabilities: {
       displayName: "Consul",
-      dataModel: "coordination",
+      dataModel: "keyValue",
       lspLanguageId: "consul",
       namespaceLabel: "kv",
       identifierQuote: "",

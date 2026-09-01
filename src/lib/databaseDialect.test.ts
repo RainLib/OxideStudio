@@ -44,7 +44,7 @@ describe("Consul dialect profile", () => {
     expect(connectionUrlScheme("consul")).toBe("http");
     expect(defaultDatabasePort("consul")).toBe(8500);
     expect(defaultDatabaseCapabilities("consul")).toMatchObject({
-      dataModel: "coordination",
+      dataModel: "keyValue",
       lspLanguageId: "consul",
       supportsSqlQuery: false,
       supportsKeyValueBrowsing: true,

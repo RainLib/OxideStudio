@@ -72,7 +72,8 @@ open real database endpoints.
 
 - Start Consul behind direct and path-prefixed HTTP/HTTPS endpoints. Verify
   Token header authentication, agent/leader health, prefix/key pagination,
-  URL redaction, malformed JSON and 401/403/404 error mapping.
+  bounded key-value previews, URL redaction, malformed JSON and 401/403/404
+  error mapping.
 - Confirm all KV mutation, transaction, ACL, Agent, Operator and arbitrary
   REST-console surfaces stay unavailable until their independently reviewed
   approval and conflict contracts are implemented.
@@ -121,9 +122,9 @@ open real database endpoints.
 
 - The planning catalogue now records all current DBX public `DatabaseType`
   products. The additions are DynamoDB, Meilisearch, Kyuubi, Impala, Cloud
-  Spanner, Ignite, Ignite 3, Consul, MQTT and VictoriaMetrics. They remain
-  unavailable until a product-owned signed package reports a ready runtime and
-  carries matching conformance evidence.
+  Spanner, Ignite, Ignite 3, Consul, MQTT and VictoriaMetrics. Entries without
+  a native runtime remain unavailable until a product-owned signed package
+  reports a ready runtime and carries matching conformance evidence.
 - Kyuubi and Impala may use the bounded Hive parser baseline only for a signed
   JDBC package's SQL documents. DynamoDB, Meilisearch, Consul, MQTT and
   VictoriaMetrics require dedicated provider/workspace contracts; the generic
