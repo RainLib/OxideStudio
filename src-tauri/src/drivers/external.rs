@@ -115,6 +115,77 @@ impl ExternalDriver {
             .map_err(|error| anyhow!(redact_driver_error(&error, &self.url)))
     }
 
+    async fn start_connected_sidecar(&self) -> Result<Arc<DatabaseDriverSidecar>> {
+        let sidecar = Arc::new(
+            DatabaseDriverSidecar::spawn(&self.package, &self.registry, env!("CARGO_PKG_VERSION"))
+                .await
+                .map_err(|error| anyhow!(error))?,
+        );
+        if self.agent_read_only && !sidecar.capabilities().read_only_enforcement {
+            sidecar.terminate().await;
+            return Err(anyhow!(
+                "External driver package does not enforce Agent read-only queries"
+            ));
+        }
+        let connect = sidecar
+            .request(
+                DriverRequest::Connect {
+                    connection_id: self.connection_id.clone(),
+                    config: SecretConnectionConfig {
+                        url: self.url.clone(),
+                        options: Default::default(),
+                    },
+                },
+                CONNECTION_TIMEOUT,
+            )
+            .await;
+        match connect {
+            Ok(DriverResult::Empty) | Ok(DriverResult::Boolean(true)) => {}
+            Ok(_) => {
+                sidecar.terminate().await;
+                return Err(anyhow!(
+                    "External driver returned an invalid connect response"
+                ));
+            }
+            Err(error) => {
+                sidecar.terminate().await;
+                return Err(anyhow!(redact_driver_error(&error, &self.url)));
+            }
+        }
+        let version = sidecar
+            .request(
+                DriverRequest::ServerVersion {
+                    connection_id: self.connection_id.clone(),
+                },
+                CONNECTION_TIMEOUT,
+            )
+            .await;
+        match version {
+            Ok(DriverResult::ServerVersion(version)) => {
+                if let Err(error) = validate_server_version_compatibility(
+                    self.package.manifest.server_version_range.as_deref(),
+                    version.as_deref(),
+                ) {
+                    sidecar.terminate().await;
+                    return Err(anyhow!(error));
+                }
+                *self.server_version.lock().await = version;
+            }
+            Ok(_) => {
+                sidecar.terminate().await;
+                return Err(anyhow!(
+                    "External driver returned an invalid server version response"
+                ));
+            }
+            Err(error) => {
+                sidecar.terminate().await;
+                return Err(anyhow!(redact_driver_error(&error, &self.url)));
+            }
+        }
+        *self.capabilities.lock().await = sidecar.capabilities().clone();
+        Ok(sidecar)
+    }
+
     async fn require_semantic_schema_migration(&self) -> Result<SchemaMigrationMode> {
         if self.agent_read_only {
             return Err(anyhow!(
@@ -635,6 +706,33 @@ impl DatabaseDriver for ExternalDriver {
         }
     }
 
+    async fn reconnect_external_runtime(&self) -> Result<bool> {
+        let mut process = self.process.lock().await;
+        let Some(current) = process.as_ref().cloned() else {
+            return Ok(false);
+        };
+        if current.is_running().await {
+            return Ok(false);
+        }
+        current.terminate().await;
+        *process = None;
+        *self.server_version.lock().await = None;
+        *self.capabilities.lock().await = Default::default();
+        match self.start_connected_sidecar().await {
+            Ok(replacement) => {
+                *process = Some(replacement);
+                Ok(true)
+            }
+            Err(error) => {
+                // Retain the terminated handle as an observable unhealthy
+                // runtime so a bounded later retry remains possible. No
+                // connection config or sidecar output leaves this object.
+                *process = Some(current);
+                Err(error)
+            }
+        }
+    }
+
     fn package_capabilities(&self) -> Option<crate::core::dialect::DatabaseCapabilities> {
         self.package.manifest.capabilities.clone()
     }
@@ -666,74 +764,7 @@ impl DatabaseDriver for ExternalDriver {
         if process.is_some() {
             return Ok(());
         }
-        let sidecar = Arc::new(
-            DatabaseDriverSidecar::spawn(&self.package, &self.registry, env!("CARGO_PKG_VERSION"))
-                .await
-                .map_err(|error| anyhow!(error))?,
-        );
-        if self.agent_read_only && !sidecar.capabilities().read_only_enforcement {
-            sidecar.terminate().await;
-            return Err(anyhow!(
-                "External driver package does not enforce Agent read-only queries"
-            ));
-        }
-        let connect = sidecar
-            .request(
-                DriverRequest::Connect {
-                    connection_id: self.connection_id.clone(),
-                    config: SecretConnectionConfig {
-                        url: self.url.clone(),
-                        options: Default::default(),
-                    },
-                },
-                CONNECTION_TIMEOUT,
-            )
-            .await;
-        match connect {
-            Ok(DriverResult::Empty) | Ok(DriverResult::Boolean(true)) => {}
-            Ok(_) => {
-                sidecar.terminate().await;
-                return Err(anyhow!(
-                    "External driver returned an invalid connect response"
-                ));
-            }
-            Err(error) => {
-                sidecar.terminate().await;
-                return Err(anyhow!(redact_driver_error(&error, &self.url)));
-            }
-        }
-        let version = sidecar
-            .request(
-                DriverRequest::ServerVersion {
-                    connection_id: self.connection_id.clone(),
-                },
-                CONNECTION_TIMEOUT,
-            )
-            .await;
-        match version {
-            Ok(DriverResult::ServerVersion(version)) => {
-                if let Err(error) = validate_server_version_compatibility(
-                    self.package.manifest.server_version_range.as_deref(),
-                    version.as_deref(),
-                ) {
-                    sidecar.terminate().await;
-                    return Err(anyhow!(error));
-                }
-                *self.server_version.lock().await = version;
-            }
-            Ok(_) => {
-                sidecar.terminate().await;
-                return Err(anyhow!(
-                    "External driver returned an invalid server version response"
-                ));
-            }
-            Err(error) => {
-                sidecar.terminate().await;
-                return Err(anyhow!(redact_driver_error(&error, &self.url)));
-            }
-        }
-        *self.capabilities.lock().await = sidecar.capabilities().clone();
-        *process = Some(sidecar);
+        *process = Some(self.start_connected_sidecar().await?);
         Ok(())
     }
 

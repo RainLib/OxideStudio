@@ -89,6 +89,10 @@ pub fn run() {
             use tauri::async_runtime::block_on;
             let meta_store = block_on(core::store::MetaStore::new(app.handle()))
                 .expect("failed to initialize metadata store");
+            block_on(
+                app.state::<ConnectionManager>()
+                    .set_external_runtime_telemetry_store(meta_store.clone()),
+            );
             app.manage(meta_store);
             let mcp_http_service = Arc::new(
                 commands::mcp_http::McpHttpServerState::new(app.handle())
@@ -241,6 +245,7 @@ pub fn run() {
             commands::database::list_database_capabilities,
             commands::database::list_database_driver_installations,
             commands::database::list_external_database_driver_runtimes,
+            commands::database::reconnect_external_database_driver_runtimes,
             commands::database::list_managed_java_runtimes,
             commands::database::get_external_database_driver_catalog,
             commands::database::install_external_database_driver,

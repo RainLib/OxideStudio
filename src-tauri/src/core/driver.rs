@@ -171,6 +171,15 @@ pub trait DatabaseDriver: Send + Sync {
         None
     }
 
+    /// Explicitly recreate an exited connection-owned sidecar while retaining
+    /// the already validated in-memory connection configuration. The manager
+    /// applies the reconnect budget before calling this hook. `Ok(false)` means
+    /// the runtime is healthy or this driver does not own a reconnectable
+    /// external process.
+    async fn reconnect_external_runtime(&self) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Signed capabilities supplied by an independently updateable driver
     /// package. Native drivers use the bundled dialect registry instead.
     /// Exposing this through the live connection keeps snapshot/export policy

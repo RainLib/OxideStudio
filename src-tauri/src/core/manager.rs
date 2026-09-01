@@ -3,6 +3,7 @@ use super::protocol::{
     IndexInfo, ParameterizedStatement, QueryParameter,
 };
 use super::ssh::SshTunnel;
+use super::store::{DriverRuntimeEventKind, DriverRuntimeTelemetryRecord, MetaStore};
 use super::{
     dialect::DatabaseCapabilities,
     driver::{
@@ -15,11 +16,15 @@ use oxide_driver_protocol::{
     SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
     SchemaMigrationPreflightResult, SchemaMigrationVerifyRequest, SchemaMigrationVerifyResult,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+
+const EXTERNAL_RUNTIME_RECONNECT_WINDOW_MS: u64 = 5 * 60 * 1000;
+const EXTERNAL_RUNTIME_RECONNECT_MAX_ATTEMPTS: usize = 3;
+const EXTERNAL_RUNTIME_RECONNECT_BATCH_LIMIT: usize = 32;
 
 #[derive(Clone)]
 pub struct ConnectionManager {
@@ -32,6 +37,8 @@ pub struct ConnectionManager {
     /// ids are only transient deduplication keys for observed exits.
     external_runtime_telemetry:
         Arc<Mutex<BTreeMap<(String, String), ExternalDriverRuntimeTelemetry>>>,
+    external_runtime_store: Arc<Mutex<Option<MetaStore>>>,
+    external_runtime_reconnect_lock: Arc<Mutex<()>>,
 }
 
 struct ManagedConnection {
@@ -65,15 +72,44 @@ pub struct ExternalDriverRuntimeSummary {
     pub observed_exit_count: u64,
     pub last_started_at_millis: Option<u64>,
     pub last_exit_observed_at_millis: Option<u64>,
+    pub reconnect_attempt_count: u64,
+    pub reconnect_success_count: u64,
+    pub reconnect_failure_count: u64,
+    pub reconnect_budget_block_count: u64,
+    pub reconnect_available: bool,
+    pub reconnect_blocked_connection_count: usize,
+    pub last_event_code: Option<String>,
+    pub last_event_at_millis: Option<u64>,
+    pub last_reconnect_at_millis: Option<u64>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDriverRuntimeReconnectResult {
+    pub driver: String,
+    pub package_version: String,
+    pub reason: String,
+    pub matched_connection_count: usize,
+    pub attempted_count: usize,
+    pub reconnected_count: usize,
+    pub failed_count: usize,
+    pub budget_blocked_count: usize,
+}
+
+#[derive(Default, Clone)]
 struct ExternalDriverRuntimeTelemetry {
     launch_count: u64,
     observed_exit_count: u64,
     last_started_at_millis: Option<u64>,
     last_exit_observed_at_millis: Option<u64>,
     observed_exited_connection_ids: HashSet<String>,
+    reconnect_attempt_count: u64,
+    reconnect_success_count: u64,
+    reconnect_failure_count: u64,
+    reconnect_budget_block_count: u64,
+    reconnect_attempts_by_connection: HashMap<String, VecDeque<u64>>,
+    last_event_code: Option<String>,
+    last_event_at_millis: Option<u64>,
+    last_reconnect_at_millis: Option<u64>,
 }
 
 /// Immutable capability inputs captured from one concrete live driver.
@@ -114,6 +150,66 @@ impl ConnectionManager {
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_schemas: Arc::new(Mutex::new(HashMap::new())),
             external_runtime_telemetry: Arc::new(Mutex::new(BTreeMap::new())),
+            external_runtime_store: Arc::new(Mutex::new(None)),
+            external_runtime_reconnect_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub async fn set_external_runtime_telemetry_store(&self, store: MetaStore) {
+        *self.external_runtime_store.lock().await = Some(store);
+    }
+
+    async fn record_persistent_runtime_event(
+        &self,
+        package_identity: &(String, String),
+        event: DriverRuntimeEventKind,
+        occurred_at_millis: u64,
+    ) {
+        let store = self.external_runtime_store.lock().await.clone();
+        let Some(store) = store else {
+            return;
+        };
+        if let Err(error) = store
+            .record_driver_runtime_event(
+                &package_identity.0,
+                &package_identity.1,
+                event,
+                occurred_at_millis,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to persist sanitized external driver runtime event {}: {}",
+                event.as_str(),
+                error
+            );
+        }
+    }
+
+    async fn persistent_runtime_telemetry(
+        &self,
+    ) -> BTreeMap<(String, String), DriverRuntimeTelemetryRecord> {
+        let store = self.external_runtime_store.lock().await.clone();
+        let Some(store) = store else {
+            return BTreeMap::new();
+        };
+        match store.list_driver_runtime_telemetry().await {
+            Ok(records) => records
+                .into_iter()
+                .map(|record| {
+                    (
+                        (record.driver.clone(), record.package_version.clone()),
+                        record,
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to read sanitized external driver runtime telemetry: {}",
+                    error
+                );
+                BTreeMap::new()
+            }
         }
     }
 
@@ -148,13 +244,90 @@ impl ConnectionManager {
         // leaves this manager-level deduplication set.
         for value in telemetry.values_mut() {
             value.observed_exited_connection_ids.remove(connection_id);
+            if package_identity.is_none() {
+                value.reconnect_attempts_by_connection.remove(connection_id);
+            }
         }
         let Some(package_identity) = package_identity else {
             return;
         };
-        let entry = telemetry.entry(package_identity).or_default();
+        let occurred_at = runtime_timestamp_millis();
+        let entry = telemetry.entry(package_identity.clone()).or_default();
         entry.launch_count = entry.launch_count.saturating_add(1);
-        entry.last_started_at_millis = Some(runtime_timestamp_millis());
+        entry.last_started_at_millis = Some(occurred_at);
+        entry.last_event_code = Some(DriverRuntimeEventKind::Launched.as_str().to_string());
+        entry.last_event_at_millis = Some(occurred_at);
+        drop(telemetry);
+        self.record_persistent_runtime_event(
+            &package_identity,
+            DriverRuntimeEventKind::Launched,
+            occurred_at,
+        )
+        .await;
+    }
+
+    async fn claim_external_runtime_reconnect(
+        &self,
+        package_identity: &(String, String),
+        connection_id: &str,
+    ) -> bool {
+        let occurred_at = runtime_timestamp_millis();
+        let event = {
+            let mut telemetry = self.external_runtime_telemetry.lock().await;
+            let entry = telemetry.entry(package_identity.clone()).or_default();
+            let attempts = entry
+                .reconnect_attempts_by_connection
+                .entry(connection_id.to_string())
+                .or_default();
+            while attempts.front().is_some_and(|timestamp| {
+                occurred_at.saturating_sub(*timestamp) > EXTERNAL_RUNTIME_RECONNECT_WINDOW_MS
+            }) {
+                attempts.pop_front();
+            }
+            let event = if attempts.len() >= EXTERNAL_RUNTIME_RECONNECT_MAX_ATTEMPTS {
+                entry.reconnect_budget_block_count =
+                    entry.reconnect_budget_block_count.saturating_add(1);
+                DriverRuntimeEventKind::ReconnectBudgetBlocked
+            } else {
+                attempts.push_back(occurred_at);
+                entry.reconnect_attempt_count = entry.reconnect_attempt_count.saturating_add(1);
+                DriverRuntimeEventKind::ReconnectAttempted
+            };
+            entry.last_event_code = Some(event.as_str().to_string());
+            entry.last_event_at_millis = Some(occurred_at);
+            entry.last_reconnect_at_millis = Some(occurred_at);
+            event
+        };
+        self.record_persistent_runtime_event(package_identity, event, occurred_at)
+            .await;
+        event == DriverRuntimeEventKind::ReconnectAttempted
+    }
+
+    async fn record_external_runtime_reconnect_outcome(
+        &self,
+        package_identity: &(String, String),
+        succeeded: bool,
+    ) {
+        let occurred_at = runtime_timestamp_millis();
+        let event = if succeeded {
+            DriverRuntimeEventKind::ReconnectSucceeded
+        } else {
+            DriverRuntimeEventKind::ReconnectFailed
+        };
+        {
+            let mut telemetry = self.external_runtime_telemetry.lock().await;
+            let entry = telemetry.entry(package_identity.clone()).or_default();
+            if succeeded {
+                entry.reconnect_success_count = entry.reconnect_success_count.saturating_add(1);
+            } else {
+                entry.reconnect_failure_count = entry.reconnect_failure_count.saturating_add(1);
+            }
+            entry.last_event_code = Some(event.as_str().to_string());
+            entry.last_event_at_millis = Some(occurred_at);
+            entry.last_reconnect_at_millis = Some(occurred_at);
+        }
+        self.record_persistent_runtime_event(package_identity, event, occurred_at)
+            .await;
     }
 
     pub async fn add_connection(&self, id: String, driver: Box<dyn DatabaseDriver>) {
@@ -384,6 +557,83 @@ impl ConnectionManager {
             .count()
     }
 
+    pub async fn reconnect_external_driver_runtimes(
+        &self,
+        driver: &str,
+        package_version: &str,
+    ) -> Result<ExternalDriverRuntimeReconnectResult> {
+        if !super::driver_package::is_safe_driver_package_token(driver)
+            || !super::driver_package::is_safe_driver_package_token(package_version)
+        {
+            return Err(anyhow!("Invalid external driver package identity"));
+        }
+        let _reconnect_guard = self.external_runtime_reconnect_lock.lock().await;
+        let package_identity = (driver.to_string(), package_version.to_string());
+        let candidates = {
+            let connections = self.connections.lock().await;
+            connections
+                .iter()
+                .filter_map(|(connection_id, connection)| {
+                    connection
+                        .driver
+                        .external_package_identity()
+                        .filter(|identity| identity.0 == driver && identity.1 == package_version)
+                        .map(|_| (connection_id.clone(), connection.driver.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        if candidates.len() > EXTERNAL_RUNTIME_RECONNECT_BATCH_LIMIT {
+            return Err(anyhow!(
+                "Too many external driver connections require a single reconnect operation"
+            ));
+        }
+
+        let mut unhealthy = Vec::new();
+        for (connection_id, connection) in candidates {
+            if matches!(connection.external_runtime_is_healthy().await, Some(false)) {
+                unhealthy.push((connection_id, connection));
+            }
+        }
+        let matched_connection_count = unhealthy.len();
+        let mut attempted_count = 0usize;
+        let mut reconnected_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut budget_blocked_count = 0usize;
+        for (connection_id, connection) in unhealthy {
+            if !self
+                .claim_external_runtime_reconnect(&package_identity, &connection_id)
+                .await
+            {
+                budget_blocked_count = budget_blocked_count.saturating_add(1);
+                continue;
+            }
+            attempted_count = attempted_count.saturating_add(1);
+            let reconnected = matches!(connection.reconnect_external_runtime().await, Ok(true));
+            self.record_external_runtime_reconnect_outcome(&package_identity, reconnected)
+                .await;
+            if reconnected {
+                reconnected_count = reconnected_count.saturating_add(1);
+                self.record_external_runtime_replacement(
+                    &connection_id,
+                    Some(package_identity.clone()),
+                )
+                .await;
+            } else {
+                failed_count = failed_count.saturating_add(1);
+            }
+        }
+        Ok(ExternalDriverRuntimeReconnectResult {
+            driver: driver.to_string(),
+            package_version: package_version.to_string(),
+            reason: "process-exited".to_string(),
+            matched_connection_count,
+            attempted_count,
+            reconnected_count,
+            failed_count,
+            budget_blocked_count,
+        })
+    }
+
     pub async fn external_driver_runtime_summaries(&self) -> Vec<ExternalDriverRuntimeSummary> {
         let connections = {
             let connections = self.connections.lock().await;
@@ -425,14 +675,20 @@ impl ConnectionManager {
             health_observations.push((package_identity, connection_id, is_healthy));
         }
 
+        let mut newly_observed_exits = Vec::new();
+        let now = runtime_timestamp_millis();
         let telemetry = {
             let mut telemetry = self.external_runtime_telemetry.lock().await;
             for (package_identity, connection_id, is_healthy) in health_observations {
-                let entry = telemetry.entry(package_identity).or_default();
+                let entry = telemetry.entry(package_identity.clone()).or_default();
                 if matches!(is_healthy, Some(false)) {
                     if entry.observed_exited_connection_ids.insert(connection_id) {
                         entry.observed_exit_count = entry.observed_exit_count.saturating_add(1);
-                        entry.last_exit_observed_at_millis = Some(runtime_timestamp_millis());
+                        entry.last_exit_observed_at_millis = Some(now);
+                        entry.last_event_code =
+                            Some(DriverRuntimeEventKind::Exited.as_str().to_string());
+                        entry.last_event_at_millis = Some(now);
+                        newly_observed_exits.push(package_identity);
                     }
                 } else {
                     entry.observed_exited_connection_ids.remove(&connection_id);
@@ -441,21 +697,28 @@ impl ConnectionManager {
             grouped
                 .keys()
                 .map(|identity| {
-                    let entry = telemetry
-                        .get(identity)
-                        .expect("runtime telemetry entry exists");
-                    (
-                        identity.clone(),
-                        (
-                            entry.launch_count,
-                            entry.observed_exit_count,
-                            entry.last_started_at_millis,
-                            entry.last_exit_observed_at_millis,
-                        ),
-                    )
+                    let entry = telemetry.entry(identity.clone()).or_default();
+                    for attempts in entry.reconnect_attempts_by_connection.values_mut() {
+                        while attempts.front().is_some_and(|timestamp| {
+                            now.saturating_sub(*timestamp) > EXTERNAL_RUNTIME_RECONNECT_WINDOW_MS
+                        }) {
+                            attempts.pop_front();
+                        }
+                    }
+                    (identity.clone(), entry.clone())
                 })
                 .collect::<BTreeMap<_, _>>()
         };
+
+        for package_identity in newly_observed_exits {
+            self.record_persistent_runtime_event(
+                &package_identity,
+                DriverRuntimeEventKind::Exited,
+                now,
+            )
+            .await;
+        }
+        let persistent = self.persistent_runtime_telemetry().await;
 
         grouped
             .into_iter()
@@ -470,15 +733,21 @@ impl ConnectionManager {
                     ),
                 )| {
                     process_ids.sort_unstable();
-                    let (
-                        launch_count,
-                        observed_exit_count,
-                        last_started_at_millis,
-                        last_exit_observed_at_millis,
-                    ) = telemetry
-                        .get(&(driver.clone(), package_version.clone()))
-                        .copied()
-                        .unwrap_or((0, 0, None, None));
+                    let identity = (driver.clone(), package_version.clone());
+                    let process = telemetry.get(&identity).cloned().unwrap_or_default();
+                    let persisted = persistent.get(&identity);
+                    let reconnect_blocked_connection_count = process
+                        .observed_exited_connection_ids
+                        .iter()
+                        .filter(|connection_id| {
+                            process
+                                .reconnect_attempts_by_connection
+                                .get(*connection_id)
+                                .is_some_and(|attempts| {
+                                    attempts.len() >= EXTERNAL_RUNTIME_RECONNECT_MAX_ATTEMPTS
+                                })
+                        })
+                        .count();
                     ExternalDriverRuntimeSummary {
                         driver,
                         package_version,
@@ -486,10 +755,42 @@ impl ConnectionManager {
                         process_ids,
                         unavailable_process_count,
                         unhealthy_connection_count,
-                        launch_count,
-                        observed_exit_count,
-                        last_started_at_millis,
-                        last_exit_observed_at_millis,
+                        launch_count: persisted
+                            .map(|record| record.launch_count)
+                            .unwrap_or(process.launch_count),
+                        observed_exit_count: persisted
+                            .map(|record| record.observed_exit_count)
+                            .unwrap_or(process.observed_exit_count),
+                        last_started_at_millis: persisted
+                            .and_then(|record| record.last_started_at_millis)
+                            .or(process.last_started_at_millis),
+                        last_exit_observed_at_millis: persisted
+                            .and_then(|record| record.last_exit_observed_at_millis)
+                            .or(process.last_exit_observed_at_millis),
+                        reconnect_attempt_count: persisted
+                            .map(|record| record.reconnect_attempt_count)
+                            .unwrap_or(process.reconnect_attempt_count),
+                        reconnect_success_count: persisted
+                            .map(|record| record.reconnect_success_count)
+                            .unwrap_or(process.reconnect_success_count),
+                        reconnect_failure_count: persisted
+                            .map(|record| record.reconnect_failure_count)
+                            .unwrap_or(process.reconnect_failure_count),
+                        reconnect_budget_block_count: persisted
+                            .map(|record| record.reconnect_budget_block_count)
+                            .unwrap_or(process.reconnect_budget_block_count),
+                        reconnect_available: unhealthy_connection_count
+                            > reconnect_blocked_connection_count,
+                        reconnect_blocked_connection_count,
+                        last_event_code: persisted
+                            .map(|record| record.last_event_code.clone())
+                            .or(process.last_event_code),
+                        last_event_at_millis: persisted
+                            .map(|record| record.last_event_at_millis)
+                            .or(process.last_event_at_millis),
+                        last_reconnect_at_millis: persisted
+                            .and_then(|record| record.last_reconnect_at_millis)
+                            .or(process.last_reconnect_at_millis),
                     }
                 },
             )
@@ -1130,7 +1431,7 @@ mod tests {
     };
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Notify;
     use tokio::time::{timeout, Duration};
@@ -1149,6 +1450,12 @@ mod tests {
         version: &'static str,
         process_id: Option<u32>,
         healthy: Option<bool>,
+    }
+
+    struct ReconnectRuntimeDriver {
+        healthy: Arc<AtomicBool>,
+        reconnects: Arc<AtomicUsize>,
+        succeeds: bool,
     }
 
     struct CapabilityDriver {
@@ -1198,6 +1505,47 @@ mod tests {
 
         async fn external_runtime_is_healthy(&self) -> Option<bool> {
             self.healthy
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for ReconnectRuntimeDriver {
+        fn external_package_identity(&self) -> Option<(&str, &str)> {
+            Some(("oracle", "23.3.0"))
+        }
+
+        async fn external_runtime_process_id(&self) -> Option<u32> {
+            Some(8201)
+        }
+
+        async fn external_runtime_is_healthy(&self) -> Option<bool> {
+            Some(self.healthy.load(Ordering::Acquire))
+        }
+
+        async fn reconnect_external_runtime(&self) -> Result<bool> {
+            self.reconnects.fetch_add(1, Ordering::AcqRel);
+            if self.succeeds {
+                self.healthy.store(true, Ordering::Release);
+                Ok(true)
+            } else {
+                Err(anyhow!("private sidecar failure detail"))
+            }
         }
 
         async fn connect(&mut self) -> Result<()> {
@@ -1674,6 +2022,136 @@ mod tests {
         assert_eq!(summary.observed_exit_count, 1);
         assert!(summary.last_started_at_millis.is_some());
         assert!(summary.last_exit_observed_at_millis.is_some());
+    }
+
+    #[tokio::test]
+    async fn exited_runtime_reconnect_is_explicit_and_updates_sanitized_telemetry() {
+        let manager = ConnectionManager::new();
+        let healthy = Arc::new(AtomicBool::new(false));
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        manager
+            .add_connection(
+                "private-connection".to_string(),
+                Box::new(ReconnectRuntimeDriver {
+                    healthy: healthy.clone(),
+                    reconnects: reconnects.clone(),
+                    succeeds: true,
+                }),
+            )
+            .await;
+        let before = manager.external_driver_runtime_summaries().await;
+        assert_eq!(before[0].unhealthy_connection_count, 1);
+        assert!(before[0].reconnect_available);
+
+        let result = manager
+            .reconnect_external_driver_runtimes("oracle", "23.3.0")
+            .await
+            .unwrap();
+        assert_eq!(result.reason, "process-exited");
+        assert_eq!(result.matched_connection_count, 1);
+        assert_eq!(result.reconnected_count, 1);
+        assert_eq!(reconnects.load(Ordering::Acquire), 1);
+        assert!(healthy.load(Ordering::Acquire));
+
+        let after = manager.external_driver_runtime_summaries().await;
+        assert_eq!(after[0].unhealthy_connection_count, 0);
+        assert_eq!(after[0].launch_count, 2);
+        assert_eq!(after[0].reconnect_attempt_count, 1);
+        assert_eq!(after[0].reconnect_success_count, 1);
+        assert_eq!(after[0].last_event_code.as_deref(), Some("launched"));
+    }
+
+    #[tokio::test]
+    async fn repeated_runtime_reconnect_failures_are_budget_limited() {
+        let manager = ConnectionManager::new();
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        manager
+            .add_connection(
+                "private-connection".to_string(),
+                Box::new(ReconnectRuntimeDriver {
+                    healthy: Arc::new(AtomicBool::new(false)),
+                    reconnects: reconnects.clone(),
+                    succeeds: false,
+                }),
+            )
+            .await;
+        manager.external_driver_runtime_summaries().await;
+
+        for _ in 0..EXTERNAL_RUNTIME_RECONNECT_MAX_ATTEMPTS {
+            let result = manager
+                .reconnect_external_driver_runtimes("oracle", "23.3.0")
+                .await
+                .unwrap();
+            assert_eq!(result.attempted_count, 1);
+            assert_eq!(result.failed_count, 1);
+        }
+        let blocked = manager
+            .reconnect_external_driver_runtimes("oracle", "23.3.0")
+            .await
+            .unwrap();
+        assert_eq!(blocked.attempted_count, 0);
+        assert_eq!(blocked.budget_blocked_count, 1);
+        assert_eq!(reconnects.load(Ordering::Acquire), 3);
+
+        let summaries = manager.external_driver_runtime_summaries().await;
+        let summary = &summaries[0];
+        assert_eq!(summary.reconnect_attempt_count, 3);
+        assert_eq!(summary.reconnect_failure_count, 3);
+        assert_eq!(summary.reconnect_budget_block_count, 1);
+        assert_eq!(summary.reconnect_blocked_connection_count, 1);
+        assert!(!summary.reconnect_available);
+        assert_eq!(
+            summary.last_event_code.as_deref(),
+            Some("reconnect-budget-blocked")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_summary_merges_sanitized_telemetry_across_manager_instances() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+
+        let first = ConnectionManager::new();
+        first
+            .set_external_runtime_telemetry_store(store.clone())
+            .await;
+        first
+            .add_connection(
+                "private-old-connection".to_string(),
+                Box::new(RuntimeDriver {
+                    driver: "oracle",
+                    version: "23.3.0",
+                    process_id: Some(8201),
+                    healthy: Some(false),
+                }),
+            )
+            .await;
+        let observed = first.external_driver_runtime_summaries().await;
+        assert_eq!(observed[0].launch_count, 1);
+        assert_eq!(observed[0].observed_exit_count, 1);
+
+        let second = ConnectionManager::new();
+        second.set_external_runtime_telemetry_store(store).await;
+        second
+            .add_connection(
+                "private-new-connection".to_string(),
+                Box::new(RuntimeDriver {
+                    driver: "oracle",
+                    version: "23.3.0",
+                    process_id: Some(8202),
+                    healthy: Some(true),
+                }),
+            )
+            .await;
+        let restored = second.external_driver_runtime_summaries().await;
+        assert_eq!(restored[0].launch_count, 2);
+        assert_eq!(restored[0].observed_exit_count, 1);
+        assert_eq!(restored[0].last_event_code.as_deref(), Some("launched"));
     }
 
     #[tokio::test]

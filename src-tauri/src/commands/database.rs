@@ -11,7 +11,10 @@ use crate::core::{
         ManagedJavaRuntimeInstallation,
     },
     driver_sidecar::DatabaseDriverSidecar,
-    manager::{ConnectionManager, ExternalDriverRuntimeSummary, LiveConnectionCapabilitySnapshot},
+    manager::{
+        ConnectionManager, ExternalDriverRuntimeReconnectResult, ExternalDriverRuntimeSummary,
+        LiveConnectionCapabilitySnapshot,
+    },
     protocol::{DatabaseCreateRequest, Response},
     store::MetaStore,
 };
@@ -129,6 +132,15 @@ pub struct DatabaseDriverRuntimeSummary {
     pub observed_exit_count: u64,
     pub last_started_at_millis: Option<u64>,
     pub last_exit_observed_at_millis: Option<u64>,
+    pub reconnect_attempt_count: u64,
+    pub reconnect_success_count: u64,
+    pub reconnect_failure_count: u64,
+    pub reconnect_budget_block_count: u64,
+    pub reconnect_available: bool,
+    pub reconnect_blocked_connection_count: usize,
+    pub last_event_code: Option<String>,
+    pub last_event_at_millis: Option<u64>,
+    pub last_reconnect_at_millis: Option<u64>,
 }
 
 impl From<ExternalDriverRuntimeSummary> for DatabaseDriverRuntimeSummary {
@@ -144,6 +156,43 @@ impl From<ExternalDriverRuntimeSummary> for DatabaseDriverRuntimeSummary {
             observed_exit_count: value.observed_exit_count,
             last_started_at_millis: value.last_started_at_millis,
             last_exit_observed_at_millis: value.last_exit_observed_at_millis,
+            reconnect_attempt_count: value.reconnect_attempt_count,
+            reconnect_success_count: value.reconnect_success_count,
+            reconnect_failure_count: value.reconnect_failure_count,
+            reconnect_budget_block_count: value.reconnect_budget_block_count,
+            reconnect_available: value.reconnect_available,
+            reconnect_blocked_connection_count: value.reconnect_blocked_connection_count,
+            last_event_code: value.last_event_code,
+            last_event_at_millis: value.last_event_at_millis,
+            last_reconnect_at_millis: value.last_reconnect_at_millis,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseDriverRuntimeReconnectResult {
+    pub driver: String,
+    pub package_version: String,
+    pub reason: String,
+    pub matched_connection_count: usize,
+    pub attempted_count: usize,
+    pub reconnected_count: usize,
+    pub failed_count: usize,
+    pub budget_blocked_count: usize,
+}
+
+impl From<ExternalDriverRuntimeReconnectResult> for DatabaseDriverRuntimeReconnectResult {
+    fn from(value: ExternalDriverRuntimeReconnectResult) -> Self {
+        Self {
+            driver: value.driver,
+            package_version: value.package_version,
+            reason: value.reason,
+            matched_connection_count: value.matched_connection_count,
+            attempted_count: value.attempted_count,
+            reconnected_count: value.reconnected_count,
+            failed_count: value.failed_count,
+            budget_blocked_count: value.budget_blocked_count,
         }
     }
 }
@@ -684,6 +733,23 @@ pub async fn list_external_database_driver_runtimes(
             .map(DatabaseDriverRuntimeSummary::from)
             .collect(),
     ))
+}
+
+/// Reconnect only sidecars already observed exited. The manager serializes
+/// recovery and applies a per-connection crash-loop budget before invoking the
+/// driver hook; raw sidecar errors never cross this command boundary.
+#[tauri::command]
+pub async fn reconnect_external_database_driver_runtimes(
+    manager: State<'_, ConnectionManager>,
+    driver: String,
+    package_version: String,
+) -> Result<Response<DatabaseDriverRuntimeReconnectResult>, String> {
+    manager
+        .reconnect_external_driver_runtimes(&driver, &package_version)
+        .await
+        .map(DatabaseDriverRuntimeReconnectResult::from)
+        .map(Response::ok)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

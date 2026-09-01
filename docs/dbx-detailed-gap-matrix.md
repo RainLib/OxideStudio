@@ -159,7 +159,7 @@
 | D03 | 部分对齐：外置 driver 安装、激活、回滚 | `src-tauri/src/commands/agents.rs`；`crates/dbx-core/src/agent_manager.rs`；`components/config/DriverStoreDialog.vue` | `src-tauri/src/core/driver_package.rs`；Settings Driver Manager | 保留 Oxide 的 Minisign、SHA-256、原子激活和 connection pin；补真实发布包。 |
 | D04 | 部分对齐：托管 Java/JAR 产品交付宽度 | `agents/common/*`；每个 `agents/drivers/<product>/build.gradle` | managed Java/runtime、generic JDBC agent、H2 内存 conformance fixture 已具备；Agent 现以真实 sidecar wire casing 处理连接/查询/cancel，尚无 SQL Server/Oracle 等正式签名包 | vendor JAR、Java 版本、URL 模板、server range 与 conformance 同时进入签名 catalog。 |
 | D05 | 逻辑已对齐并收紧：签名 Maven/JDBC 依赖获取 | DBX `crates/dbx-core/src/jdbc.rs`、`src-tauri/src/commands/plugins.rs` 与 `DriverStoreDialog.vue` 支持 resolver、Maven Central/自定义仓库、bundle 清单及离线包 | 签名 catalog 可为 Java package 声明固定 Maven 坐标、classpath 路径、精确大小/SHA-256、SPDX 许可证和 HTTPS 许可证链接；仅允许 Maven Central 固定路径，坐标/URL/manifest classpath 必须一致。依赖使用摘要命名断点缓存，安装 staging 注入后再次校验，Driver Manager 展示数量、体积、坐标和许可证 | Oxide 不接受 renderer 提交任意坐标或仓库，避免未审依赖直接进入数据库 sidecar。真实 Maven Central 代理、断点和供应商 JDBC 发布验证延期。 |
-| D06 | 部分对齐：runtime 可观测性 | `crates/dbx-core/src/driver_runtime.rs`；`components/config/driverRuntimeDisplay.ts` | `ConnectionManager::external_driver_runtime_summaries` 和 Driver Manager；按 package/version 聚合当前连接/PID/不可用数、进程生命周期内的启动次数、观测到的退出次数与最近时间 | 仍需经过真实 sidecar fixture 的崩溃预算、受控重连原因与持久化脱敏诊断；绝不保存 stderr、连接信息或 SQL。 |
+| D06 | 逻辑已对齐并收紧：runtime 可观测性与恢复 | `crates/dbx-core/src/driver_runtime.rs`；`components/config/driverRuntimeDisplay.ts` | `ConnectionManager::external_driver_runtime_summaries`、持久化 `driver_runtime_telemetry` 和 Driver Manager；按 package/version 聚合当前连接/PID/不可用/退出状态，并跨重启保留启动、退出、重连成功/失败/预算阻断计数和稳定事件码。只允许显式重连已退出 sidecar，同一连接 5 分钟最多 3 次且每批最多 32 个 | Oxide 不展示或保存 sidecar stderr，也不允许按 PID stop/kill 健康的 connection-owned runtime。真实 sidecar crash/restart、磁盘故障与多连接并发恢复验证延期。 |
 | D07 | 逻辑已对齐：下载断点续传与缓存回收 | DBX driver store/install UI 与 agent artifacts | 摘要绑定的 `.partial` 文件支持严格 HTTP Range 续传；206 必须精确延续 offset，200 自动安全回退全量，416 仅在完整摘要匹配时发布；最终 SHA-256 复验后原子进入缓存。Settings 可清理归档缓存，后端串行化下载/清理，仅删除 64-hex 摘要命名的普通文件，并保留 active、previous、connection-pinned 与 live-sidecar 版本；未知内容和符号链接不递归触碰 | 延期在真实 CDN/代理下验证 206/200/416、中断恢复、错误 Content-Range、摘要不匹配与 Windows 文件占用；不连接数据库。 |
 | D08 | 已对齐：连接级事实源 | DBX `connectionStore.ts`、`connectionDatabaseInfo.ts` | `get_connection_database_capability_context`；`LiveConnectionCapabilitySnapshot` | package、server version、capability 和 migration mode 必须来自同一 live driver 实例。 |
 | D09 | 部分对齐：复杂连接参数 | `lib/connection/oracleTnsConnection.ts`、`postgresTlsMode.ts`、`hiveKerberosOptions.ts`、`damengSslOptions.ts` | SSH、SSL、URL 与常用连接字段已支持 | 按产品包声明结构化字段；Oracle TNS、Kerberos、代理、集群地址需逐产品实现并脱敏持久化。 |
@@ -627,3 +627,26 @@ Rust 回归覆盖仓库 allowlist、坐标/URL 绑定、动态版本、packaging
 manifest 绑定、归档内污染、缓存复用/污染/保守清理、Content-Range 与真实 loopback 断点续传；
 前端 typed Tauri boundary 保留完整依赖和许可证元数据。真实 Maven Central、企业代理、网络中断、
 磁盘不足、Windows 文件占用以及正式 Oracle/SQL Server 等签名 JDBC package 发布记录为延期验证。
+
+## Phase 146 增量：外置 Driver Runtime 恢复与脱敏事件账本
+
+对照 DBX `8be503bf4` 的 `crates/dbx-core/src/driver_runtime.rs` 和 `DriverStoreDialog.vue`，Oxide 在
+保留 connection-owned sidecar 隔离边界的前提下补齐运行时恢复：
+
+- `DatabaseDriver` 新增只对外置 runtime 生效的 reconnect hook。`ExternalDriver` 仅在子进程已经退出时
+  使用当前内存中的已验证 package 与连接配置重新握手、连接、读取 server version 并刷新 runtime
+  capabilities；健康进程返回 no-op，不能通过 Driver Manager 被停止或重启。
+- Driver Manager 以精确 driver + package version 触发恢复，Host 再次枚举当前连接，只处理
+  `external_runtime_is_healthy() == Some(false)` 的项目。每批最多 32 个，同一连接滚动 5 分钟窗口最多
+  3 次尝试；恢复命令全局串行，阻止重复点击形成并发 crash loop。
+- 恢复失败不把 sidecar、JDBC 或数据库错误返回 renderer，也不会把已退出 handle 清成“未知”；它继续
+  显示 exited，供预算窗口后的人工重试。成功后才记录新 launch 并清除当前退出 observation。
+- MetaStore 新增最多 256 行、180 天保留的 package-level telemetry。只存 driver/package、固定事件码、
+  启动/退出/重连成功/失败/预算阻断计数及时间戳；schema 明确没有 connection id、URL、stderr、SQL
+  或 message 字段。乱序事件只累加计数，不允许 last-event 时间倒退。
+- Driver Manager 展示累计退出和重连成功/尝试数，只在存在 exited runtime 时显示恢复入口；达到预算
+  后禁用入口并说明 crash-loop 限制。公开 API 返回聚合计数和固定 `process-exited` 原因，不返回连接身份。
+
+Rust 回归覆盖成功恢复、失败计数、第四次预算阻断、跨 `ConnectionManager` 实例的持久计数合并、
+telemetry schema 禁止敏感字段和非法 package identity；前端 typed Tauri boundary 覆盖精确包恢复。
+真实外置 sidecar 强制崩溃、握手失败、重连中应用退出、32 连接压力和 Windows PID/文件占用验证延期。

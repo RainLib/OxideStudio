@@ -207,6 +207,34 @@ export interface DatabaseDriverRuntimeSummary {
   observedExitCount: number;
   lastStartedAtMillis?: number | null;
   lastExitObservedAtMillis?: number | null;
+  reconnectAttemptCount: number;
+  reconnectSuccessCount: number;
+  reconnectFailureCount: number;
+  reconnectBudgetBlockCount: number;
+  reconnectAvailable: boolean;
+  reconnectBlockedConnectionCount: number;
+  /** Stable host event code only; never raw sidecar output. */
+  lastEventCode?:
+    | "launched"
+    | "exited"
+    | "reconnect-attempted"
+    | "reconnect-succeeded"
+    | "reconnect-failed"
+    | "reconnect-budget-blocked"
+    | null;
+  lastEventAtMillis?: number | null;
+  lastReconnectAtMillis?: number | null;
+}
+
+export interface DatabaseDriverRuntimeReconnectResult {
+  driver: string;
+  packageVersion: string;
+  reason: "process-exited";
+  matchedConnectionCount: number;
+  attemptedCount: number;
+  reconnectedCount: number;
+  failedCount: number;
+  budgetBlockedCount: number;
 }
 
 export interface ManagedJavaRuntimeInstallation {

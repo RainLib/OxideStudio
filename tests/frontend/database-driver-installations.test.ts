@@ -61,6 +61,15 @@ describe("database driver installation inventory", () => {
         processIds: [8201, 8202],
         unavailableProcessCount: 0,
         unhealthyConnectionCount: 0,
+        launchCount: 4,
+        observedExitCount: 1,
+        reconnectAttemptCount: 1,
+        reconnectSuccessCount: 1,
+        reconnectFailureCount: 0,
+        reconnectBudgetBlockCount: 0,
+        reconnectAvailable: false,
+        reconnectBlockedConnectionCount: 0,
+        lastEventCode: "launched",
       },
     ]);
 
@@ -77,6 +86,34 @@ describe("database driver installation inventory", () => {
         processIds: [8201, 8202],
       }),
     ]);
+  });
+
+  it("reconnects only the selected exited package runtime through the typed boundary", async () => {
+    mocks.invoke.mockResolvedValue({
+      driver: "oracle",
+      packageVersion: "23.3.0",
+      reason: "process-exited",
+      matchedConnectionCount: 1,
+      attemptedCount: 1,
+      reconnectedCount: 1,
+      failedCount: 0,
+      budgetBlockedCount: 0,
+    });
+
+    const result =
+      await databaseService.reconnectExternalDatabaseDriverRuntimes(
+        "oracle",
+        "23.3.0",
+      );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "reconnect_external_database_driver_runtimes",
+      { driver: "oracle", packageVersion: "23.3.0" },
+    );
+    expect(result).toMatchObject({
+      reason: "process-exited",
+      reconnectedCount: 1,
+    });
   });
 
   it("uses the typed boundary when reading and migrating the driver store", async () => {

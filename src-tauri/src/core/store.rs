@@ -18,6 +18,8 @@ const CONNECTION_CREDENTIAL_KEY_FILE: &str = "connection-credentials-v1.secret";
 const CLI_CAPABILITY_CACHE_KEY_HEX_LENGTH: usize = 64;
 const CLI_CAPABILITY_CACHE_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const CLI_CAPABILITY_CACHE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const DRIVER_RUNTIME_TELEMETRY_RETENTION_MS: i64 = 180 * 24 * 60 * 60 * 1000;
+const DRIVER_RUNTIME_TELEMETRY_MAX_ROWS: i64 = 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
@@ -218,9 +220,62 @@ fn validate_saved_sql_identity(project_id: &str, id: &str, name: &str) -> Result
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct MetaStore {
     pool: Pool<Sqlite>,
     credential_key: Zeroizing<[u8; CONNECTION_CREDENTIAL_KEY_BYTES]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverRuntimeEventKind {
+    Launched,
+    Exited,
+    ReconnectAttempted,
+    ReconnectSucceeded,
+    ReconnectFailed,
+    ReconnectBudgetBlocked,
+}
+
+impl DriverRuntimeEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Launched => "launched",
+            Self::Exited => "exited",
+            Self::ReconnectAttempted => "reconnect-attempted",
+            Self::ReconnectSucceeded => "reconnect-succeeded",
+            Self::ReconnectFailed => "reconnect-failed",
+            Self::ReconnectBudgetBlocked => "reconnect-budget-blocked",
+        }
+    }
+
+    fn is_known_code(value: &str) -> bool {
+        matches!(
+            value,
+            "launched"
+                | "exited"
+                | "reconnect-attempted"
+                | "reconnect-succeeded"
+                | "reconnect-failed"
+                | "reconnect-budget-blocked"
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverRuntimeTelemetryRecord {
+    pub driver: String,
+    pub package_version: String,
+    pub launch_count: u64,
+    pub observed_exit_count: u64,
+    pub reconnect_attempt_count: u64,
+    pub reconnect_success_count: u64,
+    pub reconnect_failure_count: u64,
+    pub reconnect_budget_block_count: u64,
+    pub last_event_code: String,
+    pub last_event_at_millis: u64,
+    pub last_started_at_millis: Option<u64>,
+    pub last_exit_observed_at_millis: Option<u64>,
+    pub last_reconnect_at_millis: Option<u64>,
 }
 
 struct ProtectedConnectionCredentials {
@@ -590,6 +645,37 @@ impl MetaStore {
         .execute(&self.pool)
         .await?;
 
+        // Persistent external-runtime telemetry is intentionally restricted to
+        // package identity, stable event codes, counters, and timestamps. It
+        // must never become a sink for connection ids, URLs, stderr, or SQL.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS driver_runtime_telemetry (
+                driver_id TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                launch_count INTEGER NOT NULL DEFAULT 0,
+                observed_exit_count INTEGER NOT NULL DEFAULT 0,
+                reconnect_attempt_count INTEGER NOT NULL DEFAULT 0,
+                reconnect_success_count INTEGER NOT NULL DEFAULT 0,
+                reconnect_failure_count INTEGER NOT NULL DEFAULT 0,
+                reconnect_budget_block_count INTEGER NOT NULL DEFAULT 0,
+                last_event_code TEXT NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                last_started_at INTEGER,
+                last_exit_observed_at INTEGER,
+                last_reconnect_at INTEGER,
+                PRIMARY KEY(driver_id, package_version)
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_driver_runtime_telemetry_time ON driver_runtime_telemetry(last_event_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Create resources table (Hierarchical Metadata)
         // using an adjacency list model
         sqlx::query(
@@ -737,6 +823,165 @@ impl MetaStore {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn record_driver_runtime_event(
+        &self,
+        driver: &str,
+        package_version: &str,
+        event: DriverRuntimeEventKind,
+        occurred_at_millis: u64,
+    ) -> Result<()> {
+        if !super::driver_package::is_safe_driver_package_token(driver)
+            || !super::driver_package::is_safe_driver_package_token(package_version)
+        {
+            anyhow::bail!("driver runtime telemetry identity is invalid");
+        }
+        let occurred_at = i64::try_from(occurred_at_millis)
+            .map_err(|_| anyhow!("driver runtime telemetry timestamp is invalid"))?;
+        let (launch, exit, attempt, success, failure, blocked) = match event {
+            DriverRuntimeEventKind::Launched => (1_i64, 0, 0, 0, 0, 0),
+            DriverRuntimeEventKind::Exited => (0, 1, 0, 0, 0, 0),
+            DriverRuntimeEventKind::ReconnectAttempted => (0, 0, 1, 0, 0, 0),
+            DriverRuntimeEventKind::ReconnectSucceeded => (0, 0, 0, 1, 0, 0),
+            DriverRuntimeEventKind::ReconnectFailed => (0, 0, 0, 0, 1, 0),
+            DriverRuntimeEventKind::ReconnectBudgetBlocked => (0, 0, 0, 0, 0, 1),
+        };
+        let started_at = (event == DriverRuntimeEventKind::Launched).then_some(occurred_at);
+        let exited_at = (event == DriverRuntimeEventKind::Exited).then_some(occurred_at);
+        let reconnect_at = matches!(
+            event,
+            DriverRuntimeEventKind::ReconnectAttempted
+                | DriverRuntimeEventKind::ReconnectSucceeded
+                | DriverRuntimeEventKind::ReconnectFailed
+                | DriverRuntimeEventKind::ReconnectBudgetBlocked
+        )
+        .then_some(occurred_at);
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO driver_runtime_telemetry
+                (driver_id, package_version, launch_count, observed_exit_count,
+                 reconnect_attempt_count, reconnect_success_count,
+                 reconnect_failure_count, reconnect_budget_block_count,
+                 last_event_code, last_event_at, last_started_at,
+                 last_exit_observed_at, last_reconnect_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(driver_id, package_version) DO UPDATE SET
+                launch_count = launch_count + excluded.launch_count,
+                observed_exit_count = observed_exit_count + excluded.observed_exit_count,
+                reconnect_attempt_count = reconnect_attempt_count + excluded.reconnect_attempt_count,
+                reconnect_success_count = reconnect_success_count + excluded.reconnect_success_count,
+                reconnect_failure_count = reconnect_failure_count + excluded.reconnect_failure_count,
+                reconnect_budget_block_count = reconnect_budget_block_count + excluded.reconnect_budget_block_count,
+                last_event_code = CASE
+                    WHEN excluded.last_event_at >= last_event_at THEN excluded.last_event_code
+                    ELSE last_event_code
+                END,
+                last_event_at = MAX(last_event_at, excluded.last_event_at),
+                last_started_at = CASE
+                    WHEN excluded.last_started_at IS NULL THEN last_started_at
+                    ELSE MAX(COALESCE(last_started_at, excluded.last_started_at), excluded.last_started_at)
+                END,
+                last_exit_observed_at = CASE
+                    WHEN excluded.last_exit_observed_at IS NULL THEN last_exit_observed_at
+                    ELSE MAX(COALESCE(last_exit_observed_at, excluded.last_exit_observed_at), excluded.last_exit_observed_at)
+                END,
+                last_reconnect_at = CASE
+                    WHEN excluded.last_reconnect_at IS NULL THEN last_reconnect_at
+                    ELSE MAX(COALESCE(last_reconnect_at, excluded.last_reconnect_at), excluded.last_reconnect_at)
+                END
+            "#,
+        )
+        .bind(driver)
+        .bind(package_version)
+        .bind(launch)
+        .bind(exit)
+        .bind(attempt)
+        .bind(success)
+        .bind(failure)
+        .bind(blocked)
+        .bind(event.as_str())
+        .bind(occurred_at)
+        .bind(started_at)
+        .bind(exited_at)
+        .bind(reconnect_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM driver_runtime_telemetry WHERE last_event_at < ?")
+            .bind(occurred_at.saturating_sub(DRIVER_RUNTIME_TELEMETRY_RETENTION_MS))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            DELETE FROM driver_runtime_telemetry
+            WHERE rowid IN (
+                SELECT rowid FROM driver_runtime_telemetry
+                ORDER BY last_event_at DESC, driver_id, package_version
+                LIMIT -1 OFFSET ?
+            )
+            "#,
+        )
+        .bind(DRIVER_RUNTIME_TELEMETRY_MAX_ROWS)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_driver_runtime_telemetry(&self) -> Result<Vec<DriverRuntimeTelemetryRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT driver_id, package_version, launch_count, observed_exit_count,
+                   reconnect_attempt_count, reconnect_success_count,
+                   reconnect_failure_count, reconnect_budget_block_count,
+                   last_event_code, last_event_at, last_started_at,
+                   last_exit_observed_at, last_reconnect_at
+            FROM driver_runtime_telemetry
+            ORDER BY driver_id, package_version
+            LIMIT ?
+            "#,
+        )
+        .bind(DRIVER_RUNTIME_TELEMETRY_MAX_ROWS)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let nonnegative = |name: &str| -> Result<u64> {
+                    u64::try_from(row.try_get::<i64, _>(name)?)
+                        .map_err(|_| anyhow!("driver runtime telemetry counter is invalid"))
+                };
+                let optional_nonnegative = |name: &str| -> Result<Option<u64>> {
+                    row.try_get::<Option<i64>, _>(name)?
+                        .map(|value| {
+                            u64::try_from(value).map_err(|_| {
+                                anyhow!("driver runtime telemetry timestamp is invalid")
+                            })
+                        })
+                        .transpose()
+                };
+                let last_event_code: String = row.try_get("last_event_code")?;
+                if !DriverRuntimeEventKind::is_known_code(&last_event_code) {
+                    anyhow::bail!("driver runtime telemetry event code is invalid");
+                }
+                Ok(DriverRuntimeTelemetryRecord {
+                    driver: row.try_get("driver_id")?,
+                    package_version: row.try_get("package_version")?,
+                    launch_count: nonnegative("launch_count")?,
+                    observed_exit_count: nonnegative("observed_exit_count")?,
+                    reconnect_attempt_count: nonnegative("reconnect_attempt_count")?,
+                    reconnect_success_count: nonnegative("reconnect_success_count")?,
+                    reconnect_failure_count: nonnegative("reconnect_failure_count")?,
+                    reconnect_budget_block_count: nonnegative("reconnect_budget_block_count")?,
+                    last_event_code,
+                    last_event_at_millis: nonnegative("last_event_at")?,
+                    last_started_at_millis: optional_nonnegative("last_started_at")?,
+                    last_exit_observed_at_millis: optional_nonnegative("last_exit_observed_at")?,
+                    last_reconnect_at_millis: optional_nonnegative("last_reconnect_at")?,
+                })
+            })
+            .collect()
     }
 
     async fn migrate_connections_project_scope(&self) -> Result<()> {
@@ -2806,6 +3051,77 @@ mod tests {
             .get_cli_capability_cache(&cache_key, "commands", current_timestamp_millis())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn driver_runtime_telemetry_persists_only_package_events_and_counters() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        store
+            .record_driver_runtime_event("oracle", "23.3.0", DriverRuntimeEventKind::Launched, 100)
+            .await
+            .unwrap();
+        store
+            .record_driver_runtime_event("oracle", "23.3.0", DriverRuntimeEventKind::Exited, 200)
+            .await
+            .unwrap();
+        store
+            .record_driver_runtime_event(
+                "oracle",
+                "23.3.0",
+                DriverRuntimeEventKind::ReconnectAttempted,
+                300,
+            )
+            .await
+            .unwrap();
+        store
+            .record_driver_runtime_event(
+                "oracle",
+                "23.3.0",
+                DriverRuntimeEventKind::ReconnectFailed,
+                350,
+            )
+            .await
+            .unwrap();
+
+        let records = store.list_driver_runtime_telemetry().await.unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.driver, "oracle");
+        assert_eq!(record.package_version, "23.3.0");
+        assert_eq!(record.launch_count, 1);
+        assert_eq!(record.observed_exit_count, 1);
+        assert_eq!(record.reconnect_attempt_count, 1);
+        assert_eq!(record.reconnect_failure_count, 1);
+        assert_eq!(record.last_event_code, "reconnect-failed");
+        assert_eq!(record.last_started_at_millis, Some(100));
+        assert_eq!(record.last_exit_observed_at_millis, Some(200));
+        assert_eq!(record.last_reconnect_at_millis, Some(350));
+        assert!(store
+            .record_driver_runtime_event(
+                "oracle/private-connection",
+                "23.3.0",
+                DriverRuntimeEventKind::Exited,
+                400,
+            )
+            .await
+            .is_err());
+
+        let columns: Vec<String> = sqlx::query("PRAGMA table_info(driver_runtime_telemetry)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get("name"))
+            .collect();
+        for forbidden in ["connection", "url", "stderr", "sql", "message"] {
+            assert!(!columns.iter().any(|column| column.contains(forbidden)));
+        }
     }
 
     #[tokio::test]

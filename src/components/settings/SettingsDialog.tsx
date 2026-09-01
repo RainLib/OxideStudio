@@ -2535,6 +2535,34 @@ function DriverManagementSettings() {
     }
   };
 
+  const reconnectDriverRuntime = async (
+    runtime: DatabaseDriverRuntimeSummary,
+  ) => {
+    const key = `runtime-reconnect:${runtime.driver}:${runtime.packageVersion}`;
+    setPackageAction({ status: "loading", key });
+    try {
+      const result =
+        await databaseService.reconnectExternalDatabaseDriverRuntimes(
+          runtime.driver,
+          runtime.packageVersion,
+        );
+      await refreshDriverRuntimes();
+      setPackageAction({
+        status: "success",
+        message: result.reconnectedCount > 0
+          ? `Reconnected ${result.reconnectedCount} exited driver runtime${result.reconnectedCount === 1 ? "" : "s"}.`
+          : result.budgetBlockedCount > 0
+            ? "Reconnect is temporarily limited to prevent a crash loop."
+            : "No exited driver runtime still required reconnecting.",
+      });
+    } catch {
+      setPackageAction({
+        status: "error",
+        message: "The exited driver runtime could not be reconnected. Review its package and reconnect the data source manually.",
+      });
+    }
+  };
+
   const checkCatalog = async () => {
     const nextUrl = catalogUrlInput.trim();
     if (!nextUrl) {
@@ -3014,7 +3042,7 @@ function DriverManagementSettings() {
         <>
           <SettingsDivider title="Active external driver runtimes" />
           <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-[hsl(var(--wb-text-muted))]">
-            <span>Connection-owned sidecars. Process controls and driver output stay outside this view.</span>
+            <span>Connection-owned sidecars. Only exited runtimes can be reconnected; driver output is never retained.</span>
             <button
               type="button"
               className="shrink-0 text-[10px] text-[hsl(var(--wb-accent))] hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
@@ -3036,7 +3064,7 @@ function DriverManagementSettings() {
                 <span className="truncate font-mono text-[hsl(var(--wb-text-muted))]">
                   package {runtime.packageVersion}
                 </span>
-                <span className="min-w-0 text-right text-[hsl(var(--wb-text-muted))]">
+                <div className="min-w-0 text-right text-[hsl(var(--wb-text-muted))]">
                   {runtime.connectionCount} connection{runtime.connectionCount === 1 ? "" : "s"}
                   {runtime.processIds.length > 0 && (
                     <span title={`Sidecar PID: ${runtime.processIds.join(", ")}`}>
@@ -3074,7 +3102,33 @@ function DriverManagementSettings() {
                       {" "}({runtime.observedExitCount} observed exit{runtime.observedExitCount === 1 ? "" : "s"})
                     </span>
                   )}
-                </span>
+                  {runtime.reconnectAttemptCount > 0 && (
+                    <span
+                      title={`Sanitized lifecycle telemetry only${runtime.lastReconnectAtMillis ? `. Latest reconnect activity: ${new Date(runtime.lastReconnectAtMillis).toLocaleString()}` : ""}. No connection identity or driver output is stored.`}
+                    >
+                      {" "}· {runtime.reconnectSuccessCount}/{runtime.reconnectAttemptCount} reconnects
+                    </span>
+                  )}
+                  {runtime.unhealthyConnectionCount > 0 && (
+                    <button
+                      type="button"
+                      className="ml-2 text-[hsl(var(--wb-accent))] hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))] disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={
+                        packageAction.status === "loading" ||
+                        !runtime.reconnectAvailable
+                      }
+                      onClick={() => void reconnectDriverRuntime(runtime)}
+                      title={runtime.reconnectAvailable
+                        ? "Reconnect only connection-owned sidecars already observed exited"
+                        : "Reconnect is temporarily limited after repeated failures to prevent a crash loop"}
+                    >
+                      {packageAction.status === "loading" &&
+                      packageAction.key === `runtime-reconnect:${runtime.driver}:${runtime.packageVersion}`
+                        ? "Reconnecting…"
+                        : "Reconnect exited"}
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
