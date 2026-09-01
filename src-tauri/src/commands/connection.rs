@@ -1,7 +1,7 @@
 /// 连接管理相关 commands
 use crate::core::{
     config::{ConfigManager, SavedConnection as ConfigSavedConnection, SshTunnelConfig},
-    dialect::{canonical_driver_name, database_capabilities_for_driver},
+    dialect::{canonical_driver_name, database_display_name_for_driver},
     driver::DatabaseDriver,
     driver_package::DatabaseDriverPackageRegistry,
     manager::ConnectionManager,
@@ -317,9 +317,7 @@ pub async fn connect_db(
         // External packages may introduce a driver family that is not linked
         // into this build. Its sidecar remains the authority for execution;
         // the catalog is used here only for a friendly connection label.
-        let display_name = database_capabilities_for_driver(&driver)
-            .map(|capabilities| capabilities.display_name)
-            .unwrap_or_else(|_| driver.trim().to_string());
+        let display_name = database_display_name_for_driver(&driver);
 
         let (db_driver, ssh_tunnel) = connect_driver_with_transport(
             &registry,
@@ -387,9 +385,7 @@ pub async fn test_db_connection(
             redact_connection_url(&url)
         );
 
-        let display_name = database_capabilities_for_driver(&driver)
-            .map(|capabilities| capabilities.display_name)
-            .unwrap_or_else(|_| driver.trim().to_string());
+        let display_name = database_display_name_for_driver(&driver);
         let test_connection_id = format!("test-{}", uuid::Uuid::new_v4());
         let (db_driver, _ssh_tunnel) = connect_driver_with_transport(
             &registry,

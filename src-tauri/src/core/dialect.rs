@@ -1017,6 +1017,26 @@ pub fn database_capabilities_for_driver(driver: &str) -> Result<DatabaseCapabili
         .ok_or_else(|| anyhow!("Unsupported database driver: {}", driver.trim()))
 }
 
+/// Presentation identity is intentionally independent from the canonical
+/// runtime/capability identity. A protocol-compatible product must continue
+/// to tell the user what they selected even when the Host executes through a
+/// conservative bundled PostgreSQL, MySQL, or Elasticsearch implementation.
+pub fn database_display_name_for_driver(driver: &str) -> String {
+    let requested = driver.trim();
+    match requested.to_ascii_lowercase().as_str() {
+        "cockroach" | "cockroachdb" => "CockroachDB".to_string(),
+        "easysearch" => "Easysearch".to_string(),
+        "greenplum" => "Greenplum".to_string(),
+        "mariadb" => "MariaDB".to_string(),
+        "tidb" => "TiDB".to_string(),
+        "timescaledb" => "TimescaleDB".to_string(),
+        "yugabyte" | "yugabytedb" => "YugabyteDB".to_string(),
+        _ => database_spec_for_driver(requested)
+            .map(|spec| spec.display_name.to_string())
+            .unwrap_or_else(|| requested.to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseKind {
@@ -2550,6 +2570,17 @@ WITH NO DATA;"#
             "elasticsearch"
         );
         assert_eq!(canonical_driver_name("sqlite3"), Some("sqlite"));
+
+        assert_eq!(database_display_name_for_driver("tidb"), "TiDB");
+        assert_eq!(database_display_name_for_driver("easysearch"), "Easysearch");
+        assert_eq!(
+            database_display_name_for_driver("cockroachdb"),
+            "CockroachDB"
+        );
+        assert_eq!(
+            database_display_name_for_driver("custom-external"),
+            "custom-external"
+        );
 
         let drivers = all_database_capabilities()
             .into_iter()
