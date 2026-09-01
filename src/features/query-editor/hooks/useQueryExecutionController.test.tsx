@@ -58,7 +58,9 @@ const updateTabSql = vi.fn();
 const runTabQuery = vi.fn(async () => undefined);
 const runExplainPlan = vi.fn(async () => undefined);
 const cancelTabQuery = vi.fn(async () => undefined);
-const confirmExecution = vi.fn(() => true);
+const confirmExecution = vi.fn<
+  (sql: string) => boolean | Promise<boolean>
+>(() => true);
 const transactionIdForExecution = vi.fn(() => "transaction-1");
 
 function options(
@@ -231,6 +233,34 @@ describe("useQueryExecutionController", () => {
       finishRun?.();
       await Promise.resolve();
     });
+  });
+
+  it("waits for an async destructive-SQL confirmation before dispatching", async () => {
+    let decide: ((approved: boolean) => void) | undefined;
+    confirmExecution.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    );
+    await renderController(options());
+
+    await act(async () => {
+      controller.handleRun();
+      await Promise.resolve();
+    });
+    expect(runTabQuery).not.toHaveBeenCalled();
+
+    await act(async () => {
+      decide?.(true);
+      await Promise.resolve();
+    });
+    expect(runTabQuery).toHaveBeenCalledWith(
+      "tab-1",
+      "connection-1",
+      undefined,
+      "transaction-1",
+    );
   });
 
   it("drops a statement resolution that finishes after the tab changes", async () => {

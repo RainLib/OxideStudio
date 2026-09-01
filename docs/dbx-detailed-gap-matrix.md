@@ -43,7 +43,7 @@
 | `55611706b` | Redis 大字符串改为 bounded preview | 已对齐并增加 Host 终极边界：GET 使用 `GETRANGE` 读取 64 KiB + sentinel，并用 `STRLEN` 返回总长；大值结果带 preview/loadedBytes/totalBytes/truncated/readOnly，小值保持原字符串。DBX 位置：`crates/dbx-core/src/db/redis_driver.rs`、`RedisValueViewer.vue`。 |
 | `6588f27fb` | 独立 SSH Tunnel Test，不要求目标数据库可达 | 已对齐：Rust 对 primary/jump hosts 完成真实握手、host-key 与认证验证，Tauri command、typed service 和 Connection Form 均有独立测试入口。DBX 位置：`crates/dbx-core/src/connection.rs`、`ConnectionDialog.vue`。 |
 | `264f5c483` | InfluxDB 3 Core HTTP SQL engine | 已完成逻辑、静态回归并提交：新增 native `POST /api/v3/query_sql`、database/table/column metadata、Bearer token、HTTP/HTTPS、只读 capability、N+1 行上限及 32 MiB streamed response guard；连接测试走真实 query endpoint。DBX 位置：`crates/dbx-core/src/db/influxdb3_driver.rs`、`ConnectionDialog.vue`。真实 InfluxDB 3 Core/Enterprise 验证延期。 |
-| `70d7a78c6` | Danger dialog 重开时保护 selection/focus | 架构不直接适用：Oxide 使用同步原生 `window.confirm`，没有 DBX animated dialog 的 reopen lifecycle；Monaco 的 pointer-down frame snapshot 仍需最终 WebView 验证。 |
+| `70d7a78c6` | Danger dialog 重开时保护 selection/focus | 已完成应用内等价实现：危险 SQL 改用受控 Dialog 而非阻塞式 `window.confirm`；所有完整文档、当前语句、参数化执行和历史重跑入口统一等待同一个异步确认结果。关闭时抑制 Radix 默认 trigger focus，在 animation frame 中仅当没有新确认打开且 generation 未变化时才把焦点还给 Monaco，因此连续确认不会由旧 close 事件抢焦点。DBX 位置：`DangerConfirmDialog.vue`。Oxide 位置：`DangerousSqlConfirmDialog.tsx`、`QueryEditor.tsx`、`useQueryExecutionController.ts`。真实 Tauri WebView 的滚动/选区回归仍延期。 |
 | `f19439ad7` | Loading mask 只覆盖正在执行的历史 result run | 架构不直接适用：Oxide 尚无 DBX `resultRuns` 历史结果窗口，只有 tab 当前执行结果；mask 绑定当前 tab `isExecuting`。引入历史 run 时必须增加 executing-run identity。 |
 | `1e75a7822` | Kingbase timezoneless datetime 不做 UTC 转换 | 仍是正式 Kingbase signed package 的缺口；实现位于 DBX `agents/drivers/kingbase-go/main.go`，不能在 Host 用产品名分支伪装完成。 |
 | `613c4f7ca` | IoTDB 1.3 aggregate columns 与 `max_time` 格式 | 仍是正式 IoTDB signed package 的缺口；实现位于 DBX `agents/drivers/iotdb/query.go` 与 vendored IoTDB client，需 package conformance evidence。 |
@@ -56,7 +56,7 @@
 | `333c3a3f4` | UPDATE/INSERT/DELETE 可转换为只读 SELECT 预览影响行和新值 | 本阶段已对齐并收紧：Rust 使用当前 `sqlparser 0.59` 的产品方言解析一条 DML，UPDATE 追加或按可信 metadata 交错展示 `<column> (new)`，INSERT VALUES/SELECT 展示待写入行，DELETE 展示待删除行；拒绝多语句、`UPDATE ... FROM` 歧义、非 DML、超 1 MiB 输入/输出和异常 metadata，标识符按产品 delimiter 转义。Query Editor 直接复用 current-statement frame 的已缓存解析结果，不增加第二次光标 IPC；工具栏和 Monaco 右键仅在当前 frame 为 DML 时开放，生成独立 Preview tab 后走普通查询取消/历史链路，源文档版本变化会丢弃晚到预览。DBX 位置：`crates/dbx-core/src/dml_preview_sql.rs`、`apps/desktop/src/lib/sql/dmlChangePreview.ts`、`QueryEditor.vue`。Oxide 位置：`src-tauri/src/core/dml_preview_sql.rs`、`src/features/query-editor/model/dmlChangePreview.ts`、`QueryEditor.tsx`。真实产品 volatile function、权限和大结果验证延期。 |
 | `46584ff46` | Windows Host 接受远程 Linux SQLite 绝对路径 | 已有且有 Rust 回归：`sqlite_ssh::validate_remote_absolute_path` 明确按 `/` 起始的 Linux path 校验，不使用 Windows `Path::is_absolute`；拒绝 `..`、NUL 和换行。 |
 | `a751b5690` | 表数据分页不受普通查询结果行数上限截断 | Oxide 的 Table tab 使用独立 `get_table_page`/opaque document cursor 和 server total，不复用普通 `execute_query` 的 materialized result cap；深页仍按 driver 的稳定分页能力门控。真实超百万行页面验证延期。 |
-| `694611aad` | 取消危险 SQL 确认后保持编辑器滚动/选区 | Oxide 当前使用同步浏览器确认，不创建会夺取 Monaco focus 的自定义 Dialog，也没有 DBX 的 pending viewport ownership；现有 immutable pointer-down snapshot 保留选区。真实 WebView 的 cancel/focus/scroll 回归仍需记录，不把架构差异伪装成已验证。 |
+| `694611aad` | 取消危险 SQL 确认后保持编辑器滚动/选区 | 已完成逻辑对齐：取消不会调度查询；Dialog close 只在不存在新 pending confirmation 时恢复 Monaco focus，工具栏 pointer-down 的 immutable snapshot 继续作为 current-statement 执行输入，避免 toolbar 焦点改变选区后误执行其他语句。真实 Tauri WebView 的 cancel/focus/scroll 回归仍需记录。 |
 | `cbfa8d7a7` | 非 table 对象隐藏行数/大小统计 | Oxide Explorer 当前不会为 view/routine/schema 等对象渲染 table row/size stats，不存在同类误导展示。 |
 | `c7cea5a04` | 查询结果列继承物理来源列的 formatter | **逻辑已对齐，真实产品验证延期**：Oxide 已增加按 connection/database/schema/table/physical-column 规范化的 formatter key、持久化输入清洗、日期/JSON Path/脱敏/模板显示格式，以及表数据 header 的配置入口和实时“原值 → 显示值”预览。格式化只覆盖 Glide `displayData`，不改变原始值、编辑值或提交载荷。Query Grid 现在按执行 SQL 与结果 ordinal 建立保守的 `queryDisplaySourceColumns` 等价映射：直接字段、确定 alias 和单一物理 wildcard 可继承；computed expression、CTE/derived table、集合运算、多语句、混合 wildcard、歧义 join 与三/四段字段引用严格 fail closed。数据库命名空间产品可绑定执行 database；schema 命名空间产品必须显式写出 source schema，不按当前 schema 或结果同名列猜测。MySQL-family 的规范空 schema key 与旧 mirrored schema key 仍兼容读取/清理。Oxide 位置：`src/lib/queryEditorCachedCompletion.ts`、`src/features/data-grid/model/columnFormatter.ts`、`ColumnFormatterDialog.tsx`、`DataGrid.tsx`、`appSettings.ts`。真实 Monaco 与 PostgreSQL/MySQL/SQL Server/SQLite 查询结果 metadata 验证延期。 |
 | `d59b86bd5` | 多行粘贴进入新增行时自动扩展足够的 draft rows | **已对齐并收紧边界**：Glide `onPaste` 现在只在剪贴板超过一行，且目标为单个空白新增单元格、单个新增行号，或跨多行的全空白新增行选择时进入扩展路径；单行多列选择、列选择、多个行号、已有行、任一非空新增行和只读列继续由原生有界粘贴处理。扩展会复用目标之后连续的空白 draft rows，不足部分一次性分配稳定负数 row key，并通过 Store 单次状态提交写入全部值；额外预建空白行保持不变，隐藏列按可见列映射，数值文本继续使用现有无精度损失归一化。UI planner 与 Store 双层限制每批最多 1,000 行/100,000 单元格，Store 会二次校验目标存活、空白状态、列 ownership、执行状态和全空输入。Glide 多单元格普通粘贴也改为一次 `setBulkCellEdit`，避免逐单元格 Zustand 更新。纯逻辑和 Store 回归覆盖 5→10、10→10、10→5、行号优先、隐藏列、非空/已有/只读/过期目标和全空拒绝。Oxide 位置：`src/features/data-grid/model/newRowPaste.ts`、`src/components/workspace/DataGrid.tsx`、`src/store/useTabStore.ts`。真实 WebView 系统剪贴板与超大矩阵交互验证延期。 |
@@ -916,3 +916,20 @@ chunk，用户未启用 Vim 时不进入 workspace startup graph。此前 Vite �
 
 `queryResultLoadingState.test.ts` 覆盖 query index matching/mismatch、table 与 legacy fallback；production
 build 验证 DataGrid 选择器和 TypeScript。真实 WebView 下并行切换、焦点和动画继续进入延期矩阵。
+
+## Phase 158 增量：危险 SQL 的可恢复应用内确认
+
+对照 DBX `70d7a78c6` 与 `694611aad`，Oxide 原先由同步 `window.confirm` 决定危险 SQL 是否执行；它无法
+参与桌面 Dialog 的焦点生命周期，也无法在连续确认时隔离已关闭窗口的 autofocus 回调。现改为：
+
+- `DangerousSqlConfirmDialog` 显示明确风险说明、取消与 destructive execute 操作；关闭、Escape、遮罩点击和
+  取消都拒绝该次执行，只有明确 Execute SQL 才解析为批准。
+- Query Editor 给每个 pending confirmation 分配 generation；关闭默认 autofocus 被抑制，下一 animation frame
+  只有在没有新的 pending confirmation 且 generation 仍匹配时恢复 Monaco focus。因此先关闭再打开第二个确认时，
+  第一个 Dialog 的延后回调不会劫持第二个 Dialog 的焦点。
+- 全文运行、当前 statement、参数编译 SQL 与 History rerun 都通过同一 `boolean | Promise<boolean>` gate；执行租约
+  在确认期间已占用，重复快捷键不会开多个确认或抢先下发 query。参数窗口仅在批准后关闭，取消时保留用户填写值。
+
+`DangerousSqlConfirmDialog.test.tsx` 覆盖明确 Execute/Cancel 决策，
+`useQueryExecutionController.test.tsx` 覆盖 async confirmation 未批准前不 dispatch。`npm run build` 通过；真实
+Tauri WebView 下的滚动、选区和 reduced-motion 动画仍在延期验证清单中，不能以 happy-dom 取代。

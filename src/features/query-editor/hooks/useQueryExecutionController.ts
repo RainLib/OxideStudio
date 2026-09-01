@@ -68,7 +68,12 @@ type QueryExecutionControllerOptions = {
   kind: QueryExecutionKind;
   executeAllOnBlankLine: boolean;
   supportsExplainPlan: boolean;
-  confirmExecution: (sql: string) => boolean;
+  /**
+   * A confirmation may be supplied by a native dialog or the in-app dialog.
+   * Keeping it awaitable makes every editor entry point wait for the same
+   * decision instead of racing a modal against a query dispatch.
+   */
+  confirmExecution: (sql: string) => boolean | Promise<boolean>;
   onNoExecutableTarget?: () => void;
   editorRef: RefObject<QueryExecutionEditor | null>;
   transactionIdForExecution: () => string | undefined;
@@ -223,11 +228,11 @@ export function useQueryExecutionController({
     if (!sql.trim()) return;
     const transactionId = transactionIdForExecution();
     if (requestParameterizedExecution(sql, transactionId)) return;
-    if (!confirmExecution(sql)) return;
-    updateTabSql(activeTab.id, sql);
-    void runExclusive(contextKey, () =>
-      runTabQuery(activeTab.id, connectionId, undefined, transactionId),
-    );
+    void runExclusive(contextKey, async () => {
+      if (!(await confirmExecution(sql))) return;
+      updateTabSql(activeTab.id, sql);
+      await runTabQuery(activeTab.id, connectionId, undefined, transactionId);
+    });
   }, [
     activeTab,
     canExecute,
@@ -304,7 +309,7 @@ export function useQueryExecutionController({
       ) {
         return;
       }
-      if (!confirmExecution(target.sql)) return;
+      if (!(await confirmExecution(target.sql))) return;
       await runTabQuery(
         activeTab.id,
         connectionId,
@@ -406,18 +411,18 @@ export function useQueryExecutionController({
         setParameterExecution(null);
         return;
       }
-      if (!confirmExecution(compiledSql)) return;
       const requestContextKey = `${request.tabId}:${request.connectionId}`;
-      void runExclusive(requestContextKey, () =>
-        runTabQuery(
+      void runExclusive(requestContextKey, async () => {
+        if (!(await confirmExecution(compiledSql))) return;
+        setParameterExecution(null);
+        await runTabQuery(
           request.tabId,
           request.connectionId,
           compiledSql,
           request.transactionId,
           request.sourceStartOffset,
-        ),
-      );
-      setParameterExecution(null);
+        );
+      });
     },
     [
       activeTab?.id,

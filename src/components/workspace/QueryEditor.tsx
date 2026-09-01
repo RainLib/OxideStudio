@@ -105,6 +105,7 @@ import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { extractSqlParameters } from "@/lib/sqlParameters";
 import { SqlParametersPanel } from "./SqlParametersPanel";
 import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
+import { DangerousSqlConfirmDialog } from "@/features/query-editor/ui/DangerousSqlConfirmDialog";
 import {
   SqlBatchColumnDialog,
   type SqlBatchColumnDialogSession,
@@ -490,6 +491,15 @@ export function QueryEditor({
   // const dropdownRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const [mountedEditor, setMountedEditor] = useState<any>(null);
+  const dangerousExecutionRef = useRef<{
+    generation: number;
+    resolve: (approved: boolean) => void;
+  } | null>(null);
+  const dangerousExecutionGenerationRef = useRef(0);
+  const [dangerousExecution, setDangerousExecution] = useState<{
+    generation: number;
+    message: string;
+  } | null>(null);
   const tableDropTargetRef = useRef<HTMLDivElement | null>(null);
   const tableDropCaretRef = useRef<HTMLSpanElement | null>(null);
   const activeTabIdRef = useRef<string | null>(effectiveTabId);
@@ -814,16 +824,50 @@ export function QueryEditor({
         : [],
     [activeDocumentSql, isElasticsearchConsole],
   );
+  const resolveDangerousExecution = useCallback((approved: boolean) => {
+    const pending = dangerousExecutionRef.current;
+    if (!pending) return;
+    dangerousExecutionRef.current = null;
+    setDangerousExecution(null);
+    pending.resolve(approved);
+  }, []);
+  useEffect(
+    () => () => resolveDangerousExecution(false),
+    [resolveDangerousExecution],
+  );
+  const restoreDangerousExecutionFocus = useCallback((event: Event) => {
+    // Radix otherwise restores focus to its trigger. Monaco may be the trigger
+    // indirectly (keyboard shortcut or toolbar), so restore it only after the
+    // close animation and never for a newly opened confirmation.
+    event.preventDefault();
+    const closingGeneration = dangerousExecutionGenerationRef.current;
+    window.requestAnimationFrame(() => {
+      if (
+        dangerousExecutionRef.current ||
+        dangerousExecutionGenerationRef.current !== closingGeneration
+      ) {
+        return;
+      }
+      editorRef.current?.focus?.();
+    });
+  }, []);
   const confirmEditorExecution = useCallback(
-    (sql: string, executionDriver = driver) => {
+    (sql: string, executionDriver = driver): boolean | Promise<boolean> => {
       if (!editorSettings.confirmDestructiveSql) return true;
       const confirmation = editorExecutionConfirmation(sql, executionDriver);
       if (!confirmation.required) return true;
-      return window.confirm(
-        confirmation.message || "Execute this query?",
-      );
+      resolveDangerousExecution(false);
+      const generation = dangerousExecutionGenerationRef.current + 1;
+      dangerousExecutionGenerationRef.current = generation;
+      return new Promise<boolean>((resolve) => {
+        dangerousExecutionRef.current = { generation, resolve };
+        setDangerousExecution({
+          generation,
+          message: confirmation.message || "Execute this query?",
+        });
+      });
     },
-    [driver, editorSettings.confirmDestructiveSql],
+    [driver, editorSettings.confirmDestructiveSql, resolveDangerousExecution],
   );
   const showExecutionNotice = useCallback((message: string) => {
     setExecutionNotice(message);
@@ -3400,7 +3444,7 @@ export function QueryEditor({
         "Choose a data source before running this history entry.",
       );
     }
-    if (!confirmEditorExecution(item.sql, targetConnection.driver))
+    if (!(await confirmEditorExecution(item.sql, targetConnection.driver)))
       return false;
 
     if (!connectedConnectionIds.includes(targetConnection.id)) {
@@ -4153,6 +4197,12 @@ export function QueryEditor({
       onDragOverCapture={handleSavedSqlDragOver}
       onDropCapture={(event) => void handleSavedSqlDrop(event)}
     >
+      <DangerousSqlConfirmDialog
+        open={Boolean(dangerousExecution)}
+        message={dangerousExecution?.message || "Execute this query?"}
+        onDecision={resolveDangerousExecution}
+        onCloseAutoFocus={restoreDangerousExecutionFocus}
+      />
       <SqlScriptImportDialog
         open={Boolean(pendingSqlScriptImport)}
         preview={pendingSqlScriptImport?.preview || null}
