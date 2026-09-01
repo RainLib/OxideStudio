@@ -69,6 +69,18 @@ export type RocketMqTopicConfig = {
   unavailableBrokers: string[];
 };
 
+export type RocketMqTopicStats = {
+  topic: string;
+  partitions: Array<{
+    brokerName: string;
+    partition: number;
+    beginOffset: number;
+    endOffset: number;
+    messageCount: number;
+  }>;
+  totalMessages: number;
+};
+
 export type RocketMqAcls = {
   acls: Array<{
     principal: string;
@@ -147,17 +159,10 @@ export const rocketMqService = {
       topic,
     }),
   getTopicStats: (connectionId: string, topic: string) =>
-    invokeRawCommand<{
-      topic: string;
-      partitions: Array<{
-        brokerName: string;
-        partition: number;
-        beginOffset: number;
-        endOffset: number;
-        messageCount: number;
-      }>;
-      totalMessages: number;
-    }>("get_rocketmq_topic_stats", { connectionId, topic }),
+    invokeRawCommand<RocketMqTopicStats>("get_rocketmq_topic_stats", {
+      connectionId,
+      topic,
+    }),
   listAcls: (connectionId: string) =>
     invokeRawCommand<RocketMqAcls>("list_rocketmq_acls", { connectionId }),
   peekMessages: (

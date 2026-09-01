@@ -17,6 +17,7 @@ import {
   type RocketMqMessagePreview,
   type RocketMqTopicConfig,
   type RocketMqTopicDetail,
+  type RocketMqTopicStats,
   type RocketMqTopics,
 } from "@/services/tauri/mq.service";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -62,6 +63,7 @@ export function RocketMqWorkspace() {
   const [topicConfig, setTopicConfig] = useState<RocketMqTopicConfig | null>(
     null,
   );
+  const [topicStats, setTopicStats] = useState<RocketMqTopicStats | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [groupDetail, setGroupDetail] =
     useState<RocketMqConsumerGroupDetail | null>(null);
@@ -70,6 +72,7 @@ export function RocketMqWorkspace() {
   const [topicDetailLoading, setTopicDetailLoading] = useState(false);
   const [messagePreviewLoading, setMessagePreviewLoading] = useState(false);
   const [topicConfigLoading, setTopicConfigLoading] = useState(false);
+  const [topicStatsLoading, setTopicStatsLoading] = useState(false);
   const [aclLoading, setAclLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -103,6 +106,7 @@ export function RocketMqWorkspace() {
     setTopicDetail(null);
     setMessagePreview(null);
     setTopicConfig(null);
+    setTopicStats(null);
     setAcls(null);
     void refresh();
   }, [connection?.id, refresh]);
@@ -151,6 +155,7 @@ export function RocketMqWorkspace() {
       setSelectedTopic(topic);
       setMessagePreview(null);
       setTopicConfig(null);
+      setTopicStats(null);
       setTopicDetailLoading(true);
       try {
         setTopicDetail(await rocketMqService.getTopic(connection.id, topic));
@@ -197,6 +202,24 @@ export function RocketMqWorkspace() {
         setError(failureMessage(cause));
       } finally {
         setTopicConfigLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const loadTopicStats = useCallback(
+    async (topic: string) => {
+      if (!connection) return;
+      setTopicStatsLoading(true);
+      try {
+        setTopicStats(
+          await rocketMqService.getTopicStats(connection.id, topic),
+        );
+      } catch (cause) {
+        setTopicStats(null);
+        setError(failureMessage(cause));
+      } finally {
+        setTopicStatsLoading(false);
       }
     },
     [connection],
@@ -295,6 +318,9 @@ export function RocketMqWorkspace() {
                   topicConfig={topicConfig}
                   topicConfigLoading={topicConfigLoading}
                   onLoadTopicConfig={loadTopicConfig}
+                  topicStats={topicStats}
+                  topicStatsLoading={topicStatsLoading}
+                  onLoadTopicStats={loadTopicStats}
                 />
               )}
               {section === "groups" && (
@@ -446,6 +472,9 @@ function TopicList({
   topicConfig,
   topicConfigLoading,
   onLoadTopicConfig,
+  topicStats,
+  topicStatsLoading,
+  onLoadTopicStats,
 }: {
   topics: string[];
   selectedTopic: string | null;
@@ -458,6 +487,9 @@ function TopicList({
   topicConfig: RocketMqTopicConfig | null;
   topicConfigLoading: boolean;
   onLoadTopicConfig: (topic: string) => void;
+  topicStats: RocketMqTopicStats | null;
+  topicStatsLoading: boolean;
+  onLoadTopicStats: (topic: string) => void;
 }) {
   return (
     <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
@@ -498,6 +530,9 @@ function TopicList({
             topicConfig={topicConfig}
             topicConfigLoading={topicConfigLoading}
             onLoadTopicConfig={onLoadTopicConfig}
+            topicStats={topicStats}
+            topicStatsLoading={topicStatsLoading}
+            onLoadTopicStats={onLoadTopicStats}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-xs wb-muted">
@@ -518,6 +553,9 @@ function TopicDetail({
   topicConfig,
   topicConfigLoading,
   onLoadTopicConfig,
+  topicStats,
+  topicStatsLoading,
+  onLoadTopicStats,
 }: {
   detail: RocketMqTopicDetail;
   messagePreview: RocketMqMessagePreview | null;
@@ -526,15 +564,59 @@ function TopicDetail({
   topicConfig: RocketMqTopicConfig | null;
   topicConfigLoading: boolean;
   onLoadTopicConfig: (topic: string) => void;
+  topicStats: RocketMqTopicStats | null;
+  topicStatsLoading: boolean;
+  onLoadTopicStats: (topic: string) => void;
 }) {
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-sm font-semibold">{detail.topic}</h2>
         <p className="mt-1 text-[11px] wb-muted">
-          Route data is live; topic mutation and message operations remain
-          unavailable until their confirmation boundary is implemented.
+          Route, configuration, offsets, and bounded message preview are live.
+          Topic mutations remain unavailable until their confirmation boundary
+          is implemented.
         </p>
+      </div>
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-xs font-medium">Topic statistics</h3>
+          <button
+            type="button"
+            disabled={topicStatsLoading}
+            onClick={() => void onLoadTopicStats(detail.topic)}
+            className="flex h-7 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+          >
+            {topicStatsLoading && (
+              <Loader2 size={12} className="animate-spin" />
+            )}{" "}
+            Load offsets
+          </button>
+        </div>
+        {topicStats ? (
+          <>
+            <div className="mb-2 text-[11px] wb-muted">
+              {topicStats.totalMessages.toLocaleString()} messages across{" "}
+              {topicStats.partitions.length} partitions
+            </div>
+            <ResourceTable
+              headers={["Broker", "Partition", "Begin", "End", "Messages"]}
+              rows={topicStats.partitions.map((partition) => [
+                partition.brokerName,
+                String(partition.partition),
+                String(partition.beginOffset),
+                String(partition.endOffset),
+                String(partition.messageCount),
+              ])}
+              empty="No readable partitions were reported."
+            />
+          </>
+        ) : (
+          <div className="rounded-[5px] border border-dashed border-[hsl(var(--wb-border-subtle))] p-3 text-xs wb-muted">
+            Reads bounded per-partition offsets only; it does not create a
+            consumer or commit offsets.
+          </div>
+        )}
       </div>
       <div>
         <h3 className="mb-2 text-xs font-medium">Queues by broker</h3>
