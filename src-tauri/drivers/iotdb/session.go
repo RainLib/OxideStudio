@@ -70,4 +70,11 @@ func (s *Session) Close() error {
 	s.client = nil
 	return client.Close()
 }
+
+func (s *Session) Dialect() string {
+	if s == nil {
+		return TreeDialect
+	}
+	return s.config.Dialect
+}
 func quote(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }
