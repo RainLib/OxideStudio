@@ -79,6 +79,62 @@ describe("cached SQL relation completion", () => {
     );
   });
 
+  it("preserves an omitted SQL Server schema in database..table references", () => {
+    expect(
+      cachedSqlRelationsBeforeCursor(
+        "SELECT * FROM [Sales Warehouse]..[Order Lines] AS [line items] WHERE [line items].",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        database: "Sales Warehouse",
+        schema: undefined,
+        table: "Order Lines",
+        alias: "line items",
+        aliasSql: "[line items]",
+      }),
+    );
+  });
+
+  it("prefers an alias over a colliding physical table name", () => {
+    const relation = cachedSqlRelationForFieldCompletion(
+      `SELECT *
+       FROM audit.orders AS users
+       JOIN public.users AS u ON u.id = users.user_id
+       WHERE users.`,
+    );
+
+    expect(relation).toMatchObject({
+      schema: "audit",
+      table: "orders",
+      alias: "users",
+    });
+  });
+
+  it("does not resolve an aliased relation through its hidden base-table name", () => {
+    const relation = cachedSqlRelationForFieldCompletion(
+      `SELECT *
+       FROM public.orders AS o
+       JOIN public.customers AS c ON c.id = o.customer_id
+       WHERE orders.`,
+    );
+
+    expect(relation).toBeNull();
+  });
+
+  it("keeps the exact quoted alias spelling for downstream insertion", () => {
+    const relation = cachedSqlRelationForFieldCompletion(
+      `SELECT * FROM [Sales Warehouse]..[Order Lines] AS [Line]]Items]
+       WHERE [Line]]Items].`,
+    );
+
+    expect(relation).toMatchObject({
+      database: "Sales Warehouse",
+      table: "Order Lines",
+      alias: "Line]Items",
+      aliasSql: "[Line]]Items]",
+    });
+  });
+
   it("keeps the typed Unicode relation fragment available for matching", () => {
     expect(cachedSqlRelationTargetPrefix("SELECT * FROM 订")).toBe("订");
     expect(cachedSqlRelationTargetPrefix("SELECT * FROM 销售.zz")).toBe("zz");

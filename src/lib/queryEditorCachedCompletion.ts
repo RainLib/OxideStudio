@@ -10,6 +10,8 @@ export type CachedSqlRelationReference = {
   /** Optional catalog/database from a three-part relation identifier. */
   database?: string;
   alias?: string;
+  /** Exact SQL spelling of the alias, including its original delimiters. */
+  aliasSql?: string;
   /** A common table expression shadows a physical relation of the same name. */
   isCte?: boolean;
   /** A closed FROM/JOIN subquery with a visible alias and derived columns. */
@@ -343,18 +345,21 @@ function splitQualifiedIdentifier(value: string) {
     }
     if (character === ".") {
       const part = unquoteIdentifier(current);
-      if (part) parts.push(part);
+      // Preserve SQL Server's intentionally omitted schema in
+      // `database..table`. Dropping the empty segment would reinterpret the
+      // database as a schema and load metadata from the wrong catalog.
+      parts.push(part);
       current = "";
       continue;
     }
     current += character;
   }
   const finalPart = unquoteIdentifier(current);
-  if (finalPart) parts.push(finalPart);
-  if (parts.length === 0) return null;
+  if (!finalPart) return null;
+  parts.push(finalPart);
   const relation = {
     table: parts[parts.length - 1]!,
-    schema: parts.length > 1 ? parts[parts.length - 2] : undefined,
+    schema: parts.length > 1 ? parts[parts.length - 2] || undefined : undefined,
   };
   const database = parts.length > 2 ? parts[parts.length - 3] : undefined;
   return database ? { ...relation, database } : relation;
@@ -364,10 +369,16 @@ const UNQUOTED_SQL_IDENTIFIER =
   '[_\\p{ID_Start}][$@#_\\u200c\\u200d\\p{ID_Continue}]*';
 const SQL_IDENTIFIER =
   `(?:"(?:""|[^"])+"|\`(?:\`\`|[^\`])+\`|\\[(?:\\]\\]|[^\\]])+\\]|${UNQUOTED_SQL_IDENTIFIER})`;
+// Besides ordinary one-to-four-part names, SQL Server accepts an omitted
+// schema (`database..table` and `server.database..table`). Keep the empty
+// segment visible to splitQualifiedIdentifier instead of letting the matcher
+// stop after the first identifier.
+const QUALIFIED_RELATION_IDENTIFIER =
+  `(?:(?:${SQL_IDENTIFIER}\\s*\\.\\s*)?${SQL_IDENTIFIER}\\s*\\.\\s*\\.\\s*${SQL_IDENTIFIER}|${SQL_IDENTIFIER}(?:\\s*\\.\\s*${SQL_IDENTIFIER}){0,3})`;
 const TRAILING_IDENTIFIER_FRAGMENT =
   `(?:"[^"]*|\`[^\`]*|\\[[^\\]]*|${UNQUOTED_SQL_IDENTIFIER})`;
 const RELATION_MATCHER = new RegExp(
-  `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*)\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
+  `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${QUALIFIED_RELATION_IDENTIFIER})\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
   "giu",
 );
 const TRAILING_QUALIFIER = new RegExp(
@@ -569,6 +580,7 @@ function derivedSubqueryRelations(source: string, masked: string) {
     relations.push({
       table: alias,
       alias,
+      aliasSql: aliasMatch?.[1],
       isDerived: true,
       cteColumns: [...new Set(columns)],
     });
@@ -595,6 +607,7 @@ function tableFunctionRelations(source: string, masked: string) {
     relations.push({
       table: alias,
       alias,
+      aliasSql: aliasMatch?.[1],
       isDerived: true,
       cteColumns: aliasMatch?.[2]
         ? splitDelimitedIdentifiers(aliasMatch[2])
@@ -625,6 +638,10 @@ export function cachedSqlRelationsBeforeCursor(
       alias:
         possibleAlias && !NON_ALIAS_KEYWORDS.has(possibleAlias)
           ? alias
+          : undefined,
+      aliasSql:
+        possibleAlias && !NON_ALIAS_KEYWORDS.has(possibleAlias)
+          ? match[3]
           : undefined,
     });
   }
@@ -693,8 +710,26 @@ export function cachedSqlRelationForFieldCompletion(
   const relations = cachedSqlRelationsBeforeCursor(statement.source);
   if (qualifier) {
     const normalized = qualifier.toLowerCase();
+    const reversed = relations.slice().reverse();
+    // SQL aliases shadow relation names in the active query block. Resolve
+    // them in a separate pass so `orders users JOIN users u ... users.` binds
+    // to the alias even though a later physical table has the same name.
+    const aliased = reversed.find(
+      (relation) => relation.alias?.toLowerCase() === normalized,
+    );
+    if (aliased) return aliased;
+
+    // Keep the existing authoring fallback for a declared CTE before the
+    // outer FROM clause is written. An explicitly aliased CTE is no longer
+    // addressable by its declaration name, just like a physical relation.
     const cteColumns = ctes.get(normalized);
-    if (cteColumns) {
+    const cteWasAliased = reversed.some(
+      (relation) =>
+        relation.isCte &&
+        relation.alias &&
+        relation.table.toLowerCase() === normalized,
+    );
+    if (cteColumns && !cteWasAliased) {
       return {
         table: qualifier,
         schema: undefined,
@@ -703,15 +738,15 @@ export function cachedSqlRelationForFieldCompletion(
         alias: undefined,
       };
     }
+
+    // Once a relation has an alias, SQL no longer permits its base name as a
+    // qualifier. Returning it here would fabricate columns for invalid SQL
+    // and, in collision cases, query the wrong metadata target.
     return (
-      relations
-        .slice()
-        .reverse()
-        .find(
-          (relation) =>
-            relation.alias?.toLowerCase() === normalized ||
-            relation.table.toLowerCase() === normalized,
-        ) || null
+      reversed.find(
+        (relation) =>
+          !relation.alias && relation.table.toLowerCase() === normalized,
+      ) || null
     );
   }
   return relations.length === 1 ? relations[0]! : null;

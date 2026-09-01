@@ -94,7 +94,7 @@ function qualifiedTarget(
 }
 
 function sourceQualifier(driver: DatabaseDriver, relation: CachedSqlRelationReference) {
-  return quoteIdentifier(driver, relation.alias || relation.table);
+  return relation.aliasSql || quoteIdentifier(driver, relation.alias || relation.table);
 }
 
 /** Converts both outgoing and incoming catalog relationships into the same

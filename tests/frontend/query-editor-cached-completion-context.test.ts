@@ -21,6 +21,7 @@ JOIN orders o ON o.customer_id = c.id`;
     expect(cachedSqlRelationForFieldCompletion(source)).toEqual({
       table: "customers",
       alias: "c",
+      aliasSql: "c",
       schema: undefined,
     });
     expect(cachedSqlRelationForFieldCompletion(`${source}\nWHERE `)).toBeNull();
@@ -38,6 +39,7 @@ WHERE current.`;
       table: "current",
       schema: "sales",
       alias: "current",
+      aliasSql: "current",
     });
   });
 
@@ -59,6 +61,7 @@ WHERE fresh_row.`;
       table: "fresh_row",
       schema: "sales",
       alias: "fresh_row",
+      aliasSql: "fresh_row",
     });
   });
 
@@ -106,6 +109,7 @@ FROM [warehouse].[sales].[order.items] AS [o]`;
         schema: "sales",
         table: "order.items",
         alias: "o",
+        aliasSql: "[o]",
       },
     ]);
     expect(cachedSqlRelationForFieldCompletion(source)).toEqual({
@@ -113,6 +117,7 @@ FROM [warehouse].[sales].[order.items] AS [o]`;
       schema: "sales",
       table: "order.items",
       alias: "o",
+      aliasSql: "[o]",
     });
   });
 
@@ -150,12 +155,13 @@ SELECT recent_orders.`;
 FROM public.users u
 WHERE u.`;
     expect(cachedSqlRelationsBeforeCursor(source)).toEqual([
-      { table: "users", schema: "public", alias: "u" },
+      { table: "users", schema: "public", alias: "u", aliasSql: "u" },
     ]);
     expect(cachedSqlRelationForFieldCompletion(source)).toEqual({
       table: "users",
       schema: "public",
       alias: "u",
+      aliasSql: "u",
     });
   });
 

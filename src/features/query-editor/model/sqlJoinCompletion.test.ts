@@ -44,7 +44,7 @@ describe("foreign-key JOIN completion", () => {
       label: "orders",
       filterText: "orders",
       insertText:
-        '"orders" "o" ON "o"."tenant_id" = "ol"."tenant_id" AND "o"."id" = "ol"."order_id"',
+        '"orders" "o" ON "o"."tenant_id" = ol."tenant_id" AND "o"."id" = ol."order_id"',
     });
   });
 
@@ -69,7 +69,36 @@ describe("foreign-key JOIN completion", () => {
     );
 
     expect(completion?.insertText).toBe(
-      '"crm"."customers" "c2" on "c2"."id" = "c"."parent_id"',
+      '"crm"."customers" "c2" on "c2"."id" = c."parent_id"',
+    );
+  });
+
+  it("reuses the source alias's exact SQL spelling in the generated predicate", () => {
+    const context = cachedSqlJoinTargetContext(
+      'SELECT * FROM dbo.order_lines AS "Order Source" JOIN ',
+    );
+    const [completion] = sqlForeignKeyJoinCompletions(
+      context!,
+      context!.sourceRelations[0]!,
+      [
+        {
+          name: "fk_order_customer",
+          constraint_type: "FOREIGN KEY",
+          columns: ["customer_id"],
+          referenced_schema: "dbo",
+          referenced_table: "customers",
+          referenced_columns: ["id"],
+        },
+      ],
+      { driver: "sqlserver", defaultSchema: "dbo" },
+    );
+
+    expect(context?.sourceRelations[0]).toMatchObject({
+      alias: "Order Source",
+      aliasSql: '"Order Source"',
+    });
+    expect(completion?.insertText).toBe(
+      '"customers" "c" ON "c"."id" = "Order Source"."customer_id"',
     );
   });
 
