@@ -41,6 +41,7 @@ function escapeRegExp(value: string) {
 function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
   return (
     driver === "elasticsearch" ||
+    driver === "easysearch" ||
     driver === "influxdb" ||
     driver === "influxdb3" ||
     driver === "etcd" ||

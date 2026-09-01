@@ -93,6 +93,28 @@ describe("Meilisearch connection URL", () => {
   });
 });
 
+describe("Easysearch connection URL", () => {
+  it("shares Elasticsearch HTTP transport while preserving the selected product", () => {
+    const url = buildConnectionUrl({
+      driver: "easysearch",
+      host: "search.example.test",
+      port: 9200,
+      password: "private key",
+      database: "must-not-be-a-path",
+      sslMode: "require",
+    });
+
+    expect(url).toBe("https://:private%20key@search.example.test:9200");
+    expect(parseConnectionUrl(url, "easysearch")).toMatchObject({
+      driver: "easysearch",
+      host: "search.example.test",
+      port: 9200,
+      password: "private key",
+      sslMode: "require",
+    });
+  });
+});
+
 describe("Elasticsearch connection URL options", () => {
   it("serializes the complete proxy and safety configuration", () => {
     const value = applyElasticsearchConnectionOptions(

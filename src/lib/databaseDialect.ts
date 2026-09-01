@@ -390,6 +390,10 @@ const DATABASE_DRIVER_PROFILES: Record<
       supportsCollectionBrowsing: true,
       supportsKeyValueBrowsing: false,
       supportsSchemas: false,
+      // Elasticsearch-compatible endpoints address indices in request paths;
+      // a connection URL must not acquire a database path from a stale form
+      // field. Easysearch inherits this same profile.
+      supportsConnectionDatabase: false,
       supportsCreateDatabase: false,
       supportsCreateDatabaseOwner: false,
       supportsCreateDatabaseCharset: false,
