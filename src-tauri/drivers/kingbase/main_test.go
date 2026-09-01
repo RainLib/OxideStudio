@@ -50,3 +50,11 @@ func TestKingbaseIndexCatalogQueryUsesBoundIdentifiers(t *testing.T) {
 		t.Fatalf("index query must use bound identifiers: %s", query)
 	}
 }
+
+func TestKingbaseMetadataQueriesUseBoundScope(t *testing.T) {
+	for _, query := range []string{kingbaseConstraintsQuery(), `SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1`} {
+		if !strings.Contains(query, "$1") || strings.Contains(query, "%s") {
+			t.Fatalf("metadata query must bind its scope: %s", query)
+		}
+	}
+}

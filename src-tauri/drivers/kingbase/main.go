@@ -330,6 +330,20 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		}
 		return map[string]any{"kind": "metadata", "value": out}, nil
 	}
+	if p.Request.Kind == "constraints" {
+		out, err := listKingbaseConstraints(db, p.Request.Namespace, p.Request.Relation)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
+	if p.Request.Kind == "routines" {
+		out, err := listKingbaseRoutines(db, p.Request.Namespace)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
 	var sqlText string
 	args := []any{}
 	switch p.Request.Kind {
@@ -443,6 +457,134 @@ JOIN %s_am am ON am.oid = i.relam
 JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
 JOIN %s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
 WHERE n.nspname = $1 AND t.relname = $2 ORDER BY i.relname, pos.n`, catalog, catalog, catalog, catalog, catalog, catalog)
+}
+
+// listKingbaseConstraints deliberately uses information_schema for the v1
+// sidecar contract. It preserves the portable fields consumed by the desktop
+// (keys, referenced relation and actions) without fabricating catalog-only
+// state such as validation or enablement flags.
+func listKingbaseConstraints(db *sql.DB, schema, table string) ([]any, error) {
+	if strings.TrimSpace(schema) == "" || strings.TrimSpace(table) == "" {
+		return []any{}, nil
+	}
+	rows, err := db.Query(kingbaseConstraintsQuery(), schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type constraintEntry struct {
+		name, kind                        string
+		columns, referencedColumns        []string
+		referencedSchema, referencedTable string
+		onUpdate, onDelete, definition    string
+	}
+	byName := map[string]*constraintEntry{}
+	order := []string{}
+	for rows.Next() {
+		var name, kind string
+		var column, refSchema, refTable, refColumn, onUpdate, onDelete, definition sql.NullString
+		if err := rows.Scan(&name, &kind, &column, &refSchema, &refTable, &refColumn, &onUpdate, &onDelete, &definition); err != nil {
+			return nil, err
+		}
+		item := byName[name]
+		if item == nil {
+			item = &constraintEntry{name: name, kind: kind, columns: []string{}, referencedColumns: []string{}}
+			byName[name] = item
+			order = append(order, name)
+		}
+		if column.Valid && column.String != "" {
+			item.columns = append(item.columns, column.String)
+		}
+		if refColumn.Valid && refColumn.String != "" {
+			item.referencedColumns = append(item.referencedColumns, refColumn.String)
+		}
+		if refSchema.Valid {
+			item.referencedSchema = refSchema.String
+		}
+		if refTable.Valid {
+			item.referencedTable = refTable.String
+		}
+		if onUpdate.Valid {
+			item.onUpdate = onUpdate.String
+		}
+		if onDelete.Valid {
+			item.onDelete = onDelete.String
+		}
+		if definition.Valid {
+			item.definition = definition.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(order))
+	for _, name := range order {
+		item := byName[name]
+		out = append(out, map[string]any{
+			"name": item.name, "constraint_type": item.kind, "columns": item.columns,
+			"referenced_schema": optionalText(item.referencedSchema), "referenced_table": optionalText(item.referencedTable),
+			"referenced_columns": item.referencedColumns, "definition": optionalText(item.definition),
+			"on_update": optionalText(item.onUpdate), "on_delete": optionalText(item.onDelete),
+		})
+	}
+	return out, nil
+}
+
+func kingbaseConstraintsQuery() string {
+	return `SELECT tc.constraint_name, tc.constraint_type, kcu.column_name,
+  ccu.table_schema, ccu.table_name, ccu.column_name, rc.update_rule, rc.delete_rule, cc.check_clause
+FROM information_schema.table_constraints tc
+LEFT JOIN information_schema.key_column_usage kcu
+  ON kcu.constraint_catalog = tc.constraint_catalog AND kcu.constraint_schema = tc.constraint_schema
+  AND kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema AND kcu.table_name = tc.table_name
+LEFT JOIN information_schema.referential_constraints rc
+  ON rc.constraint_catalog = tc.constraint_catalog AND rc.constraint_schema = tc.constraint_schema AND rc.constraint_name = tc.constraint_name
+LEFT JOIN information_schema.key_column_usage ccu
+  ON ccu.constraint_catalog = rc.unique_constraint_catalog AND ccu.constraint_schema = rc.unique_constraint_schema
+  AND ccu.constraint_name = rc.unique_constraint_name AND ccu.ordinal_position = kcu.position_in_unique_constraint
+LEFT JOIN information_schema.check_constraints cc
+  ON cc.constraint_catalog = tc.constraint_catalog AND cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+WHERE tc.table_schema = $1 AND tc.table_name = $2
+ORDER BY tc.constraint_name, kcu.ordinal_position`
+}
+
+func listKingbaseRoutines(db *sql.DB, schema string) ([]any, error) {
+	if strings.TrimSpace(schema) == "" {
+		return []any{}, nil
+	}
+	rows, err := db.Query(`SELECT routine_name, routine_type, data_type, routine_comment
+FROM information_schema.routines WHERE routine_schema = $1 ORDER BY routine_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var name string
+		var kind, returnType, description sql.NullString
+		if err := rows.Scan(&name, &kind, &returnType, &description); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"name": name, "routine_type": optionalText(kind.String), "parameters": []any{},
+			"return_type": valueOrUnknown(returnType), "description": optionalText(description.String),
+		})
+	}
+	return out, rows.Err()
+}
+
+func optionalText(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func valueOrUnknown(value sql.NullString) string {
+	if value.Valid && strings.TrimSpace(value.String) != "" {
+		return value.String
+	}
+	return "UNKNOWN"
 }
 
 func nullable(value sql.NullString) any {
