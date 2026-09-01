@@ -3,7 +3,7 @@ use crate::core::driver::{
 };
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-    QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+    QueryResult, SchemaObjectInfo, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::statement::{
     execution_mode, execution_statement_kind, split_sql_statements, QueryExecutionMode,
@@ -770,6 +770,32 @@ impl DatabaseDriver for SqliteDriver {
             })
             .collect())
     }
+
+    async fn get_schema_objects(&self, schema: &str) -> Result<Vec<SchemaObjectInfo>> {
+        let schema_name = normalized_sqlite_schema(schema);
+        let schema = sqlite_schema_identifier(schema_name)?;
+        let rows = sqlx::query(&format!(
+            "SELECT name, tbl_name FROM {schema}.sqlite_schema \
+             WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%' ORDER BY tbl_name, name"
+        ))
+        .fetch_all(&self.pool().await?)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let name = row.try_get::<String, _>("name").ok()?;
+                let parent_name = row.try_get::<String, _>("tbl_name").ok()?;
+                Some(SchemaObjectInfo {
+                    name,
+                    schema: Some(schema_name.to_string()),
+                    object_type: "trigger".to_string(),
+                    parent_name: Some(parent_name),
+                    comment: None,
+                    members_expandable: false,
+                })
+            })
+            .collect())
+    }
 }
 
 impl SqliteDriver {
@@ -800,7 +826,18 @@ pub(crate) fn validate_sqlite_rebuild_statements(
         if sql.is_empty() || sql.contains('\0') {
             return Err(anyhow!("SQLite rebuild contains an invalid statement"));
         }
-        let split = split_sql_statements(sql, StatementScanDialect::Postgres);
+        let normalized = sql.trim_start().to_ascii_uppercase();
+        let is_trigger = normalized.starts_with("CREATE TRIGGER ")
+            || normalized.starts_with("CREATE TEMP TRIGGER ")
+            || normalized.starts_with("CREATE TEMPORARY TRIGGER ");
+        let split = split_sql_statements(
+            sql,
+            if is_trigger {
+                StatementScanDialect::Mysql
+            } else {
+                StatementScanDialect::Postgres
+            },
+        );
         if split.len() != 1 {
             return Err(anyhow!(
                 "SQLite rebuild statements must contain exactly one SQL statement"
@@ -1181,10 +1218,26 @@ mod tests {
     async fn sqlite_driver_exposes_bounded_query_and_explorer_metadata() {
         let mut driver = SqliteDriver::new(":memory:");
         driver.connect().await.unwrap();
-        driver.query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE); CREATE INDEX users_email_search_idx ON users (lower(email)) WHERE email IS NOT NULL; INSERT INTO users VALUES (1, 'hello@example.test');").await.unwrap();
+        driver.query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE); CREATE TABLE audit (user_id INTEGER); CREATE INDEX users_email_search_idx ON users (lower(email)) WHERE email IS NOT NULL;").await.unwrap();
+        driver
+            .execute_parameterized(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id); END;",
+                &[],
+            )
+            .await
+            .unwrap();
+        driver
+            .query("INSERT INTO users VALUES (1, 'hello@example.test');")
+            .await
+            .unwrap();
         let rows = driver.query("SELECT id, email FROM users").await.unwrap();
         assert_eq!(rows[0].rows.len(), 1);
-        assert_eq!(driver.get_tables("main").await.unwrap()[0].name, "users");
+        assert!(driver
+            .get_tables("main")
+            .await
+            .unwrap()
+            .iter()
+            .any(|table| table.name == "users"));
         assert!(driver
             .get_columns("main", "users")
             .await
@@ -1201,6 +1254,17 @@ mod tests {
             Some(
                 "CREATE INDEX users_email_search_idx ON users (lower(email)) WHERE email IS NOT NULL"
             )
+        );
+        assert_eq!(
+            driver.get_schema_objects("main").await.unwrap(),
+            vec![SchemaObjectInfo {
+                name: "users_audit".to_string(),
+                schema: Some("main".to_string()),
+                object_type: "trigger".to_string(),
+                parent_name: Some("users".to_string()),
+                comment: None,
+                members_expandable: false,
+            }]
         );
 
         // The Data Grid uses numbered bind markers on its shared relational
@@ -1347,7 +1411,14 @@ mod tests {
         driver.connect().await.unwrap();
         driver
             .query(
-                "PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id)); INSERT INTO parents VALUES (1, 'before'); INSERT INTO children VALUES (1, 1);",
+                "PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id)); CREATE TABLE parent_audit (parent_id INTEGER); INSERT INTO parents VALUES (1, 'before'); INSERT INTO children VALUES (1, 1);",
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_parameterized(
+                "CREATE TRIGGER parents_audit AFTER INSERT ON parents BEGIN INSERT INTO parent_audit(parent_id) VALUES (NEW.id); UPDATE parent_audit SET parent_id = parent_id WHERE parent_id = NEW.id; END;",
+                &[],
             )
             .await
             .unwrap();
@@ -1366,6 +1437,10 @@ mod tests {
             },
             ParameterizedStatement {
                 sql: "ALTER TABLE \"__oxide_rebuild_parents\" RENAME TO \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "CREATE TRIGGER parents_audit AFTER INSERT ON parents BEGIN INSERT INTO parent_audit(parent_id) VALUES (NEW.id); UPDATE parent_audit SET parent_id = parent_id WHERE parent_id = NEW.id; END;".to_string(),
                 params: Vec::new(),
             },
         ];
@@ -1389,6 +1464,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(foreign_keys, 1);
+        driver
+            .query("INSERT INTO parents (id, name) VALUES (2, 'after')")
+            .await
+            .unwrap();
+        let audit = driver
+            .query("SELECT parent_id FROM parent_audit")
+            .await
+            .unwrap();
+        assert_eq!(audit[0].rows, vec![vec![Value::from(2)]]);
 
         let mut backup = SqliteDriver::new(backup_path.to_string_lossy().as_ref());
         backup.connect().await.unwrap();

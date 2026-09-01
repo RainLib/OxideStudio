@@ -4,7 +4,7 @@ use crate::core::driver::{
 };
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
-    QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
+    QueryResult, SchemaObjectInfo, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
 };
 use crate::core::sqlite_worker_artifact::{ResolvedSqliteWorker, SqliteWorkerArtifactRegistry};
 use crate::core::ssh::SshSession;
@@ -862,6 +862,45 @@ impl DatabaseDriver for RemoteSqliteDriver {
                         .first()
                         .and_then(|row| on_delete.and_then(|index| string_at(row, index))),
                 }
+            })
+            .collect())
+    }
+
+    async fn get_schema_objects(&self, schema: &str) -> Result<Vec<SchemaObjectInfo>> {
+        let schema = normalized_schema(schema);
+        let result = self
+            .run_statement(
+                None,
+                &format!(
+                    "SELECT name, tbl_name FROM {}.sqlite_schema \
+                     WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%' ORDER BY tbl_name, name",
+                    quote_identifier(schema)?
+                ),
+                &[],
+            )
+            .await?;
+        let name = result
+            .columns
+            .iter()
+            .position(|column| column.name == "name")
+            .unwrap_or(0);
+        let parent_name = result
+            .columns
+            .iter()
+            .position(|column| column.name == "tbl_name")
+            .unwrap_or(1);
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some(SchemaObjectInfo {
+                    name: string_at(row, name)?,
+                    schema: Some(schema.to_string()),
+                    object_type: "trigger".to_string(),
+                    parent_name: Some(string_at(row, parent_name)?),
+                    comment: None,
+                    members_expandable: false,
+                })
             })
             .collect())
     }

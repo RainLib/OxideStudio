@@ -5031,7 +5031,7 @@ fn sqlite_catalog_ddl_suffix(
     Ok(suffix.to_string())
 }
 
-fn rewrite_sqlite_create_table_for_transfer(
+pub(crate) fn rewrite_sqlite_create_table_for_transfer(
     source_sql: &str,
     source_table: &str,
     target_schema: &str,
@@ -5284,7 +5284,7 @@ fn sqlite_transfer_target_index_name(
     }
 }
 
-fn rewrite_sqlite_create_index_for_transfer(
+pub(crate) fn rewrite_sqlite_create_index_for_transfer(
     source_sql: &str,
     target_schema: &str,
     target_table: &str,

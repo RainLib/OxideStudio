@@ -1,5 +1,23 @@
 # DBX alignment: deferred validation queue
 
+## Phase 154 -- catalog-backed SQLite schema rebuild
+
+- On local file databases and remote SQLite-over-SSH workers, rebuild tables
+  containing CHECK/COLLATE, generated columns, AUTOINCREMENT, composite UNIQUE
+  and foreign keys, STRICT/WITHOUT ROWID, expression/partial/collated indexes,
+  and multi-statement trigger bodies. Compare the complete `sqlite_schema`
+  before and after and confirm inserted rows still fire each restored trigger.
+- Repeat with attached schemas, quoted/Unicode object names, self-references,
+  WAL mode, concurrent readers, a busy writer, cancellation and forced disk
+  exhaustion. Confirm the Host backup remains usable, `foreign_keys` returns to
+  its original value, failed rebuilds roll back, and no temporary table or
+  partially restored trigger/index survives.
+- Remove catalog source, alter the reviewed fingerprint, append a second SQL
+  statement to table/index/trigger DDL, and add a required column without a
+  default. Every case must fail before mutation. The 70+ database matrix and
+  real product endpoints remain deferred; this phase claims static/local
+  contract coverage only.
+
 ## Phase 147 -- DBX `5d6f66777` native/runtime validation
 
 - Start InfluxDB 3 Core with and without authentication, then repeat against an

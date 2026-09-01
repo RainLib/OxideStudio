@@ -169,6 +169,52 @@ async fn capture_sqlite_table_definition(
         .map(str::to_string))
 }
 
+fn sqlite_trigger_definition_query(driver: &str, schema: &str) -> Option<String> {
+    (canonical_driver_name(driver) == Some("sqlite")).then(|| {
+        let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+        format!(
+            "SELECT name, tbl_name, sql AS definition FROM {schema}.sqlite_schema \
+             WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL \
+             ORDER BY tbl_name, name;"
+        )
+    })
+}
+
+async fn capture_sqlite_trigger_definitions(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    driver: &str,
+    schema: &str,
+) -> Result<HashMap<String, String>, String> {
+    let Some(sql) = sqlite_trigger_definition_query(driver, schema) else {
+        return Ok(HashMap::new());
+    };
+    let results = manager
+        .query(connection_id, &sql, Some(schema.to_string()), None, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    for row in results.iter().flat_map(|result| result.rows.iter()) {
+        let (Some(name), Some(parent_name), Some(definition)) = (
+            row.first().and_then(serde_json::Value::as_str),
+            row.get(1).and_then(serde_json::Value::as_str),
+            row.get(2).and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if !name.trim().is_empty()
+            && !parent_name.trim().is_empty()
+            && !definition.trim().is_empty()
+        {
+            definitions.insert(
+                schema_object_definition_key(Some(parent_name), name),
+                definition.trim().to_string(),
+            );
+        }
+    }
+    Ok(definitions)
+}
+
 fn postgres_view_dependency_query(schema: &str) -> String {
     let schema = sql_string_literal(schema);
     format!(
@@ -1645,6 +1691,33 @@ pub(crate) async fn capture_schema_snapshot_inner(
             }
             Err(error) => warnings.push(format!(
                 "MySQL trigger source was unavailable; trigger drift remains review-only: {error}"
+            )),
+        }
+    }
+
+    if !schema_objects.is_empty() {
+        match capture_sqlite_trigger_definitions(
+            &manager,
+            &connection_id,
+            &capabilities.driver,
+            schema,
+        )
+        .await
+        {
+            Ok(definitions) => {
+                for object in &mut schema_objects {
+                    if object.object_type.eq_ignore_ascii_case("trigger") {
+                        if let Some(definition) = definitions.get(&schema_object_definition_key(
+                            object.parent_name.as_deref(),
+                            &object.name,
+                        )) {
+                            object.definition = Some(definition.clone());
+                        }
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "SQLite trigger source was unavailable; affected rebuilds remain review-only: {error}"
             )),
         }
     }
@@ -3747,6 +3820,19 @@ mod tests {
         assert!(sql.contains("LIMIT 1"));
         assert!(!sql.to_ascii_uppercase().contains("PRAGMA"));
         assert!(sqlite_table_definition_query("postgres", "public", "users").is_none());
+    }
+
+    #[test]
+    fn sqlite_trigger_definition_query_is_catalog_scoped_and_read_only() {
+        let sql = sqlite_trigger_definition_query("sqlite", "tenant\"data")
+            .expect("SQLite should expose trigger catalog definitions");
+
+        assert!(sql.contains("FROM \"tenant\"\"data\".sqlite_schema"));
+        assert!(sql.contains("type = 'trigger'"));
+        assert!(sql.contains("sql IS NOT NULL"));
+        assert!(sql.contains("ORDER BY tbl_name, name"));
+        assert!(!sql.to_ascii_uppercase().contains("PRAGMA"));
+        assert!(sqlite_trigger_definition_query("postgres", "public").is_none());
     }
 
     #[test]

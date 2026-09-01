@@ -1,9 +1,13 @@
+use crate::commands::table::{
+    rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
+};
 use crate::core::{
     dialect::{database_spec_for_driver, DatabaseKind},
     protocol::{
         ColumnInfo, ConstraintInfo, FunctionInfo, FunctionParameterInfo, IndexInfo,
         SchemaObjectInfo,
     },
+    statement::{split_sql_statements, StatementScanDialect},
 };
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -23,7 +27,7 @@ pub struct SchemaRelationSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     /// The read-only SELECT body for a view, or the native SQLite CREATE TABLE
-    /// definition used only as completeness evidence for guarded rebuilds.
+    /// definition replayed through the guarded, catalog-validated rebuild path.
     /// Other table drivers leave it absent. Older snapshots deserialize
     /// without it and remain review-only where exact source is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1539,9 +1543,10 @@ fn sqlite_sql_fragment_is_safe(fragment: &str) -> bool {
     !fragment.contains('\0') && !fragment.contains(';')
 }
 
-fn sqlite_table_definition_supports_synthesized_rebuild(
+fn sqlite_exact_rebuild_table_sql(
     relation: &SchemaRelationSnapshot,
-) -> Result<(), String> {
+    temporary_table: &str,
+) -> Result<String, String> {
     let definition = relation
         .definition
         .as_deref()
@@ -1553,61 +1558,98 @@ fn sqlite_table_definition_supports_synthesized_rebuild(
                 relation.name
             )
         })?;
-    if definition.contains('\0') || definition.contains(';') {
+    // Passing the temporary identity as both the source and target tells the
+    // shared catalog rewriter to preserve all REFERENCES targets verbatim.
+    // Self-references already point at the final table name and remain correct
+    // after the temporary table is renamed.
+    rewrite_sqlite_create_table_for_transfer(definition, temporary_table, "", temporary_table)
+        .map_err(|error| {
+            format!(
+                "SQLite relation {} has a catalog definition that cannot be rebuilt exactly: {error}",
+                relation.name
+            )
+        })
+}
+
+fn sqlite_exact_rebuild_index_sql(
+    relation: &SchemaRelationSnapshot,
+    index: &IndexInfo,
+) -> Result<Option<String>, String> {
+    let Some(definition) = index
+        .definition
+        .as_deref()
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty())
+    else {
+        if index.is_primary || index.name.starts_with("sqlite_autoindex_") {
+            return Ok(None);
+        }
         return Err(format!(
-            "SQLite relation {} has an invalid or multi-statement catalog definition.",
-            relation.name
+            "Index {}.{} is missing its sqlite_schema definition.",
+            relation.name, index.name
+        ));
+    };
+    rewrite_sqlite_create_index_for_transfer(
+        definition,
+        "",
+        &relation.name,
+        &index.name,
+        index.is_unique,
+    )
+    .map(Some)
+    .map_err(|error| {
+        format!(
+            "Index {}.{} has a catalog definition that cannot be rebuilt exactly: {error}",
+            relation.name, index.name
+        )
+    })
+}
+
+fn sqlite_exact_rebuild_trigger_sql(object: &SchemaObjectSnapshot) -> Result<String, String> {
+    let definition = object
+        .definition
+        .as_deref()
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "SQLite trigger {} is missing its sqlite_schema definition.",
+                object.name
+            )
+        })?;
+    if definition.contains('\0') || definition.len() > 1024 * 1024 {
+        return Err(format!(
+            "SQLite trigger {} has an invalid catalog definition.",
+            object.name
         ));
     }
-    let normalized = definition
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    // Column/constraint metadata cannot currently reproduce these clauses
-    // byte-for-byte. Conservatively block instead of silently weakening the
-    // table. False positives in quoted defaults merely keep the plan manual.
-    const UNSUPPORTED_CATALOG_SEMANTICS: [&str; 16] = [
-        " CHECK",
-        " COLLATE",
-        " GENERATED",
-        " AUTOINCREMENT",
-        " UNIQUE",
-        " CONSTRAINT ",
-        " STRICT",
-        " WITHOUT ROWID",
-        " DEFERRABLE",
-        " INITIALLY",
-        " MATCH ",
-        " ON UPDATE ",
-        " ON DELETE ",
-        " ON CONFLICT ",
-        " ASC",
-        " DESC",
-    ];
-    if let Some(semantic) = UNSUPPORTED_CATALOG_SEMANTICS
-        .iter()
-        .find(|semantic| normalized.contains(**semantic))
+    // The MySQL statement scanner understands CREATE TRIGGER BEGIN/END bodies
+    // and therefore does not mistake their internal semicolons for additional
+    // top-level statements. SQLite remains the final parser authority.
+    let statements = split_sql_statements(definition, StatementScanDialect::Mysql);
+    if statements.len() != 1 {
+        return Err(format!(
+            "SQLite trigger {} catalog definition contains more than one statement.",
+            object.name
+        ));
+    }
+    let normalized = statements[0].trim_start().to_ascii_uppercase();
+    if !normalized.starts_with("CREATE TRIGGER ")
+        && !normalized.starts_with("CREATE TEMP TRIGGER ")
+        && !normalized.starts_with("CREATE TEMPORARY TRIGGER ")
     {
         return Err(format!(
-            "SQLite relation {} contains catalog semantic {} that the synthesized rebuild cannot preserve exactly.",
-            relation.name,
-            semantic.trim()
+            "SQLite trigger {} catalog definition has an unexpected statement type.",
+            object.name
         ));
     }
-    if relation
-        .columns
-        .iter()
-        .filter(|column| column.is_primary_key)
-        .count()
-        > 1
-    {
-        return Err(format!(
-            "SQLite relation {} has a composite primary key whose declared column order is not available in the rebuild metadata.",
-            relation.name
-        ));
-    }
-    Ok(())
+    let mut sql = statements[0]
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_string();
+    sql.push(';');
+    Ok(sql)
 }
 
 fn sqlite_column_definition(column: &ColumnInfo) -> Result<String, String> {
@@ -1922,9 +1964,6 @@ fn sqlite_rebuild_relation_sql(
             )],
         );
     }
-    if let Err(warning) = sqlite_table_definition_supports_synthesized_rebuild(source_relation) {
-        return (Vec::new(), vec![warning]);
-    }
     let rebuild_suffix = &hex_digest(
         format!(
             "{}:{}:{}",
@@ -1936,10 +1975,11 @@ fn sqlite_rebuild_relation_sql(
         "__oxide_rebuild_{}_{}",
         source_relation.name, rebuild_suffix
     );
-    let (create_sql, mut warnings) = sqlite_create_relation_sql(source_relation, &temporary_table);
-    if create_sql.is_empty() {
-        return (Vec::new(), warnings);
-    }
+    let create_sql = match sqlite_exact_rebuild_table_sql(source_relation, &temporary_table) {
+        Ok(sql) => sql,
+        Err(warning) => return (Vec::new(), vec![warning]),
+    };
+    let mut warnings = Vec::new();
     let target_columns = target_relation
         .columns
         .iter()
@@ -1948,7 +1988,11 @@ fn sqlite_rebuild_relation_sql(
     let preserved_columns = source_relation
         .columns
         .iter()
-        .filter(|source_column| target_columns.contains_key(source_column.name.as_str()))
+        .filter(|source_column| {
+            source_column.is_generated == Some(false)
+                && source_column.is_hidden == Some(false)
+                && target_columns.contains_key(source_column.name.as_str())
+        })
         .collect::<Vec<_>>();
     if preserved_columns.is_empty() {
         warnings.push(format!(
@@ -1958,7 +2002,9 @@ fn sqlite_rebuild_relation_sql(
         return (Vec::new(), warnings);
     }
     for source_column in &source_relation.columns {
-        if !target_columns.contains_key(source_column.name.as_str())
+        if source_column.is_generated == Some(false)
+            && source_column.is_hidden == Some(false)
+            && !target_columns.contains_key(source_column.name.as_str())
             && !source_column.is_nullable
             && source_column.default_value.is_none()
         {
@@ -1986,10 +2032,7 @@ fn sqlite_rebuild_relation_sql(
         .map(|column| sqlite_quote_identifier(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut sql = Vec::new();
-    sql.extend(create_sql.into_iter().filter(|statement| {
-        !statement.starts_with("CREATE INDEX") && !statement.starts_with("CREATE UNIQUE INDEX")
-    }));
+    let mut sql = vec![create_sql];
     sql.push(format!(
         "INSERT INTO {} ({copied_columns}) SELECT {copied_columns} FROM {};",
         sqlite_quote_identifier(&temporary_table),
@@ -2004,18 +2047,19 @@ fn sqlite_rebuild_relation_sql(
         sqlite_quote_identifier(&temporary_table),
         sqlite_quote_identifier(&source_relation.name)
     ));
-    let constraint_names = source_relation
-        .constraints
-        .iter()
-        .map(|constraint| constraint.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for index in source_relation
-        .indexes
-        .iter()
-        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
-    {
-        match sqlite_create_index_sql(source_relation, &source_relation.name, index) {
-            Ok(index_sql) => sql.push(index_sql),
+    for index in &source_relation.indexes {
+        match sqlite_exact_rebuild_index_sql(source_relation, index) {
+            Ok(Some(index_sql)) => sql.push(index_sql),
+            Ok(None) => {}
+            Err(warning) => warnings.push(warning),
+        }
+    }
+    for trigger in source.schema_objects.iter().filter(|object| {
+        object.object_type.eq_ignore_ascii_case("trigger")
+            && object.parent_name.as_deref() == Some(source_relation.name.as_str())
+    }) {
+        match sqlite_exact_rebuild_trigger_sql(trigger) {
+            Ok(trigger_sql) => sql.push(trigger_sql),
             Err(warning) => warnings.push(warning),
         }
     }
@@ -7710,7 +7754,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_rebuild_with_unreproducible_catalog_semantics_remains_review_only() {
+    fn sqlite_rebuild_preserves_advanced_catalog_semantics() {
         let mut source = snapshot(
             "desired",
             vec![
@@ -7726,11 +7770,6 @@ mod tests {
             "CREATE TABLE users (id INTEGER NOT NULL, email TEXT COLLATE NOCASE, CHECK (length(email) < 100)) STRICT"
                 .to_string(),
         );
-        assert!(
-            sqlite_table_definition_supports_synthesized_rebuild(&source.relations[0])
-                .unwrap_err()
-                .contains("catalog semantic")
-        );
         source = finalize_schema_snapshot(source).unwrap();
 
         let mut target = snapshot("actual", vec![column("id", "INTEGER", false)]);
@@ -7743,15 +7782,17 @@ mod tests {
         target = finalize_schema_snapshot(target).unwrap();
 
         let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
-        assert!(!plan.transactional);
-        assert_eq!(plan.execution_owner, SchemaDiffExecutionOwner::ReviewOnly);
-        assert_eq!(plan.summary.blocked, 1);
-        assert!(plan.changes[0].sql.is_empty());
-        assert!(plan.changes[0].blocked_reason.is_some());
+        assert!(plan.transactional);
+        assert_eq!(plan.execution_owner, SchemaDiffExecutionOwner::HostSql);
+        assert_eq!(plan.summary.blocked, 0);
+        assert!(plan.changes[0].blocked_reason.is_none());
+        assert!(plan.changes[0].sql[0].contains("email TEXT COLLATE NOCASE"));
+        assert!(plan.changes[0].sql[0].contains("CHECK (length(email) < 100)"));
+        assert!(plan.changes[0].sql[0].ends_with("STRICT;"));
     }
 
     #[test]
-    fn sqlite_catalog_only_drift_is_visible_and_blocked() {
+    fn sqlite_catalog_only_drift_is_executable_from_exact_ddl() {
         let mut source = snapshot("desired", vec![column("id", "INTEGER", false)]);
         source.driver = "sqlite".to_string();
         source.database_name = None;
@@ -7772,9 +7813,158 @@ mod tests {
 
         let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
         assert_eq!(plan.summary.total, 1);
-        assert_eq!(plan.summary.blocked, 1);
+        assert_eq!(plan.summary.blocked, 0);
+        assert!(plan.transactional);
+        assert_eq!(plan.execution_owner, SchemaDiffExecutionOwner::HostSql);
         assert_eq!(plan.changes[0].kind, SchemaChangeKind::RelationModify);
-        assert!(plan.changes[0].sql.is_empty());
+        assert!(plan.changes[0].sql[0].contains("CHECK (id > 0)"));
+    }
+
+    #[test]
+    fn sqlite_rebuild_preserves_generated_columns_without_copying_them() {
+        let mut generated = column("normalized_email", "TEXT", true);
+        generated.is_generated = Some(true);
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+                generated,
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition = Some(
+            "CREATE TABLE users (id INTEGER NOT NULL, email TEXT, normalized_email TEXT GENERATED ALWAYS AS (lower(email)) STORED)"
+                .to_string(),
+        );
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot(
+            "actual",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        target.driver = "sqlite".to_string();
+        target.database_name = None;
+        target.schema_name = "main".to_string();
+        target.relations[0].columns[0].is_auto_increment = false;
+        target.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL, email TEXT)".to_string());
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(plan.transactional);
+        assert_eq!(plan.summary.blocked, 0);
+        assert!(plan.changes[0].sql[0]
+            .contains("normalized_email TEXT GENERATED ALWAYS AS (lower(email)) STORED"));
+        assert!(plan.changes[0].sql[1].contains("(\"id\", \"email\")"));
+        assert!(!plan.changes[0].sql[1].contains("normalized_email"));
+    }
+
+    #[test]
+    fn sqlite_rebuild_preserves_expression_and_partial_index_definition() {
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL, email TEXT)".to_string());
+        source.relations[0].indexes = vec![IndexInfo {
+            definition: Some(
+                "CREATE INDEX users_email_expr ON users (lower(email) COLLATE NOCASE DESC) WHERE email IS NOT NULL"
+                    .to_string(),
+            ),
+            key_is_expression: vec![true],
+            ..index("users_email_expr", &[], "btree")
+        }];
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot(
+            "actual",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        target.driver = "sqlite".to_string();
+        target.database_name = None;
+        target.schema_name = "main".to_string();
+        target.relations[0].columns[0].is_auto_increment = false;
+        target.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL, email TEXT)".to_string());
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(plan.transactional);
+        assert_eq!(plan.summary.blocked, 0);
+        assert!(plan.changes[0].sql.iter().any(|statement| {
+            statement.contains("lower(email) COLLATE NOCASE DESC")
+                && statement.contains("WHERE email IS NOT NULL")
+        }));
+    }
+
+    #[test]
+    fn sqlite_rebuild_recreates_exact_trigger_definitions() {
+        let trigger = SchemaObjectSnapshot {
+            name: "users_audit".to_string(),
+            object_type: "trigger".to_string(),
+            parent_name: Some("users".to_string()),
+            description: None,
+            definition: Some(
+                "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit(user_id) VALUES (NEW.id); UPDATE audit SET touched = 1 WHERE user_id = NEW.id; END"
+                    .to_string(),
+            ),
+            sequence_owner: None,
+            sequence_last_value: None,
+            sequence_is_called: None,
+            dependencies: Vec::new(),
+        };
+        let mut source = snapshot(
+            "desired",
+            vec![
+                column("id", "INTEGER", false),
+                column("email", "TEXT", true),
+            ],
+        );
+        source.driver = "sqlite".to_string();
+        source.database_name = None;
+        source.schema_name = "main".to_string();
+        source.relations[0].columns[0].is_auto_increment = false;
+        source.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL, email TEXT)".to_string());
+        source.schema_objects = vec![trigger.clone()];
+        source = finalize_schema_snapshot(source).unwrap();
+
+        let mut target = snapshot("actual", vec![column("id", "INTEGER", false)]);
+        target.driver = "sqlite".to_string();
+        target.database_name = None;
+        target.schema_name = "main".to_string();
+        target.relations[0].columns[0].is_auto_increment = false;
+        target.relations[0].definition =
+            Some("CREATE TABLE users (id INTEGER NOT NULL)".to_string());
+        target.schema_objects = vec![trigger];
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        assert!(plan.transactional);
+        assert_eq!(plan.summary.blocked, 0);
+        let trigger_sql = plan.changes[0].sql.last().unwrap();
+        assert!(trigger_sql.starts_with("CREATE TRIGGER users_audit"));
+        assert!(trigger_sql.contains("INSERT INTO audit(user_id) VALUES (NEW.id);"));
+        assert!(trigger_sql.contains("UPDATE audit SET touched = 1"));
+        assert!(trigger_sql.ends_with("END;"));
     }
 
     #[test]

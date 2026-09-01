@@ -536,11 +536,109 @@ fn validate_single_statement(sql: &str) -> Result<&str, String> {
     }
     // rusqlite prepare rejects trailing statements. Keep the explicit check so
     // a future runtime change cannot silently widen the worker contract.
-    if !tail_is_only_semicolons_and_comments(trimmed) {
+    // CREATE TRIGGER bodies legitimately contain semicolons. rusqlite remains
+    // the authoritative parser and rejects a trailing top-level statement;
+    // the desktop host additionally validates the compound body before it can
+    // enter a guarded rebuild request.
+    let single_statement = if is_create_trigger(trimmed) {
+        trigger_tail_is_only_semicolons_and_comments(trimmed)
+    } else {
+        tail_is_only_semicolons_and_comments(trimmed)
+    };
+    if !single_statement {
         return Err("SQLite worker accepts exactly one statement per request".into());
     }
     validate_remote_sql_features(trimmed)?;
     Ok(trimmed)
+}
+
+fn is_create_trigger(sql: &str) -> bool {
+    let tokens = sqlite_identifier_tokens(sql, 3);
+    matches!(
+        tokens.as_slice(),
+        [create, trigger, ..] if create == "create" && trigger == "trigger"
+    ) || matches!(
+        tokens.as_slice(),
+        [create, temporary, trigger, ..]
+            if create == "create"
+                && matches!(temporary.as_str(), "temp" | "temporary")
+                && trigger == "trigger"
+    )
+}
+
+fn trigger_tail_is_only_semicolons_and_comments(sql: &str) -> bool {
+    let mut chars = sql.char_indices().peekable();
+    let mut body_started = false;
+    let mut case_depth = 0usize;
+    while let Some((start, character)) = chars.next() {
+        match character {
+            '-' if chars.peek().is_some_and(|(_, next)| *next == '-') => {
+                chars.next();
+                for (_, next) in chars.by_ref() {
+                    if next == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                chars.next();
+                let mut previous = '\0';
+                for (_, next) in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            '\'' | '"' | '`' => {
+                let delimiter = character;
+                while let Some((_, next)) = chars.next() {
+                    if next == delimiter {
+                        if chars
+                            .peek()
+                            .is_some_and(|(_, escaped)| *escaped == delimiter)
+                        {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '[' => {
+                for (_, next) in chars.by_ref() {
+                    if next == ']' {
+                        break;
+                    }
+                }
+            }
+            character if character.is_ascii_alphabetic() || character == '_' => {
+                let mut end = start + character.len_utf8();
+                while let Some((index, next)) = chars.peek().copied() {
+                    if next.is_ascii_alphanumeric() || next == '_' {
+                        chars.next();
+                        end = index + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let token = sql[start..end].to_ascii_lowercase();
+                if !body_started {
+                    body_started = token == "begin";
+                } else if token == "case" {
+                    case_depth = case_depth.saturating_add(1);
+                } else if token == "end" {
+                    if case_depth > 0 {
+                        case_depth -= 1;
+                    } else {
+                        return strip_sqlite_trivia_and_semicolons(&sql[end..]).is_empty();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn validate_remote_sql_features(sql: &str) -> Result<(), String> {
@@ -1351,6 +1449,38 @@ mod tests {
         assert!(validate_single_statement("SELECT 1; -- done").is_ok());
         assert!(validate_single_statement("SELECT 1; /* done */").is_ok());
         assert!(validate_single_statement("SELECT 1; SELECT 2").is_err());
+    }
+
+    #[test]
+    fn trigger_bodies_are_accepted_but_trailing_statements_are_rejected_by_sqlite() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE users (id INTEGER); CREATE TABLE audit (id INTEGER);")
+            .unwrap();
+        let trigger = "CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit(id) VALUES (NEW.id); UPDATE audit SET id = id WHERE id = NEW.id; END;";
+        assert!(validate_single_statement(trigger).is_ok());
+        assert!(matches!(
+            execute(&connection, trigger, &[]),
+            WorkerResponseBody::Result { .. }
+        ));
+        assert!(matches!(
+            execute(
+                &connection,
+                "CREATE TRIGGER malicious AFTER INSERT ON users BEGIN SELECT NEW.id; END; DROP TABLE users;",
+                &[],
+            ),
+            WorkerResponseBody::Error { .. }
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'users'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
