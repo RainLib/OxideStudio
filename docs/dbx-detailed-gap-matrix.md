@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`034ff5030`
+> DBX 参考提交：`fac018f16`（v0.6.0；最新功能提交 `c4cdcbc48`）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,11 +9,11 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`5d6f66777` → `034ff5030`）
+### 最新增量审计（`5d6f66777` → `fac018f16`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
-| `034ff5030` | 发布 v0.5.100 | 仅同步 DBX 自身 `package.json`、Cargo/flake/Tauri 版本号与 lockfile，没有产品逻辑或可迁移实现；Oxide 不跟随 DBX 产品版本号。参考仓库已前移并固定到该提交。 |
+| `fac018f16`、`b31b6845f`、`0d75456f8` | 发布 v0.6.0 与 packages 0.4.77 | 上游强制更新后的三个提交只调整 DBX 自身版本、lockfile 和发布元数据；最新功能提交仍为下列已审计的 `c4cdcbc48`，没有新的产品逻辑需要迁移。Oxide 不跟随 DBX 产品版本号，参考仓库已前移并固定到 `fac018f16`。 |
 | `8187ef9ba`（历史性能缺口复核） | MySQL routine 编辑时增量复用 lexer/block 状态，避免每个内部分号重新扫描完整语句前缀造成 O(n²) | 已完成等价并减少中间状态：Oxide 的 Rust authoritative statement scanner 在既有单次 quote/comment-aware 遍历中直接识别 routine 的有界 16-word `CREATE` 前缀，并增量维护 `BEGIN`/`CASE`/`END IF|LOOP|REPEAT|WHILE` 块栈；不为 routine 另存持续增长的 token 数组。无 `DELIMITER` 的 compound procedure/function/trigger/event 保持一个 statement，显式 custom delimiter 与普通 `CREATE TABLE` 边界不变。20,000 条内部 `SET` 的回归覆盖线性扫描路径。DBX 位置：`apps/desktop/src/lib/sql/sqlStatementRanges.ts:mysqlRoutineTokensUpTo/advanceMysqlRoutineBlockCompleteness`。Oxide 位置：`src-tauri/src/core/statement.rs:MysqlRoutineScan/split_sql_statement_spans`。真实 MySQL/MariaDB routine 执行仍归统一数据库验证阶段。 |
 | `19f8736b6`（历史诊断缺口复核） | MySQL procedure/function 使用专用 syntax diagnostics，避免通用 SQL 语义分析误报 routine body | 已对齐并增加明确资源边界：Native/custom MySQL 编辑器使用 delimiter、quote、comment aware 的 O(n)/O(depth) 单次扫描，报告参数尾逗号、procedure 中非法 `RETURN`、function 中缺少表达式的 `RETURN`；`DELIMITER $$` 紧贴 `END`/`RETURN`、嵌套 `BEGIN`/`CASE`、多 routine 与普通 SQL 隔离均有回归。编辑输入按 180ms 合并，分析结果按 model/version 复用；仅 routine 精确范围内来自 `tree-sitter-sql` 的 `SYNTAX_ERROR/PARSE_ERROR` 被隐藏，OXIDE 安全/结构 inspection 继续显示。同步扫描上限为 4 MiB，超限 fail quiet；20,000 条内部语句验证不保留增长 token 列表。DBX 位置：`apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.vue:refreshSemanticDiagnostics`。Oxide 位置：`src/features/query-editor/model/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.tsx`。真实 MySQL 版本诊断与执行验证延期。 |
 | `1e9babca4`（历史性能缺口复核） | 超大 Oracle package body 不绘制 current-statement frame，避免逐行几何探测冻结 UI | 已完成等价并覆盖 Oxide 自身实现风险：Monaco 不是 CodeMirror layer，但旧实现会为 statement 每个逻辑行生成一个 whole-line decoration，并把整段 SQL 复制进 React DML preview state。现在 statement 跨度超过 500 行时不生成 frame decorations，也不发布 preview SQL；Rust authoritative range、10,000-range 版本缓存、执行/选择语义均不改变，正好位于上限的 statement 仍绘制。DBX 位置：`apps/desktop/src/lib/editor/codemirrorCurrentStatementFrameLayer.ts:MAX_FRAME_STATEMENT_LINES/currentStatementFrameRect`。Oxide 位置：`src/features/query-editor/model/currentStatementDecoration.ts:MAX_CURRENT_STATEMENT_FRAME_LINES/currentStatementLineFrames`、`hooks/useCurrentStatementDecoration.ts:decorate`。真实 WebView 滚动帧率验证延期。 |
