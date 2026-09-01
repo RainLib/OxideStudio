@@ -6119,11 +6119,71 @@ fn validate_native_read_only_query(driver: &str, query: &str) -> std::result::Re
         "elasticsearch" | "elastic" | "es" => validate_elasticsearch_read_only_query(query),
         "mongodb" | "mongo" => validate_mongodb_read_only_query(query),
         "redis" => validate_redis_read_only_query(query),
+        "etcd" | "consul" => validate_native_key_value_read_only_query(driver.as_str(), query),
+        "nacos" => validate_nacos_read_only_query(query),
         _ => Err(format!(
             "query.runReadOnly is unsupported for driver {}",
             bounded_text(&driver, 80)
         )),
     }
+}
+
+/// The bundled Consul and etcd integrations deliberately expose only a
+/// concrete key preview. Keep the Agent boundary exactly as narrow: no
+/// prefixes, multiple commands, or driver-specific REST syntax can cross it.
+fn validate_native_key_value_read_only_query(
+    driver: &str,
+    query: &str,
+) -> std::result::Result<(), String> {
+    let value = parse_native_get_json(driver, query)?;
+    let key = value
+        .as_str()
+        .ok_or_else(|| format!("{driver} GET requires one JSON-quoted key"))?;
+    validate_native_key_component(driver, "key", key, true)
+}
+
+/// Nacos configuration identity is a three-part object. Requiring all three
+/// fields prevents an Agent from turning a preview into an implicit group or
+/// namespace-wide request as the provider evolves.
+fn validate_nacos_read_only_query(query: &str) -> std::result::Result<(), String> {
+    let value = parse_native_get_json("Nacos", query)?;
+    let object = value.as_object().ok_or_else(|| {
+        "Nacos GET requires a JSON config key with dataId, group and tenant".to_string()
+    })?;
+    for field in ["dataId", "group", "tenant"] {
+        let value = object
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("Nacos GET requires a string {field}"))?;
+        validate_native_key_component("Nacos", field, value, field != "tenant")?;
+    }
+    Ok(())
+}
+
+fn parse_native_get_json(driver: &str, query: &str) -> std::result::Result<Value, String> {
+    let query = query.trim();
+    let Some(payload) = query
+        .strip_prefix("GET ")
+        .or_else(|| query.strip_prefix("get "))
+    else {
+        return Err(format!(
+            "{driver} read-only queries only support GET <JSON-key>"
+        ));
+    };
+    serde_json::from_str(payload.trim())
+        .map_err(|_| format!("{driver} GET requires one complete JSON key"))
+}
+
+fn validate_native_key_component(
+    driver: &str,
+    field: &str,
+    value: &str,
+    required: bool,
+) -> std::result::Result<(), String> {
+    if (required && value.trim().is_empty()) || value.len() > 1_024 || value.contains('\0') {
+        return Err(format!("{driver} {field} is invalid"));
+    }
+    Ok(())
 }
 
 fn validate_elasticsearch_read_only_query(query: &str) -> std::result::Result<(), String> {
@@ -7632,6 +7692,32 @@ mod tests {
         );
         assert!(validate_native_read_only_query("redis", "GET user:1\nTTL user:1").is_ok());
         assert!(validate_native_read_only_query("redis", "DEL user:1").is_err());
+    }
+
+    #[test]
+    fn native_read_only_gate_allows_only_exact_new_key_value_previews() {
+        for driver in ["etcd", "consul"] {
+            assert!(validate_native_read_only_query(driver, r#"GET "app/config""#).is_ok());
+            assert!(validate_native_read_only_query(driver, "GET app/config").is_err());
+            assert!(validate_native_read_only_query(driver, r#"GET """#).is_err());
+            assert!(validate_native_read_only_query(driver, r#"GET "app"\nGET "other""#).is_err());
+        }
+        assert!(validate_native_read_only_query(
+            "nacos",
+            r#"GET {"dataId":"app.yaml","group":"DEFAULT_GROUP","tenant":"prod"}"#,
+        )
+        .is_ok());
+        assert!(validate_native_read_only_query(
+            "nacos",
+            r#"GET {"dataId":"app.yaml","group":"DEFAULT_GROUP"}"#,
+        )
+        .is_err());
+        assert!(validate_native_read_only_query(
+            "nacos",
+            r#"GET {"dataId":"app.yaml","group":"","tenant":"prod"}"#,
+        )
+        .is_err());
+        assert!(validate_native_read_only_query("nacos", "POST /v1/cs/configs").is_err());
     }
 
     #[test]
