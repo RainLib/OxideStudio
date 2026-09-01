@@ -209,4 +209,32 @@ describe("LSP hover provider coordinator", () => {
     expect(metadataMocks.loadTableDdl).not.toHaveBeenCalled();
     expect(metadataOnly.contents[0].value).not.toContain("DDL preview");
   });
+
+  it("does not duplicate table metadata requests when the interactive widget owns them", async () => {
+    const state = fixture();
+    metadataMocks.loadTableMetadata.mockClear();
+    metadataMocks.loadTableDdl.mockClear();
+    state.setRuntime({
+      ...state.runtime(),
+      schemaTables: [{ name: "users", type: "BASE TABLE" }],
+      supportsTableBrowsing: true,
+      showTableDdlHoverPreview: true,
+      interactiveTableHover: true,
+    });
+    const model = {
+      ...state.model,
+      getLineContent: () => "SELECT * FROM users",
+      getValue: () => "SELECT * FROM users",
+      getWordAtPosition: () => ({ startColumn: 15, endColumn: 20 }),
+    };
+
+    const hover = await state
+      .provider()
+      .provideHover(model, { lineNumber: 1, column: 17 });
+
+    expect(metadataMocks.loadTableMetadata).not.toHaveBeenCalled();
+    expect(metadataMocks.loadTableDdl).not.toHaveBeenCalled();
+    expect(state.lspClient.getHover).not.toHaveBeenCalled();
+    expect(hover).toBeNull();
+  });
 });

@@ -15,6 +15,7 @@ import {
 } from "@/services/tableMetadataCache";
 import { syncLspModelBeforeCompletion } from "../model/lspDocumentSync";
 import { toMonacoRange } from "../model/lspMonacoAdapter";
+import { useTableDdlHoverSearchWidget } from "./useTableDdlHoverSearchWidget";
 
 type Disposable = { dispose: () => void };
 
@@ -35,11 +36,13 @@ export type LspHoverProviderRuntime = {
   showTableDdlHoverPreview: boolean;
   supportsTableBrowsing: boolean;
   targetSchema?: string | null;
+  interactiveTableHover?: boolean;
 };
 
 export type LspHoverProviderCoordinatorOptions = LspHoverProviderRuntime & {
   editorLanguageId: string;
   isActivePane: boolean;
+  editor?: any;
   lspClient: LspClient;
   monaco: any;
 };
@@ -125,18 +128,24 @@ export function registerLspHoverProvider(options: {
               table: relation.name,
             }
           : null;
+      const interactiveTablePreview = Boolean(
+        tableIdentity && runtime.interactiveTableHover,
+      );
+      const shouldLoadTablePreview = tableIdentity && !interactiveTablePreview;
       const [lspHover, metadata, ddl] = await Promise.all([
-        lspClient
-          .getHover(uri, position.lineNumber - 1, position.column - 1)
-          .catch(() => null),
-        tableIdentity
+        interactiveTablePreview
+          ? Promise.resolve(null)
+          : lspClient
+              .getHover(uri, position.lineNumber - 1, position.column - 1)
+              .catch(() => null),
+        shouldLoadTablePreview
           ? loadTableMetadata({
               ...tableIdentity,
               includeIndexes: true,
               includeConstraints: false,
             }).catch(() => null)
           : Promise.resolve(null),
-        tableIdentity && runtime.showTableDdlHoverPreview
+        shouldLoadTablePreview && runtime.showTableDdlHoverPreview
           ? loadTableDdl(tableIdentity, relation?.type).catch(() => null)
           : Promise.resolve(null),
       ]);
@@ -184,6 +193,17 @@ export function useLspHoverProviderCoordinator(
 ) {
   const runtimeRef = useRef<LspHoverProviderRuntime>(options);
   runtimeRef.current = options;
+
+  useTableDdlHoverSearchWidget({
+    editor: options.editor,
+    monaco: options.monaco,
+    runtime: options,
+    enabled:
+      options.isActivePane &&
+      Boolean(options.editor) &&
+      options.showTableDdlHoverPreview &&
+      options.supportsTableBrowsing,
+  });
 
   useEffect(() => {
     if (!options.isActivePane || !options.monaco) return;

@@ -2513,6 +2513,12 @@ export function QueryEditor({
     driver,
     editorLanguageId,
     effectiveConnectionId,
+    editor: mountedEditor,
+    interactiveTableHover: Boolean(
+      mountedEditor &&
+        editorSettings.showTableDdlHoverPreview &&
+        capabilities.supportsTableBrowsing,
+    ),
     isActivePane,
     lspClient,
     metadataRevision: metadataVersion,

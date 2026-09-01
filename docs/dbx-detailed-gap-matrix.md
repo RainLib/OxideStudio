@@ -339,6 +339,7 @@ Tauri 配置解析；macOS 真实首击、关闭动画和多窗口行为仍进�
 | AI API 自定义 Header `42c0dc7f8` | `src-tauri/src/commands/ai.rs`、`agent/model.rs`、`SettingsDialog.tsx`（`bef53c0a`） | 已对齐并加强：Header 值进入 Rust 凭据存储，不进入前端状态、日志或 provider 快照。 |
 | 左侧页签关闭、分页服务端排序、Gauss 未引号迁移标识符 `662037295`、`40a806a24`、`4baa46ca8` | `useTabStore.ts`、`TabBar.tsx`、`TableDataView.tsx`、`DataGrid.tsx`、`commands/table.rs` | 已在前序阶段对齐；dirty/pinned tab 保留防丢失边界，关系表排序进入分页请求，Gauss policy 有独立测试。 |
 | View options/长内容 popover 越出窗口 `b41dac461` | `src/components/ui/popover.tsx`、`popover.test.ts` | 本阶段已对齐到共享 primitive：默认 8px collision padding，使用 Radix 可用高度变量，横向裁剪、纵向滚动；调用方仍可显式覆盖尺寸/overflow。 |
-| DDL hover 内联搜索 `f9ff9245c` | Oxide 当前 Monaco Markdown hover + 可搜索的完整 DDL tab | 尚未完成；Monaco 安全 Markdown 不允许 DBX CodeMirror tooltip 直接嵌入 input，需以受控 content widget 实现，不能开启任意 HTML/command trust。 |
+| DDL hover 内联搜索 `f9ff9245c` | `useTableDdlHoverSearchWidget.ts`、`queryEditorTableHover.ts` | 本阶段已按 Monaco 架构对齐：关系表 hover 使用受控 content widget，不开启任意 Markdown HTML/command trust；320ms 延迟后复用有界 metadata/DDL cache，支持字面量、大小写不敏感搜索与安全 `<mark>` 高亮。鼠标在标识符任意字符上均使用同一对齐起点；同表移动只重排 widget，不重新请求。连接、文档、metadata revision、编辑、滚动或目标变化会关闭 widget，迟到结果不能复活。DDL 不可用时降级为最多 200 列的 metadata 结构。 |
 
-这次复核没有用“相似入口”替代缺失的 hover 搜索；该项继续保留为明确实现任务。
+这次实现保留标准 LSP hover 处理列/表达式语义；只有已确认的 relation target 由可搜索
+widget 接管，从而避免原生 hover 与交互式 hover 重叠，也不重复发送 metadata/DDL/LSP 请求。

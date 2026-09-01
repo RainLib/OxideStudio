@@ -1655,3 +1655,20 @@ explicit deferred validation task rather than an implicit release check.
   shared default through `cn`/Tailwind merging.
 - Phase 130 adds a pure shared-primitive contract test and production build;
   it does not claim real WebView geometry verification.
+
+## Searchable table-structure hover
+
+- In packaged Monaco, hover the first, middle and final character of ordinary,
+  Unicode, double-quoted, backtick-quoted and SQL Server bracket-quoted table
+  references. The same relation widget must appear without duplicate native
+  hover content or duplicate metadata/DDL requests.
+- Type literal searches containing regex punctuation, quotes and non-ASCII text;
+  results must highlight database text without interpreting HTML. Escape first
+  clears the query and then closes the widget; IME and arrow keys must remain in
+  the search input.
+- Change connection, schema, database, metadata revision, document, scroll and
+  edit state while a delayed DDL request is active. The old widget/result must
+  disappear and must not reopen after the request resolves.
+- Test tables above 200 columns and DDL above 24 KiB. The hover must remain
+  bounded and direct users to the complete searchable DDL tab when truncated.
+  Phase 131 uses mocked cache/Monaco lifecycle tests and opens no live database.

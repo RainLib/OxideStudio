@@ -89,7 +89,38 @@ export function findQueryEditorHoverTable<T extends QueryEditorHoverTable>(
 /** Avoid replacing a column hover merely because a table happens to have the
  * same name. The language server owns all other semantic contexts. */
 export function isSqlRelationIdentifierContext(line: string, column: number): boolean {
-  const before = line.slice(0, Math.max(0, column - 1));
+  const requestedCursor = Math.max(0, column - 1);
+  if (requestedCursor >= line.length) {
+    return /\b(?:from|join|update|into|table|references)\s+(?:(?:[\w$]+|"[^"]*"|`[^`]*`|\[[^\]]*\])\s*\.\s*)?(?:"|`|\[)?$/iu.test(
+      line,
+    );
+  }
+  const cursor = requestedCursor;
+  let identifierStart = cursor;
+  if (/[\p{L}\p{N}_$]/u.test(line[cursor] || "")) {
+    while (
+      identifierStart > 0 &&
+      /[\p{L}\p{N}_$]/u.test(line[identifierStart - 1] || "")
+    ) {
+      identifierStart -= 1;
+    }
+  } else if (/[\p{L}\p{N}_$]/u.test(line[cursor - 1] || "")) {
+    while (
+      identifierStart > 0 &&
+      /[\p{L}\p{N}_$]/u.test(line[identifierStart - 1] || "")
+    ) {
+      identifierStart -= 1;
+    }
+  }
+  for (const [open, close] of [["\"", "\""], ["`", "`"], ["[", "]"]] as const) {
+    const start = line.lastIndexOf(open, cursor);
+    const end = start >= 0 ? line.indexOf(close, start + 1) : -1;
+    if (start >= 0 && end >= cursor && start <= identifierStart) {
+      identifierStart = start;
+      break;
+    }
+  }
+  const before = line.slice(0, identifierStart);
   return /\b(?:from|join|update|into|table|references)\s+(?:(?:[\w$]+|"[^"]*"|`[^`]*`|\[[^\]]*\])\s*\.\s*)?(?:"|`|\[)?$/iu.test(before);
 }
 

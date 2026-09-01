@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildQueryEditorTableHoverMarkdown } from "./queryEditorTableHover";
+import {
+  buildQueryEditorTableHoverMarkdown,
+  isSqlRelationIdentifierContext,
+  sqlIdentifierAtColumn,
+} from "./queryEditorTableHover";
 
 describe("buildQueryEditorTableHoverMarkdown", () => {
   it("keeps database-owned hover values compact and inside the markdown table", () => {
@@ -15,5 +19,27 @@ describe("buildQueryEditorTableHoverMarkdown", () => {
     expect(markdown).toContain("DEFAULT `");
     expect(markdown).toContain("… +4");
     expect(markdown.length).toBeLessThan(700);
+  });
+
+  it.each([
+    ["SELECT * FROM users", 15],
+    ["SELECT * FROM users", 17],
+    ["SELECT * FROM users", 19],
+    ['SELECT * FROM "order items"', 16],
+    ['SELECT * FROM "order items"', 22],
+    ["SELECT * FROM public.users", 22],
+    ["SELECT * FROM public.users", 26],
+  ])(
+    "keeps relation context aligned across the complete identifier at column %s",
+    (line, column) => {
+      expect(sqlIdentifierAtColumn(line, column)).toBeTruthy();
+      expect(isSqlRelationIdentifierContext(line, column)).toBe(true);
+    },
+  );
+
+  it("does not classify same-named columns and expressions as relation targets", () => {
+    expect(isSqlRelationIdentifierContext("SELECT users FROM audit", 8)).toBe(false);
+    expect(isSqlRelationIdentifierContext("WHERE users = 1", 9)).toBe(false);
+    expect(isSqlRelationIdentifierContext("SELECT fn(users)", 12)).toBe(false);
   });
 });
