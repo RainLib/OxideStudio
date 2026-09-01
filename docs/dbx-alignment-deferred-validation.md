@@ -2076,6 +2076,29 @@ explicit deferred validation task rather than an implicit release check.
   tabs, diagnostics or persisted connection state. Verify 401/403/404 and
   malformed payloads are bounded and return clear errors.
 - Nacos 3.x protocol variants, rnacos compatibility, service registration,
-  namespace management, ACL administration and all configuration writes remain
-  deliberately unsupported until a product-specific reviewed workflow and
-  live compatibility evidence exist.
+  namespace management and ACL administration remain deliberately unsupported
+  until a product-specific reviewed workflow and live compatibility evidence
+  exist. The separate reviewed configuration-migration surface is covered by
+  Phase 164; it does not change this browser's read-only query contract.
+
+## Phase 164 -- Nacos reviewed configuration migration
+
+- Against two disposable Nacos 2.x instances (and two namespaces on one
+  instance), transfer JSON, YAML and plain-text configurations with duplicate
+  `dataId` values across different groups. Confirm the context-menu workflow
+  reads the full source instead of the 64 KiB preview, preserves the selected
+  target `dataId`/group/tenant and refreshes the active target Explorer.
+- Verify create, Abort, Skip and Overwrite plans. Before an overwrite, change
+  the target value from another client and confirm the reviewed `casMd5`
+  revision fails rather than replacing the newer value. Confirm the renderer
+  requires the exact overwrite phrase and that stale source or target plans
+  cannot be replayed.
+- Exercise 401/403, a missing source, a missing target connection, partial
+  target metadata permissions, payloads near the 8 MiB cap, and concurrent
+  creation of a target that did not exist during preview. Nacos provides an
+  `md5` compare-and-set guard for overwrites; create-vs-create behavior must
+  be verified against each supported server version before it is claimed as an
+  atomic no-conflict guarantee.
+- Phase 164 currently has fake-HTTP native driver tests, transfer-token and
+  frontend build coverage. No real Nacos server, Nacos 3/rnacos compatibility,
+  credential-expiry or concurrency fixture has been executed yet.
