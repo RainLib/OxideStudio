@@ -53,7 +53,7 @@ describe("UpdateDialog", () => {
 
     expect(document.body.textContent).toContain("Version 0.2.0 is available");
     expect(document.body.textContent).toContain("Faster metadata cache");
-    expect(document.body.textContent).toContain("Download Update");
+    expect(document.body.textContent).toContain("Download in Background");
     expect(document.body.textContent).not.toContain("Install and Restart");
   });
 

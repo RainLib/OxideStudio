@@ -161,6 +161,8 @@ export function AppBar({ center, right }: AppBarProps) {
   } = useProjectStore();
   const updateStatus = useUpdateStore((state) => state.status);
   const availableUpdate = useUpdateStore((state) => state.update);
+  const updateDownloadedBytes = useUpdateStore((state) => state.downloadedBytes);
+  const updateTotalBytes = useUpdateStore((state) => state.totalBytes);
   const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
   useAppUpdatePolling();
   // Detect if we're on macOS
@@ -345,7 +347,18 @@ export function AppBar({ center, right }: AppBarProps) {
 
   const updateMenuLabel = (() => {
     if (updateStatus === "checking") return "Checking for Updates...";
-    if (updateStatus === "downloading") return "Downloading Update...";
+    if (updateStatus === "downloading") {
+      const progress =
+        updateTotalBytes && updateTotalBytes > 0
+          ? Math.min(
+              100,
+              Math.round((updateDownloadedBytes / updateTotalBytes) * 100),
+            )
+          : null;
+      return progress === null
+        ? "Downloading Update in Background..."
+        : `Downloading Update... ${progress}%`;
+    }
     if (updateStatus === "downloaded") return "Restart to Update...";
     if (availableUpdate) return `Update to ${availableUpdate.version}...`;
     return "Check for Updates...";
@@ -361,6 +374,14 @@ export function AppBar({ center, right }: AppBarProps) {
   })();
   const showUpdateBadge =
     updateStatus === "available" || updateStatus === "downloaded";
+  const showUpdateStatusButton =
+    updateStatus === "available" ||
+    updateStatus === "downloading" ||
+    updateStatus === "downloaded";
+  const updateProgress =
+    updateStatus === "downloading" && updateTotalBytes && updateTotalBytes > 0
+      ? Math.min(1, updateDownloadedBytes / updateTotalBytes)
+      : null;
 
   const handleCreateProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -617,6 +638,60 @@ export function AppBar({ center, right }: AppBarProps) {
       <div className="h-full flex items-center gap-1 shrink-0 ml-auto pr-1">
         {right && <div className="flex items-center gap-1 pr-1">{right}</div>}
         <div className="flex items-center gap-0.5 pl-0.5">
+          {showUpdateStatusButton && (
+            <button
+              type="button"
+              className="wb-icon-button relative"
+              title={updateMenuLabel}
+              aria-label={updateMenuLabel}
+              onClick={openUpdateDialog}
+            >
+              {updateStatus === "downloading" ? (
+                updateProgress === null ? (
+                  <LoaderCircle
+                    size={15}
+                    className="animate-spin motion-reduce:animate-none"
+                  />
+                ) : (
+                  <svg
+                    viewBox="0 0 20 20"
+                    className="h-[15px] w-[15px] -rotate-90"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="10"
+                      cy="10"
+                      r="7"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      className="opacity-20"
+                    />
+                    <circle
+                      cx="10"
+                      cy="10"
+                      r="7"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      pathLength="1"
+                      strokeDasharray="1"
+                      strokeDashoffset={1 - updateProgress}
+                      className="text-[hsl(var(--wb-accent))] transition-[stroke-dashoffset] duration-150 motion-reduce:transition-none"
+                    />
+                  </svg>
+                )
+              ) : updateStatus === "downloaded" ? (
+                <RotateCw size={14} className="text-[hsl(var(--wb-accent))]" />
+              ) : (
+                <CircleArrowDown
+                  size={14}
+                  className="text-[hsl(var(--wb-accent))]"
+                />
+              )}
+            </button>
+          )}
           <EnterpriseAccountMenu />
           <Popover open={settingsMenuOpen} onOpenChange={setSettingsMenuOpen}>
             <PopoverTrigger asChild>

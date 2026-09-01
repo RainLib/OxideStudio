@@ -16,7 +16,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useUpdateStore, type AppUpdateStatus } from "@/store/useUpdateStore";
+import {
+  activeUpdateBlockingTaskCount,
+  useUpdateStore,
+  type AppUpdateStatus,
+} from "@/store/useUpdateStore";
+import { useTaskStore } from "@/store/useTaskStore";
 
 interface UpdateDialogProps {
   open: boolean;
@@ -107,10 +112,10 @@ function StatusMessage({
 }
 
 function actionLabel(status: AppUpdateStatus) {
-  if (status === "downloading") return "Downloading...";
+  if (status === "downloading") return "Downloading in Background...";
   if (status === "downloaded") return "Install and Restart";
   if (status === "installing") return "Installing...";
-  return "Download Update";
+  return "Download in Background";
 }
 
 export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
@@ -127,6 +132,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     ignoreAvailableVersion,
     clearError,
   } = useUpdateStore();
+  const activeTaskCount = useTaskStore((state) =>
+    activeUpdateBlockingTaskCount(state.tasks),
+  );
 
   const progress =
     totalBytes && totalBytes > 0
@@ -140,7 +148,10 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     status === "installing";
 
   const runPrimaryAction = () => {
-    if (status === "available") void downloadUpdate();
+    if (status === "available") {
+      onOpenChange(false);
+      void downloadUpdate();
+    }
     if (status === "downloaded") void installAndRestart();
   };
 
@@ -257,6 +268,17 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           </div>
         )}
 
+        {status === "downloaded" && activeTaskCount > 0 && (
+          <div className="flex items-start gap-2 border-t border-amber-400/20 bg-amber-400/5 px-4 py-2 text-[11px] leading-4 text-amber-200">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            <span>
+              The update is ready. Finish or cancel {activeTaskCount} active
+              background {activeTaskCount === 1 ? "task" : "tasks"} before
+              restarting.
+            </span>
+          </div>
+        )}
+
         <DialogFooter className="flex-row items-center justify-end gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-4 py-3 sm:space-x-0">
           {(status === "up-to-date" || status === "error") && (
             <button
@@ -290,10 +312,21 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
               type="button"
               className="inline-flex h-7 items-center gap-1.5 rounded-[4px] bg-[hsl(var(--wb-accent))] px-3 text-[12px] font-medium text-[hsl(var(--wb-accent-foreground))] transition-colors hover:brightness-110 disabled:pointer-events-none disabled:opacity-55"
               onClick={runPrimaryAction}
-              disabled={status === "downloading" || status === "installing"}
+              disabled={
+                status === "downloading" ||
+                status === "installing" ||
+                (status === "downloaded" && activeTaskCount > 0)
+              }
             >
               {status === "downloaded" || status === "installing" ? (
-                <RotateCw size={13} className={status === "installing" ? "animate-spin" : ""} />
+                <RotateCw
+                  size={13}
+                  className={
+                    status === "installing"
+                      ? "animate-spin motion-reduce:animate-none"
+                      : ""
+                  }
+                />
               ) : (
                 <Download size={13} />
               )}

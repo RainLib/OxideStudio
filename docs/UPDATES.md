@@ -6,6 +6,14 @@ and published to Aliyun OSS. The application checks and downloads updates from
 the HTTPS URL configured by `OXIDE_RELEASE_BASE_URL`; GitHub Releases are not an
 update or download dependency.
 
+When a user accepts an available update, the package downloads in the
+background and the dialog may be closed without cancelling it. The title bar
+keeps a progress/ready indicator that reopens the same operation. Download
+progress is coalesced before updating React state. Installation and restart
+are refused while any Workbench task is `running` or `waiting`; the downloaded
+package remains ready until queries, transfers, imports, exports, or Agent
+approval work reaches a terminal state.
+
 The repository's base `tauri.conf.json` intentionally contains no updater
 endpoint or verification key. The release workflow writes both the public key
 and Aliyun endpoint into a temporary Tauri config before every build, which

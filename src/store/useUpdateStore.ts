@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { AppUpdateInfo } from "@/services/appUpdateService";
+import { useTaskStore, type WorkbenchTask } from "@/store/useTaskStore";
 
 export type AppUpdateStatus =
   | "idle"
@@ -33,8 +34,17 @@ interface AppUpdateState {
 }
 
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+export const UPDATE_PROGRESS_PUBLISH_INTERVAL_MS = 100;
 const LAST_CHECK_STORAGE_KEY = "oxide-update-last-check";
 const IGNORED_VERSION_STORAGE_KEY = "oxide-update-ignored-version";
+
+export function activeUpdateBlockingTaskCount(
+  tasks: readonly Pick<WorkbenchTask, "status">[],
+) {
+  return tasks.filter(
+    (task) => task.status === "running" || task.status === "waiting",
+  ).length;
+}
 
 function normalizedVersion(value: string) {
   return value.trim().replace(/^v/i, "").toLocaleLowerCase();
@@ -205,13 +215,32 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
     });
     try {
       const { downloadAppUpdate } = await import("@/services/appUpdateService");
+      let hasPublishedProgress = false;
+      let lastPublishedAt = 0;
+      let lastObservedDownloadedBytes = 0;
+      let lastTotalBytes: number | null = null;
       await downloadAppUpdate(({ downloadedBytes, totalBytes }) => {
-        set({ downloadedBytes, totalBytes });
+        lastObservedDownloadedBytes = downloadedBytes;
+        const now = Date.now();
+        const totalChanged = totalBytes !== lastTotalBytes;
+        const completed = totalBytes !== null && downloadedBytes >= totalBytes;
+        if (
+          !hasPublishedProgress ||
+          totalChanged ||
+          completed ||
+          now - lastPublishedAt >= UPDATE_PROGRESS_PUBLISH_INTERVAL_MS
+        ) {
+          hasPublishedProgress = true;
+          lastPublishedAt = now;
+          lastTotalBytes = totalBytes;
+          set({ downloadedBytes, totalBytes });
+        }
       });
-      set((state) => ({
+      set({
         status: "downloaded",
-        downloadedBytes: state.totalBytes ?? state.downloadedBytes,
-      }));
+        downloadedBytes: lastTotalBytes ?? lastObservedDownloadedBytes,
+        totalBytes: lastTotalBytes,
+      });
     } catch (error) {
       set({ status: "available", error: describeUpdateError(error) });
     }
@@ -219,6 +248,16 @@ export const useUpdateStore = create<AppUpdateState>((set, get) => ({
 
   installAndRestart: async () => {
     if (get().status !== "downloaded") return;
+
+    const activeTaskCount = activeUpdateBlockingTaskCount(
+      useTaskStore.getState().tasks,
+    );
+    if (activeTaskCount > 0) {
+      set({
+        error: `Finish or cancel ${activeTaskCount} active background ${activeTaskCount === 1 ? "task" : "tasks"} before installing the update.`,
+      });
+      return;
+    }
 
     set({ status: "installing", error: null });
     try {

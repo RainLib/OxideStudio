@@ -1733,3 +1733,20 @@ explicit deferred validation task rather than an implicit release check.
   repeated layout work. Phase 134 covers the shared hysteresis contract,
   structural observer/accessibility assertions and a production frontend
   build; packaged WebView geometry remains deferred.
+
+## Background application update lifecycle
+
+- Use a correctly signed update on packaged Windows, macOS and Linux builds.
+  Start the download, close and reopen the dialog, switch projects and hide the
+  window. The same download must continue once, preserve monotonic progress and
+  end in one ready-to-install state without a second update check.
+- Repeat with missing content length, slow/stalled transfer, connection loss,
+  invalid signature and a superseding release. Unknown totals must remain
+  indeterminate; errors must keep the current app runnable and must not expose
+  updater URLs, headers or signature material.
+- While the package is ready, run queries, imports, exports, transfers and an
+  Agent turn waiting for approval. Both the disabled UI and direct Store action
+  must refuse installation. Finish/cancel every task and confirm one explicit
+  install/restart succeeds. Add a new task at the installation boundary to
+  characterize the remaining renderer-to-plugin race before claiming a durable
+  Host-owned shutdown lease.

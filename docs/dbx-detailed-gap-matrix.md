@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`d69cf9da7`
+> DBX 参考提交：`8be503bf4`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,7 +9,16 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`f075caef2` → `d69cf9da7`，进行中）
+### 最新增量审计（`d69cf9da7` → `8be503bf4`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `8be503bf4` | 应用更新包在关闭对话框后继续后台下载，并在工具栏持续显示状态 | 本阶段已对齐并补充性能/安全边界：下载状态移入全局 Store，点击后立即关闭对话框但不取消请求；标题栏提供可重新打开的 available/downloading/downloaded 状态入口，已知总量显示环形进度，未知总量显示 indeterminate 动画。下载 chunk 只按 100ms 或 total/完成边界发布，避免 AppBar 高频重渲染。安装/重启前前后两层检查 Workbench `running/waiting` 任务，存在查询、迁移、导入导出或 Agent 审批时保持 downloaded，不调用 updater。Tauri 签名校验和 active `Update` handle 仍由既有 service 所有。 |
+| `23f0b1255` | Oracle Data Compare 允许显式选择 schema | Oxide 已由 capability 而非产品 allowlist 覆盖：`TableDataCompareDialog` 对不声明 database catalog 的任意关系驱动读取 `getSchemas` 并显示目标 schema，下游 column/table/compare endpoint 都携带所选 schema；声明 catalog 的驱动则按 database→schema 选择。正式 Oracle package 与真实 schema 权限验证仍延期，不能以候选身份冒充可运行能力。 |
+| `d79d35792` | SQL Library 默认折叠分组并提供 Collapse All | 尚未对齐：Oxide 当前 Project Files/Query History 不是 DBX 的持久 SQL Library，不能只增加装饰性 Collapse All 按钮。需先明确 Library 的项目级持久模型、搜索/重命名/删除/拖入编辑器及与现有 `.sql` 项目文件的去重边界，再迁移折叠状态。 |
+| `5f9ba5176` | Tab bar 位置、分组和排序可配置 | 部分对齐：Oxide 已有 pinned、Close Left/Right/Others/All、拖动排序与 Split Editor group，但没有 DBX 的 top/bottom 位置、connection/type group 和 alphabetic/created/updated sorting 设置。此项需在 `useTabStore` 的可见顺序、拖动语义、split group、active-tab 保持和 dirty close 共同建模后实现，已列为下一 UI 阶段。 |
+
+### 上一增量审计（`f075caef2` → `d69cf9da7`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
@@ -516,3 +525,24 @@ collation、STRICT/WITHOUT ROWID 和显式 expression/partial index。本阶段�
 
 纯逻辑与内存 SQLite 回归覆盖 CHECK/FK/generated/STRICT、字符串内分号、表达式/partial index、
 恶意第二语句、括号/尾部 clause 校验以及 catalog DDL 计划组装。
+
+## Phase 142 增量：应用更新后台下载与安全重启
+
+对照 DBX `8be503bf4`，Oxide 原更新对话框要求用户停留并手动开始下载，且安装前没有绑定
+Workbench 活动任务。本阶段调整为全局生命周期：
+
+- 用户点击“Download in Background”后对话框立即关闭，下载仍由全局 Update Store 和 Tauri
+  `Update` handle 持续持有；重新打开对话框可查看同一进度，不会重新检查或启动第二个下载。
+- 标题栏在 available/downloading/downloaded 状态显示独立入口。已知 content length 使用环形进度，
+  未知总长使用 indeterminate 状态；Settings 菜单同步显示百分比或后台下载文案。
+- 网络 chunk 进度在 renderer 侧按 100ms、总量变化或完成边界合并，避免每个 chunk 同时触发
+  AppBar、Settings 和对话框订阅更新。
+- 下载不因查询、迁移、Agent 或导出任务而阻塞；安装并重启前则重新读取 Workbench Task Store，
+  任一 `running`/`waiting` 任务都会保持 downloaded 状态并拒绝调用 updater。UI 同时禁用安装按钮
+  并显示精确活动任务数量，renderer 绕过按钮直接调用 Store 也无法扩大权限。
+- updater 签名、公钥、超时、active update handle 与安装/重启仍复用既有 Tauri service；本阶段不把
+  关闭对话框误实现为下载取消，也不声称底层插件提供未验证的断点续传。
+
+单元测试覆盖进度节流、并发下载单飞、后台完成状态、活动任务阻断和终态任务放行。真实签名
+update、未知 content length、网络中断、Windows installer/macOS bundle/Linux AppImage 以及安装
+瞬间新增任务的竞态进入更新延期验证清单。
