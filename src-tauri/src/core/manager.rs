@@ -1290,6 +1290,30 @@ impl ConnectionManager {
         driver.clear_search_index_documents(index).await
     }
 
+    pub async fn get_nacos_config_snapshot(
+        &self,
+        id: &str,
+        data_id: &str,
+        group: &str,
+        tenant: &str,
+    ) -> Result<Option<super::protocol::NacosConfigSnapshot>> {
+        self.get_driver(id)
+            .await?
+            .get_nacos_config_snapshot(data_id, group, tenant)
+            .await
+    }
+
+    pub async fn publish_nacos_config(
+        &self,
+        id: &str,
+        request: super::protocol::NacosConfigPublishRequest<'_>,
+    ) -> Result<super::protocol::NacosConfigPublishReceipt> {
+        self.get_driver(id)
+            .await?
+            .publish_nacos_config(request)
+            .await
+    }
+
     /// Get columns
     pub async fn get_columns(
         &self,

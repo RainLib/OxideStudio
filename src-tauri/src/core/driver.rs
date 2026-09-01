@@ -3,7 +3,8 @@ use super::{
     dialect::DatabaseCapabilities,
     protocol::{
         CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, DatabaseInfo,
-        ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, ParameterizedStatement, QueryParameter,
+        ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, NacosConfigPublishReceipt,
+        NacosConfigPublishRequest, NacosConfigSnapshot, ParameterizedStatement, QueryParameter,
         QueryResult, SchemaObjectInfo, TableInfo,
     },
 };
@@ -687,6 +688,28 @@ pub trait DatabaseDriver: Send + Sync {
         _index: &str,
     ) -> Result<crate::core::protocol::SearchIndexClearResult> {
         Err(unsupported_driver_feature("Search index clear"))
+    }
+
+    /// Read the full native configuration for a reviewed Nacos migration.
+    /// This is deliberately not implemented through the generic query path,
+    /// whose explorer response can be truncated.
+    async fn get_nacos_config_snapshot(
+        &self,
+        _data_id: &str,
+        _group: &str,
+        _tenant: &str,
+    ) -> Result<Option<NacosConfigSnapshot>> {
+        Err(unsupported_driver_feature("Nacos configuration migration"))
+    }
+
+    /// Publish one reviewed Nacos configuration. Only the dedicated migration
+    /// command may invoke this native operation; generic query text remains
+    /// read-only.
+    async fn publish_nacos_config(
+        &self,
+        _request: NacosConfigPublishRequest<'_>,
+    ) -> Result<NacosConfigPublishReceipt> {
+        Err(unsupported_driver_feature("Nacos configuration migration"))
     }
 
     /// Get columns for a specific table

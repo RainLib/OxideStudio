@@ -6,6 +6,42 @@ use serde::{Deserialize, Serialize};
 /// the visible result is incomplete.
 pub const DEFAULT_QUERY_RESULT_ROW_LIMIT: usize = 1_000;
 
+/// A complete Nacos configuration value obtained through the driver's fixed
+/// OpenAPI contract.  It is intentionally separate from `QueryResult`: a
+/// migration must never use the 64 KiB explorer preview as its source.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosConfigSnapshot {
+    pub data_id: String,
+    pub group: String,
+    pub tenant: String,
+    pub content: String,
+    /// Server supplied revision (`md5`) when the Nacos list endpoint exposes
+    /// it. It is used as an optimistic-concurrency guard for overwrites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NacosConfigPublishRequest<'a> {
+    pub data_id: &'a str,
+    pub group: &'a str,
+    pub tenant: &'a str,
+    pub content: &'a str,
+    /// Revision reviewed during preview. `None` means the preview confirmed
+    /// that the target did not exist.
+    pub expected_revision: Option<&'a str>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosConfigPublishReceipt {
+    pub data_id: String,
+    pub group: String,
+    pub tenant: String,
+    pub overwritten: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<ColumnDef>,

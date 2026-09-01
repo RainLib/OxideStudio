@@ -1,6 +1,9 @@
 use crate::core::{
     driver::DatabaseDriver,
-    protocol::{CollectionInfo, CollectionPage, ColumnDef, QueryResult},
+    protocol::{
+        CollectionInfo, CollectionPage, ColumnDef, NacosConfigPublishReceipt,
+        NacosConfigPublishRequest, NacosConfigSnapshot, QueryResult,
+    },
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -206,6 +209,38 @@ impl NacosDriver {
             .with_context(|| format!("Nacos {operation} returned non-UTF-8 content"))
     }
 
+    async fn post_form_text(
+        &self,
+        path: &str,
+        mut form: Vec<(String, String)>,
+        operation: &str,
+    ) -> Result<String> {
+        if let Some(token) = self.token().await? {
+            form.push(("accessToken".to_string(), token));
+        }
+        let response = self
+            .client
+            .post(self.endpoint(path)?)
+            .form(&form)
+            .send()
+            .await
+            .with_context(|| format!("Nacos {operation} request failed"))?;
+        let status = response.status();
+        let body = bounded_nacos_response_bytes(
+            response,
+            if status.is_success() {
+                NACOS_RESPONSE_MAX_BYTES
+            } else {
+                NACOS_ERROR_MAX_BYTES
+            },
+            operation,
+        )
+        .await?;
+        nacos_status_error(status, operation)?;
+        String::from_utf8(body)
+            .with_context(|| format!("Nacos {operation} returned non-UTF-8 content"))
+    }
+
     async fn list_configs(
         &self,
         page: usize,
@@ -278,6 +313,86 @@ impl NacosDriver {
             truncated.then(|| "Nacos configuration preview is truncated at 64 KiB".to_string());
         Ok(result)
     }
+
+    async fn config_snapshot(&self, key: &NacosConfigKey) -> Result<Option<NacosConfigSnapshot>> {
+        validate_config_key(key)?;
+        let page = self.list_configs(1, NACOS_PAGE_LIMIT, &key.data_id).await?;
+        let item = page.page_items.into_iter().find(|item| {
+            item.data_id == key.data_id
+                && item.group == key.group
+                && (item.tenant.is_empty() || item.tenant == key.tenant)
+        });
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        let content = self
+            .get_text(
+                "v1/cs/configs",
+                vec![
+                    ("dataId".to_string(), key.data_id.clone()),
+                    ("group".to_string(), key.group.clone()),
+                    ("tenant".to_string(), key.tenant.clone()),
+                ],
+                "configuration migration source read",
+            )
+            .await?;
+        Ok(Some(NacosConfigSnapshot {
+            data_id: key.data_id.clone(),
+            group: key.group.clone(),
+            tenant: key.tenant.clone(),
+            content,
+            revision: (!item.md5.trim().is_empty()).then_some(item.md5),
+        }))
+    }
+
+    async fn publish_config(
+        &self,
+        request: NacosConfigPublishRequest<'_>,
+    ) -> Result<NacosConfigPublishReceipt> {
+        let key = NacosConfigKey {
+            data_id: request.data_id.to_string(),
+            group: request.group.to_string(),
+            tenant: request.tenant.to_string(),
+        };
+        validate_config_key(&key)?;
+        if request.content.len() > NACOS_RESPONSE_MAX_BYTES || request.content.contains('\0') {
+            bail!("Nacos configuration content is invalid or exceeds the 8 MiB migration limit")
+        }
+        let current = self.config_snapshot(&key).await?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|snapshot| snapshot.revision.as_deref());
+        if current_revision != request.expected_revision {
+            bail!("Nacos configuration target changed after preview; review the migration again")
+        }
+        let overwritten = current.is_some();
+        let mut form = vec![
+            ("dataId".to_string(), key.data_id.clone()),
+            ("group".to_string(), key.group.clone()),
+            ("tenant".to_string(), key.tenant.clone()),
+            ("content".to_string(), request.content.to_string()),
+        ];
+        if let Some(revision) = request
+            .expected_revision
+            .filter(|revision| !revision.trim().is_empty())
+        {
+            // Nacos' documented `casMd5` guard closes the remaining interval
+            // between the review read and the publish request for overwrites.
+            form.push(("casMd5".to_string(), revision.to_string()));
+        }
+        let response = self
+            .post_form_text("v1/cs/configs", form, "configuration migration publish")
+            .await?;
+        if !matches!(response.trim(), "true" | "\"true\"") {
+            bail!("Nacos configuration migration publish was not accepted")
+        }
+        Ok(NacosConfigPublishReceipt {
+            data_id: key.data_id,
+            group: key.group,
+            tenant: key.tenant,
+            overwritten,
+        })
+    }
 }
 
 #[async_trait]
@@ -312,6 +427,29 @@ impl DatabaseDriver for NacosDriver {
         let key: NacosConfigKey =
             serde_json::from_str(input.trim()).context("Nacos GET requires a JSON config key")?;
         Ok(vec![self.get_config(&key).await?])
+    }
+
+    async fn get_nacos_config_snapshot(
+        &self,
+        data_id: &str,
+        group: &str,
+        tenant: &str,
+    ) -> Result<Option<NacosConfigSnapshot>> {
+        self.ensure_connected()?;
+        self.config_snapshot(&NacosConfigKey {
+            data_id: data_id.to_string(),
+            group: group.to_string(),
+            tenant: tenant.to_string(),
+        })
+        .await
+    }
+
+    async fn publish_nacos_config(
+        &self,
+        request: NacosConfigPublishRequest<'_>,
+    ) -> Result<NacosConfigPublishReceipt> {
+        self.ensure_connected()?;
+        self.publish_config(request).await
     }
 
     async fn get_schemas(&self) -> Result<Vec<String>> {
@@ -635,5 +773,47 @@ mod tests {
             request.starts_with("POST /tenant/v1/auth/users/login HTTP/1.1")
                 || request.starts_with("GET /tenant/v1/cs/configs?")
         }));
+    }
+
+    #[tokio::test]
+    async fn reviewed_publish_rechecks_revision_and_uses_nacos_cas_guard() {
+        let list = r#"{"totalCount":1,"pageItems":[{"dataId":"app.json","group":"DEFAULT_GROUP","tenant":"prod","md5":"reviewed-md5"}]}"#;
+        let (url, server) = serve_test_http_responses(vec![
+            (
+                "application/json",
+                r#"{"accessToken":"fixture-token","tokenTtl":3600}"#,
+            ),
+            ("application/json", r#"{"totalCount":0,"pageItems":[]}"#),
+            ("application/json", list),
+            ("text/plain", r#"{"enabled":true}"#),
+            ("application/json", list),
+            ("text/plain", r#"{"enabled":true}"#),
+            ("text/plain", "true"),
+        ])
+        .await;
+        let mut driver = NacosDriver::new(&url).unwrap();
+        driver.connect().await.unwrap();
+        let source = driver
+            .get_nacos_config_snapshot("app.json", "DEFAULT_GROUP", "prod")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.revision.as_deref(), Some("reviewed-md5"));
+        let receipt = driver
+            .publish_nacos_config(NacosConfigPublishRequest {
+                data_id: "app.json",
+                group: "DEFAULT_GROUP",
+                tenant: "prod",
+                content: "{\"enabled\":false}",
+                expected_revision: source.revision.as_deref(),
+            })
+            .await
+            .unwrap();
+        assert!(receipt.overwritten);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 7);
+        assert!(requests[6].starts_with("POST /tenant/v1/cs/configs HTTP/1.1"));
+        assert!(requests[6].contains("casMd5=reviewed-md5"));
+        assert!(requests[6].contains("content=%7B%22enabled%22%3Afalse%7D"));
     }
 }

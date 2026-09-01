@@ -313,6 +313,8 @@ pub fn run() {
             commands::document::get_elasticsearch_index_metadata,
             commands::document::preview_elasticsearch_index_clear,
             commands::document::execute_elasticsearch_index_clear,
+            commands::nacos::preview_nacos_config_transfer,
+            commands::nacos::execute_nacos_config_transfer,
             commands::schema::get_columns,
             commands::schema::get_generated_columns,
             commands::schema::get_database_columns,
