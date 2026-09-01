@@ -25,9 +25,12 @@ export interface IndexInfo {
     columns: string[];
     is_unique: boolean;
     is_primary: boolean;
+    filter?: string;
     index_type?: string;
+    included_columns?: string[];
     definition?: string;
     comment?: string;
+    key_is_expression?: boolean[];
 }
 
 export interface ConstraintInfo {
@@ -38,6 +41,8 @@ export interface ConstraintInfo {
     referenced_table?: string;
     referenced_columns: string[];
     definition?: string;
+    on_update?: string;
+    on_delete?: string;
 }
 
 export interface QueryResult {

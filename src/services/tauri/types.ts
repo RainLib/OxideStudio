@@ -958,6 +958,8 @@ export interface TableDataTransferRequest {
   reseedIdentity?: boolean;
   /** Defaults to true; false is Host-gated to reviewed GaussDB/openGauss packages. */
   quoteTargetColumnNames?: boolean;
+  /** Restore reviewed same-product indexes and constraints after row writes. */
+  restoreSourceSchemaObjects?: boolean;
 }
 
 /** A read-only role-to-member relationship returned by the connected server. */
@@ -1091,6 +1093,7 @@ export interface TableDataTransferBatchPlanRequest {
   reseedIdentity?: boolean;
   /** Defaults to true; false is Host-gated to reviewed GaussDB/openGauss packages. */
   quoteTargetColumnNames?: boolean;
+  restoreSourceSchemaObjects?: boolean;
 }
 
 export type TableDataTransferObjectKind =
@@ -1137,6 +1140,7 @@ export interface TableDataTransferBatchTablePreflight {
   planDigest?: string | null;
   /** Preview-only target generator identities and current state. */
   identityReseedPlans?: TableDataTransferIdentityReseedPlan[];
+  schemaRestoreStatements?: string[];
   warnings: string[];
 }
 
@@ -1170,6 +1174,7 @@ export interface TableDataTransferBatchTableResult {
   /** Reviewed target baseline used to verify append/overwrite results. */
   targetRowsBefore?: number | null;
   identityReseedColumns: string[];
+  restoredSchemaObjects?: number;
   reportId?: string | null;
 }
 
@@ -1235,6 +1240,7 @@ export interface TableDataTransferPreview {
   upsertKeyColumns: string[];
   identityReseedColumns: string[];
   identityReseedPlans?: TableDataTransferIdentityReseedPlan[];
+  schemaRestoreStatements?: string[];
   canExecute: boolean;
   confirmationToken: string;
   warnings: string[];
@@ -1279,6 +1285,7 @@ export interface TableDataTransferResult {
   targetRowsBefore?: number | null;
   mappedColumns: TableDataTransferColumnMapping[];
   identityReseedColumns: string[];
+  restoredSchemaObjects?: number;
   /** Set when the terminal transfer report was stored successfully. */
   reportId?: string | null;
 }
@@ -1606,9 +1613,12 @@ export interface IndexInfo {
   columns: string[];
   is_unique: boolean;
   is_primary: boolean;
+  filter?: string;
   index_type?: string;
+  included_columns?: string[];
   definition?: string;
   comment?: string;
+  key_is_expression?: boolean[];
 }
 
 export interface DocumentPage {
@@ -1723,6 +1733,8 @@ export interface ConstraintInfo {
   referenced_table?: string;
   referenced_columns: string[];
   definition?: string;
+  on_update?: string;
+  on_delete?: string;
 }
 
 export interface ForeignKeyReferenceInfo {

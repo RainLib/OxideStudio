@@ -1082,10 +1082,13 @@ impl DatabaseDriver for MysqlDriver {
                     is_unique: non_unique == 0,
                     name,
                     columns,
+                    filter: None,
                     index_type: mysql_string_by_index(row, 2),
+                    included_columns: None,
                     definition: None,
                     comment: mysql_string_by_index(row, 3)
                         .filter(|comment| !comment.trim().is_empty()),
+                    key_is_expression: Vec::new(),
                 }
             })
             .collect())
@@ -1102,7 +1105,9 @@ impl DatabaseDriver for MysqlDriver {
                 MAX(kcu.referenced_table_schema) AS referenced_schema,
                 MAX(kcu.referenced_table_name) AS referenced_table,
                 GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.position_in_unique_constraint SEPARATOR ',') AS referenced_columns,
-                MAX(cc.check_clause) AS check_clause
+                MAX(cc.check_clause) AS check_clause,
+                MAX(rc.update_rule) AS on_update,
+                MAX(rc.delete_rule) AS on_delete
             FROM information_schema.table_constraints tc
             LEFT JOIN information_schema.key_column_usage kcu
               ON kcu.constraint_schema = tc.constraint_schema
@@ -1112,6 +1117,10 @@ impl DatabaseDriver for MysqlDriver {
             LEFT JOIN information_schema.check_constraints cc
               ON cc.constraint_schema = tc.constraint_schema
              AND cc.constraint_name = tc.constraint_name
+            LEFT JOIN information_schema.referential_constraints rc
+              ON rc.constraint_schema = tc.constraint_schema
+             AND rc.table_name = tc.table_name
+             AND rc.constraint_name = tc.constraint_name
             WHERE tc.table_schema = ? AND tc.table_name = ?
             GROUP BY tc.constraint_name, tc.constraint_type
             ORDER BY tc.constraint_type, tc.constraint_name
@@ -1147,6 +1156,8 @@ impl DatabaseDriver for MysqlDriver {
                     referenced_table: mysql_string_by_index(row, 4),
                     referenced_columns,
                     definition: mysql_string_by_index(row, 6),
+                    on_update: mysql_string_by_index(row, 7),
+                    on_delete: mysql_string_by_index(row, 8),
                 }
             })
             .collect())

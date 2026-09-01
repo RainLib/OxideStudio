@@ -148,6 +148,15 @@ function supportsPostgresIdentityReseed(driver: string | undefined) {
   );
 }
 
+function transferSchemaRestoreFamily(driver: string | undefined) {
+  const normalized = driver?.trim().toLocaleLowerCase() || "";
+  if (new Set(["postgres", "postgresql", "pgsql"]).has(normalized)) {
+    return "postgres";
+  }
+  if (new Set(["mysql", "mariadb"]).has(normalized)) return "mysql";
+  return null;
+}
+
 const transferObjectKindOrder: TableDataTransferObjectKind[] = [
   "SEQUENCE",
   "VIEW",
@@ -258,6 +267,8 @@ export function TableDataTransferDialog({
   const [batchSize, setBatchSize] = useState("250");
   const [reseedIdentity, setReseedIdentity] = useState(false);
   const [quoteTargetColumnNames, setQuoteTargetColumnNames] = useState(true);
+  const [restoreSourceSchemaObjects, setRestoreSourceSchemaObjects] =
+    useState(false);
   const [schemas, setSchemas] = useState<string[]>([]);
   const [databases, setDatabases] = useState<string[]>([]);
   const [targetCapabilities, setTargetCapabilities] =
@@ -319,6 +330,10 @@ export function TableDataTransferDialog({
       ),
     [connections, targetConnectionId],
   );
+  const sourceConnection = useMemo(
+    () => connections.find((connection) => connection.id === source.connectionId),
+    [connections, source.connectionId],
+  );
   const eligibleTargetConnections = useMemo(
     () =>
       connections.filter((connection) =>
@@ -354,6 +369,16 @@ export function TableDataTransferDialog({
   );
   const isBatchTransfer =
     selectedSourceTables.size > 1 || selectedTransferObjects.length > 0;
+  const canRestoreSourceSchemaObjects = Boolean(
+    sourceConnection &&
+      targetConnection &&
+      !sourceConnection.driverPackageVersion &&
+      !targetConnection.driverPackageVersion &&
+      transferSchemaRestoreFamily(effectiveSource.driver) &&
+      transferSchemaRestoreFamily(effectiveSource.driver) ===
+        transferSchemaRestoreFamily(targetConnection.driver) &&
+      (isBatchTransfer || effectiveSource.table === targetTable),
+  );
   const sourceTransferObjectGroups = useMemo(
     () => transferObjectKindOrder
       .map((kind) => ({
@@ -508,6 +533,7 @@ export function TableDataTransferDialog({
       batchSize: Number.parseInt(batchSize, 10) || undefined,
       reseedIdentity,
       quoteTargetColumnNames,
+      restoreSourceSchemaObjects,
     };
   }, [
     batchSize,
@@ -516,6 +542,7 @@ export function TableDataTransferDialog({
     projectId,
     reseedIdentity,
     quoteTargetColumnNames,
+    restoreSourceSchemaObjects,
     effectiveSource,
     transferId,
     targetConnection,
@@ -549,6 +576,7 @@ export function TableDataTransferDialog({
         batchSize: Number.parseInt(batchSize, 10) || undefined,
         reseedIdentity,
         quoteTargetColumnNames,
+        restoreSourceSchemaObjects,
       },
     };
   }, [
@@ -557,6 +585,7 @@ export function TableDataTransferDialog({
     mode,
     reseedIdentity,
     quoteTargetColumnNames,
+    restoreSourceSchemaObjects,
     projectId,
     selectedSourceTables,
     selectedTransferObjects,
@@ -636,6 +665,7 @@ export function TableDataTransferDialog({
     setMode("append");
     setReseedIdentity(false);
     setQuoteTargetColumnNames(true);
+    setRestoreSourceSchemaObjects(false);
     setSchemas([]);
     setDatabases([]);
     setTargetCapabilities(null);
@@ -955,6 +985,13 @@ export function TableDataTransferDialog({
     setProgress(null);
   };
 
+  useEffect(() => {
+    if (!canRestoreSourceSchemaObjects && restoreSourceSchemaObjects) {
+      setRestoreSourceSchemaObjects(false);
+      resetTransferReview();
+    }
+  }, [canRestoreSourceSchemaObjects, restoreSourceSchemaObjects]);
+
   const handleTargetTableModeChange = (nextMode: "existing" | "new") => {
     setTargetTableMode(nextMode);
     setTargetTable(
@@ -963,6 +1000,7 @@ export function TableDataTransferDialog({
     setTargetPlan(null);
     setTargetPlanPreviewKey("");
     setTargetPlanConfirmation("");
+    setRestoreSourceSchemaObjects(false);
     resetTransferReview();
     setError(null);
   };
@@ -1026,6 +1064,7 @@ export function TableDataTransferDialog({
       setTables(names);
       setTargetTableMode("existing");
       setTargetTable(created.table);
+      setRestoreSourceSchemaObjects(true);
       setTargetPlan(null);
       setTargetPlanPreviewKey("");
       setTargetPlanConfirmation("");
@@ -1674,6 +1713,25 @@ export function TableDataTransferDialog({
                     </span>
                   </label>
                 )}
+                {canRestoreSourceSchemaObjects && (
+                  <label className="flex items-start gap-2 rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2 text-[10px] leading-4">
+                    <Checkbox
+                      checked={restoreSourceSchemaObjects}
+                      onCheckedChange={(checked) => {
+                        setRestoreSourceSchemaObjects(checked === true);
+                        resetTransferReview();
+                      }}
+                      disabled={isSubmitting}
+                    />
+                    <span>
+                      Restore source indexes and constraints after the row copy
+                      <span className="mt-0.5 block wb-muted">
+                        Same-product catalog metadata only. The exact DDL is reviewed first,
+                        runs inside the target transaction, and restores foreign keys last.
+                      </span>
+                    </span>
+                  </label>
+                )}
                 <p className="text-[10px] leading-4 wb-muted">
                   Transfer streams bounded batches through one target transaction and commits only after every step succeeds. {mode === "overwrite" ? "Replace mode deletes the previewed target rows inside that transaction and rolls the deletion back on failure." : mode === "upsert" ? "Upsert mode uses the target table's declared primary key and updates only mapped non-key columns." : "Append mode leaves existing rows unchanged."} Only verified paging, binding, and transaction paths are listed.
                 </p>
@@ -1912,6 +1970,7 @@ export function TableDataTransferDialog({
                           (item) => item.table === table,
                         );
                         const generatorPlans = preflight?.identityReseedPlans || [];
+                        const schemaStatements = preflight?.schemaRestoreStatements || [];
                         return (
                           <div key={table} className="space-y-1 border-b border-[hsl(var(--wb-border-subtle))] py-1 last:border-b-0">
                             <div className="flex items-center justify-between gap-2">
@@ -1932,6 +1991,16 @@ export function TableDataTransferDialog({
                                 {` · last ${generator.currentValue ?? "unavailable"} · target max ${generator.targetMaxValue ?? "empty"}`}
                               </div>
                             ))}
+                            {schemaStatements.length > 0 && (
+                              <details className="pl-2 text-[9px] wb-muted">
+                                <summary className="cursor-pointer select-none">
+                                  Restore {schemaStatements.length} index/constraint statement(s)
+                                </summary>
+                                <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded-[3px] bg-[hsl(var(--wb-panel))] p-1.5">
+                                  {schemaStatements.join("\n\n")}
+                                </pre>
+                              </details>
+                            )}
                           </div>
                         );
                       })}
@@ -2106,6 +2175,16 @@ export function TableDataTransferDialog({
                       ))}
                     </div>
                   </div>
+                )}
+                {(preview.schemaRestoreStatements?.length || 0) > 0 && (
+                  <details className="rounded-[4px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-editor))] p-2">
+                    <summary className="cursor-pointer select-none font-medium">
+                      Restore {preview.schemaRestoreStatements?.length} index/constraint statement(s) after copy
+                    </summary>
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono leading-4 wb-muted">
+                      {preview.schemaRestoreStatements?.join("\n\n")}
+                    </pre>
+                  </details>
                 )}
                 {!preview.canExecute && (
                   <p className="leading-4 text-[hsl(var(--destructive))]">

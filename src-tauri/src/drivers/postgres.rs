@@ -58,6 +58,17 @@ fn postgres_supports_with_ordinality(server_version_num: i32) -> bool {
     server_version_num >= 90_400
 }
 
+/// INCLUDE columns and `pg_index.indnkeyatts` landed in PostgreSQL 11.
+/// Returning a static, host-owned expression keeps older catalog queries from
+/// referencing a column that their parser does not know about.
+fn postgres_index_key_count_expression(server_version_num: i32) -> &'static str {
+    if server_version_num >= 110_000 {
+        "ix.indnkeyatts"
+    } else {
+        "COALESCE(array_length(ix.indkey::smallint[], 1), 0)"
+    }
+}
+
 /// Keep a selected workspace schema first without discarding connection-level
 /// search-path entries such as extension schemas or `$user`. PostgreSQL adds
 /// `pg_catalog` implicitly when absent, but making it explicit preserves the
@@ -642,7 +653,16 @@ impl PostgresDriver {
         schema: &str,
         table: &str,
     ) -> Result<Vec<IndexInfo>> {
-        let rows = sqlx::query(
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+                .persistent(false)
+                .fetch_one(pool)
+                .await?;
+        // INCLUDE columns and pg_index.indnkeyatts were introduced in 11.
+        // Older supported servers expose every indkey entry as a key, and
+        // must not parse a reference to the newer catalog field.
+        let key_count_expression = postgres_index_key_count_expression(server_version_num);
+        let sql = format!(
             r#"
             SELECT
                 i.relname AS index_name,
@@ -650,15 +670,36 @@ impl PostgresDriver {
                 ix.indisprimary,
                 am.amname AS index_type,
                 pg_get_indexdef(ix.indexrelid) AS definition,
+                pg_get_expr(ix.indpred, ix.indrelid) AS filter_expression,
                 obj_description(ix.indexrelid, 'pg_class') AS index_comment,
-                COALESCE((
-                    SELECT array_agg(a.attname ORDER BY keys.ordinality)
-                    FROM unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
-                    JOIN pg_attribute a
+                COALESCE(ARRAY(
+                    SELECT COALESCE(
+                        a.attname,
+                        pg_get_indexdef(ix.indexrelid, positions.position, true)
+                    )
+                    FROM generate_series(
+                        1,
+                        COALESCE(array_length(ix.indkey::smallint[], 1), 0)
+                    ) AS positions(position)
+                    LEFT JOIN pg_attribute a
                       ON a.attrelid = ix.indrelid
-                     AND a.attnum = keys.attnum
-                    WHERE keys.attnum > 0
-                ), ARRAY[]::text[]) AS columns
+                     AND a.attnum = (ix.indkey::smallint[])[
+                         array_lower(ix.indkey::smallint[], 1) + positions.position - 1
+                     ]
+                     AND a.attnum > 0
+                    ORDER BY positions.position
+                ), ARRAY[]::text[]) AS all_columns,
+                {key_count_expression} AS key_count,
+                COALESCE(ARRAY(
+                    SELECT (ix.indkey::smallint[])[
+                        array_lower(ix.indkey::smallint[], 1) + positions.position - 1
+                    ] = 0
+                    FROM generate_series(
+                        1,
+                        COALESCE(array_length(ix.indkey::smallint[], 1), 0)
+                    ) AS positions(position)
+                    ORDER BY positions.position
+                ), ARRAY[]::boolean[]) AS all_key_is_expression
             FROM pg_class t
             JOIN pg_namespace n ON n.oid = t.relnamespace
             JOIN pg_index ix ON ix.indrelid = t.oid
@@ -666,27 +707,52 @@ impl PostgresDriver {
             JOIN pg_am am ON am.oid = i.relam
             WHERE n.nspname = $1 AND t.relname = $2
             ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(pool)
-        .await?;
+            "#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(schema)
+            .bind(table)
+            .persistent(false)
+            .fetch_all(pool)
+            .await?;
 
         Ok(rows
             .iter()
-            .map(|row| IndexInfo {
-                name: row.try_get("index_name").unwrap_or_default(),
-                columns: row.try_get("columns").unwrap_or_default(),
-                is_unique: row.try_get("indisunique").unwrap_or(false),
-                is_primary: row.try_get("indisprimary").unwrap_or(false),
-                index_type: row.try_get("index_type").ok(),
-                definition: row.try_get("definition").ok(),
-                comment: row
-                    .try_get::<String, _>("index_comment")
-                    .ok()
-                    .filter(|comment| !comment.trim().is_empty()),
+            .map(|row| {
+                let all_columns = row
+                    .try_get::<Vec<String>, _>("all_columns")
+                    .unwrap_or_default();
+                let key_count = row
+                    .try_get::<i32, _>("key_count")
+                    .unwrap_or(all_columns.len() as i32)
+                    .max(0) as usize;
+                let split_at = key_count.min(all_columns.len());
+                let all_key_is_expression = row
+                    .try_get::<Vec<bool>, _>("all_key_is_expression")
+                    .unwrap_or_default();
+                IndexInfo {
+                    name: row.try_get("index_name").unwrap_or_default(),
+                    columns: all_columns[..split_at].to_vec(),
+                    is_unique: row.try_get("indisunique").unwrap_or(false),
+                    is_primary: row.try_get("indisprimary").unwrap_or(false),
+                    filter: row
+                        .try_get::<String, _>("filter_expression")
+                        .ok()
+                        .filter(|filter| !filter.trim().is_empty()),
+                    index_type: row.try_get("index_type").ok(),
+                    included_columns: (split_at < all_columns.len())
+                        .then(|| all_columns[split_at..].to_vec()),
+                    definition: row.try_get("definition").ok(),
+                    comment: row
+                        .try_get::<String, _>("index_comment")
+                        .ok()
+                        .filter(|comment| !comment.trim().is_empty()),
+                    key_is_expression: if all_key_is_expression.len() == all_columns.len() {
+                        all_key_is_expression[..split_at].to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                }
             })
             .collect())
     }
@@ -719,6 +785,22 @@ impl PostgresDriver {
                 ), ARRAY[]::text[]) AS columns,
                 ref_ns.nspname AS referenced_schema,
                 ref_table.relname AS referenced_table,
+                CASE c.confupdtype
+                    WHEN 'a' THEN 'NO ACTION'
+                    WHEN 'r' THEN 'RESTRICT'
+                    WHEN 'c' THEN 'CASCADE'
+                    WHEN 'n' THEN 'SET NULL'
+                    WHEN 'd' THEN 'SET DEFAULT'
+                    ELSE NULL
+                END AS on_update,
+                CASE c.confdeltype
+                    WHEN 'a' THEN 'NO ACTION'
+                    WHEN 'r' THEN 'RESTRICT'
+                    WHEN 'c' THEN 'CASCADE'
+                    WHEN 'n' THEN 'SET NULL'
+                    WHEN 'd' THEN 'SET DEFAULT'
+                    ELSE NULL
+                END AS on_delete,
                 COALESCE((
                     SELECT array_agg(a.attname ORDER BY keys.ordinality)
                     FROM unnest(c.confkey) WITH ORDINALITY AS keys(attnum, ordinality)
@@ -760,6 +842,22 @@ impl PostgresDriver {
                 ), ARRAY[]::text[]) AS columns,
                 ref_ns.nspname AS referenced_schema,
                 ref_table.relname AS referenced_table,
+                CASE c.confupdtype
+                    WHEN 'a' THEN 'NO ACTION'
+                    WHEN 'r' THEN 'RESTRICT'
+                    WHEN 'c' THEN 'CASCADE'
+                    WHEN 'n' THEN 'SET NULL'
+                    WHEN 'd' THEN 'SET DEFAULT'
+                    ELSE NULL
+                END AS on_update,
+                CASE c.confdeltype
+                    WHEN 'a' THEN 'NO ACTION'
+                    WHEN 'r' THEN 'RESTRICT'
+                    WHEN 'c' THEN 'CASCADE'
+                    WHEN 'n' THEN 'SET NULL'
+                    WHEN 'd' THEN 'SET DEFAULT'
+                    ELSE NULL
+                END AS on_delete,
                 COALESCE((
                     SELECT array_agg(a.attname ORDER BY keys.ordinality)
                     FROM generate_subscripts(c.confkey, 1) AS keys(ordinality)
@@ -793,6 +891,8 @@ impl PostgresDriver {
                 referenced_table: row.try_get("referenced_table").ok(),
                 referenced_columns: row.try_get("referenced_columns").unwrap_or_default(),
                 definition: row.try_get("definition").ok(),
+                on_update: row.try_get("on_update").ok(),
+                on_delete: row.try_get("on_delete").ok(),
             })
             .collect())
     }
@@ -2983,6 +3083,16 @@ mod tests {
         assert!(!postgres_supports_with_ordinality(90_300));
         assert!(postgres_supports_with_ordinality(90_400));
         assert!(postgres_supports_with_ordinality(160_000));
+    }
+
+    #[test]
+    fn postgres_index_metadata_avoids_include_catalog_fields_before_11() {
+        assert!(!postgres_index_key_count_expression(90_300).contains("indnkeyatts"));
+        assert!(!postgres_index_key_count_expression(100_000).contains("indnkeyatts"));
+        assert_eq!(
+            postgres_index_key_count_expression(110_000),
+            "ix.indnkeyatts"
+        );
     }
 
     #[test]

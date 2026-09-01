@@ -652,9 +652,12 @@ impl DatabaseDriver for RemoteSqliteDriver {
                 is_primary: origin_index
                     .and_then(|index| string_at(row, index))
                     .is_some_and(|origin| origin == "pk"),
+                filter: None,
                 index_type: Some("BTREE".into()),
+                included_columns: None,
                 definition: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             });
         }
         Ok(indexes)
@@ -673,6 +676,8 @@ impl DatabaseDriver for RemoteSqliteDriver {
         let referenced_table = table.required_column("table")?;
         let from = table.required_column("from")?;
         let to = table.required_column("to")?;
+        let on_update = table.column_index("on_update");
+        let on_delete = table.column_index("on_delete");
         let mut grouped = BTreeMap::<i64, Vec<&Vec<serde_json::Value>>>::new();
         for row in &table.rows {
             grouped
@@ -694,6 +699,12 @@ impl DatabaseDriver for RemoteSqliteDriver {
                         .and_then(|row| string_at(row, referenced_table)),
                     referenced_columns: rows.iter().filter_map(|row| string_at(row, to)).collect(),
                     definition: None,
+                    on_update: rows
+                        .first()
+                        .and_then(|row| on_update.and_then(|index| string_at(row, index))),
+                    on_delete: rows
+                        .first()
+                        .and_then(|row| on_delete.and_then(|index| string_at(row, index))),
                 }
             })
             .collect())

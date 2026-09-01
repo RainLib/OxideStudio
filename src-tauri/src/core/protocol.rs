@@ -343,10 +343,23 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
     pub is_unique: bool,
     pub is_primary: bool,
+    /// Predicate of a partial/filtered index, without the leading `WHERE`.
+    /// Older external driver packages omit this field, which means unknown
+    /// rather than an empty predicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
     pub index_type: Option<String>,
+    /// Non-key columns stored by an index (for example PostgreSQL `INCLUDE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub included_columns: Option<Vec<String>>,
     pub definition: Option<String>,
     #[serde(default)]
     pub comment: Option<String>,
+    /// Parallel to `columns`: true means the entry is a catalog-provided raw
+    /// expression rather than an identifier. An empty vector means that the
+    /// metadata provider did not prove expression provenance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_is_expression: Vec<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -358,6 +371,12 @@ pub struct ConstraintInfo {
     pub referenced_table: Option<String>,
     pub referenced_columns: Vec<String>,
     pub definition: Option<String>,
+    /// Structured referential actions are required for MySQL-family metadata,
+    /// where `CHECK_CLAUSE` does not contain the foreign-key definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
 }
 
 /// A foreign key whose owning table references another relation.

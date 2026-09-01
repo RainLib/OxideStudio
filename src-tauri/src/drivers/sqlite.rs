@@ -600,9 +600,12 @@ impl DatabaseDriver for SqliteDriver {
                     .try_get::<String, _>("origin")
                     .map(|value| value == "pk")
                     .unwrap_or(false),
+                filter: None,
                 index_type: Some("BTREE".to_string()),
+                included_columns: None,
                 definition: None,
                 comment: None,
+                key_is_expression: Vec::new(),
                 name,
             });
         }
@@ -639,6 +642,8 @@ impl DatabaseDriver for SqliteDriver {
                     .map(|value| vec![value])
                     .unwrap_or_default(),
                 definition: None,
+                on_update: row.try_get("on_update").ok(),
+                on_delete: row.try_get("on_delete").ok(),
             })
             .collect())
     }

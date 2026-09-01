@@ -86,6 +86,8 @@ const MAX_TRANSFER_ROWS: u32 = 10_000;
 const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
 const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
 const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
+const MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS: usize = 256;
+const MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES: usize = 4 * 1024 * 1024;
 /// A full table compare can inspect up to 100,000 rows per side, but its IPC
 /// response must not materialize every difference in the renderer. Totals are
 /// always exact; this only bounds the row-level preview returned to the UI.
@@ -1095,6 +1097,11 @@ pub struct TableDataTransferRequest {
     /// connected package before honoring `false`.
     #[serde(default = "default_true")]
     pub quote_target_column_names: bool,
+    /// Explicitly restore catalog-backed secondary indexes and constraints
+    /// after the row copy, in the same target transaction. The preview binds
+    /// the exact DDL; external and cross-product drivers remain fail-closed.
+    #[serde(default)]
+    pub restore_source_schema_objects: bool,
 }
 
 /// A bounded, dependency-aware table selection. Unlike the single-table
@@ -1125,6 +1132,8 @@ pub struct TableDataTransferBatchPlanRequest {
     pub reseed_identity: bool,
     #[serde(default = "default_true")]
     pub quote_target_column_names: bool,
+    #[serde(default)]
+    pub restore_source_schema_objects: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1233,6 +1242,8 @@ pub struct TableDataTransferBatchTablePreflight {
     /// transfer report.
     #[serde(default)]
     pub identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
+    #[serde(default)]
+    pub schema_restore_statements: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -1248,6 +1259,8 @@ pub struct TableDataTransferBatchTableResult {
     /// Exact PostgreSQL generators synchronized by the reviewed table plan.
     #[serde(default)]
     pub identity_reseed_columns: Vec<String>,
+    #[serde(default)]
+    pub restored_schema_objects: u32,
     /// A terminal, privacy-bounded report is persisted for each object when
     /// the request supplies a project id.
     pub report_id: Option<String>,
@@ -1358,6 +1371,10 @@ pub struct TableDataTransferPreview {
     pub identity_reseed_columns: Vec<String>,
     #[serde(default)]
     pub identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
+    /// Ordered catalog-derived DDL that will run only after all row writes and
+    /// identity synchronization have succeeded in the target transaction.
+    #[serde(default)]
+    pub schema_restore_statements: Vec<String>,
     pub can_execute: bool,
     /// The user must type this exact short-lived plan binding to start a
     /// destructive cross-connection write.  Execute recomputes the plan and
@@ -1421,6 +1438,8 @@ pub struct TableDataTransferResult {
     /// Exact PostgreSQL generators synchronized by the reviewed plan.
     #[serde(default)]
     pub identity_reseed_columns: Vec<String>,
+    #[serde(default)]
+    pub restored_schema_objects: u32,
     /// Present only when the caller supplied a project id and the terminal
     /// report was persisted successfully.
     pub report_id: Option<String>,
@@ -6859,6 +6878,7 @@ struct ResolvedTableDataTransferPlan {
     upsert_key_columns: Vec<String>,
     identity_reseed_columns: Vec<String>,
     identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
+    schema_restore_statements: Vec<String>,
     confirmation_token: String,
     warnings: Vec<String>,
 }
@@ -7400,6 +7420,399 @@ fn normalized_transfer_driver_id(driver: &str) -> String {
         .to_ascii_lowercase()
 }
 
+async fn get_transfer_indexes(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<Vec<IndexInfo>, String> {
+    match endpoint.database.as_deref() {
+        Some(database) => {
+            manager
+                .get_database_indexes(
+                    &endpoint.connection_id,
+                    database,
+                    &endpoint.schema,
+                    &endpoint.table,
+                )
+                .await
+        }
+        None => {
+            manager
+                .get_indexes(&endpoint.connection_id, &endpoint.schema, &endpoint.table)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+async fn get_transfer_constraints(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+) -> Result<Vec<ConstraintInfo>, String> {
+    match endpoint.database.as_deref() {
+        Some(database) => {
+            manager
+                .get_database_constraints(
+                    &endpoint.connection_id,
+                    database,
+                    &endpoint.schema,
+                    &endpoint.table,
+                )
+                .await
+        }
+        None => {
+            manager
+                .get_constraints(&endpoint.connection_id, &endpoint.schema, &endpoint.table)
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn transfer_index_structure_matches(source: &IndexInfo, target: &IndexInfo) -> bool {
+    source.columns == target.columns
+        && source.is_unique == target.is_unique
+        && source.is_primary == target.is_primary
+        && source.filter == target.filter
+        && source
+            .index_type
+            .as_deref()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(target.index_type.as_deref().unwrap_or_default())
+        && source.included_columns == target.included_columns
+        && source.key_is_expression == target.key_is_expression
+        && source.comment == target.comment
+}
+
+fn mapped_transfer_constraint_schema(
+    schema: Option<&str>,
+    source_schema: &str,
+    target_schema: &str,
+) -> Option<String> {
+    schema.map(|schema| {
+        if schema.eq_ignore_ascii_case(source_schema) {
+            target_schema.to_string()
+        } else {
+            schema.to_string()
+        }
+    })
+}
+
+fn normalized_transfer_referential_action(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let normalized = value.to_ascii_uppercase().replace('_', " ");
+    matches!(
+        normalized.as_str(),
+        "NO ACTION" | "RESTRICT" | "CASCADE" | "SET NULL" | "SET DEFAULT"
+    )
+    .then_some(normalized)
+}
+
+fn transfer_constraint_structure_matches(
+    source: &ConstraintInfo,
+    target: &ConstraintInfo,
+    source_schema: &str,
+    target_schema: &str,
+) -> bool {
+    source
+        .constraint_type
+        .eq_ignore_ascii_case(&target.constraint_type)
+        && source.columns == target.columns
+        && mapped_transfer_constraint_schema(
+            source.referenced_schema.as_deref(),
+            source_schema,
+            target_schema,
+        ) == target.referenced_schema
+        && source.referenced_table == target.referenced_table
+        && source.referenced_columns == target.referenced_columns
+        && source.definition.as_deref().map(str::trim)
+            == target.definition.as_deref().map(str::trim)
+        && normalized_transfer_referential_action(source.on_update.as_deref())
+            == normalized_transfer_referential_action(target.on_update.as_deref())
+        && normalized_transfer_referential_action(source.on_delete.as_deref())
+            == normalized_transfer_referential_action(target.on_delete.as_deref())
+}
+
+fn transfer_constraint_is_primary(constraint: &ConstraintInfo) -> bool {
+    constraint
+        .constraint_type
+        .to_ascii_uppercase()
+        .contains("PRIMARY")
+}
+
+fn transfer_constraint_is_foreign(constraint: &ConstraintInfo) -> bool {
+    constraint
+        .constraint_type
+        .to_ascii_uppercase()
+        .contains("FOREIGN")
+}
+
+#[derive(Clone, Copy)]
+struct TransferTableSchemaObjects<'a> {
+    indexes: &'a [IndexInfo],
+    constraints: &'a [ConstraintInfo],
+}
+
+fn build_transfer_schema_restore_statements(
+    kind: DatabaseKind,
+    source_schema: &str,
+    target_schema: &str,
+    table: &str,
+    source: TransferTableSchemaObjects<'_>,
+    target: TransferTableSchemaObjects<'_>,
+) -> Result<Vec<String>, String> {
+    let target_indexes_by_name = target
+        .indexes
+        .iter()
+        .map(|index| (index.name.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let target_constraints_by_name = target
+        .constraints
+        .iter()
+        .map(|constraint| (constraint.name.as_str(), constraint))
+        .collect::<BTreeMap<_, _>>();
+    let source_constraint_names = source
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect::<HashSet<_>>();
+
+    let mut regular_constraints = Vec::new();
+    let mut foreign_keys = Vec::new();
+    for constraint in source
+        .constraints
+        .iter()
+        .filter(|constraint| !transfer_constraint_is_primary(constraint))
+    {
+        let name = constraint.name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Source table {table} has an unnamed non-primary constraint; exact restoration is blocked."
+            ));
+        }
+        if let Some(existing) = target_constraints_by_name.get(name) {
+            if transfer_constraint_structure_matches(
+                constraint,
+                existing,
+                source_schema,
+                target_schema,
+            ) {
+                continue;
+            }
+            return Err(format!(
+                "Target constraint {name} already exists with a different definition."
+            ));
+        }
+        if target_indexes_by_name.contains_key(name) {
+            return Err(format!(
+                "Target index {name} conflicts with the source constraint of the same name."
+            ));
+        }
+        let statement = crate::core::schema_diff::add_constraint_sql(
+            kind,
+            source_schema,
+            target_schema,
+            table,
+            constraint,
+        )
+        .ok_or_else(|| {
+            format!(
+                "Constraint {name} has no catalog-backed definition that can be restored safely."
+            )
+        })?;
+        if transfer_constraint_is_foreign(constraint) {
+            foreign_keys.push(statement);
+        } else {
+            regular_constraints.push(statement);
+        }
+    }
+
+    let mut indexes = Vec::new();
+    for index in source
+        .indexes
+        .iter()
+        .filter(|index| !index.is_primary && !source_constraint_names.contains(index.name.as_str()))
+    {
+        let name = index.name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Source table {table} has an unnamed secondary index; exact restoration is blocked."
+            ));
+        }
+        if let Some(existing) = target_indexes_by_name.get(name) {
+            if transfer_index_structure_matches(index, existing) {
+                continue;
+            }
+            return Err(format!(
+                "Target index {name} already exists with a different definition."
+            ));
+        }
+        if target_constraints_by_name.contains_key(name) {
+            return Err(format!(
+                "Target constraint {name} conflicts with the source index of the same name."
+            ));
+        }
+        indexes.push(crate::core::schema_diff::create_index_sql(
+            kind,
+            source_schema,
+            target_schema,
+            table,
+            index,
+        )?);
+        if kind == DatabaseKind::Postgres {
+            if let Some(comment) = index
+                .comment
+                .as_deref()
+                .map(str::trim)
+                .filter(|comment| !comment.is_empty())
+            {
+                let qualified_index = kind.qualified_table(Some(target_schema), name);
+                indexes.push(format!(
+                    "COMMENT ON INDEX {qualified_index} IS {};",
+                    sql_string_literal(comment)
+                ));
+            }
+        }
+    }
+
+    regular_constraints.extend(indexes);
+    regular_constraints.extend(foreign_keys);
+    if regular_constraints.len() > MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS {
+        return Err(format!(
+            "Schema restoration is limited to {MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS} statements per table."
+        ));
+    }
+    let total_bytes = regular_constraints.iter().map(String::len).sum::<usize>();
+    if total_bytes > MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES {
+        return Err(format!(
+            "Schema restoration SQL exceeds the {} byte review limit.",
+            MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES
+        ));
+    }
+    Ok(regular_constraints)
+}
+
+async fn resolve_transfer_schema_restore_statements(
+    manager: &ConnectionManager,
+    request: &TableDataTransferRequest,
+    source_kind: DatabaseKind,
+    target_kind: DatabaseKind,
+) -> Result<Vec<String>, String> {
+    if !request.restore_source_schema_objects {
+        return Ok(Vec::new());
+    }
+    let source_driver = normalized_transfer_driver_id(&request.source.driver);
+    let target_driver = normalized_transfer_driver_id(&request.target.driver);
+    if source_kind != target_kind
+        || source_driver != target_driver
+        || !matches!(source_driver.as_str(), "postgres" | "mysql")
+    {
+        return Err(
+            "Schema-object restoration requires the same native PostgreSQL or MySQL-family product on both endpoints."
+                .to_string(),
+        );
+    }
+    if request.source.table != request.target.table {
+        return Err(
+            "Schema-object restoration currently requires the source and target table names to match exactly."
+                .to_string(),
+        );
+    }
+    if manager
+        .is_external_driver_connection(&request.source.connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        || manager
+            .is_external_driver_connection(&request.target.connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "External driver packages cannot restore table schema objects until their signed protocol declares an exact DDL contract."
+                .to_string(),
+        );
+    }
+
+    let source_indexes = get_transfer_indexes(manager, &request.source).await?;
+    let target_indexes = get_transfer_indexes(manager, &request.target).await?;
+    let source_constraints = get_transfer_constraints(manager, &request.source).await?;
+    let target_constraints = get_transfer_constraints(manager, &request.target).await?;
+
+    for constraint in source_constraints
+        .iter()
+        .filter(|constraint| transfer_constraint_is_foreign(constraint))
+    {
+        let referenced_table = constraint.referenced_table.as_deref().ok_or_else(|| {
+            format!(
+                "Foreign key {} is missing its referenced table metadata.",
+                constraint.name
+            )
+        })?;
+        if constraint.referenced_columns.is_empty()
+            || constraint.referenced_columns.len() != constraint.columns.len()
+        {
+            return Err(format!(
+                "Foreign key {} has an incomplete referenced-column mapping.",
+                constraint.name
+            ));
+        }
+        let referenced_schema = mapped_transfer_constraint_schema(
+            constraint.referenced_schema.as_deref(),
+            &request.source.schema,
+            &request.target.schema,
+        )
+        .unwrap_or_else(|| request.target.schema.clone());
+        let referenced_columns = get_target_columns(
+            manager,
+            &request.target.connection_id,
+            request.target.database.as_deref(),
+            &referenced_schema,
+            referenced_table,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Referenced target table {referenced_schema}.{referenced_table} is unavailable for foreign key {}: {error}",
+                constraint.name
+            )
+        })?;
+        let available = referenced_columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<HashSet<_>>();
+        let missing = constraint
+            .referenced_columns
+            .iter()
+            .filter(|column| !available.contains(column.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "Foreign key {} references missing target column(s): {}.",
+                constraint.name,
+                missing.join(", ")
+            ));
+        }
+    }
+
+    build_transfer_schema_restore_statements(
+        target_kind,
+        &request.source.schema,
+        &request.target.schema,
+        &request.target.table,
+        TransferTableSchemaObjects {
+            indexes: &source_indexes,
+            constraints: &source_constraints,
+        },
+        TransferTableSchemaObjects {
+            indexes: &target_indexes,
+            constraints: &target_constraints,
+        },
+    )
+}
+
 fn resolve_transfer_upsert_key_columns(
     mode: TableDataTransferMode,
     target_is_external: bool,
@@ -7486,6 +7899,7 @@ struct TableDataTransferConfirmationBinding<'a> {
     target_rows_to_delete: Option<u64>,
     upsert_key_columns: &'a [String],
     identity_reseed_plans: &'a [TableDataTransferIdentityReseedPlan],
+    schema_restore_statements: &'a [String],
 }
 
 fn transfer_confirmation_token(
@@ -7506,6 +7920,8 @@ fn transfer_confirmation_token(
         "reseedIdentity": request.reseed_identity,
         "quoteTargetColumnNames": request.quote_target_column_names,
         "identityReseedPlans": binding.identity_reseed_plans,
+        "restoreSourceSchemaObjects": request.restore_source_schema_objects,
+        "schemaRestoreStatements": binding.schema_restore_statements,
     });
     let encoded = serde_json::to_vec(&binding).map_err(|error| error.to_string())?;
     let digest = format!("{:x}", Sha256::digest(encoded));
@@ -8846,7 +9262,7 @@ async fn resolve_table_data_transfer_target_plan(
         endpoint_label(&request.target)
     )];
     warnings.push(
-        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained; source sequence names/current values, generated expressions, foreign keys, checks, triggers, indexes, and unmapped defaults are not copied."
+        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained. The empty-table step does not create secondary indexes or constraints by itself; an eligible same-product PostgreSQL/MySQL data transfer can separately review and restore catalog-backed indexes, unique/check constraints, and foreign keys after rows are copied. Source sequence names/current values, generated expressions, triggers, and unmapped defaults are not copied."
             .to_string(),
     );
     warnings.extend(target_column_warnings);
@@ -9017,6 +9433,9 @@ async fn resolve_table_data_transfer_plan(
     let identity_reseed_plans =
         resolve_postgres_identity_reseed_plans(manager, &request.target, &identity_reseed_columns)
             .await?;
+    let schema_restore_statements =
+        resolve_transfer_schema_restore_statements(manager, request, source_kind, target_kind)
+            .await?;
     let max_rows = normalized_transfer_limit(request.max_rows);
     let batch_size = normalized_transfer_batch_size(request.batch_size);
     let target_rows_before = if matches!(
@@ -9067,6 +9486,7 @@ async fn resolve_table_data_transfer_plan(
             target_rows_to_delete,
             upsert_key_columns: &upsert_key_columns,
             identity_reseed_plans: &identity_reseed_plans,
+            schema_restore_statements: &schema_restore_statements,
         },
     )?;
 
@@ -9110,6 +9530,17 @@ async fn resolve_table_data_transfer_plan(
             ));
         }
     }
+    if request.restore_source_schema_objects {
+        warnings.push(if schema_restore_statements.is_empty() {
+            "Catalog-backed secondary indexes and constraints are already present on the target; no post-copy DDL is required."
+                .to_string()
+        } else {
+            format!(
+                "After all row writes, {} reviewed secondary index/constraint statement(s) will run inside the same target transaction; foreign keys run last.",
+                schema_restore_statements.len()
+            )
+        });
+    }
     if !skipped_source_columns.is_empty() {
         warnings.push(format!(
             "Source-only columns will be skipped: {}.",
@@ -9142,6 +9573,7 @@ async fn resolve_table_data_transfer_plan(
         upsert_key_columns,
         identity_reseed_columns,
         identity_reseed_plans,
+        schema_restore_statements,
         confirmation_token,
         warnings,
     })
@@ -10229,6 +10661,7 @@ async fn resolve_table_data_transfer_batch_plan(
                 batch_size: request.batch_size,
                 reseed_identity: request.reseed_identity,
                 quote_target_column_names: request.quote_target_column_names,
+                restore_source_schema_objects: request.restore_source_schema_objects,
             };
             match resolve_table_data_transfer_plan(manager, &preflight_request).await {
                 Ok(table_plan) => {
@@ -10242,6 +10675,7 @@ async fn resolve_table_data_transfer_batch_plan(
                                 &table_plan.confirmation_token,
                             )),
                             identity_reseed_plans: table_plan.identity_reseed_plans,
+                            schema_restore_statements: table_plan.schema_restore_statements,
                             warnings: table_plan.warnings,
                         });
                     plan.can_execute &= can_execute;
@@ -10254,6 +10688,7 @@ async fn resolve_table_data_transfer_batch_plan(
                             mapped_columns: 0,
                             plan_digest: None,
                             identity_reseed_plans: Vec::new(),
+                            schema_restore_statements: Vec::new(),
                             warnings: vec![bounded_table_data_transfer_message(&error)],
                         });
                     plan.can_execute = false;
@@ -10353,6 +10788,7 @@ pub async fn preview_table_data_transfer(
             upsert_key_columns: plan.upsert_key_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
             identity_reseed_plans: plan.identity_reseed_plans,
+            schema_restore_statements: plan.schema_restore_statements,
             can_execute,
             confirmation_token: plan.confirmation_token,
             warnings: plan.warnings,
@@ -10554,6 +10990,26 @@ async fn execute_resolved_table_data_transfer_in_transaction(
                 format!("Could not synchronize PostgreSQL identity generators: {error}")
             })?;
     }
+    if !plan.schema_restore_statements.is_empty() {
+        let statements = plan
+            .schema_restore_statements
+            .iter()
+            .map(|sql| ParameterizedStatement {
+                sql: sql.clone(),
+                params: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        manager
+            .execute_parameterized_transaction(
+                &request.target.connection_id,
+                transaction_id,
+                &statements,
+            )
+            .await
+            .map_err(|error| {
+                format!("Could not restore the reviewed target indexes and constraints: {error}")
+            })?;
+    }
     Ok((rows_transferred, batches, limit_reached))
 }
 
@@ -10674,6 +11130,7 @@ pub async fn execute_table_data_transfer(
             target_rows_before: plan.target_rows_before,
             mapped_columns: plan.mapped_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
+            restored_schema_objects: plan.schema_restore_statements.len() as u32,
             report_id: None,
         })
     }
@@ -10865,6 +11322,7 @@ pub async fn execute_table_data_transfer_batch(
                 batch_size: request.plan.batch_size,
                 reseed_identity: request.plan.reseed_identity,
                 quote_target_column_names: request.plan.quote_target_column_names,
+                restore_source_schema_objects: request.plan.restore_source_schema_objects,
             };
             let table_plan = resolve_table_data_transfer_plan(&manager, &table_request).await?;
             let expected_digest = batch_plan
@@ -10941,6 +11399,7 @@ pub async fn execute_table_data_transfer_batch(
                     batches: table_batches, limit_reached: table_limit_reached,
                     target_rows_before: table_plan.target_rows_before,
                     identity_reseed_columns: table_plan.identity_reseed_columns.clone(), report_id: None,
+                    restored_schema_objects: table_plan.schema_restore_statements.len() as u32,
                 });
             }
             // Non-table objects run after all table data so triggers cannot
@@ -11054,6 +11513,7 @@ pub async fn execute_table_data_transfer_batch(
                         target_rows_before: table.target_rows_before,
                         mapped_columns: Vec::new(),
                         identity_reseed_columns: table.identity_reseed_columns.clone(),
+                        restored_schema_objects: table.restored_schema_objects,
                         report_id: None,
                     };
                     Some(
@@ -18111,9 +18571,10 @@ mod tests {
         build_structured_filter_where, build_table_data_compare_result,
         build_table_data_compare_sync_parameterized_statements,
         build_table_data_compare_sync_statements, build_table_data_transfer_object_plan,
-        build_table_order_by, build_transfer_target_columns, build_update_mutation,
-        build_upsert_mutation, build_upsert_mutation_with_column_quoting, canonical_import_columns,
-        column_lookup, csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
+        build_table_order_by, build_transfer_schema_restore_statements,
+        build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
+        build_upsert_mutation_with_column_quoting, canonical_import_columns, column_lookup,
+        csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
         csv_import_source_columns, csv_record_values, data_compare_degradation_level,
         data_compare_key, data_compare_key_columns_are_declared_unique,
         data_compare_keyset_continuation, data_compare_row_values,
@@ -18175,9 +18636,9 @@ mod tests {
         TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
         TableExportWriterContext, TableExportWriterMessage, TableFilter,
         TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
-        TableRowUpdate, TableSort, MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION,
-        MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS, MAX_JSON_IMPORT_PREVIEW_ROWS,
-        MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
+        TableRowUpdate, TableSort, TransferTableSchemaObjects,
+        MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
+        MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
     };
     use crate::core::{
@@ -18223,6 +18684,190 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         affected_rows: u64,
         columns: Vec<ColumnInfo>,
+    }
+
+    #[test]
+    fn transfer_schema_restore_orders_postgres_constraints_indexes_and_foreign_keys() {
+        let source_constraints = vec![
+            ConstraintInfo {
+                name: "orders_email_key".to_string(),
+                constraint_type: "UNIQUE".to_string(),
+                columns: vec!["email".to_string()],
+                referenced_schema: None,
+                referenced_table: None,
+                referenced_columns: Vec::new(),
+                definition: Some("UNIQUE (email)".to_string()),
+                on_update: None,
+                on_delete: None,
+            },
+            ConstraintInfo {
+                name: "orders_amount_check".to_string(),
+                constraint_type: "CHECK".to_string(),
+                columns: Vec::new(),
+                referenced_schema: None,
+                referenced_table: None,
+                referenced_columns: Vec::new(),
+                definition: Some("CHECK (amount > 0)".to_string()),
+                on_update: None,
+                on_delete: None,
+            },
+            ConstraintInfo {
+                name: "orders_account_fk".to_string(),
+                constraint_type: "FOREIGN KEY".to_string(),
+                columns: vec!["account_id".to_string()],
+                referenced_schema: Some("template".to_string()),
+                referenced_table: Some("accounts".to_string()),
+                referenced_columns: vec!["id".to_string()],
+                definition: Some(
+                    "FOREIGN KEY (account_id) REFERENCES template.accounts(id) ON DELETE CASCADE"
+                        .to_string(),
+                ),
+                on_update: Some("NO ACTION".to_string()),
+                on_delete: Some("CASCADE".to_string()),
+            },
+        ];
+        let source_indexes = vec![
+            IndexInfo {
+                name: "orders_email_key".to_string(),
+                columns: vec!["email".to_string()],
+                is_unique: true,
+                is_primary: false,
+                filter: None,
+                index_type: Some("btree".to_string()),
+                included_columns: None,
+                definition: Some(
+                    "CREATE UNIQUE INDEX orders_email_key ON template.orders USING btree (email)"
+                        .to_string(),
+                ),
+                comment: None,
+                key_is_expression: vec![false],
+            },
+            IndexInfo {
+                name: "orders_lookup_idx".to_string(),
+                columns: vec!["account_id".to_string()],
+                is_unique: false,
+                is_primary: false,
+                filter: Some("status = 'open'::text".to_string()),
+                index_type: Some("btree".to_string()),
+                included_columns: Some(vec!["created_at".to_string()]),
+                definition: Some(
+                    "CREATE INDEX orders_lookup_idx ON template.orders USING btree (account_id) INCLUDE (created_at) WHERE status = 'open'::text"
+                        .to_string(),
+                ),
+                comment: Some("open order lookup".to_string()),
+                key_is_expression: vec![false],
+            },
+        ];
+
+        let statements = build_transfer_schema_restore_statements(
+            DatabaseKind::Postgres,
+            "template",
+            "public",
+            "orders",
+            TransferTableSchemaObjects {
+                indexes: &source_indexes,
+                constraints: &source_constraints,
+            },
+            TransferTableSchemaObjects {
+                indexes: &[],
+                constraints: &[],
+            },
+        )
+        .expect("reviewable PostgreSQL restoration");
+
+        assert_eq!(statements.len(), 5);
+        assert!(statements[0].contains("orders_email_key"));
+        assert!(statements[1].contains("orders_amount_check"));
+        assert!(statements[2].contains("CREATE INDEX orders_lookup_idx"));
+        assert!(statements[2].contains("ON \"public\".orders"));
+        assert!(statements[2].contains("INCLUDE (created_at)"));
+        assert!(statements[2].contains("WHERE status = 'open'::text"));
+        assert!(statements[3].contains("COMMENT ON INDEX \"public\".\"orders_lookup_idx\""));
+        assert!(statements[4].contains("orders_account_fk"));
+        assert!(statements[4].contains("REFERENCES \"public\".accounts"));
+        assert_eq!(
+            statements
+                .iter()
+                .filter(|statement| statement.contains("CREATE UNIQUE INDEX orders_email_key"))
+                .count(),
+            0,
+            "the index backing a named constraint must not be restored twice"
+        );
+    }
+
+    #[test]
+    fn transfer_schema_restore_preserves_mysql_foreign_key_actions_and_schema_mapping() {
+        let source_constraints = vec![ConstraintInfo {
+            name: "orders_account_fk".to_string(),
+            constraint_type: "FOREIGN KEY".to_string(),
+            columns: vec!["account_id".to_string()],
+            referenced_schema: Some("template".to_string()),
+            referenced_table: Some("accounts".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            definition: None,
+            on_update: Some("cascade".to_string()),
+            on_delete: Some("set_null".to_string()),
+        }];
+
+        let statements = build_transfer_schema_restore_statements(
+            DatabaseKind::Mysql,
+            "template",
+            "app",
+            "orders",
+            TransferTableSchemaObjects {
+                indexes: &[],
+                constraints: &source_constraints,
+            },
+            TransferTableSchemaObjects {
+                indexes: &[],
+                constraints: &[],
+            },
+        )
+        .expect("reviewable MySQL restoration");
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("ALTER TABLE `app`.`orders`"));
+        assert!(statements[0].contains("REFERENCES `app`.`accounts` (`id`)"));
+        assert!(statements[0].contains("ON DELETE SET NULL"));
+        assert!(statements[0].contains("ON UPDATE CASCADE"));
+    }
+
+    #[test]
+    fn transfer_schema_restore_rejects_same_name_index_drift() {
+        let source = IndexInfo {
+            name: "orders_lookup_idx".to_string(),
+            columns: vec!["account_id".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            definition: None,
+            comment: None,
+            key_is_expression: vec![false],
+        };
+        let target = IndexInfo {
+            columns: vec!["customer_id".to_string()],
+            ..source.clone()
+        };
+
+        let error = build_transfer_schema_restore_statements(
+            DatabaseKind::Postgres,
+            "public",
+            "public",
+            "orders",
+            TransferTableSchemaObjects {
+                indexes: &[source],
+                constraints: &[],
+            },
+            TransferTableSchemaObjects {
+                indexes: &[target],
+                constraints: &[],
+            },
+        )
+        .expect_err("same-name target drift must fail closed");
+
+        assert!(error.contains("already exists with a different definition"));
     }
 
     #[test]
@@ -20026,6 +20671,7 @@ mod tests {
             batch_size: Some(100),
             reseed_identity: false,
             quote_target_column_names: true,
+            restore_source_schema_objects: false,
         };
         let mappings =
             build_data_transfer_column_mapping(&[target_column("id")], &[target_column("id")])
@@ -20047,6 +20693,7 @@ mod tests {
                         target_rows_to_delete,
                         upsert_key_columns,
                         identity_reseed_plans,
+                        schema_restore_statements: &[],
                     },
                 )
             };
@@ -20805,6 +21452,7 @@ mod tests {
             batch_size: None,
             reseed_identity: false,
             quote_target_column_names: true,
+            restore_source_schema_objects: false,
         };
         let users = ConstraintInfo {
             name: "users_pkey".to_string(),
@@ -20814,6 +21462,8 @@ mod tests {
             referenced_table: None,
             referenced_columns: Vec::new(),
             definition: None,
+            on_update: None,
+            on_delete: None,
         };
         let order_user_fk = ConstraintInfo {
             name: "orders_user_fk".to_string(),
@@ -20823,6 +21473,8 @@ mod tests {
             referenced_table: Some("users".to_string()),
             referenced_columns: vec!["id".to_string()],
             definition: None,
+            on_update: None,
+            on_delete: None,
         };
         let plan = table_data_transfer_batch_plan(
             &request,
@@ -20854,6 +21506,8 @@ mod tests {
                         referenced_table: Some("orders".to_string()),
                         referenced_columns: vec!["id".to_string()],
                         definition: None,
+                        on_update: None,
+                        on_delete: None,
                     }],
                 ),
             ],
@@ -21396,6 +22050,8 @@ mod tests {
                     referenced_table: None,
                     referenced_columns: vec![],
                     definition: Some("PRIMARY KEY (id)".to_string()),
+                    on_update: None,
+                    on_delete: None,
                 },
                 ConstraintInfo {
                     name: "users_email_key".to_string(),
@@ -21405,6 +22061,8 @@ mod tests {
                     referenced_table: None,
                     referenced_columns: vec![],
                     definition: Some("UNIQUE (email)".to_string()),
+                    on_update: None,
+                    on_delete: None,
                 },
             ],
             &[IndexInfo {
@@ -21412,11 +22070,14 @@ mod tests {
                 columns: vec!["email".to_string()],
                 is_unique: false,
                 is_primary: false,
+                filter: None,
                 index_type: Some("btree".to_string()),
+                included_columns: None,
                 definition: Some(
                     "CREATE INDEX users_email_idx ON public.users USING btree (email)".to_string(),
                 ),
                 comment: None,
+                key_is_expression: Vec::new(),
             }],
         );
 
@@ -21505,12 +22166,15 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             columns: vec!["email".to_string()],
             is_unique: true,
             is_primary: false,
+            filter: None,
             index_type: Some("btree".to_string()),
+            included_columns: None,
             definition: Some(
                 "CREATE UNIQUE INDEX active_users_mv_email_idx ON public.active_users_mv USING btree (email);"
                     .to_string(),
             ),
             comment: None,
+            key_is_expression: Vec::new(),
         }];
 
         assert_eq!(
@@ -23100,18 +23764,24 @@ WITH DATA;"#
                 columns: vec!["email".to_string()],
                 is_unique: false,
                 is_primary: false,
+                filter: None,
                 index_type: Some("btree".to_string()),
+                included_columns: None,
                 definition: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             },
             IndexInfo {
                 name: "users_pkey".to_string(),
                 columns: vec!["id".to_string()],
                 is_unique: true,
                 is_primary: true,
+                filter: None,
                 index_type: Some("btree".to_string()),
+                included_columns: None,
                 definition: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             },
         ];
 
@@ -23339,6 +24009,8 @@ WITH DATA;"#
             referenced_table: Some("users".to_string()),
             referenced_columns: vec!["id".to_string()],
             definition: None,
+            on_update: None,
+            on_delete: None,
         };
         let unique = ConstraintInfo {
             name: "users_email_key".to_string(),
@@ -23348,6 +24020,8 @@ WITH DATA;"#
             referenced_table: None,
             referenced_columns: vec![],
             definition: None,
+            on_update: None,
+            on_delete: None,
         };
         let primary = ConstraintInfo {
             name: "users_pkey".to_string(),
@@ -23357,6 +24031,8 @@ WITH DATA;"#
             referenced_table: None,
             referenced_columns: vec![],
             definition: None,
+            on_update: None,
+            on_delete: None,
         };
 
         assert_eq!(

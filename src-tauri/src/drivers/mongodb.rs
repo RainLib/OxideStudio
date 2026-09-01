@@ -1304,9 +1304,12 @@ fn mongodb_indexes_to_info(indexes: Vec<Document>) -> Vec<IndexInfo> {
                 columns,
                 is_unique,
                 is_primary,
+                filter: None,
                 index_type,
+                included_columns: None,
                 definition,
                 comment: None,
+                key_is_expression: Vec::new(),
             })
         })
         .collect()

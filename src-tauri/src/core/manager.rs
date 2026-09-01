@@ -1343,9 +1343,12 @@ mod tests {
                 columns: vec!["id".to_string()],
                 is_unique: false,
                 is_primary: false,
+                filter: None,
                 index_type: None,
+                included_columns: None,
                 definition: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }])
         }
 
@@ -1363,6 +1366,8 @@ mod tests {
                 referenced_table: None,
                 referenced_columns: Vec::new(),
                 definition: None,
+                on_update: None,
+                on_delete: None,
             }])
         }
     }

@@ -3665,7 +3665,7 @@ fn create_relation_sql(
     (sql, manual_review, warnings)
 }
 
-fn create_index_sql(
+pub(crate) fn create_index_sql(
     kind: DatabaseKind,
     source_schema: &str,
     target_schema: &str,
@@ -3953,7 +3953,7 @@ fn alter_column_sql(
     (sql, manual_review, warnings)
 }
 
-fn add_constraint_sql(
+pub(crate) fn add_constraint_sql(
     kind: DatabaseKind,
     source_schema: &str,
     target_schema: &str,
@@ -3988,9 +3988,6 @@ fn add_constraint_sql(
         ));
     }
     if normalized.contains("FOREIGN") {
-        if kind == DatabaseKind::Mysql {
-            return None;
-        }
         return constraint
             .referenced_table
             .as_deref()
@@ -4010,8 +4007,8 @@ fn add_constraint_sql(
                     .or(Some(target_schema)),
                     referenced_table,
                     &constraint.referenced_columns,
-                    None,
-                    None,
+                    normalized_referential_action(constraint.on_delete.as_deref()).as_deref(),
+                    normalized_referential_action(constraint.on_update.as_deref()).as_deref(),
                 )
             });
     }
@@ -4053,9 +4050,6 @@ fn inline_constraint_clause(
         ));
     }
     if normalized.contains("FOREIGN") {
-        if kind == DatabaseKind::Mysql {
-            return None;
-        }
         let referenced_table = constraint.referenced_table.as_deref()?;
         let referenced_columns = constraint
             .referenced_columns
@@ -4063,8 +4057,14 @@ fn inline_constraint_clause(
             .map(|column| kind.quote_identifier(column))
             .collect::<Vec<_>>()
             .join(", ");
+        let on_delete = normalized_referential_action(constraint.on_delete.as_deref())
+            .map(|action| format!(" ON DELETE {action}"))
+            .unwrap_or_default();
+        let on_update = normalized_referential_action(constraint.on_update.as_deref())
+            .map(|action| format!(" ON UPDATE {action}"))
+            .unwrap_or_default();
         return Some(format!(
-            "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
+            "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns}){on_delete}{on_update}",
             kind.quote_identifier(&constraint.name),
             kind.qualified_table(
                 mapped_constraint_schema(
@@ -4114,12 +4114,25 @@ fn mapped_constraint_schema(
     target_schema: &str,
 ) -> Option<String> {
     schema.map(|schema| {
-        if kind == DatabaseKind::Postgres && schema == source_schema {
+        if matches!(kind, DatabaseKind::Postgres | DatabaseKind::Mysql) && schema == source_schema {
             target_schema.to_string()
         } else {
             schema.to_string()
         }
     })
+}
+
+fn normalized_referential_action(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let normalized = value.to_ascii_uppercase().replace('_', " ");
+    matches!(
+        normalized.as_str(),
+        "NO ACTION" | "RESTRICT" | "CASCADE" | "SET NULL" | "SET DEFAULT"
+    )
+    .then_some(normalized)
 }
 
 fn is_foreign_constraint(constraint: &ConstraintInfo) -> bool {
@@ -4145,8 +4158,11 @@ fn index_structure_changed(source: &IndexInfo, target: &IndexInfo) -> bool {
         || source.columns != target.columns
         || source.is_unique != target.is_unique
         || source.is_primary != target.is_primary
+        || source.filter != target.filter
         || source.index_type != target.index_type
+        || source.included_columns != target.included_columns
         || source.definition != target.definition
+        || source.key_is_expression != target.key_is_expression
 }
 
 fn relation_map(relations: &[SchemaRelationSnapshot]) -> BTreeMap<String, &SchemaRelationSnapshot> {
@@ -5539,6 +5555,8 @@ mod tests {
             referenced_table: None,
             referenced_columns: Vec::new(),
             definition: None,
+            on_update: None,
+            on_delete: None,
         }
     }
 
@@ -5548,9 +5566,12 @@ mod tests {
             columns: columns.iter().map(|value| (*value).to_string()).collect(),
             is_unique: false,
             is_primary: false,
+            filter: None,
             index_type: Some(index_type.to_string()),
+            included_columns: None,
             definition: None,
             comment: None,
+            key_is_expression: Vec::new(),
         }
     }
 
@@ -6324,9 +6345,12 @@ mod tests {
             columns: vec!["tags".to_string()],
             is_unique: false,
             is_primary: false,
+            filter: None,
             index_type: Some("gin".to_string()),
+            included_columns: None,
             definition: Some("CREATE INDEX users_tags_gin ON users USING gin (tags)".to_string()),
             comment: None,
+            key_is_expression: Vec::new(),
         });
         source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot("actual", vec![column("id", "char(36)", false)]);
@@ -6376,11 +6400,14 @@ mod tests {
             columns: vec!["search_vector".to_string()],
             is_unique: false,
             is_primary: false,
+            filter: None,
             index_type: Some("gist".to_string()),
+            included_columns: None,
             definition: Some(
                 "CREATE INDEX users_search_gist ON users USING gist (search_vector)".to_string(),
             ),
             comment: None,
+            key_is_expression: Vec::new(),
         });
         source = finalize_schema_snapshot(source).unwrap();
         let mut target = snapshot(
@@ -7179,7 +7206,7 @@ mod tests {
     }
 
     #[test]
-    fn mysql_check_is_normalized_but_foreign_key_rules_are_not_guessed() {
+    fn mysql_check_and_structured_foreign_key_are_executable() {
         let mut source = snapshot(
             "desired",
             vec![column("id", "int", false), column("age", "int", true)],
@@ -7194,6 +7221,8 @@ mod tests {
                 referenced_schema: Some("public".to_string()),
                 referenced_table: Some("accounts".to_string()),
                 referenced_columns: vec!["id".to_string()],
+                on_update: Some("CASCADE".to_string()),
+                on_delete: Some("SET NULL".to_string()),
                 ..constraint("users_account_fk", "FOREIGN KEY", &["id"])
             },
         ];
@@ -7218,8 +7247,89 @@ mod tests {
             .iter()
             .find(|change| change.child_name.as_deref() == Some("users_account_fk"))
             .unwrap();
-        assert!(foreign_key.sql.is_empty());
+        assert_eq!(foreign_key.sql.len(), 1);
+        assert!(foreign_key.sql[0].contains("REFERENCES `public`.`accounts` (`id`)"));
+        assert!(foreign_key.sql[0].contains("ON DELETE SET NULL"));
+        assert!(foreign_key.sql[0].contains("ON UPDATE CASCADE"));
         assert!(foreign_key.manual_review);
+    }
+
+    #[test]
+    fn postgres_index_filter_include_and_expression_provenance_are_structural() {
+        let mut source = snapshot("desired", vec![column("id", "bigint", false)]);
+        let mut target = snapshot("actual", vec![column("id", "bigint", false)]);
+        let mut source_index = index("users_lookup_idx", &["id"], "btree");
+        source_index.filter = Some("id > 0".to_string());
+        source_index.included_columns = Some(vec!["email".to_string()]);
+        source_index.key_is_expression = vec![false];
+        source_index.definition = Some(
+            "CREATE INDEX users_lookup_idx ON public.users USING btree (id) INCLUDE (email) WHERE id > 0"
+                .to_string(),
+        );
+        let mut target_index = source_index.clone();
+        target_index.filter = Some("id > 1".to_string());
+        target_index.included_columns = None;
+        target_index.key_is_expression = vec![true];
+        target_index.definition = Some(
+            "CREATE INDEX users_lookup_idx ON public.users USING btree ((id + 1)) WHERE id > 1"
+                .to_string(),
+        );
+        source.relations[0].indexes.push(source_index);
+        target.relations[0].indexes.push(target_index);
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let index_changes = plan
+            .changes
+            .iter()
+            .filter(|change| change.child_name.as_deref() == Some("users_lookup_idx"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(index_changes.len(), 2);
+        assert_eq!(index_changes[0].kind, SchemaChangeKind::IndexDrop);
+        assert_eq!(index_changes[1].kind, SchemaChangeKind::IndexAdd);
+        assert!(index_changes[1].sql[0].contains("INCLUDE (email)"));
+        assert!(index_changes[1].sql[0].contains("WHERE id > 0"));
+    }
+
+    #[test]
+    fn mysql_foreign_key_action_change_rebuilds_with_source_actions() {
+        let mut source = snapshot("desired", vec![column("account_id", "bigint", false)]);
+        let mut target = snapshot("actual", vec![column("account_id", "bigint", false)]);
+        source.driver = "mysql".to_string();
+        target.driver = "mysql".to_string();
+        source.relations[0].constraints = vec![ConstraintInfo {
+            referenced_schema: Some("app".to_string()),
+            referenced_table: Some("accounts".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            on_update: Some("CASCADE".to_string()),
+            on_delete: Some("SET NULL".to_string()),
+            ..constraint("users_account_fk", "FOREIGN KEY", &["account_id"])
+        }];
+        target.relations[0].constraints = vec![ConstraintInfo {
+            referenced_schema: Some("app".to_string()),
+            referenced_table: Some("accounts".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            on_update: Some("NO ACTION".to_string()),
+            on_delete: Some("RESTRICT".to_string()),
+            ..constraint("users_account_fk", "FOREIGN KEY", &["account_id"])
+        }];
+        source = finalize_schema_snapshot(source).unwrap();
+        target = finalize_schema_snapshot(target).unwrap();
+
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let changes = plan
+            .changes
+            .iter()
+            .filter(|change| change.child_name.as_deref() == Some("users_account_fk"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].kind, SchemaChangeKind::ConstraintDrop);
+        assert_eq!(changes[1].kind, SchemaChangeKind::ConstraintAdd);
+        assert!(changes[1].sql[0].contains("ON DELETE SET NULL"));
+        assert!(changes[1].sql[0].contains("ON UPDATE CASCADE"));
     }
 
     #[test]
