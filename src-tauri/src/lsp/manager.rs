@@ -12,6 +12,10 @@ use super::protocol::*;
 
 type ResponseSender = oneshot::Sender<Result<Value>>;
 const MAX_LSP_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+// Keep the in-flight map bounded independently from the outbound channel.
+// A stalled server can otherwise accept every queued request and never reply,
+// retaining one response sender per request until each caller times out.
+const MAX_PENDING_LSP_RESPONSES: usize = 128;
 
 fn validate_lsp_message_size(bytes: usize) -> Result<()> {
     anyhow::ensure!(bytes > 0, "LSP message is empty");
@@ -21,6 +25,10 @@ fn validate_lsp_message_size(bytes: usize) -> Result<()> {
         MAX_LSP_MESSAGE_BYTES / (1024 * 1024)
     );
     Ok(())
+}
+
+fn can_register_pending_response(pending_count: usize) -> bool {
+    pending_count < MAX_PENDING_LSP_RESPONSES
 }
 
 fn content_length_from_lsp_header(line: &str) -> Result<Option<usize>> {
@@ -454,6 +462,13 @@ impl LspServerManager {
                 if let (Some(id), Some(tx)) = (id_opt, response_tx_opt) {
                     tracing::debug!("Sending LSP request ID: {}", id);
                     let mut pending = pending_responses_for_writer.lock().await;
+                    if !can_register_pending_response(pending.len()) {
+                        drop(pending);
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "LSP server has too many in-flight requests; wait for an existing request to finish"
+                        )));
+                        continue;
+                    }
                     pending.insert(id, tx);
                 }
 
@@ -750,10 +765,10 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_request_notification, completion_client_capabilities,
+        can_register_pending_response, cancel_request_notification, completion_client_capabilities,
         content_length_from_lsp_header, lsp_server_request_response,
         server_supports_completion_resolve, validate_lsp_message_size, LspRequestTokens,
-        MAX_LSP_MESSAGE_BYTES,
+        MAX_LSP_MESSAGE_BYTES, MAX_PENDING_LSP_RESPONSES,
     };
 
     #[test]
@@ -761,6 +776,16 @@ mod tests {
         let notification = cancel_request_notification(42);
         assert_eq!(notification.method, "$/cancelRequest");
         assert_eq!(notification.params["id"], 42);
+    }
+
+    #[test]
+    fn pending_response_limit_rejects_only_new_overflow_requests() {
+        assert!(can_register_pending_response(0));
+        assert!(can_register_pending_response(MAX_PENDING_LSP_RESPONSES - 1));
+        assert!(!can_register_pending_response(MAX_PENDING_LSP_RESPONSES));
+        assert!(!can_register_pending_response(
+            MAX_PENDING_LSP_RESPONSES + 1
+        ));
     }
 
     #[test]
