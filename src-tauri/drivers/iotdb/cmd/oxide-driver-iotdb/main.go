@@ -232,7 +232,7 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	if err != nil {
 		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
 	}
-	metadata, err := iotdb.AdaptMetadata(value.Request.Kind, value.Request.Namespace, result)
+	metadata, err := iotdb.AdaptMetadata(value.Request.Kind, value.Request.Namespace, value.Request.Relation, result)
 	if err != nil {
 		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
 	}

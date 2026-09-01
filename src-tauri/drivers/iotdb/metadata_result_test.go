@@ -3,15 +3,15 @@ package iotdb
 import "testing"
 
 func TestAdaptMetadataForTreeAndTableResults(t *testing.T) {
-	value, err := AdaptMetadata("relations", "root.factory", QueryResult{Columns: []string{"Device"}, Rows: [][]any{{"root.factory.d1"}}})
+	value, err := AdaptMetadata("relations", "root.factory", "", QueryResult{Columns: []string{"Device"}, Rows: [][]any{{"root.factory.d1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	relations := value.([]map[string]any)
-	if relations[0]["name"] != "root.factory.d1" || relations[0]["type"] != "TABLE" {
+	if relations[0]["name"] != "d1" || relations[0]["type"] != "TABLE" {
 		t.Fatalf("relations=%#v", relations)
 	}
-	value, err = AdaptMetadata("columns", "metrics", QueryResult{Columns: []string{"ColumnName", "DataType"}, Rows: [][]any{{"cpu", "DOUBLE"}}})
+	value, err = AdaptMetadata("columns", "metrics", "", QueryResult{Columns: []string{"ColumnName", "DataType"}, Rows: [][]any{{"cpu", "DOUBLE"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,12 +22,23 @@ func TestAdaptMetadataForTreeAndTableResults(t *testing.T) {
 }
 
 func TestAdaptMetadataOmitsUnprovenRows(t *testing.T) {
-	value, err := AdaptMetadata("databases", "", QueryResult{Rows: [][]any{{nil}, {"metrics"}}})
+	value, err := AdaptMetadata("databases", "", "", QueryResult{Rows: [][]any{{nil}, {"metrics"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	databases := value.([]string)
 	if len(databases) != 1 || databases[0] != "metrics" {
 		t.Fatalf("databases=%#v", databases)
+	}
+}
+
+func TestAdaptMetadataReturnsTreeColumnsRelativeToTheSelectedDevice(t *testing.T) {
+	value, err := AdaptMetadata("columns", "root.factory", "d1", QueryResult{Columns: []string{"Timeseries", "DataType"}, Rows: [][]any{{"root.factory.d1.temperature", "FLOAT"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := value.([]map[string]any)
+	if len(columns) != 1 || columns[0]["name"] != "temperature" {
+		t.Fatalf("columns=%#v", columns)
 	}
 }

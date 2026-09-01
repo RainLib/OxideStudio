@@ -9,7 +9,7 @@ import (
 // metadata shapes deserialized by Oxide's external driver. It deliberately
 // emits only fields IoTDB proves; absent index/constraint information remains
 // an empty list instead of inferred schema state.
-func AdaptMetadata(kind, schema string, result QueryResult) (any, error) {
+func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, error) {
 	switch kind {
 	case "databases", "schemas":
 		values := make([]string, 0, len(result.Rows))
@@ -26,7 +26,7 @@ func AdaptMetadata(kind, schema string, result QueryResult) (any, error) {
 		nameIndex := columnIndex(result.Columns, "TableName", "table_name", "Device")
 		typeIndex := columnIndex(result.Columns, "TableType", "table_type")
 		for _, row := range result.Rows {
-			name := rowValue(row, nameIndex)
+			name := relativeTreeName(schema, rowValue(row, nameIndex))
 			if name == "" {
 				continue
 			}
@@ -42,7 +42,7 @@ func AdaptMetadata(kind, schema string, result QueryResult) (any, error) {
 		nameIndex := columnIndex(result.Columns, "ColumnName", "column_name", "Timeseries")
 		typeIndex := columnIndex(result.Columns, "DataType", "data_type")
 		for _, row := range result.Rows {
-			name := rowValue(row, nameIndex)
+			name := relativeTreeName(joinTreePath(schema, relation), rowValue(row, nameIndex))
 			if name == "" {
 				continue
 			}
@@ -58,6 +58,25 @@ func AdaptMetadata(kind, schema string, result QueryResult) (any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported IoTDB metadata result: %s", kind)
 	}
+}
+
+func joinTreePath(parts ...string) string {
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.Trim(strings.TrimSpace(part), "."); value != "" {
+			values = append(values, value)
+		}
+	}
+	return strings.Join(values, ".")
+}
+
+func relativeTreeName(prefix, value string) string {
+	prefix = strings.Trim(strings.TrimSpace(prefix), ".")
+	value = strings.TrimSpace(value)
+	if prefix == "" || !strings.HasPrefix(value, prefix+".") {
+		return value
+	}
+	return strings.TrimPrefix(value, prefix+".")
 }
 func columnIndex(columns []string, names ...string) int {
 	for i, column := range columns {

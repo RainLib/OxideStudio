@@ -39,11 +39,26 @@ func treePath(parts ...string) string {
 		if part == "" {
 			continue
 		}
-		if part == "**" {
-			result = append(result, part)
-			continue
+		for _, node := range strings.Split(part, ".") {
+			node = strings.TrimSpace(node)
+			if node == "" {
+				continue
+			}
+			if node == "**" {
+				result = append(result, node)
+				continue
+			}
+			result = append(result, quoteTreeNode(node))
 		}
-		result = append(result, "`"+strings.ReplaceAll(part, "`", "``")+"`")
 	}
 	return strings.Join(result, ".")
+}
+
+func quoteTreeNode(value string) string {
+	for _, character := range value {
+		if !(character == '_' || character == '$' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9') {
+			return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+		}
+	}
+	return value
 }

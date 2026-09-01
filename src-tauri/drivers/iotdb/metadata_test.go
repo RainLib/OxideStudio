@@ -4,7 +4,7 @@ import "testing"
 
 func TestMetadataStatementUsesTheCorrectIoTDBDialect(t *testing.T) {
 	statement, err := MetadataStatement(TreeDialect, "relations", "root.factory", "")
-	if err != nil || statement != "SHOW DEVICES `root.factory`.**" {
+	if err != nil || statement != "SHOW DEVICES root.factory.**" {
 		t.Fatalf("tree relations = %q, %v", statement, err)
 	}
 	statement, err = MetadataStatement(TableDialect, "relations", "metrics", "")
@@ -14,6 +14,10 @@ func TestMetadataStatementUsesTheCorrectIoTDBDialect(t *testing.T) {
 	statement, err = MetadataStatement(TableDialect, "columns", "metrics", "cpu\"load")
 	if err != nil || statement != `DESC "metrics"."cpu""load" DETAILS` {
 		t.Fatalf("table columns = %q, %v", statement, err)
+	}
+	statement, err = MetadataStatement(TreeDialect, "columns", "root.factory", "device.with.dot")
+	if err != nil || statement != "SHOW TIMESERIES root.factory.device.with.dot.**" {
+		t.Fatalf("tree columns = %q, %v", statement, err)
 	}
 }
 
