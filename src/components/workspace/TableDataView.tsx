@@ -262,6 +262,8 @@ export function TableDataView() {
     mode: "clone" | "edit" | "delete";
     sourceId: unknown;
   } | null>(null);
+  const [documentFilterDraft, setDocumentFilterDraft] = useState("");
+  const [documentSortDraft, setDocumentSortDraft] = useState("");
   const [transposedTabIds, setTransposedTabIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -731,6 +733,8 @@ export function TableDataView() {
     setDdlError(null);
     setIsDdlLoading(false);
     setMongoDocumentAction(null);
+    setDocumentFilterDraft(activeTab?.documentFilter || "");
+    setDocumentSortDraft(activeTab?.documentSort || "");
   }, [activeTab?.id]);
 
   useEffect(() => {
@@ -893,6 +897,26 @@ export function TableDataView() {
     }
     void loadTablePage(activeTab.id, page, undefined, undefined, {
       discardAction: "refresh the table",
+    });
+  };
+
+  const applyDocumentFilterAndSort = () => {
+    if (!isSearchObjectPreview || activeTab.isExecuting) return;
+    void loadDocumentPage(activeTab.id, 0, {
+      filter: documentFilterDraft.trim() || null,
+      sort: documentSortDraft.trim() || null,
+      discardAction: "apply the document filter or sort order",
+    });
+  };
+
+  const clearDocumentFilterAndSort = () => {
+    if (!isSearchObjectPreview || activeTab.isExecuting) return;
+    setDocumentFilterDraft("");
+    setDocumentSortDraft("");
+    void loadDocumentPage(activeTab.id, 0, {
+      filter: null,
+      sort: null,
+      discardAction: "clear the document filter or sort order",
     });
   };
 
@@ -2009,6 +2033,58 @@ export function TableDataView() {
           Latest export: {recentExportReport.status} · {recentExportReport.format.toUpperCase()} · {recentExportReport.encoding === "utf8Bom" ? "UTF-8 BOM" : recentExportReport.encoding === "binary" ? "Binary" : "UTF-8"} · {recentExportReport.maxRows ? `first ${recentExportReport.maxRows.toLocaleString()} requested · ` : "all matching rows · "}{recentExportReport.rowsExported.toLocaleString()} rows · {recentExportReport.batches.toLocaleString()} batches
         </div>
       )}
+
+      {isSearchObjectPreview &&
+        !showStructure &&
+        !showDdl &&
+        !isTransposed && (
+          <form
+            className="flex shrink-0 items-center gap-1.5 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 py-1.5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              applyDocumentFilterAndSort();
+            }}
+          >
+            <input
+              value={documentFilterDraft}
+              onChange={(event) => setDocumentFilterDraft(event.target.value)}
+              className="h-7 min-w-0 flex-1 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+              placeholder={
+                normalizeDatabaseDriverName(driver) === "meilisearch"
+                  ? 'Filter: {"status":"published"} or status = "published"'
+                  : 'Filter JSON: {"term":{"status":"published"}}'
+              }
+              aria-label="Document filter"
+              disabled={activeTab.isExecuting}
+            />
+            <input
+              value={documentSortDraft}
+              onChange={(event) => setDocumentSortDraft(event.target.value)}
+              className="h-7 w-48 max-w-[30%] rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 font-mono text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+              placeholder={
+                normalizeDatabaseDriverName(driver) === "meilisearch"
+                  ? 'Sort: {"title":"asc"}'
+                  : 'Sort JSON: [{"createdAt":"desc"}]'
+              }
+              aria-label="Document sort"
+              disabled={activeTab.isExecuting}
+            />
+            <Button type="submit" variant="outline" size="sm" disabled={activeTab.isExecuting}>
+              Apply
+            </Button>
+            {(documentFilterDraft || documentSortDraft || activeTab.documentFilter || activeTab.documentSort) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={activeTab.isExecuting}
+                onClick={clearDocumentFilterAndSort}
+              >
+                Clear
+              </Button>
+            )}
+          </form>
+        )}
 
       {/* Query Builder Filter Row */}
       {!isNativeObjectPreview &&

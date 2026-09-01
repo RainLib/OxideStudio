@@ -119,6 +119,10 @@ open real database endpoints.
   health/index/document endpoints are called, a filter/sort/page-size cursor
   cannot be replayed with different conditions, and an API key never appears
   in diagnostics, telemetry or saved URL display.
+- In packaged WebViews, verify the Search Index Filter/Sort toolbar preserves
+  an in-progress draft while a page is loading, submits once on Enter, clears
+  both values atomically, prevents pagination with stale cursors, and does not
+  present SQL-only filter controls for a Meilisearch index.
 - Exercise 401/403/404, malformed JSON, declared and streamed bodies above
   8 MiB, cancellation/connection loss and index deletion between page loads.
   Cursor replay across a different index must fail locally.
