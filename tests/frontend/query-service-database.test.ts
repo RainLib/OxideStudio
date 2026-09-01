@@ -101,6 +101,41 @@ describe("query service database scope", () => {
     );
   });
 
+  it("builds a DML preview through the pure parser command", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      success: true,
+      data: {
+        sql: "SELECT *, 2 AS \"total (new)\" FROM orders WHERE id = 1",
+        operation: "update",
+        hasNewValueColumns: true,
+        tables: [{ schema: "public", table: "orders" }],
+      },
+    });
+
+    await queryService.buildDmlChangePreviewSql({
+      sql: "UPDATE orders SET total = 2 WHERE id = 1",
+      databaseType: "postgres",
+      identifierQuote: "\"",
+      columns: ["id", "total"],
+    });
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "build_dml_change_preview_sql",
+      {
+        options: {
+          sql: "UPDATE orders SET total = 2 WHERE id = 1",
+          databaseType: "postgres",
+          identifierQuote: "\"",
+          columns: ["id", "total"],
+        },
+      },
+    );
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      "execute_query",
+      expect.anything(),
+    );
+  });
+
   it("passes an active package's editor language to syntax validation", async () => {
     mocks.invoke.mockResolvedValueOnce({
       success: true,

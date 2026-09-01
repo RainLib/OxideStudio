@@ -10,6 +10,8 @@ import type {
   SqlScriptImportResult,
   SqlStatementSelection,
   SqlSyntaxValidation,
+  DmlChangePreviewSqlOptions,
+  DmlChangePreviewSqlResult,
 } from "./types";
 
 /**
@@ -71,6 +73,15 @@ export async function validateSqlSyntax(
     ...(lspLanguageId ? { lspLanguageId } : {}),
     ...(lspServerDialect ? { lspServerDialect } : {}),
   });
+}
+
+export async function buildDmlChangePreviewSql(
+  options: DmlChangePreviewSqlOptions,
+): Promise<DmlChangePreviewSqlResult> {
+  return invokeWithInterceptors<DmlChangePreviewSqlResult>(
+    "build_dml_change_preview_sql",
+    { options },
+  );
 }
 
 export async function importSqlScript(
@@ -164,5 +175,6 @@ export const queryService = {
   cancelQuery,
   resolveSqlStatementAtCursor,
   validateSqlSyntax,
+  buildDmlChangePreviewSql,
   getSqlCompletion,
 };

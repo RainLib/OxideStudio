@@ -231,6 +231,7 @@ pub fn run() {
             commands::query::execute_query,
             commands::query::resolve_sql_statement_at_cursor,
             commands::query::validate_sql_syntax,
+            commands::query::build_dml_change_preview_sql,
             commands::query::preview_sql_script_import,
             commands::query::import_sql_script,
             commands::query::import_elasticsearch_console_file,

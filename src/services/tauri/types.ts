@@ -1417,6 +1417,27 @@ export interface SqlStatementRange {
   endOffset: number;
 }
 
+export interface DmlChangePreviewSqlOptions {
+  sql: string;
+  databaseType?: string;
+  identifierQuote?: string;
+  columns?: string[];
+}
+
+export interface DmlChangePreviewTableRef {
+  catalog?: string | null;
+  database?: string | null;
+  schema?: string | null;
+  table?: string | null;
+}
+
+export interface DmlChangePreviewSqlResult {
+  sql: string;
+  operation: "update" | "insert" | "delete";
+  hasNewValueColumns: boolean;
+  tables: DmlChangePreviewTableRef[];
+}
+
 export interface SqlSyntaxDiagnostic {
   severity: "error";
   message: string;

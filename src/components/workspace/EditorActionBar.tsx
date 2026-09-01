@@ -29,6 +29,7 @@ import {
   BookmarkPlus,
   FileCode2,
   History,
+  Eye,
   LineChart,
   LoaderCircle,
   Play,
@@ -76,6 +77,9 @@ interface EditorActionBarProps {
   onRun: () => void;
   onRunCurrent: () => void;
   onRunCurrentPointerDown?: () => void;
+  canPreviewChanges?: boolean;
+  isPreviewingChanges?: boolean;
+  onPreviewChanges?: () => void;
   onExplain: (mode: "estimate" | "analyze") => void;
   onCancelRun: () => void;
   onImportSqlScript?: () => void;
@@ -139,6 +143,9 @@ export function EditorActionBar({
   onRun,
   onRunCurrent,
   onRunCurrentPointerDown,
+  canPreviewChanges = false,
+  isPreviewingChanges = false,
+  onPreviewChanges,
   onExplain,
   onCancelRun,
   onImportSqlScript,
@@ -333,6 +340,23 @@ export function EditorActionBar({
             )}
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {canPreviewChanges && onPreviewChanges && (
+          <button
+            type="button"
+            className="wb-icon-button text-sky-400 hover:text-sky-300"
+            onClick={onPreviewChanges}
+            disabled={!isConnected || isExecuting || isPreviewingChanges}
+            title="Preview affected rows and new values without running the DML"
+            aria-label="Preview changes"
+          >
+            {isPreviewingChanges ? (
+              <LoaderCircle size={13} className="animate-spin" />
+            ) : (
+              <Eye size={13} />
+            )}
+          </button>
+        )}
 
         {parameterCount > 0 && (
           <button

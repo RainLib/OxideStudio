@@ -27,6 +27,8 @@ export type CurrentStatementDecorationOptions = {
     sql: string,
     offset: number,
   ) => Promise<StatementResolution>;
+  /** Reuses the authoritative frame resolution for adjacent editor actions. */
+  onCurrentStatementChange?: (sql: string) => void;
 };
 
 export type UseCurrentStatementDecorationOptions =
@@ -46,6 +48,7 @@ export function useCurrentStatementDecoration(
     options.isMongoDbConsole,
     options.monaco,
     options.ownerKey,
+    options.onCurrentStatementChange,
     options.resolveSqlStatementAtCursor,
   ]);
 }
@@ -60,6 +63,7 @@ export function attachCurrentStatementDecoration(
     isMongoDbConsole,
     monaco,
     resolveSqlStatementAtCursor = queryService.resolveSqlStatementAtCursor,
+    onCurrentStatementChange,
   } = options;
   let decorationIds: string[] = [];
   let timer: number | null = null;
@@ -72,6 +76,13 @@ export function attachCurrentStatementDecoration(
   let contentDisposable: Disposable | undefined;
   let modelDisposable: Disposable | undefined;
   let disposed = false;
+  let publishedSql = "";
+
+  const publishSql = (sql: string) => {
+    if (sql === publishedSql) return;
+    publishedSql = sql;
+    onCurrentStatementChange?.(sql);
+  };
 
   const clear = () => {
     if (timer !== null) {
@@ -82,6 +93,7 @@ export function attachCurrentStatementDecoration(
     rangeCache = null;
     renderedRange = null;
     decorationIds = editor.deltaDecorations(decorationIds, []);
+    publishSql("");
   };
 
   const decorate = (startOffset: number, endOffset: number) => {
@@ -89,8 +101,10 @@ export function attachCurrentStatementDecoration(
     if (!model || endOffset <= startOffset) {
       renderedRange = null;
       decorationIds = editor.deltaDecorations(decorationIds, []);
+      publishSql("");
       return;
     }
+    publishSql(model.getValue().slice(startOffset, endOffset));
     const modelVersion = model.getVersionId();
     if (
       renderedRange !== null &&

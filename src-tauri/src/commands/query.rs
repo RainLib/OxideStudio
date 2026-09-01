@@ -1,6 +1,10 @@
 /// 查询执行相关 commands
 use crate::core::{
     dialect::{canonical_driver_name, DatabaseKind},
+    dml_preview_sql::{
+        build_dml_change_preview_sql as build_preview_sql, DmlChangePreviewSqlOptions,
+        DmlChangePreviewSqlResult,
+    },
     explain::{build_explain_statement, parse_explain_results},
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
@@ -615,6 +619,19 @@ pub fn validate_sql_syntax(
     ) {
         Ok(validation) => Ok(Response::ok(validation)),
         Err(error) => Ok(Response::err("SQL_SYNTAX_VALIDATION_UNAVAILABLE", &error)),
+    }
+}
+
+/// Convert one DML statement into a bounded SELECT preview without touching a
+/// database. The generated SQL still travels through the normal query safety
+/// and cancellation path when the renderer executes it.
+#[tauri::command]
+pub fn build_dml_change_preview_sql(
+    options: DmlChangePreviewSqlOptions,
+) -> Result<Response<DmlChangePreviewSqlResult>, String> {
+    match build_preview_sql(options) {
+        Ok(preview) => Ok(Response::ok(preview)),
+        Err(error) => Ok(Response::err("DML_CHANGE_PREVIEW_UNAVAILABLE", &error)),
     }
 }
 

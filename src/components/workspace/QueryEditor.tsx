@@ -65,6 +65,10 @@ import {
 } from "@/lib/actionEvents";
 import { editorExecutionConfirmation } from "@/lib/sqlExecutionGate";
 import {
+  dmlPreviewTabTitle,
+  looksLikeDmlStatement,
+} from "@/features/query-editor/model/dmlChangePreview";
+import {
   completionUsageScore,
   completionUsageScope,
   recordCompletionUsage,
@@ -448,6 +452,8 @@ export function QueryEditor({
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
 
   const [executionNotice, setExecutionNotice] = useState<string | null>(null);
+  const [currentPreviewSql, setCurrentPreviewSql] = useState("");
+  const [isPreviewingChanges, setIsPreviewingChanges] = useState(false);
   const [batchColumnSession, setBatchColumnSession] =
     useState<SqlBatchColumnRuntimeSession | null>(null);
   const [inlineCompletionStatus, setInlineCompletionStatus] =
@@ -477,6 +483,9 @@ export function QueryEditor({
   const inlineCompletionListenersRef = useRef(new Set<() => void>());
   const runAllActionRef = useRef<() => void>(() => {});
   const runCurrentActionRef = useRef<() => void>(() => {});
+  const previewChangesActionRef = useRef<() => void>(() => {});
+  const previewChangesContextRef = useRef<{ set: (value: boolean) => void } | null>(null);
+  const canPreviewChangesRef = useRef(false);
   const pendingToolbarExecutionSnapshotRef = useRef<
     import("@/features/query-editor").QueryExecutionSnapshot | null
   >(null);
@@ -767,8 +776,8 @@ export function QueryEditor({
     },
     [driver, editorSettings.confirmDestructiveSql],
   );
-  const showNoExecutableTarget = useCallback(() => {
-    setExecutionNotice("No executable statement at cursor");
+  const showExecutionNotice = useCallback((message: string) => {
+    setExecutionNotice(message);
     if (executionNoticeTimerRef.current !== null) {
       window.clearTimeout(executionNoticeTimerRef.current);
     }
@@ -777,6 +786,10 @@ export function QueryEditor({
       setExecutionNotice(null);
     }, 3000);
   }, []);
+  const showNoExecutableTarget = useCallback(
+    () => showExecutionNotice("No executable statement at cursor"),
+    [showExecutionNotice],
+  );
   useEffect(
     () => () => {
       if (executionNoticeTimerRef.current !== null) {
@@ -845,6 +858,107 @@ export function QueryEditor({
     runExplainPlan,
     cancelTabQuery,
   });
+  const canPreviewChanges = Boolean(
+    canExecuteDocument &&
+      capabilities.supportsSqlQuery &&
+      effectiveConnectionId &&
+      looksLikeDmlStatement(currentPreviewSql),
+  );
+  const handlePreviewChanges = useCallback(async () => {
+    const sourceSql = currentPreviewSql.trim();
+    if (
+      !activeTab ||
+      !effectiveConnectionId ||
+      !canPreviewChanges ||
+      isPreviewingChanges
+    ) {
+      if (!sourceSql) showExecutionNotice("Place the cursor in one UPDATE, INSERT, or DELETE statement");
+      return;
+    }
+
+    const sourceModel = editorRef.current?.getModel?.();
+    const sourceModelVersion = sourceModel?.getVersionId?.();
+    const sourceTabId = activeTab.id;
+    const contextIsCurrent = () =>
+      useTabStore.getState().tabs.some((tab) => tab.id === sourceTabId) &&
+      (!sourceModel ||
+        (editorRef.current?.getModel?.() === sourceModel &&
+          sourceModel.getVersionId?.() === sourceModelVersion));
+
+    setIsPreviewingChanges(true);
+    try {
+      let preview = await queryService.buildDmlChangePreviewSql({
+        sql: sourceSql,
+        databaseType: driver,
+        identifierQuote: capabilities.identifierQuote || undefined,
+      });
+      if (!contextIsCurrent()) return;
+
+      const table = preview.tables.length === 1 ? preview.tables[0] : undefined;
+      if (preview.operation === "update" && table?.table) {
+        try {
+          const columns = await schemaService.getColumns(
+            effectiveConnectionId,
+            table.schema || activeTab.targetSchema || currentSchema || "",
+            table.table,
+          );
+          if (!contextIsCurrent()) return;
+          if (columns.length > 0) {
+            preview = await queryService.buildDmlChangePreviewSql({
+              sql: sourceSql,
+              databaseType: driver,
+              identifierQuote: capabilities.identifierQuote || undefined,
+              columns: columns.map((column) => column.name),
+            });
+          }
+        } catch {
+          // Metadata is an ordering enhancement only. The parser-generated
+          // wildcard preview remains complete when metadata is unavailable.
+        }
+      }
+      if (!contextIsCurrent()) return;
+
+      const previewSql = `/* Change preview · ${preview.operation.toUpperCase()} · original DML was not executed */\n${preview.sql}`;
+      const tabs = useTabStore.getState();
+      const previewTabId = tabs.createTab(
+        "query",
+        dmlPreviewTabTitle(preview.operation),
+        previewSql,
+        {
+          connectionId: effectiveConnectionId,
+          databaseName: activeTab.databaseName || undefined,
+          schemaName: activeTab.targetSchema || currentSchema || undefined,
+        },
+      );
+      await useTabStore
+        .getState()
+        .runTabQuery(previewTabId, effectiveConnectionId);
+    } catch (error) {
+      showExecutionNotice(
+        error instanceof Error
+          ? error.message
+          : "Unable to build a safe change preview for this statement",
+      );
+    } finally {
+      setIsPreviewingChanges(false);
+    }
+  }, [
+    activeTab,
+    canPreviewChanges,
+    capabilities.identifierQuote,
+    currentPreviewSql,
+    currentSchema,
+    driver,
+    effectiveConnectionId,
+    isPreviewingChanges,
+    showExecutionNotice,
+  ]);
+  previewChangesActionRef.current = () => void handlePreviewChanges();
+  canPreviewChangesRef.current = canPreviewChanges;
+
+  useEffect(() => {
+    previewChangesContextRef.current?.set(canPreviewChanges);
+  }, [canPreviewChanges]);
   const sqlScriptImportContextKey =
     activeTab?.id && effectiveConnectionId
       ? `${activeTab.id}:${effectiveConnectionId}`
@@ -3611,6 +3725,12 @@ export function QueryEditor({
       }
       mountedEditor.executeEdits("oxide.sql-intention", edits);
     };
+    const previewContext = mountedEditor.createContextKey(
+      "oxideDmlPreviewAvailable",
+      false,
+    );
+    previewContext.set(canPreviewChangesRef.current);
+    previewChangesContextRef.current = previewContext;
     const actions = [
       mountedEditor.addAction({
         id: "oxide.sql.triggerCompletion",
@@ -3631,24 +3751,32 @@ export function QueryEditor({
         },
       }),
       mountedEditor.addAction({
+        id: "oxide.sql.previewChanges",
+        label: "Preview affected rows and new values",
+        contextMenuGroupId: "oxide.sql",
+        contextMenuOrder: 1,
+        precondition: "oxideDmlPreviewAvailable",
+        run: () => previewChangesActionRef.current(),
+      }),
+      mountedEditor.addAction({
         id: "oxide.sql.quoteIdentifier",
         label: "Quote selected SQL identifier",
         contextMenuGroupId: "oxide.sql",
-        contextMenuOrder: 1,
+        contextMenuOrder: 2,
         run: () => replaceSelections((selected) => quoteSqlIdentifierSelection(driver, selected)),
       }),
       mountedEditor.addAction({
         id: "oxide.sql.unquoteIdentifier",
         label: "Unquote selected SQL identifier",
         contextMenuGroupId: "oxide.sql",
-        contextMenuOrder: 2,
+        contextMenuOrder: 3,
         run: () => replaceSelections(unquoteSqlIdentifierSelection),
       }),
       mountedEditor.addAction({
         id: "oxide.sql.pasteInList",
         label: "Paste clipboard as SQL IN list",
         contextMenuGroupId: "oxide.sql",
-        contextMenuOrder: 3,
+        contextMenuOrder: 4,
         run: async () => {
           try {
             const clipboard = await navigator.clipboard?.readText();
@@ -3661,7 +3789,13 @@ export function QueryEditor({
         },
       }),
     ];
-    return () => actions.forEach((action) => action.dispose());
+    return () => {
+      actions.forEach((action) => action.dispose());
+      if (previewChangesContextRef.current === previewContext) {
+        previewChangesContextRef.current = null;
+      }
+      previewContext.set(false);
+    };
   }, [
     capabilities.supportsSqlQuery,
     driver,
@@ -3764,6 +3898,7 @@ export function QueryEditor({
     isMongoDbConsole,
     monaco,
     ownerKey: effectiveTabId ? `${effectiveTabId}\u0000${documentUri}` : "",
+    onCurrentStatementChange: setCurrentPreviewSql,
   });
   const canAcceptExplorerTableDrop = Boolean(
     activeTab &&
@@ -4011,6 +4146,9 @@ export function QueryEditor({
             pendingToolbarExecutionSnapshotRef.current = null;
             void handleRunCurrent(snapshot);
           }}
+          canPreviewChanges={canPreviewChanges}
+          isPreviewingChanges={isPreviewingChanges}
+          onPreviewChanges={() => void handlePreviewChanges()}
           onExplain={handleExplain}
           onCancelRun={handleCancelRun}
           onImportSqlScript={

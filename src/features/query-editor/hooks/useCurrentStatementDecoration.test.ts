@@ -68,6 +68,7 @@ describe("current statement decoration lifecycle", () => {
         { startOffset: 10, endOffset: 18 },
       ],
     }));
+    const onCurrentStatementChange = vi.fn();
     const attachment = attachCurrentStatementDecoration({
       connectionId: "connection-1",
       editor,
@@ -75,17 +76,20 @@ describe("current statement decoration lifecycle", () => {
       isMongoDbConsole: false,
       monaco: { Range: TestRange },
       resolveSqlStatementAtCursor: resolve,
+      onCurrentStatementChange,
     });
 
     await vi.advanceTimersByTimeAsync(80);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(decorations[0]?.[0]?.options.className)
       .toContain("oxide-current-statement-line");
+    expect(onCurrentStatementChange).toHaveBeenLastCalledWith("select 1;");
 
     offset = 12;
     cursorListener?.();
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(decorations[1]?.[0]?.range.startLineNumber).toBe(2);
+    expect(onCurrentStatementChange).toHaveBeenLastCalledWith("select 2");
 
     attachment.dispose();
   });

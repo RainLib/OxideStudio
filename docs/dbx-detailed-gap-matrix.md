@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`8be503bf4`
+> DBX 参考提交：`e43e36e7a`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,7 +9,23 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`d69cf9da7` → `8be503bf4`）
+### 最新增量审计（`8be503bf4` → `e43e36e7a`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `333c3a3f4` | UPDATE/INSERT/DELETE 可转换为只读 SELECT 预览影响行和新值 | 本阶段已对齐并收紧：Rust 使用当前 `sqlparser 0.59` 的产品方言解析一条 DML，UPDATE 追加或按可信 metadata 交错展示 `<column> (new)`，INSERT VALUES/SELECT 展示待写入行，DELETE 展示待删除行；拒绝多语句、`UPDATE ... FROM` 歧义、非 DML、超 1 MiB 输入/输出和异常 metadata，标识符按产品 delimiter 转义。Query Editor 直接复用 current-statement frame 的已缓存解析结果，不增加第二次光标 IPC；工具栏和 Monaco 右键仅在当前 frame 为 DML 时开放，生成独立 Preview tab 后走普通查询取消/历史链路，源文档版本变化会丢弃晚到预览。DBX 位置：`crates/dbx-core/src/dml_preview_sql.rs`、`apps/desktop/src/lib/sql/dmlChangePreview.ts`、`QueryEditor.vue`。Oxide 位置：`src-tauri/src/core/dml_preview_sql.rs`、`src/features/query-editor/model/dmlChangePreview.ts`、`QueryEditor.tsx`。真实产品 volatile function、权限和大结果验证延期。 |
+| `46584ff46` | Windows Host 接受远程 Linux SQLite 绝对路径 | 已有且有 Rust 回归：`sqlite_ssh::validate_remote_absolute_path` 明确按 `/` 起始的 Linux path 校验，不使用 Windows `Path::is_absolute`；拒绝 `..`、NUL 和换行。 |
+| `a751b5690` | 表数据分页不受普通查询结果行数上限截断 | Oxide 的 Table tab 使用独立 `get_table_page`/opaque document cursor 和 server total，不复用普通 `execute_query` 的 materialized result cap；深页仍按 driver 的稳定分页能力门控。真实超百万行页面验证延期。 |
+| `694611aad` | 取消危险 SQL 确认后保持编辑器滚动/选区 | Oxide 当前使用同步浏览器确认，不创建会夺取 Monaco focus 的自定义 Dialog，也没有 DBX 的 pending viewport ownership；现有 immutable pointer-down snapshot 保留选区。真实 WebView 的 cancel/focus/scroll 回归仍需记录，不把架构差异伪装成已验证。 |
+| `cbfa8d7a7` | 非 table 对象隐藏行数/大小统计 | Oxide Explorer 当前不会为 view/routine/schema 等对象渲染 table row/size stats，不存在同类误导展示。 |
+| `c7cea5a04` | 查询结果列继承物理来源列的 formatter | **新差距**：Oxide 的 formatter 设置目前主要绑定当前网格/列，没有 DBX `queryDisplaySourceColumns` 的 catalog/database/schema/table/column lineage key。需先复用已有 SQL semantic relation mapping，禁止按同名列或当前 schema 猜测。 |
+| `d59b86bd5` | 多行粘贴进入新增行时自动扩展足够的 draft rows | **待核对/补齐**：需要验证 Glide paste 的二维矩形超过当前 draft 尾部时是否一次扩展全部新行，并保证 undo/validation 仍是单批次。 |
+| `8f21e7af9` | SQL Server 未命名聚合结果列获得稳定标题 | 属于 D02/D04 的正式 SQL Server package 缺口；Host 不应在无 source ordinal/alias contract 时按表达式猜列名。需进入签名 package 和 conformance fixture。 |
+| `2e8ed4b48` | Database Search 对所有表分批扫描 | **新差距**：Oxide Search Everywhere 只搜索已缓存对象/文件/命令，尚无 DBX 的跨表数据扫描、批次进度、取消与错误隔离。实现必须先绑定连接/database/schema 快照并设置表数、并发、行数和响应字节上限。 |
+| `600af8753` | INSERT 列 inlay hints 扩展到 INSERT ... SELECT projection | **新 LSP/Editor 差距**：Oxide 已覆盖 INSERT VALUES 和完整 INSERT snippet，但尚未证明 SELECT projection、括号 SELECT、DISTINCT ON/TOP 以及 dollar-quoted routine body 内的列 hint。列数不匹配必须 fail closed，不能按位置越界提示。 |
+| `e43e36e7a` | PIT 已创建但 `_shard_doc` 查询失败时回退到 bounded from/size | **明确 Elasticsearch 差距**：Oxide 只在打开 PIT 失败时回退 offset；PIT 成功后首个 `_search` 失败会直接报错。下一阶段需只对确认的 shard-doc/PIT compatibility failure 关闭 PIT 并从第一页 bounded fallback，认证、过滤、mapping 和网络错误不得被吞掉。 |
+
+### 上一增量审计（`d69cf9da7` → `8be503bf4`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
