@@ -86,7 +86,11 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("databend", "Databend", "relational", "http"),
   candidate("redshift", "Amazon Redshift", "relational", "jdbc"),
   candidate("dameng", "Dameng", "relational", "jdbc"),
-  candidate("kingbase", "KingbaseES", "relational", "jdbc"),
+  // DBX ships Kingbase as a dedicated native agent (`kingbase-go`), not as a
+  // generic JDBC profile. It retains a conservative PostgreSQL-compatible LSP
+  // baseline, but package authors must deliver a signed sidecar which owns
+  // Kingbase connection parsing, metadata and value conversion.
+  candidate("kingbase", "KingbaseES", "relational", "native"),
   candidate("highgo", "HighGo", "relational", "jdbc"),
   candidate("uxdb", "UXDB", "relational", "jdbc"),
   candidate("vastbase", "Vastbase", "relational", "jdbc"),
@@ -126,7 +130,10 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("oscar", "OscarDB", "relational", "jdbc"),
   candidate("tdengine", "TDengine", "timeSeries", "jdbc"),
   candidate("xugu", "Xugu", "relational", "jdbc"),
-  candidate("iotdb", "Apache IoTDB", "timeSeries", "jdbc"),
+  // IoTDB's tree/table metadata and aggregate result semantics are owned by
+  // DBX's native agent. Do not imply that an arbitrary JDBC archive supplies
+  // an equivalent SQL editor or workspace.
+  candidate("iotdb", "Apache IoTDB", "timeSeries", "native"),
   candidate("etcd", "etcd", "keyValue", "bundled"),
   candidate("zookeeper", "Apache ZooKeeper", "coordination", "jdbc"),
   candidate("nacos", "Nacos", "keyValue", "bundled"),

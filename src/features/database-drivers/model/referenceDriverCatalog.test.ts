@@ -30,6 +30,7 @@ describe("DBX reference driver catalogue", () => {
   it("keeps the latest DBX products unavailable until their own package is ready", () => {
     const nativeWorkspaceProducts = [
       "dynamodb",
+      "iotdb",
       "mqtt",
     ];
     const jdbcProducts = ["kyuubi", "impala", "spanner", "ignite", "ignite3"];
@@ -49,6 +50,15 @@ describe("DBX reference driver catalogue", () => {
       runtimeRoute: "signedJdbc",
       lspRoute: "compatibleSql",
       lspParserBaseline: "hive",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("kingbase")!)).toMatchObject({
+      runtimeRoute: "signedSidecar",
+      lspRoute: "compatibleSql",
+      lspParserBaseline: "postgres",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("iotdb")!)).toMatchObject({
+      runtimeRoute: "dedicatedWorkspace",
+      lspRoute: "notApplicable",
     });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
       runtimeRoute: "bundled",

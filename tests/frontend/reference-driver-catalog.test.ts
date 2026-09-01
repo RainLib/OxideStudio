@@ -139,6 +139,15 @@ describe("reference database driver catalogue", () => {
       runtimeRoute: "dedicatedWorkspace",
       lspRoute: "notApplicable",
     });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("kingbase")!)).toMatchObject({
+      runtimeRoute: "signedSidecar",
+      lspRoute: "compatibleSql",
+      lspParserBaseline: "postgres",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("iotdb")!)).toMatchObject({
+      runtimeRoute: "dedicatedWorkspace",
+      lspRoute: "notApplicable",
+    });
   });
 
   it("keeps DBX dialect identities distinct from their compatibility parser baselines", () => {
