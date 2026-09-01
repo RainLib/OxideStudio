@@ -6,6 +6,7 @@ import {
   SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER,
   driverCandidateAvailability,
   driverCandidateConformance,
+  referenceDriverPackageRequirement,
   referenceDriverDeliveryPlan,
   referenceDriverCandidate,
 } from "@/features/database-drivers";
@@ -148,6 +149,12 @@ describe("reference database driver catalogue", () => {
       runtimeRoute: "dedicatedWorkspace",
       lspRoute: "notApplicable",
     });
+    expect(referenceDriverPackageRequirement(referenceDriverCandidate("kingbase")!)).toBe(
+      "Signed native Agent package required",
+    );
+    expect(referenceDriverPackageRequirement(referenceDriverCandidate("iotdb")!)).toBe(
+      "Dedicated workspace runtime required",
+    );
   });
 
   it("keeps DBX dialect identities distinct from their compatibility parser baselines", () => {

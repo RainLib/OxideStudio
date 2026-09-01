@@ -67,6 +67,7 @@ import {
   REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
   driverCandidateConformance,
+  referenceDriverPackageRequirement,
   referenceDriverDeliveryPlan,
 } from "@/features/database-drivers";
 import {
@@ -3166,7 +3167,7 @@ function DriverManagementSettings() {
                     ? "Active · no version evidence"
                   : catalogRelease
                     ? `Release ${catalogRelease.packageVersion}`
-                    : "Package required";
+                    : referenceDriverPackageRequirement(candidate) || "Package required";
             const availabilityClassName =
               conformance.state === "notInstalled"
                 ? "text-[hsl(var(--wb-text-muted))]"

@@ -219,6 +219,27 @@ export type DriverCandidateAvailability =
   | "requiresPackage";
 
 /**
+ * User-facing installation requirement derived from the reviewed DBX delivery
+ * route. This deliberately does not claim that a catalog row is installable:
+ * it only prevents a native product from being described as a generic JDBC
+ * download while its own signed runtime is absent.
+ */
+export function referenceDriverPackageRequirement(
+  candidate: DatabaseDriverCandidate,
+): string | null {
+  switch (referenceDriverDeliveryPlan(candidate).runtimeRoute) {
+    case "bundled":
+      return null;
+    case "signedJdbc":
+      return "Signed JDBC package required";
+    case "signedSidecar":
+      return "Signed native Agent package required";
+    case "dedicatedWorkspace":
+      return "Dedicated workspace runtime required";
+  }
+}
+
+/**
  * The package and editor route planned for a product in the DBX reference
  * catalogue. This is deliberately a planning contract, not an activation
  * result: a row remains unavailable until its exact signed package is ready.

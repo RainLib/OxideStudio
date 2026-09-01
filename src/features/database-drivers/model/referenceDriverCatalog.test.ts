@@ -3,6 +3,7 @@ import {
   DBX_REFERENCE_DRIVER_IDS,
   REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
+  referenceDriverPackageRequirement,
   referenceDriverCandidate,
   referenceDriverDeliveryPlan,
 } from "./referenceDriverCatalog";
@@ -60,6 +61,12 @@ describe("DBX reference driver catalogue", () => {
       runtimeRoute: "dedicatedWorkspace",
       lspRoute: "notApplicable",
     });
+    expect(referenceDriverPackageRequirement(referenceDriverCandidate("kingbase")!)).toBe(
+      "Signed native Agent package required",
+    );
+    expect(referenceDriverPackageRequirement(referenceDriverCandidate("iotdb")!)).toBe(
+      "Dedicated workspace runtime required",
+    );
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
       runtimeRoute: "bundled",
       lspRoute: "notApplicable",

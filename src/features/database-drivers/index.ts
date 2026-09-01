@@ -4,6 +4,7 @@ export {
   DBX_DIALECT_REFERENCE_DRIVER_IDS,
   driverCandidateAvailability,
   driverCandidateConformance,
+  referenceDriverPackageRequirement,
   referenceDriverDeliveryPlan,
   SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER,
   referenceDriverCandidate,
