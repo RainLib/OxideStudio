@@ -851,3 +851,25 @@ Oxide 将既有的 SQLite rebuild 审阅产物收紧为可执行闭集，并补�
 Rust 回归覆盖 planner/catalog fail-closed、复合 FK 顺序/action metadata、内存成功、FK 失败回滚、本地文件独立 snapshot connection 和 worker
 在 `BEGIN IMMEDIATE` 下的 committed snapshot。真实 WAL、并发进程、磁盘不足、commit/SSH 断连、远程
 下载与多平台恢复按用户要求留在统一延期验证队列。
+
+## Phase 154 增量：DBX `d4d3995be` 上游复审
+
+以 DBX `d4d3995be`（2026-09-02 本地参考仓库 HEAD）重新审计 `d69cf9da7..d4d3995be` 的
+产品变更。该区间的实际能力差异不以提交数量计数；每项均以 Oxide 当前可达代码路径、测试或明确的
+交付前置条件为准：
+
+| DBX 变更 | Oxide 结论与可追溯证据 | 状态 |
+| --- | --- | --- |
+| `1f274c57e` Explorer `Cmd/Ctrl+R` refresh | `src/lib/keybindings.ts:isExplorerRefreshShortcut`、`SchemaSidebar.tsx` 和 `keybindings.test.ts` 已按焦点/输入框/IME 边界接管。裸 `F5` 仍可用。 | 逻辑对齐；真实各平台 WebView reload 抑制延期。 |
+| `5d6f66777` MySQL transfer 防止静默丢列 | 所有 transfer plan 在执行前经过 `commands/table.rs:build_data_transfer_column_mapping`；目标缺少任一源列即明确失败，错误文本与 Rust 回归锁定“不静默丢弃”。 | 已对齐。 |
+| `600af8753` INSERT SELECT inlay hint | Phase 100 已覆盖语法；Phase 154 前的 `76c0ba80`/`3ed486ee` 进一步修正超过 viewport 的 PostgreSQL dollar-quoted routine。扫描按 64 KiB chunk 有界，且按 Monaco model version/visible range 缓存，不会为了找到 opening tag materialize 整份文档。 | 已对齐；真实多方言 metadata/Monaco 布局延期。 |
+| `e9a90173a` SQL file schema restore / `c4cdcbc48` save target 文案 | `projectSqlFileTarget.ts`、`useTabStore.ts` 和 `editorSaveTarget.test.ts` 保留 project SQL 文件的 connection/database/schema 目标；保存提示只反映当前实际目标。 | 已对齐。 |
+| `6588f27fb` 单独 SSH tunnel test | `core/ssh.rs:test_ssh_tunnel` 由 `commands/connection.rs`、Tauri command 和 `ConnectionForm.tsx` 的独立入口调用；probe 不依赖数据库连接。 | 已对齐；真实 SSH server/host-key/auth 组合延期。 |
+| `333c3a3f4` DML readonly preview、`55611706b` Redis bounded preview、`e43e36e7a` Elasticsearch `_shard_doc` fallback、`264f5c483` InfluxDB 3 | 分别由 `core/dml_preview_sql.rs`、`drivers/redis.rs`、`drivers/elasticsearch.rs`、`drivers/influxdb3.rs` 提供并已有 fixture/unit coverage；详见本矩阵 Phase 相关条目。 | 已对齐；真实服务版本矩阵延期。 |
+| `19be19472` / `440c41f5b` / `8f21e7af9` SQL Server CTE/temp-table/result-column 修复 | Oxide 的产品目录可以显示 SQL Server 候选，但 native/JDBC SQL Server runtime 尚未作为签名 package 交付；因此不存在可安全修补却未修补的执行路径。不得以 generic fallback 假装支持该产品。`D04` 继续要求签名 manifest、runtime handshake 和 conformance fixture 后才开启。 | 明确未交付，受运行时前置条件阻断。 |
+| `6a7ea4ae9` Jalapeno Cloud partner preset | 这是 DBX 的商业身份、Referer、品牌资产与服务条款，不属于可复制的技术能力；Oxide 已有独立 OpenAI-compatible/Codex CLI/CodeBuddy CLI provider。 | 有意不迁移。 |
+
+因此，本轮没有发现需要凭猜测新增的 DBX 逻辑。下一轮工程工作应集中在已登记的正式外置驱动包与真实服务
+验证，而不是为 SQL Server 等尚未可用 runtime 增加不可达的前端/解析分支。所有真实数据库、SSH、WebView
+和 70+ 驱动矩阵验证仍统一保留在 `dbx-alignment-deferred-validation.md`，不得将上述静态/fixture 回归表述为
+实库验收。
