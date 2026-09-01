@@ -100,6 +100,10 @@ import {
   loadGridLayout,
   normalizeGridLayout,
   planExpandableNewRowPaste,
+  applyColumnFormatter,
+  columnFormatterKeys,
+  ColumnFormatterDialog,
+  type ColumnFormatterConfig,
   type DataGridContextMenuItem,
   type DataGridHoverTooltipState,
   type DataGridColumnLookupItem,
@@ -330,6 +334,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const dataGridSettings = useSettingsStore(
       (state) => state.settings.dataGrid,
     );
+    const updateSettings = useSettingsStore((state) => state.updateSettings);
     const copyIncludeHeaders = dataGridSettings.copyIncludeHeaders;
     const showTypeIcons = dataGridSettings.showTypeIcons;
     const viewMetrics = dataGridMetrics(
@@ -397,6 +402,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const [columnLookupSelectedIndex, setColumnLookupSelectedIndex] = useState(0);
     const [valueEditorTarget, setValueEditorTarget] =
       useState<GridValueEditorTarget | null>(null);
+    const [formatterTarget, setFormatterTarget] = useState<{
+      columnIndex: number;
+      columnName: string;
+      keys: string[];
+      sampleValue: unknown;
+    } | null>(null);
 
     // Context menu state
     const [contextMenu, setContextMenu] = useState<{
@@ -470,6 +481,44 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const tableColumnsByName = useMemo(
       () => new Map(tableColumns?.map((column) => [column.name, column])),
       [tableColumns],
+    );
+
+    const formatterKeysForResultColumn = useCallback(
+      (columnIndex: number) => {
+        const resultColumn = result?.columns[columnIndex];
+        if (
+          !resultColumn ||
+          !activeTab?.connectionId ||
+          activeTab.type !== "table" ||
+          !activeTab.tableName
+        ) {
+          return [];
+        }
+        return columnFormatterKeys({
+          connectionId: activeTab.connectionId,
+          database: activeTab.databaseName,
+          schema: activeTab.schemaName,
+          databaseType: activeConnection?.driver,
+          resultColumn: resultColumn.name,
+          tableMeta: {
+            database: activeTab.databaseName,
+            schema: activeTab.schemaName,
+            tableName: activeTab.tableName,
+          },
+        });
+      },
+      [activeConnection?.driver, activeTab, result?.columns],
+    );
+
+    const formatterForResultColumn = useCallback(
+      (columnIndex: number) => {
+        for (const key of formatterKeysForResultColumn(columnIndex)) {
+          const formatter = dataGridSettings.columnFormatters[key];
+          if (formatter) return formatter;
+        }
+        return undefined;
+      },
+      [dataGridSettings.columnFormatters, formatterKeysForResultColumn],
     );
 
     const layoutColumnIds = useMemo(() => {
@@ -555,9 +604,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               tableColumnType: metadata?.data_type,
               resultColumnType: col.data_type,
             });
-            const title = dataType
+            const titleBase = dataType
               ? `${col.name || "Unknown"} (${compactResultColumnType(dataType)})`
               : col.name || "Unknown";
+            const title = formatterForResultColumn(index)
+              ? `${titleBase} · formatted`
+              : titleBase;
             const columnIcon = dataType
               ? columnIconForType(dataType, metadata?.is_primary_key)
               : undefined;
@@ -638,6 +690,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       gridScale,
       hiddenColumns,
       isTransposed,
+      formatterForResultColumn,
     ]);
 
     const columnLookupItems = useMemo<DataGridColumnLookupItem[]>(() => {
@@ -1051,6 +1104,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           }),
         );
         const gridCell = { ...baseCell };
+        const formattedValue = applyColumnFormatter(
+          val,
+          formatterForResultColumn(originalColIndex),
+        );
+        if (formattedValue !== undefined && gridCell.kind === GridCellKind.Text) {
+          gridCell.displayData = formattedValue;
+        }
 
         if (pendingEdits.has(editKey)) {
           gridCell.themeOverride = {
@@ -1099,6 +1159,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         isEditable,
         tableColumns,
         isTransposed,
+        formatterForResultColumn,
       ],
     );
 
@@ -1833,6 +1894,27 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       closeContextMenu();
     }, [contextMenu, closeContextMenu]);
 
+    const handleOpenColumnFormatter = useCallback(() => {
+      if (contextMenu.col === undefined || !result) return;
+      const columnIndex = visualColumnIndexToResultIndex(contextMenu.col);
+      const column = result.columns[columnIndex];
+      const keys = formatterKeysForResultColumn(columnIndex);
+      if (!column || keys.length === 0) return;
+      setFormatterTarget({
+        columnIndex,
+        columnName: column.name,
+        keys,
+        sampleValue: result.rows[0]?.[columnIndex],
+      });
+      closeContextMenu();
+    }, [
+      closeContextMenu,
+      contextMenu.col,
+      formatterKeysForResultColumn,
+      result,
+      visualColumnIndexToResultIndex,
+    ]);
+
     const handleSortAsc = useCallback(() => {
       if (!activeTab || !contextMenu.columnId) return;
       if (contextMenu.columnId) {
@@ -2232,6 +2314,18 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             onSelect: handleCopyColumnName,
           },
           {
+            id: "format-column",
+            label: "Format Column...",
+            description: "Change display formatting without changing stored values.",
+            icon: <Sparkles size={12} />,
+            disabled:
+              contextMenu.col === undefined ||
+              formatterKeysForResultColumn(
+                visualColumnIndexToResultIndex(contextMenu.col),
+              ).length === 0,
+            onSelect: handleOpenColumnFormatter,
+          },
+          {
             id: "sort-ascending",
             label: "Sort Ascending",
             description: "Order the visible rows by this column.",
@@ -2525,6 +2619,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       gridState?.sortColumn,
       handleClearSort,
       handleCopyColumnName,
+      handleOpenColumnFormatter,
+      formatterKeysForResultColumn,
+      visualColumnIndexToResultIndex,
       handleDeleteSelectedRows,
       handleOpenColumnFilter,
       handleHideColumn,
@@ -3049,6 +3146,38 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           }}
           navigation={valueEditorNavigation}
           onNavigate={navigateValueEditor}
+        />
+        <ColumnFormatterDialog
+          open={formatterTarget !== null}
+          columnName={formatterTarget?.columnName || "column"}
+          sampleValue={formatterTarget?.sampleValue}
+          formatter={
+            formatterTarget
+              ? formatterForResultColumn(formatterTarget.columnIndex)
+              : undefined
+          }
+          onOpenChange={(open) => {
+            if (!open) setFormatterTarget(null);
+          }}
+          onSave={(formatter: ColumnFormatterConfig) => {
+            if (!formatterTarget) return;
+            const next = { ...dataGridSettings.columnFormatters };
+            for (const key of formatterTarget.keys) delete next[key];
+            next[formatterTarget.keys[0]!] = formatter;
+            void updateSettings({
+              dataGrid: { ...dataGridSettings, columnFormatters: next },
+            });
+            setFormatterTarget(null);
+          }}
+          onClear={() => {
+            if (!formatterTarget) return;
+            const next = { ...dataGridSettings.columnFormatters };
+            for (const key of formatterTarget.keys) delete next[key];
+            void updateSettings({
+              dataGrid: { ...dataGridSettings, columnFormatters: next },
+            });
+            setFormatterTarget(null);
+          }}
         />
       </div>
     );

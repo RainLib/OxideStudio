@@ -82,6 +82,34 @@ describe("Database Explorer settings", () => {
   });
 });
 
+describe("data grid formatter settings", () => {
+  it("migrates missing formatter records and retains only bounded valid configs", () => {
+    expect(normalizeAppSettings({}).dataGrid.columnFormatters).toEqual({});
+    expect(
+      normalizeAppSettings({
+        dataGrid: {
+          columnFormatters: {
+            "conn::app::public::users::created_at": {
+              kind: "datetime",
+              unit: "auto",
+              pattern: "YYYY-MM-DD HH:mm:ss",
+              timezone: "UTC",
+            },
+            broken: { kind: "mask", prefix: -1, suffix: 2 },
+          },
+        },
+      }).dataGrid.columnFormatters,
+    ).toEqual({
+      "conn::app::public::users::created_at": {
+        kind: "datetime",
+        unit: "auto",
+        pattern: "YYYY-MM-DD HH:mm:ss",
+        timezone: "UTC",
+      },
+    });
+  });
+});
+
 describe("SQL Library tool window settings", () => {
   it("defaults to a closed right-side shared panel and preserves explicit moves", () => {
     const defaults = normalizeAppSettings({}).workbench;

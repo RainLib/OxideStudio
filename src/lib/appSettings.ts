@@ -3,6 +3,10 @@ import {
   DEFAULT_SQL_COMMAND_SNIPPETS,
   type SqlSnippetSetting,
 } from "@/features/query-editor/model/sqlCommandSnippets";
+import {
+  normalizeColumnFormatterRecord,
+  type ColumnFormatterConfig,
+} from "@/features/data-grid/model/columnFormatter";
 
 export type { SqlSnippetSetting };
 
@@ -156,6 +160,7 @@ export type AppSettings = {
     tableTabReuseMode: TableTabReuseMode;
     copyIncludeHeaders: boolean;
     showTypeIcons: boolean;
+    columnFormatters: Record<string, ColumnFormatterConfig>;
   };
   databaseExplorer: {
     activationMode: ExplorerActivationMode;
@@ -337,6 +342,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     tableTabReuseMode: "same-table",
     copyIncludeHeaders: true,
     showTypeIcons: true,
+    columnFormatters: {},
   },
   databaseExplorer: {
     activationMode: "single",
@@ -775,6 +781,9 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["dataGrid", "showTypeIcons"],
         defaults.dataGrid.showTypeIcons,
+      ),
+      columnFormatters: normalizeColumnFormatterRecord(
+        getAt(raw, ["dataGrid", "columnFormatters"]),
       ),
     },
     databaseExplorer: {
