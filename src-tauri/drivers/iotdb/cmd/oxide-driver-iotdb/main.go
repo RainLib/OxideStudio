@@ -228,5 +228,9 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	if err != nil {
 		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
 	}
-	return map[string]any{"kind": "metadata", "value": map[string]any{"columns": protocolColumns(result), "rows": result.Rows, "truncated": result.Truncated}}, nil
+	metadata, err := iotdb.AdaptMetadata(value.Request.Kind, value.Request.Namespace, result)
+	if err != nil {
+		return nil, iotdb.Fail("METADATA_FAILED", err.Error())
+	}
+	return map[string]any{"kind": "metadata", "value": metadata}, nil
 }
