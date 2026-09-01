@@ -52,6 +52,10 @@ export default defineConfig(async () => ({
     // block the first workspace request while it discovers/pre-bundles these
     // dependencies. Keep the interactive workbench dependency set explicit so
     // cold development starts do the work before the WebView asks for it.
+    //
+    // Vim is explicitly opt-in and loaded through `attachVimMode`. Do not put
+    // its multi-megabyte runtime on every cold development start; Vite resolves
+    // the dynamic import only when the user enables Vim.
     include: [
       "react",
       "react/jsx-runtime",
@@ -78,7 +82,6 @@ export default defineConfig(async () => ({
       "@monaco-editor/react",
       "cmdk",
       "date-fns",
-      "monaco-vim",
       "react-icons/si",
       "@tauri-apps/api/app",
       "@tauri-apps/api/core",

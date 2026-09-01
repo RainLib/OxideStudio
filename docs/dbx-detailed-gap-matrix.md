@@ -889,3 +889,15 @@ Rust 回归覆盖 planner/catalog fail-closed、复合 FK 顺序/action metadata
 `useTabStore.organization.test.ts` 覆盖跨结果集隔离、关闭中间/当前结果后的索引重映射；前端 production
 build 已验证 TypeScript 和 bundle。真实 Grid 交互（虚拟滚动、键盘筛选菜单、WebView 焦点）仍按统一延期
 清单执行。
+
+## Phase 156 增量：按需 Vim 运行时不再阻塞开发冷启动
+
+构建审计确认 `monaco-vim` 通过 `lib/vimMode.ts:attachVimMode` 的动态 import 保持为独立 production
+chunk，用户未启用 Vim 时不进入 workspace startup graph。此前 Vite 的 `optimizeDeps.include` 又强制在每次
+开发服务器冷启动预构建该多 MiB 依赖，造成不必要的首开工作；现将它移出显式预构建清单：
+
+- 普通 Tauri/Vite 开发首开只预处理默认互动工作台依赖；首次启用 Vim 时才解析其已有动态 import。
+- production bundle 仍由 `npm run build` 验证：`monaco-vim` 未合并进 startup module，bundle verifier 保持
+  单一 startup module 和无静态 import cycle。
+- 此变更不改变 Vim 功能、用户设置或 production 代码拆分；真正的 Vim 首次启用延迟仍应在 packaged
+  WebView 性能矩阵中实测，而不是用本机构建耗时替代。
