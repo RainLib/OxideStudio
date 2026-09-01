@@ -512,6 +512,42 @@ async fn bounded_nacos_response_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    async fn serve_test_http_responses(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (content_type, body) in responses {
+                let Ok(Ok((mut socket, _))) =
+                    timeout(Duration::from_millis(500), listener.accept()).await
+                else {
+                    break;
+                };
+                let mut request = vec![0u8; 8 * 1024];
+                let Ok(Ok(size)) =
+                    timeout(Duration::from_millis(500), socket.read(&mut request)).await
+                else {
+                    break;
+                };
+                requests.push(String::from_utf8_lossy(&request[..size]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (
+            format!("http://nacos:secret@{address}/tenant?namespace=prod"),
+            handle,
+        )
+    }
 
     #[test]
     fn url_redacts_credentials_namespace_and_preserves_context_path() {
@@ -542,5 +578,62 @@ mod tests {
         })
         .is_err());
         assert_eq!(truncate_utf8("你好", 4), "你");
+    }
+
+    #[tokio::test]
+    async fn native_browser_uses_only_fixed_openapi_read_endpoints() {
+        let (url, server) = serve_test_http_responses(vec![
+            ("application/json", r#"{"accessToken":"fixture-token","tokenTtl":3600}"#),
+            (
+                "application/json",
+                r#"{"totalCount":1,"pageItems":[{"dataId":"app.json","group":"DEFAULT_GROUP","tenant":"prod","md5":"abc"}]}"#,
+            ),
+            ("application/json", r#"{"totalCount":0,"pageItems":[]}"#),
+            (
+                "application/json",
+                r#"{"totalCount":1,"pageItems":[{"dataId":"app.json","group":"DEFAULT_GROUP","tenant":"prod","md5":"abc"}]}"#,
+            ),
+            ("text/plain", r#"{"enabled":true}"#),
+        ])
+        .await;
+        let mut driver = NacosDriver::new(&url).unwrap();
+        driver.connect().await.unwrap();
+        driver.ping().await.unwrap();
+        let page = driver
+            .get_collections_page("config", None, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(page.total, Some(1));
+        assert_eq!(page.items.len(), 1);
+        let preview = driver
+            .query(&format!("GET {}", page.items[0].name))
+            .await
+            .unwrap();
+        assert_eq!(
+            preview[0].rows[0][3],
+            Value::String(r#"{"enabled":true}"#.to_string())
+        );
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].starts_with("POST /tenant/v1/auth/users/login HTTP/1.1"));
+        assert!(requests[0].contains("username=nacos&password=secret"));
+        assert!(requests[1].starts_with("GET /tenant/v1/cs/configs?"));
+        assert!(requests[2].starts_with("GET /tenant/v1/cs/configs?"));
+        assert!(requests[3].starts_with("GET /tenant/v1/cs/configs?"));
+        assert!(requests[4].starts_with("GET /tenant/v1/cs/configs?"));
+        assert!(requests[1..]
+            .iter()
+            .all(|request| request.contains("accessToken=fixture-token")));
+        assert!(requests[1..]
+            .iter()
+            .all(|request| !request.contains("authorization: Basic")));
+        assert!(requests[4].contains("dataId=app.json"));
+        assert!(requests[4].contains("group=DEFAULT_GROUP"));
+        assert!(requests[4].contains("tenant=prod"));
+        assert!(requests.iter().all(|request| {
+            request.starts_with("POST /tenant/v1/auth/users/login HTTP/1.1")
+                || request.starts_with("GET /tenant/v1/cs/configs?")
+        }));
     }
 }
