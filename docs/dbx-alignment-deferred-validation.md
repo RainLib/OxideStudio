@@ -1844,3 +1844,23 @@ explicit deferred validation task rather than an implicit release check.
   141 covers pure model, IPC contract, Rust SQL/bounds tests, frontend build,
   full Rust tests and Clippy; it deliberately does not claim live database or
   packaged-WebView evidence.
+
+## JDBC catalog and schema query scope
+
+- Package and run the generic Java 21 Agent with Microsoft JDBC against SQL
+  Server 2008 plus a current supported version. Select a non-default database,
+  execute CTE/comment-prefixed and ordinary statements, then verify the next
+  unscoped request returns to the original catalog. Repeat with an invalid and
+  inaccessible catalog; neither may fall back to the connection default.
+- Repeat catalog switching with PostgreSQL JDBC and MySQL Connector/J, including
+  case-sensitive names and a selected schema. Record whether each vendor maps
+  `setSchema` and `setCatalog` exactly as its signed capability profile claims.
+- Run Oracle, Hive and Argo packages and verify the generated manifest exposes
+  schemas/namespaces without a duplicate catalog tree or `query_database`
+  surface. Oracle TNS, Hive/Kerberos and vendor URL variants remain separate
+  product-package validation rather than generic profile assumptions.
+- Force `setCatalog`, `getCatalog`, `setSchema`, read-back and restoration
+  failures with vendor fixtures. Any ignored or unrestorable change must fail
+  the current request and retire the connection; concurrent metadata must not
+  observe the temporary query context. H2 2.3.232 already covers the local
+  protocol apply/reject/restore path without a live server.

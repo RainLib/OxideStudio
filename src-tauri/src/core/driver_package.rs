@@ -1586,6 +1586,13 @@ pub fn validate_handshake(
                     .to_string(),
             );
         }
+        if capabilities.supports_database_catalogs && !response.capabilities.database_scoped_queries
+        {
+            return Err(
+                "Driver manifest declares database catalogs that its runtime cannot query safely"
+                    .to_string(),
+            );
+        }
         // Reverse navigation is a separate server-side query boundary. A
         // package must not advertise foreign-key navigation merely because it
         // can enumerate ordinary table metadata; old or partial sidecars
@@ -5186,6 +5193,25 @@ mod tests {
         assert!(validate_handshake(&package.manifest, &response)
             .unwrap_err()
             .contains("database creation"));
+
+        package
+            .manifest
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .supports_create_database = false;
+        package
+            .manifest
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .supports_database_catalogs = true;
+        assert!(validate_handshake(&package.manifest, &response)
+            .unwrap_err()
+            .contains("database catalogs"));
+
+        response.capabilities.database_scoped_queries = true;
+        assert!(validate_handshake(&package.manifest, &response).is_ok());
     }
 
     #[test]
@@ -5290,6 +5316,7 @@ mod tests {
                 metadata: true,
                 cancellation: true,
                 transactions: true,
+                database_scoped_queries: true,
                 database_creation: true,
                 referencing_foreign_keys: true,
                 ..DriverRuntimeCapabilities::default()

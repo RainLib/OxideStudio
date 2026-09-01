@@ -4,11 +4,12 @@ import { readFile, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 
-export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.1.0";
+export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.2.0";
 export const CATALOG_CONFORMANCE_OPERATIONS = Object.freeze([
   "connect",
   "metadata",
   "query",
+  "databaseScope",
   "cancellation",
   "mutations",
   "migration",
@@ -368,6 +369,20 @@ function validateManifestFixture(manifest, fixture) {
   assert((fixture.query.parameters || []).length > 0, "Query conformance requires at least one bound parameter");
   assert(fixture.errorMapping?.statement, "Conformance fixture must include an error-mapping check");
   assert((fixture.errorMapping.expectedCodes || []).length > 0, "Error-mapping check requires expectedCodes");
+  const declaresDatabaseCatalogs = manifest.capabilities?.supportsDatabaseCatalogs === true;
+  if (declaresDatabaseCatalogs) {
+    assert(fixture.databaseScope?.statement, "Database-catalog packages require a databaseScope query fixture");
+    assert(
+      typeof fixture.databaseScope.context?.database === "string" && fixture.databaseScope.context.database.trim(),
+      "Database-scope conformance requires an explicit database context",
+    );
+    assert(
+      Array.isArray(fixture.databaseScope.expect?.firstRow) && fixture.databaseScope.expect.firstRow.length > 0,
+      "Database-scope conformance requires an exact first-row proof",
+    );
+  } else {
+    assert(!fixture.databaseScope, "A databaseScope fixture requires signed database-catalog capability");
+  }
   if (fixture.migration) {
     assert(manifest.schemaMigration?.snapshotVersion === 1, "Migration fixture requires a signed schemaMigration contract");
     assert(["transactional", "nonTransactional"].includes(manifest.schemaMigration.mode), "Migration contract mode is invalid");
@@ -431,6 +446,7 @@ export async function runDriverConformance({
       if (declared.supportsSqlQuery) assert(runtime.query === true, "Runtime did not prove query capability");
       if (declared.supportsTableBrowsing) assert(runtime.metadata === true, "Runtime did not prove metadata capability");
       if (declared.supportsQueryCancellation) assert(runtime.cancellation === true, "Runtime did not prove cancellation capability");
+      if (declared.supportsDatabaseCatalogs) assert(runtime.databaseScopedQueries === true, "Runtime did not prove database-scoped query capability");
       if (declared.supportsTransactions || declared.supportsTableRowMutation || declared.supportsTableDataTransfer) {
         assert(runtime.transactions === true, "Runtime did not prove transaction capability");
       }
@@ -463,6 +479,16 @@ export async function runDriverConformance({
         assert(fixture.errorMapping.expectedCodes.includes(error.code), "Driver returned an unclassified query error code");
       }
     });
+
+    if (fixture.databaseScope) {
+      await recorder.run("databaseScope", ["explicitDatabaseContext", "resultShape"], async () => {
+        const results = assertResultKind(
+          await client.request("query", queryParams(connectionId, fixture.databaseScope)),
+          "query",
+        );
+        assertQueryResult(results, fixture.databaseScope.expect);
+      });
+    }
 
     if ((fixture.metadata || []).length > 0) {
       await recorder.run("metadata", fixture.metadata.map((item) => item.id), async () => {

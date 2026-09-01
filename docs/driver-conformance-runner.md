@@ -24,6 +24,12 @@ coverage:
 4. A classified error response for an invalid query.
 5. Requested metadata assertions.
 
+Packages that declare `supportsDatabaseCatalogs` must additionally provide a
+`databaseScope` query with an explicit `context.database`. The handshake must
+advertise `databaseScopedQueries`, and the returned value must prove that the
+query actually ran in that catalog. Catalog capability is therefore not
+inferred from metadata enumeration alone.
+
 The protocol has a deliberate casing boundary: top-level `DriverRequest` enum
 variant fields use the Rust wire names (`connection_id`, `transaction_id`,
 `query_id`), while nested protocol objects such as handshake and query context

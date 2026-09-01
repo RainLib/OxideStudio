@@ -4,6 +4,12 @@ The agent is a JDK 21-only, portable implementation of the Oxide driver protocol
 
 The desktop Host launches Java packages exclusively through a managed Java 21 runtime inside the driver registry. It never executes a package launcher or resolves `java` from `PATH`.
 
+For package authoring and tests, `build-jdbc-driver-agent.mjs` resolves JDK
+tools from `OXIDE_JAVA_HOME`, then `JAVA_HOME`, then `PATH`. This keeps local
+and CI builds on an explicit JDK without changing the user's global PATH. The
+H2 protocol fixture accepts `OXIDE_H2_JAR` when the pinned test JAR is outside
+the conventional Maven cache.
+
 The generic agent supports one in-flight JDBC statement per connection and maps the
 driver protocol's query id to `Statement.cancel()`, so a long query can be
 cancelled without waiting for its result. It intentionally reports no Agent
@@ -38,6 +44,17 @@ vendor JARs; the resulting package still needs a trusted manifest signature.
 `generic`、`postgres`、`mysql`、`sqlserver`、`oracle`、`h2` 与 `hive` profiles
 only provide connection/editor defaults. A profile never grants vendor DDL,
 Grid writing, transfer, or server-version compatibility by itself.
+Profiles also distinguish a real catalog layer from an ordinary schema/database
+namespace: SQL Server, PostgreSQL, MySQL and H2 authoring defaults enable JDBC
+catalog discovery, while Oracle, Hive, Argo and generic profiles keep it off.
+Package authors must opt in only when a vendor fixture proves that
+`DatabaseMetaData#getCatalogs` represents selectable product catalogs. A
+catalog-scoped query is then applied with `Connection#setCatalog`, read back,
+and restored before the next request. Schema context uses the equivalent
+`setSchema` contract, with a catalog fallback only for products where no
+separate database was requested. Unsupported, ignored, or unrestorable context
+changes fail closed and retire the connection instead of running against an
+unknown database.
 
 For relational packages, the agent reads the portable JDBC `DatabaseMetaData` APIs for catalogs, catalog-scoped schemas, tables, columns, indexes, primary/imported keys, exported keys, procedures and functions. This enables Explorer constraint, reverse-foreign-key and routine navigation when the signed package declares those capabilities. Check constraints and unique-constraint definitions remain dialect-specific because JDBC does not expose them consistently across engines. If a package declares a server-version range, the Host checks the banner returned by this Agent before publishing the connection.
 

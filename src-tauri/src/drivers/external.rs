@@ -452,6 +452,17 @@ fn allows_database_creation(
         && runtime_capabilities.database_creation
 }
 
+/// Database-scoped execution is also a two-party contract. A generic runtime
+/// may know how to switch JDBC catalogs, but that must not expose a catalog
+/// layer for products whose reviewed package models only schemas.
+fn allows_database_scoped_queries(
+    signed_capabilities: Option<&crate::core::dialect::DatabaseCapabilities>,
+    runtime_capabilities: &oxide_driver_protocol::DriverRuntimeCapabilities,
+) -> bool {
+    signed_capabilities.is_some_and(|capabilities| capabilities.supports_database_catalogs)
+        && runtime_capabilities.database_scoped_queries
+}
+
 fn validate_bounded_migration_text(value: &str, label: &str, allow_empty: bool) -> Result<()> {
     if (!allow_empty && value.is_empty()) || value.len() > MAX_MIGRATION_TEXT_BYTES {
         return Err(anyhow!("External driver returned an invalid {label}"));
@@ -856,7 +867,11 @@ impl DatabaseDriver for ExternalDriver {
         sql: &str,
         params: &[QueryParameter],
     ) -> Result<Vec<QueryResult>> {
-        if !self.capabilities.lock().await.database_scoped_queries {
+        let runtime_capabilities = self.capabilities.lock().await.clone();
+        if !allows_database_scoped_queries(
+            self.package.manifest.capabilities.as_ref(),
+            &runtime_capabilities,
+        ) {
             return Err(anyhow!(
                 "External driver package does not provide database-scoped queries"
             ));
@@ -934,7 +949,11 @@ impl DatabaseDriver for ExternalDriver {
         sql: &str,
         schema: Option<&str>,
     ) -> Result<Vec<QueryResult>> {
-        if !self.capabilities.lock().await.database_scoped_queries {
+        let runtime_capabilities = self.capabilities.lock().await.clone();
+        if !allows_database_scoped_queries(
+            self.package.manifest.capabilities.as_ref(),
+            &runtime_capabilities,
+        ) {
             return Err(anyhow!(
                 "External driver package does not provide database-scoped queries"
             ));
@@ -1618,6 +1637,34 @@ mod tests {
         capabilities.supports_create_database = false;
         runtime.database_creation = true;
         assert!(!allows_database_creation(Some(&capabilities), &runtime));
+    }
+
+    #[test]
+    fn database_scoped_queries_require_both_signed_and_runtime_declarations() {
+        let mut runtime = oxide_driver_protocol::DriverRuntimeCapabilities {
+            database_scoped_queries: true,
+            ..Default::default()
+        };
+        assert!(!allows_database_scoped_queries(None, &runtime));
+
+        let mut capabilities = DatabaseKind::Postgres.capabilities();
+        assert!(allows_database_scoped_queries(
+            Some(&capabilities),
+            &runtime
+        ));
+
+        runtime.database_scoped_queries = false;
+        assert!(!allows_database_scoped_queries(
+            Some(&capabilities),
+            &runtime
+        ));
+
+        capabilities.supports_database_catalogs = false;
+        runtime.database_scoped_queries = true;
+        assert!(!allows_database_scoped_queries(
+            Some(&capabilities),
+            &runtime
+        ));
     }
 
     #[test]

@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const h2Jar = join(homedir(), ".m2", "repository", "com", "h2database", "h2", "2.3.232", "h2-2.3.232.jar");
+const h2Jar = process.env.OXIDE_H2_JAR?.trim()
+  ? resolve(process.env.OXIDE_H2_JAR.trim())
+  : join(homedir(), ".m2", "repository", "com", "h2database", "h2", "2.3.232", "h2-2.3.232.jar");
+const javaHome = process.env.OXIDE_JAVA_HOME?.trim() || process.env.JAVA_HOME?.trim();
+const javaTool = (name) => javaHome
+  ? join(resolve(javaHome), "bin", process.platform === "win32" ? `${name}.exe` : name)
+  : name;
 
 async function request(process, output, id, method, params) {
   process.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
@@ -94,7 +100,8 @@ test("generic JDBC Agent executes and discovers H2 through the driver protocol",
   assert.equal(manifest.capabilities.supportsTableConstraints, true);
   assert.equal(manifest.capabilities.supportsCreateDatabase, true);
 
-  const agent = spawn("java", ["-cp", `${join(packageDirectory, manifest.entrypoint)}:${join(packageDirectory, manifest.runtime.classpath[0].path)}`, "studio.oxide.jdbc.DriverMain"], {
+  const classpathSeparator = process.platform === "win32" ? ";" : ":";
+  const agent = spawn(javaTool("java"), ["-cp", `${join(packageDirectory, manifest.entrypoint)}${classpathSeparator}${join(packageDirectory, manifest.runtime.classpath[0].path)}`, "studio.oxide.jdbc.DriverMain"], {
     cwd: root,
     env: {
       ...process.env,
@@ -110,6 +117,7 @@ test("generic JDBC Agent executes and discovers H2 through the driver protocol",
   assert.equal(handshake.status, "ok");
   assert.equal(handshake.result.value.driverId, "h2");
   assert.equal(handshake.result.value.capabilities.metadata, true);
+  assert.equal(handshake.result.value.capabilities.databaseScopedQueries, true);
 
   assert.equal((await request(agent, output, 2, "connect", {
     connection_id: "h2",
@@ -149,6 +157,46 @@ test("generic JDBC Agent executes and discovers H2 through the driver protocol",
   assert.equal(invalidQuery.status, "error");
   assert.equal(invalidQuery.result.code, "QUERY_FAILED");
   assert.equal(JSON.stringify(invalidQuery).includes("jdbc:h2:mem:oxide_fixture"), false);
+
+  const currentCatalog = await request(agent, output, 15, "query", {
+    connection_id: "h2",
+    statement: "SELECT CURRENT_CATALOG AS catalog_name, CURRENT_SCHEMA AS schema_name",
+    parameters: [],
+  });
+  assert.equal(currentCatalog.status, "ok");
+  const [catalogName, schemaName] = currentCatalog.result.value[0].rows[0];
+  const scopedQuery = await request(agent, output, 16, "query", {
+    connection_id: "h2",
+    statement: "SELECT CURRENT_CATALOG AS catalog_name, CURRENT_SCHEMA AS schema_name",
+    parameters: [],
+    context: { database: catalogName, schema: schemaName },
+  });
+  assert.deepEqual(scopedQuery.result.value[0].rows[0], [catalogName, schemaName]);
+
+  const rejectedCatalog = await request(agent, output, 17, "query", {
+    connection_id: "h2",
+    statement: "SELECT CURRENT_CATALOG",
+    parameters: [],
+    context: { database: "OXIDE_MISSING_CATALOG" },
+  });
+  assert.equal(rejectedCatalog.status, "error");
+  assert.equal(rejectedCatalog.result.code, "QUERY_FAILED");
+
+  const restoredContext = await request(agent, output, 18, "query", {
+    connection_id: "h2",
+    statement: "SELECT CURRENT_CATALOG AS catalog_name, CURRENT_SCHEMA AS schema_name",
+    parameters: [],
+  });
+  assert.deepEqual(restoredContext.result.value[0].rows[0], [catalogName, schemaName]);
+
+  const invalidContext = await request(agent, output, 19, "query", {
+    connection_id: "h2",
+    statement: "SELECT 1",
+    parameters: [],
+    context: { database: "bad\ncontext" },
+  });
+  assert.equal(invalidContext.status, "error");
+  assert.equal(invalidContext.result.code, "QUERY_FAILED");
 
   assert.equal((await request(agent, output, 7, "createDatabase", {
     connection_id: "h2",

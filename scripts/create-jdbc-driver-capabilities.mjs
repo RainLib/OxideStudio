@@ -111,7 +111,11 @@ async function main() {
     supportsCollectionBrowsing: false,
     supportsKeyValueBrowsing: false,
     supportsSchemas: true,
-    supportsDatabaseCatalogs: true,
+    // Catalogs are a distinct level above schemas only for profiles that
+    // explicitly declare them. Treating every JDBC DatabaseMetaData#getCatalogs
+    // implementation as a usable product catalog creates duplicate/empty tree
+    // levels for Oracle, Hive and generic JDBC packages.
+    supportsDatabaseCatalogs: profile.supportsDatabaseCatalogs,
     supportsConnectionDatabase: true,
     // The generic Agent implements a semantic namespace request, but it is
     // off by default. Enabling it never permits Host-generated CREATE SQL;

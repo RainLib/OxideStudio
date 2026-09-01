@@ -12,6 +12,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: '"',
     defaultPort: 0,
+    supportsDatabaseCatalogs: false,
   },
   postgres: {
     lspLanguageId: "postgres",
@@ -19,6 +20,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: '"',
     defaultPort: 5432,
+    supportsDatabaseCatalogs: true,
   },
   // Protocol-compatible products can inherit PostgreSQL's connection naming
   // and quoting without falsely claiming PostgreSQL diagnostics. A release
@@ -29,6 +31,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: '"',
     defaultPort: 5432,
+    supportsDatabaseCatalogs: true,
   },
   mysql: {
     lspLanguageId: "mysql",
@@ -36,6 +39,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "database",
     identifierQuote: "`",
     defaultPort: 3306,
+    supportsDatabaseCatalogs: true,
   },
   // Same conservative distinction for MySQL-wire-compatible products. Their
   // SQL grammar and metadata can differ substantially from MySQL itself.
@@ -45,6 +49,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "database",
     identifierQuote: "`",
     defaultPort: 3306,
+    supportsDatabaseCatalogs: true,
   },
   sqlserver: {
     // `sqlserver` is a reviewed compatibility identity backed by the generic
@@ -55,6 +60,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: "[",
     defaultPort: 1433,
+    supportsDatabaseCatalogs: true,
   },
   oracle: {
     lspLanguageId: "sql",
@@ -62,6 +68,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: '"',
     defaultPort: 1521,
+    supportsDatabaseCatalogs: false,
   },
   h2: {
     lspLanguageId: "sql",
@@ -69,6 +76,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "schema",
     identifierQuote: '"',
     defaultPort: 9092,
+    supportsDatabaseCatalogs: true,
   },
   hive: {
     lspLanguageId: "hive",
@@ -76,6 +84,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "database",
     identifierQuote: "`",
     defaultPort: 10000,
+    supportsDatabaseCatalogs: false,
   },
   argo: {
     // Keep the Argo product identity visible to the LSP session while the
@@ -85,6 +94,7 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     namespaceLabel: "database",
     identifierQuote: "`",
     defaultPort: 10000,
+    supportsDatabaseCatalogs: false,
   },
 });
 

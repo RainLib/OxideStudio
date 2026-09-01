@@ -15,6 +15,15 @@
       "firstRow": [42, "oxide"]
     }
   },
+  "databaseScope": {
+    "statement": "SELECT currentDatabase() AS database_name",
+    "context": { "database": "default", "readOnly": true },
+    "expect": {
+      "minRows": 1,
+      "columns": ["database_name"],
+      "firstRow": ["default"]
+    }
+  },
   "errorMapping": {
     "statement": "SELECT * FROM oxide_conformance_missing_table",
     "context": { "readOnly": true },

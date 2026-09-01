@@ -54,6 +54,12 @@ test("maps each JDBC reference family to a conservative, known editor profile", 
   }
 
   assert.equal(Object.keys(JDBC_REFERENCE_DIALECT_PROFILE_NAMES).length, 49);
+  assert.equal(jdbcDialectProfile("generic").supportsDatabaseCatalogs, false);
+  assert.equal(jdbcDialectProfile("oracle").supportsDatabaseCatalogs, false);
+  assert.equal(jdbcDialectProfile("hive").supportsDatabaseCatalogs, false);
+  assert.equal(jdbcDialectProfile("sqlserver").supportsDatabaseCatalogs, true);
+  assert.equal(jdbcDialectProfile("postgres").supportsDatabaseCatalogs, true);
+  assert.equal(jdbcDialectProfile("mysql").supportsDatabaseCatalogs, true);
 });
 
 test("writes a conservative JDBC capability contract", async () => {
@@ -79,6 +85,7 @@ test("writes a conservative JDBC capability contract", async () => {
   assert.deepEqual(capabilities.tableExportFormats, []);
   assert.equal(capabilities.supportsTableConstraints, false);
   assert.equal(capabilities.supportsTransactions, false);
+  assert.equal(capabilities.supportsDatabaseCatalogs, false);
 
   const argoOutput = join(directory, "argo.json");
   const argoResult = spawnSync(process.execPath, [
@@ -109,6 +116,7 @@ test("writes a conservative JDBC capability contract", async () => {
   assert.equal(sqlServerCapabilities.identifierQuote, "[");
   assert.equal(sqlServerCapabilities.lspLanguageId, "sql");
   assert.equal(sqlServerCapabilities.lspServerDialect, "sqlserver");
+  assert.equal(sqlServerCapabilities.supportsDatabaseCatalogs, true);
 
   const redshiftOutput = join(directory, "redshift.json");
   const redshiftResult = spawnSync(process.execPath, [
@@ -167,6 +175,7 @@ test("writes a conservative JDBC capability contract", async () => {
   const h2Capabilities = JSON.parse(await readFile(h2Output, "utf8"));
   assert.equal(h2Capabilities.supportsTableConstraints, true);
   assert.equal(h2Capabilities.supportsCreateDatabase, true);
+  assert.equal(h2Capabilities.supportsDatabaseCatalogs, true);
 
   const postgresOutput = join(directory, "postgres.json");
   const postgresResult = spawnSync(process.execPath, [
@@ -182,4 +191,18 @@ test("writes a conservative JDBC capability contract", async () => {
     postgresCapabilities.tableExportFormats,
     ["csv", "json", "jsonl", "sql", "tsv", "xlsx"],
   );
+  assert.equal(postgresCapabilities.supportsDatabaseCatalogs, true);
+
+  const oracleOutput = join(directory, "oracle-profile.json");
+  const oracleResult = spawnSync(process.execPath, [
+    "scripts/create-jdbc-driver-capabilities.mjs",
+    "--driver", "oracle",
+    "--display-name", "Oracle Database",
+    "--out", oracleOutput,
+    "--reference-driver", "oracle",
+  ], { encoding: "utf8" });
+  assert.equal(oracleResult.status, 0, oracleResult.stderr);
+  const oracleCapabilities = JSON.parse(await readFile(oracleOutput, "utf8"));
+  assert.equal(oracleCapabilities.namespaceLabel, "schema");
+  assert.equal(oracleCapabilities.supportsDatabaseCatalogs, false);
 });

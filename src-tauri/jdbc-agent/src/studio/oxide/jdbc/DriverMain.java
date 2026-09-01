@@ -11,6 +11,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -39,12 +40,12 @@ public final class DriverMain {
   private static final Map<String, Connection> CONNECTIONS = new ConcurrentHashMap<>();
   // A JDBC Connection is not generally safe for arbitrary concurrent work.
   // Only a currently executing Statement is exposed to the reader thread so
-  // it can receive the protocol's bounded cancel request; all other commands
-  // retain the normal request handling path.
+  // it can receive the protocol's bounded cancel request; connection-affecting
+  // commands otherwise retain protocol order on one executor.
   private static final Map<String, Statement> RUNNING_QUERIES = new ConcurrentHashMap<>();
   // One sidecar belongs to one saved connection. Serialize query execution for
   // that connection while keeping stdin free to deliver Statement.cancel().
-  private static final ExecutorService QUERY_EXECUTOR = Executors.newSingleThreadExecutor((task) -> {
+  private static final ExecutorService CONNECTION_EXECUTOR = Executors.newSingleThreadExecutor((task) -> {
     Thread worker = new Thread(task, "oxide-jdbc-query");
     worker.setDaemon(true);
     return worker;
@@ -58,9 +59,10 @@ public final class DriverMain {
         try {
           Map<String, Object> request = object(Json.parse(line));
           id = number(request.get("id")).longValue();
-          if ("query".equals(text(request.get("method")))) {
-            final long queryId = id;
-            QUERY_EXECUTOR.execute(() -> respond(output, queryId, request));
+          String method = text(request.get("method"));
+          if (usesConnectionExecutor(method)) {
+            final long requestId = id;
+            CONNECTION_EXECUTOR.execute(() -> respond(output, requestId, request));
           } else {
             respond(output, id, request);
           }
@@ -71,8 +73,15 @@ public final class DriverMain {
     } finally {
       for (Connection connection : CONNECTIONS.values()) close(connection);
       RUNNING_QUERIES.clear();
-      QUERY_EXECUTOR.shutdownNow();
+      CONNECTION_EXECUTOR.shutdownNow();
     }
+  }
+
+  private static boolean usesConnectionExecutor(String method) {
+    return switch (method) {
+      case "connect", "disconnect", "ping", "serverVersion", "query", "metadata", "createDatabase" -> true;
+      default -> false;
+    };
   }
 
   private static void respond(PrintWriter output, long id, Map<String, Object> request) {
@@ -193,15 +202,17 @@ public final class DriverMain {
   }
 
   private static Map<String, Object> query(Map<String, Object> params) throws SQLException {
-    Connection connection = connection(params); String sql = text(params.get("statement"));
+    String connectionId = connectionId(params); Connection connection = connection(params); String sql = text(params.get("statement"));
     List<Object> values = array(params.get("parameters"));
     String queryId = nullable(protocolField(params, "query_id", "queryId"));
-    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+    Map<String, Object> context = object(params.get("context"));
+    try (QueryContext ignored = QueryContext.apply(connectionId, connection, context);
+         PreparedStatement statement = connection.prepareStatement(sql)) {
       configureQueryStatement(statement);
       for (int index = 0; index < values.size(); index++) {
         Map<String, Object> parameter = object(values.get(index)); statement.setObject(index + 1, parameter.get("value"));
       }
-      String runningKey = queryId == null || queryId.isBlank() ? null : queryKey(connectionId(params), queryId);
+      String runningKey = queryId == null || queryId.isBlank() ? null : queryKey(connectionId, queryId);
       if (runningKey != null) RUNNING_QUERIES.put(runningKey, statement);
       try {
         boolean hasRows = statement.execute();
@@ -211,6 +222,178 @@ public final class DriverMain {
         if (runningKey != null) RUNNING_QUERIES.remove(runningKey, statement);
       }
     }
+  }
+
+  /**
+   * Apply the Host's immutable database/schema target to one query and restore
+   * the connection before it can serve the next request. JDBC permits drivers
+   * to ignore setCatalog/setSchema, so every change is read back. If applying
+   * or restoring a context cannot be proven, the connection is removed and
+   * closed instead of allowing a later query to run against an unknown target.
+   */
+  private static final class QueryContext implements AutoCloseable {
+    private final String connectionId;
+    private final Connection connection;
+    private JdbcValue originalCatalog;
+    private JdbcValue originalSchema;
+    private boolean catalogTouched;
+    private boolean schemaTouched;
+    private boolean closed;
+
+    private QueryContext(String connectionId, Connection connection) {
+      this.connectionId = connectionId;
+      this.connection = connection;
+    }
+
+    static QueryContext apply(String connectionId, Connection connection, Map<String, Object> context) throws SQLException {
+      QueryContext scope = new QueryContext(connectionId, connection);
+      try {
+        String database = contextName(context.get("database"), "database");
+        String schema = contextName(context.get("schema"), "schema");
+        if (database != null) scope.applyCatalog(database);
+        if (schema != null) scope.applySchema(schema, database == null);
+        return scope;
+      } catch (SQLException error) {
+        try {
+          scope.close();
+        } catch (SQLException restoreError) {
+          error.addSuppressed(restoreError);
+        }
+        throw error;
+      }
+    }
+
+    private void applyCatalog(String requested) throws SQLException {
+      originalCatalog = readCatalog(connection);
+      if (!originalCatalog.supported) {
+        throw new SQLException("The JDBC driver cannot prove database-scoped query support");
+      }
+      if (sameContext(originalCatalog.value, requested)) return;
+      catalogTouched = true;
+      setCatalog(connection, requested);
+      JdbcValue applied = readCatalog(connection);
+      if (!applied.supported || !sameContext(applied.value, requested)) {
+        throw new SQLException("The JDBC driver did not apply the requested database context");
+      }
+    }
+
+    private void applySchema(String requested, boolean allowCatalogFallback) throws SQLException {
+      originalSchema = readSchema(connection);
+      if (originalSchema.supported) {
+        if (sameContext(originalSchema.value, requested)) return;
+        schemaTouched = true;
+        setSchema(connection, requested);
+        JdbcValue applied = readSchema(connection);
+        if (!applied.supported || !sameContext(applied.value, requested)) {
+          throw new SQLException("The JDBC driver did not apply the requested schema context");
+        }
+        return;
+      }
+      if (!allowCatalogFallback) {
+        throw new SQLException("The JDBC driver cannot apply a schema within the requested database context");
+      }
+      // MySQL-family JDBC drivers commonly model a schema as a catalog. Only
+      // use this fallback when no separate database was requested; otherwise
+      // it could replace the already selected SQL Server-style catalog.
+      applyCatalog(requested);
+    }
+
+    @Override
+    public void close() throws SQLException {
+      if (closed) return;
+      closed = true;
+      SQLException failure = null;
+      if (catalogTouched) {
+        try {
+          restoreCatalog();
+        } catch (SQLException error) {
+          failure = error;
+        }
+      }
+      if (schemaTouched) {
+        try {
+          restoreSchema();
+        } catch (SQLException error) {
+          if (failure == null) failure = error; else failure.addSuppressed(error);
+        }
+      }
+      if (failure != null) {
+        CONNECTIONS.remove(connectionId, connection);
+        DriverMain.close(connection);
+        throw new SQLException("The JDBC query context could not be restored; the connection was closed", failure);
+      }
+    }
+
+    private void restoreCatalog() throws SQLException {
+      setCatalog(connection, originalCatalog.value);
+      JdbcValue restored = readCatalog(connection);
+      if (!restored.supported || !sameContext(restored.value, originalCatalog.value)) {
+        throw new SQLException("The JDBC database context could not be restored");
+      }
+    }
+
+    private void restoreSchema() throws SQLException {
+      setSchema(connection, originalSchema.value);
+      JdbcValue restored = readSchema(connection);
+      if (!restored.supported || !sameContext(restored.value, originalSchema.value)) {
+        throw new SQLException("The JDBC schema context could not be restored");
+      }
+    }
+  }
+
+  private static final class JdbcValue {
+    private final boolean supported;
+    private final String value;
+
+    private JdbcValue(boolean supported, String value) {
+      this.supported = supported;
+      this.value = value;
+    }
+  }
+
+  private static JdbcValue readCatalog(Connection connection) throws SQLException {
+    try {
+      return new JdbcValue(true, connection.getCatalog());
+    } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
+      return new JdbcValue(false, null);
+    }
+  }
+
+  private static JdbcValue readSchema(Connection connection) throws SQLException {
+    try {
+      return new JdbcValue(true, connection.getSchema());
+    } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
+      return new JdbcValue(false, null);
+    }
+  }
+
+  private static void setCatalog(Connection connection, String catalog) throws SQLException {
+    try {
+      connection.setCatalog(catalog);
+    } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError error) {
+      throw new SQLException("The JDBC driver does not support database-scoped queries", error);
+    }
+  }
+
+  private static void setSchema(Connection connection, String schema) throws SQLException {
+    try {
+      connection.setSchema(schema);
+    } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError error) {
+      throw new SQLException("The JDBC driver does not support schema-scoped queries", error);
+    }
+  }
+
+  private static String contextName(Object value, String label) throws SQLException {
+    if (value == null) return null;
+    String name = String.valueOf(value);
+    if (name.isBlank() || name.length() > 256 || name.codePoints().anyMatch(Character::isISOControl)) {
+      throw new SQLException("The requested JDBC " + label + " context is invalid");
+    }
+    return name;
+  }
+
+  private static boolean sameContext(String actual, String expected) {
+    return actual == null ? expected == null : actual.equals(expected);
   }
 
   private static void configureQueryStatement(PreparedStatement statement) {

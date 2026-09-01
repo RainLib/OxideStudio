@@ -32,6 +32,28 @@
     },
     "setup": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/query" } },
     "query": { "$ref": "#/$defs/queryExpectation" },
+    "databaseScope": {
+      "description": "Required when the signed package declares supportsDatabaseCatalogs. The query must prove execution in an explicit context.database.",
+      "allOf": [
+        { "$ref": "#/$defs/queryExpectation" },
+        {
+          "type": "object",
+          "required": ["context"],
+          "properties": {
+            "context": {
+              "type": "object",
+              "required": ["database"],
+              "properties": {
+                "database": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "schema": { "type": ["string", "null"], "maxLength": 256 },
+                "readOnly": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
     "errorMapping": {
       "type": "object",
       "additionalProperties": false,

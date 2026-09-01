@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const javaHome = process.env.OXIDE_JAVA_HOME?.trim() || process.env.JAVA_HOME?.trim();
+const javaTool = (name) => javaHome
+  ? join(resolve(javaHome), "bin", process.platform === "win32" ? `${name}.exe` : name)
+  : name;
 
 async function commandAvailable(command) {
   const child = spawn(command, ["-version"], { cwd: root, stdio: "ignore" });
@@ -16,7 +20,7 @@ async function commandAvailable(command) {
 }
 
 async function requireJdk(t) {
-  if (await commandAvailable("java") && await commandAvailable("javac")) return true;
+  if (await commandAvailable(javaTool("java")) && await commandAvailable(javaTool("javac"))) return true;
   t.skip("JDK fixture is not available on this runner");
   return false;
 }
@@ -32,7 +36,7 @@ test("JDBC Agent advertises cancellable queries and responds to a bounded cancel
   const [buildCode] = await once(build, "close");
   assert.equal(buildCode, 0, "JDBC Agent should compile");
 
-  const agent = spawn("java", ["-jar", join(temporary, "oxide-jdbc-agent.jar")], {
+  const agent = spawn(javaTool("java"), ["-jar", join(temporary, "oxide-jdbc-agent.jar")], {
     cwd: root,
     env: {
       ...process.env,
@@ -159,7 +163,7 @@ public final class CatalogDriver implements Driver {
 }
 `,
   );
-  const compileFixture = spawn("javac", ["-d", classesDirectory, join(sourceDirectory, "CatalogDriver.java")], {
+  const compileFixture = spawn(javaTool("javac"), ["-d", classesDirectory, join(sourceDirectory, "CatalogDriver.java")], {
     cwd: root,
     stdio: "pipe",
   });
@@ -167,7 +171,7 @@ public final class CatalogDriver implements Driver {
   assert.equal(compileCode, 0, "Catalog fixture should compile");
 
   const agent = spawn(
-    "java",
+    javaTool("java"),
     [
       "-Djdbc.drivers=fixture.CatalogDriver",
       "-cp",
@@ -186,9 +190,21 @@ public final class CatalogDriver implements Driver {
     },
   );
   let stdout = "";
+  let responseBuffer = "";
+  let resolveMetadata;
+  const metadataResponse = new Promise((resolveResponse) => {
+    resolveMetadata = resolveResponse;
+  });
   agent.stdout.setEncoding("utf8");
   agent.stdout.on("data", (chunk) => {
     stdout += chunk;
+    responseBuffer += chunk;
+    const lines = responseBuffer.split("\n");
+    responseBuffer = lines.pop() || "";
+    for (const line of lines.filter(Boolean)) {
+      const response = JSON.parse(line);
+      if (response.id === 2) resolveMetadata(response);
+    }
   });
   agent.stdin.write(`${JSON.stringify({
     id: 1,
@@ -203,15 +219,10 @@ public final class CatalogDriver implements Driver {
       request: { kind: "schemas", database: "second" },
     },
   })}\n`);
+  const response = await metadataResponse;
   agent.stdin.end();
   const [code] = await once(agent, "close");
   assert.equal(code, 0);
-  const response = stdout
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line))
-    .find((item) => item.id === 2);
   assert.deepEqual(response, {
     id: 2,
     status: "ok",

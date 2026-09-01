@@ -23,7 +23,7 @@ rl.on("line", (line) => {
   if (["beginTransaction", "rollbackTransaction"].includes(message.method) && !params.transaction_id) {
     return response(message.id, "error", { code: "INVALID_REQUEST", message: "transaction_id must use the sidecar protocol casing", retryable: false, details: {} });
   }
-  if (message.method === "handshake") return response(message.id, "ok", { kind: "handshake", value: { protocolVersion: "1.0", packageId: "oxide.mock", packageVersion: "1.0.0", driverId: "mockdb", capabilities: { metadata: true, query: true, transactions: true, semanticSchemaMigration: true } } });
+  if (message.method === "handshake") return response(message.id, "ok", { kind: "handshake", value: { protocolVersion: "1.0", packageId: "oxide.mock", packageVersion: "1.0.0", driverId: "mockdb", capabilities: { metadata: true, query: true, transactions: true, databaseScopedQueries: true, semanticSchemaMigration: true } } });
   if (message.method === "connect" || message.method === "disconnect" || message.method === "beginTransaction" || message.method === "rollbackTransaction") return response(message.id, "ok", { kind: "empty", value: null });
   if (message.method === "ping") return response(message.id, "ok", { kind: "boolean", value: true });
   if (message.method === "serverVersion") return response(message.id, "ok", { kind: "serverVersion", value: "1.2.3" });
@@ -35,6 +35,7 @@ rl.on("line", (line) => {
   if (message.method === "query") {
     if (params.statement === "SELECT missing") return response(message.id, "error", { code: "QUERY_FAILED", message: "private connection details must never leave the driver", retryable: false, details: {} });
     if (params.statement === "SELECT ?") return response(message.id, "ok", { kind: "query", value: [{ columns: [{ name: "bound_value", dataType: "INTEGER" }], rows: [[42]], truncated: false, rowLimit: null, rowsAffected: null, statementType: "select", message: null }] });
+    if (params.statement === "SELECT current_database") return response(message.id, "ok", { kind: "query", value: [{ columns: [{ name: "database_name", dataType: "VARCHAR" }], rows: [[params.context && params.context.database]], truncated: false, rowLimit: null, rowsAffected: null, statementType: "select", message: null }] });
     if (params.statement === "SELECT count(*)") return response(message.id, "ok", { kind: "query", value: [{ columns: [{ name: "row_count", dataType: "INTEGER" }], rows: [[0]], truncated: false, rowLimit: null, rowsAffected: null, statementType: "select", message: null }] });
     return response(message.id, "ok", { kind: "query", value: [{ columns: [], rows: [], truncated: false, rowLimit: null, rowsAffected: 1, statementType: "mutation", message: null }] });
   }
@@ -140,6 +141,41 @@ test("driver conformance refuses fixtures without parameter binding", async (t) 
     }),
     /bound parameter/,
   );
+});
+
+test("driver conformance requires executable database-scope evidence for catalog packages", async (t) => {
+  const fixture = await tempFixture();
+  t.after(async () => rm(fixture.root, { recursive: true, force: true }));
+  const manifest = JSON.parse(await readFile(fixture.manifestPath, "utf8"));
+  manifest.capabilities.supportsDatabaseCatalogs = true;
+  await writeFile(fixture.manifestPath, `${JSON.stringify(manifest)}\n`, "utf8");
+
+  await assert.rejects(
+    runDriverConformance({
+      manifestPath: fixture.manifestPath,
+      fixturePath: fixture.fixturePath,
+      environment: { MOCKDB_URL: "mock://private-host/secret-db", MOCKDB_PASSWORD: "top-secret" },
+      launchOverride: { command: process.execPath, args: [fixture.entrypoint] },
+    }),
+    /databaseScope query fixture/,
+  );
+
+  const document = JSON.parse(await readFile(fixture.fixturePath, "utf8"));
+  document.databaseScope = {
+    statement: "SELECT current_database",
+    context: { database: "app", readOnly: true },
+    expect: { minRows: 1, columns: ["database_name"], firstRow: ["app"] },
+  };
+  await writeFile(fixture.fixturePath, `${JSON.stringify(document)}\n`, "utf8");
+  const { report } = await runDriverConformance({
+    manifestPath: fixture.manifestPath,
+    fixturePath: fixture.fixturePath,
+    environment: { MOCKDB_URL: "mock://private-host/secret-db", MOCKDB_PASSWORD: "top-secret" },
+    target: "x86_64-pc-windows-msvc",
+    launchOverride: { command: process.execPath, args: [fixture.entrypoint] },
+  });
+  assert.equal(report.passed, true);
+  assert.ok(report.operations.some((item) => item.operation === "databaseScope"));
 });
 
 test("driver conformance refuses Host SQL in semantic migration snapshots", async (t) => {
