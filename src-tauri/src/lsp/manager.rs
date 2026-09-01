@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -12,6 +12,7 @@ use super::protocol::*;
 
 type ResponseSender = oneshot::Sender<Result<Value>>;
 const MAX_LSP_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_LSP_HEADER_LINE_BYTES: usize = 8 * 1024;
 // Keep the in-flight map bounded independently from the outbound channel.
 // A stalled server can otherwise accept every queued request and never reply,
 // retaining one response sender per request until each caller times out.
@@ -29,6 +30,38 @@ fn validate_lsp_message_size(bytes: usize) -> Result<()> {
 
 fn can_register_pending_response(pending_count: usize) -> bool {
     pending_count < MAX_PENDING_LSP_RESPONSES
+}
+
+/// Reads one LSP header line without allowing a malformed server to make the
+/// `BufReader::read_line` allocation grow without bound. Header values are
+/// small by protocol design; payloads keep their separate 32 MiB boundary.
+async fn read_lsp_header_line<R>(reader: &mut R, line: &mut Vec<u8>) -> std::io::Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(line.len());
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if line.len().saturating_add(take) > MAX_LSP_HEADER_LINE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "LSP header line exceeds the 8 KiB transport limit",
+            ));
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if line.last() == Some(&b'\n') {
+            return Ok(line.len());
+        }
+    }
 }
 
 fn content_length_from_lsp_header(line: &str) -> Result<Option<usize>> {
@@ -275,7 +308,7 @@ impl LspServerManager {
         let server_response_tx = message_tx;
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
+            let mut line = Vec::with_capacity(256);
 
             loop {
                 line.clear();
@@ -283,17 +316,29 @@ impl LspServerManager {
                 // Start a header block. A few servers accidentally log plain
                 // text to stdout, so skip non-header lines and recover at the
                 // next valid LSP frame.
-                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                if read_lsp_header_line(&mut reader, &mut line)
+                    .await
+                    .unwrap_or(0)
+                    == 0
+                {
                     tracing::warn!("LSP stdout closed");
                     break;
                 }
-                if line == "\r\n" || line == "\n" || !line.contains(':') {
+                if line == b"\r\n" || line == b"\n" || !line.contains(&b':') {
                     continue;
                 }
 
                 let mut content_length = None;
                 loop {
-                    match content_length_from_lsp_header(&line) {
+                    let header = match std::str::from_utf8(&line) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            tracing::error!("Rejecting LSP response with a non-UTF-8 header");
+                            content_length = None;
+                            break;
+                        }
+                    };
+                    match content_length_from_lsp_header(header) {
                         Ok(Some(length)) => match content_length {
                             Some(existing) if existing != length => {
                                 tracing::error!("LSP returned conflicting Content-Length headers");
@@ -311,9 +356,9 @@ impl LspServerManager {
                     }
 
                     line.clear();
-                    match reader.read_line(&mut line).await {
+                    match read_lsp_header_line(&mut reader, &mut line).await {
                         Ok(0) => break,
-                        Ok(_) if line == "\r\n" || line == "\n" => break,
+                        Ok(_) if line == b"\r\n" || line == b"\n" => break,
                         Ok(_) => {}
                         Err(error) => {
                             tracing::error!("Failed to read LSP headers: {error}");
@@ -766,10 +811,12 @@ fn cancel_request_notification(id: u64) -> LspNotification {
 mod tests {
     use super::{
         can_register_pending_response, cancel_request_notification, completion_client_capabilities,
-        content_length_from_lsp_header, lsp_server_request_response,
+        content_length_from_lsp_header, lsp_server_request_response, read_lsp_header_line,
         server_supports_completion_resolve, validate_lsp_message_size, LspRequestTokens,
-        MAX_LSP_MESSAGE_BYTES, MAX_PENDING_LSP_RESPONSES,
+        MAX_LSP_HEADER_LINE_BYTES, MAX_LSP_MESSAGE_BYTES, MAX_PENDING_LSP_RESPONSES,
     };
+    use std::io::Cursor;
+    use tokio::io::BufReader;
 
     #[test]
     fn timeout_cancellation_uses_the_standard_lsp_notification() {
@@ -786,6 +833,25 @@ mod tests {
         assert!(!can_register_pending_response(
             MAX_PENDING_LSP_RESPONSES + 1
         ));
+    }
+
+    #[tokio::test]
+    async fn lsp_header_lines_are_bounded_before_collecting_untrusted_output() {
+        let mut reader = BufReader::new(Cursor::new(vec![b'x'; MAX_LSP_HEADER_LINE_BYTES + 1]));
+        let mut line = Vec::new();
+        let error = read_lsp_header_line(&mut reader, &mut line)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(line.len(), MAX_LSP_HEADER_LINE_BYTES);
+        assert!(line.capacity() <= MAX_LSP_HEADER_LINE_BYTES);
+
+        let mut reader = BufReader::new(Cursor::new(b"Content-Length: 2\r\n".to_vec()));
+        assert_eq!(
+            read_lsp_header_line(&mut reader, &mut line).await.unwrap(),
+            b"Content-Length: 2\r\n".len()
+        );
+        assert_eq!(line, b"Content-Length: 2\r\n");
     }
 
     #[test]
