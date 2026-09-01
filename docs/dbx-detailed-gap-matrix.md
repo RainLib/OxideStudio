@@ -191,7 +191,7 @@
 | `ef1fba2d1` | MySQL 保存既有 view 时把 `CREATE [OR REPLACE] VIEW` 改写为 `ALTER VIEW` | 本阶段对齐：Create 仍生成 `CREATE VIEW`；Edit/Replace 对 MySQL/MariaDB 生成 `ALTER VIEW`，PostgreSQL 继续使用 `CREATE OR REPLACE VIEW`，避免把不同产品的替换语义混用。 |
 | `1ca2de42a` | SQL Server 复杂查询的 qualified `ORDER BY` 分页避免失去排序表达式 | 当前 Host 没有原生 SQL Server query-result pagination builder；外置 JDBC/package 的分页 SQL 由受审 driver runtime 所有。待引入 Host-owned SQL Server 分页时必须迁移该安全判定和 fixtures，不借用 PostgreSQL 路径。 |
 | `deba5db2f`、`585e2f3c5`、`ad9075e18` | Oracle clone 保留 index/trigger metadata，并展开 Oracle/Xugu package members | 继续落在 D02/D04/M08 的逐产品运行时和迁移证据缺口；在签名 package、结构化 metadata 与真实版本证据齐备前不伪装为可迁移能力。 |
-| `37f13018d` 等 | Consul 全栈工作台及 KV lazy-tree 增强 | 属于专用数据库工作台宽度，不改变本轮 SQL LSP；候选产品仍须通过安装、连接、能力与 conformance 门禁。 |
+| `37f13018d` 等 | Consul 全栈工作台及 KV lazy-tree 增强 | Oxide 已有 bundled、固定端点且有界响应的只读 Consul KV browser，连接和精确 value preview 不再是候选能力；DBX 的 KV mutation、service discovery、ACL/namespace 等全栈工作台仍是专用产品差距，不能借只读 browser 暴露。该项不改变 SQL LSP。 |
 
 ## 1. 支持口径
 
