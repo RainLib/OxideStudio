@@ -13,6 +13,7 @@ import {
   type RocketMqCluster,
   type RocketMqConsumerGroupDetail,
   type RocketMqConsumerGroups,
+  type RocketMqTopicDetail,
   type RocketMqTopics,
 } from "@/services/tauri/mq.service";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -47,11 +48,16 @@ export function RocketMqWorkspace() {
   const [cluster, setCluster] = useState<RocketMqCluster | null>(null);
   const [topics, setTopics] = useState<RocketMqTopics | null>(null);
   const [groups, setGroups] = useState<RocketMqConsumerGroups | null>(null);
+  const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
+  const [topicDetail, setTopicDetail] = useState<RocketMqTopicDetail | null>(
+    null,
+  );
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [groupDetail, setGroupDetail] =
     useState<RocketMqConsumerGroupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [topicDetailLoading, setTopicDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -80,6 +86,8 @@ export function RocketMqWorkspace() {
   useEffect(() => {
     setSelectedGroup(null);
     setGroupDetail(null);
+    setSelectedTopic(null);
+    setTopicDetail(null);
     void refresh();
   }, [connection?.id, refresh]);
 
@@ -97,6 +105,23 @@ export function RocketMqWorkspace() {
         setError(failureMessage(cause));
       } finally {
         setDetailLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const loadTopic = useCallback(
+    async (topic: string) => {
+      if (!connection) return;
+      setSelectedTopic(topic);
+      setTopicDetailLoading(true);
+      try {
+        setTopicDetail(await rocketMqService.getTopic(connection.id, topic));
+      } catch (cause) {
+        setTopicDetail(null);
+        setError(failureMessage(cause));
+      } finally {
+        setTopicDetailLoading(false);
       }
     },
     [connection],
@@ -183,7 +208,13 @@ export function RocketMqWorkspace() {
                 <ClusterOverview cluster={cluster} summary={summary} />
               )}
               {section === "topics" && (
-                <TopicList topics={topics?.topics || []} />
+                <TopicList
+                  topics={topics?.topics || []}
+                  selectedTopic={selectedTopic}
+                  detail={topicDetail}
+                  loading={topicDetailLoading}
+                  onSelect={loadTopic}
+                />
               )}
               {section === "groups" && (
                 <ConsumerGroups
@@ -242,21 +273,100 @@ function ClusterOverview({
   );
 }
 
-function TopicList({ topics }: { topics: string[] }) {
+function TopicList({
+  topics,
+  selectedTopic,
+  detail,
+  loading,
+  onSelect,
+}: {
+  topics: string[];
+  selectedTopic: string | null;
+  detail: RocketMqTopicDetail | null;
+  loading: boolean;
+  onSelect: (topic: string) => void;
+}) {
+  return (
+    <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
+      <div className="overflow-hidden rounded-[5px] border border-[hsl(var(--wb-border-subtle))]">
+        <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-xs font-medium">
+          Topics
+        </div>
+        {topics.length ? (
+          topics.map((topic) => (
+            <button
+              type="button"
+              key={topic}
+              onClick={() => void onSelect(topic)}
+              className={cn(
+                "flex w-full items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-left text-xs last:border-0 hover:bg-[hsl(var(--wb-hover))]",
+                selectedTopic === topic && "bg-[hsl(var(--wb-active-strong))]",
+              )}
+            >
+              <span className="truncate font-medium">{topic}</span>
+              <ChevronRight size={13} className="shrink-0 wb-muted" />
+            </button>
+          ))
+        ) : (
+          <div className="p-3 text-xs wb-muted">No topics reported.</div>
+        )}
+      </div>
+      <div className="rounded-[5px] border border-[hsl(var(--wb-border-subtle))] p-4">
+        {loading ? (
+          <div className="flex items-center gap-2 text-xs wb-muted">
+            <Loader2 size={14} className="animate-spin" /> Loading topic route…
+          </div>
+        ) : detail ? (
+          <TopicDetail detail={detail} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs wb-muted">
+            <Boxes size={14} className="mr-2" /> Select a topic for live route
+            and partition details.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TopicDetail({ detail }: { detail: RocketMqTopicDetail }) {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-sm font-semibold">Topics</h2>
-        <p className="mt-1 text-xs wb-muted">
-          Topic changes and message inspection are intentionally added after
-          read-only console validation.
+        <h2 className="text-sm font-semibold">{detail.topic}</h2>
+        <p className="mt-1 text-[11px] wb-muted">
+          Route data is live; topic mutation and message operations remain
+          unavailable until their confirmation boundary is implemented.
         </p>
       </div>
-      <ResourceTable
-        headers={["Topic"]}
-        rows={topics.map((topic) => [topic])}
-        empty="No topics reported by the cluster."
-      />
+      <div>
+        <h3 className="mb-2 text-xs font-medium">Queues by broker</h3>
+        <ResourceTable
+          headers={["Broker", "Read queues", "Write queues", "Permission"]}
+          rows={detail.queueDatas.map((queue) => [
+            queue.brokerName,
+            String(queue.readQueueNums),
+            String(queue.writeQueueNums),
+            String(queue.perm),
+          ])}
+          empty="No queue routes reported."
+        />
+      </div>
+      <div>
+        <h3 className="mb-2 text-xs font-medium">Broker route</h3>
+        <ResourceTable
+          headers={["Broker", "Cluster", "Addresses"]}
+          rows={detail.brokerDatas.map((broker) => [
+            broker.brokerName,
+            broker.cluster,
+            Object.entries(broker.brokerAddrs)
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([id, address]) => `${id}: ${address}`)
+              .join(", "),
+          ])}
+          empty="No broker routes reported."
+        />
+      </div>
     </div>
   );
 }

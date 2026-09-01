@@ -26,7 +26,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -121,6 +121,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.describeCluster()
 	case "mq_list_topics":
 		return a.listTopics(params)
+	case "mq_describe_topic":
+		return a.describeTopic(params)
 	case "mq_list_consumer_groups":
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
@@ -306,6 +308,67 @@ func (a *rocketMQAgent) listTopics(params map[string]any) (any, error) {
 	}
 	sort.Strings(items)
 	return map[string]any{"topics": items, "total": len(items), "offset": 0, "limit": len(items)}, nil
+}
+
+// describeTopic exposes the live route rather than assuming that all brokers
+// host the same number of queues.  That difference matters during expansion
+// and broker recovery, so the console keeps the per-broker records intact.
+func (a *rocketMQAgent) describeTopic(params map[string]any) (any, error) {
+	topic, ok := params["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if !ok || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	route, err := client.ExamineTopicRouteInfo(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	return topicRouteResult(topic, route), nil
+}
+
+func topicRouteResult(topic string, route *admin.TopicRouteData) map[string]any {
+	queues := make([]map[string]any, 0)
+	brokers := make([]map[string]any, 0)
+	if route != nil {
+		for _, queue := range route.QueueDatas {
+			if queue == nil {
+				continue
+			}
+			queues = append(queues, map[string]any{
+				"brokerName":     queue.BrokerName,
+				"readQueueNums":  queue.ReadQueueNums,
+				"writeQueueNums": queue.WriteQueueNums,
+				"perm":           queue.Perm,
+			})
+		}
+		for _, broker := range route.BrokerDatas {
+			if broker == nil {
+				continue
+			}
+			addresses := make(map[string]string, len(broker.BrokerAddrs))
+			for id, address := range broker.BrokerAddrs {
+				addresses[id] = address
+			}
+			brokers = append(brokers, map[string]any{
+				"brokerName":  broker.BrokerName,
+				"cluster":     broker.Cluster,
+				"brokerAddrs": addresses,
+			})
+		}
+	}
+	sort.Slice(queues, func(left, right int) bool {
+		return fmt.Sprint(queues[left]["brokerName"]) < fmt.Sprint(queues[right]["brokerName"])
+	})
+	sort.Slice(brokers, func(left, right int) bool {
+		return fmt.Sprint(brokers[left]["brokerName"]) < fmt.Sprint(brokers[right]["brokerName"])
+	})
+	return map[string]any{"topic": topic, "queueDatas": queues, "brokerDatas": brokers}
 }
 
 // listConsumerGroups mirrors DBX's cluster-wide group listing. The admin

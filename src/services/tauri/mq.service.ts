@@ -19,6 +19,21 @@ export type RocketMqTopics = {
   limit: number;
 };
 
+export type RocketMqTopicDetail = {
+  topic: string;
+  queueDatas: Array<{
+    brokerName: string;
+    readQueueNums: number;
+    writeQueueNums: number;
+    perm: number;
+  }>;
+  brokerDatas: Array<{
+    brokerName: string;
+    cluster: string;
+    brokerAddrs: Record<string, string>;
+  }>;
+};
+
 export type RocketMqConsumerGroups = {
   groups: Array<{
     groupId: string;
@@ -69,6 +84,11 @@ export const rocketMqService = {
     invokeRawCommand<RocketMqTopics>("list_rocketmq_topics", {
       connectionId,
       keyword,
+    }),
+  getTopic: (connectionId: string, topic: string) =>
+    invokeRawCommand<RocketMqTopicDetail>("get_rocketmq_topic", {
+      connectionId,
+      topic,
     }),
   listConsumerGroups: (
     connectionId: string,

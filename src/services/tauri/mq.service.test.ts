@@ -26,6 +26,7 @@ describe("RocketMQ workspace service", () => {
       namesrvAddr: "localhost:9876",
     });
     await rocketMqService.listTopics("rocket-1", "orders");
+    await rocketMqService.getTopic("rocket-1", "orders");
     await rocketMqService.listConsumerGroups("rocket-1", {
       offset: 200,
       limit: 100,
@@ -47,8 +48,12 @@ describe("RocketMQ workspace service", () => {
         keyword: "orders",
       },
     );
+    expect(invokeRawCommand).toHaveBeenNthCalledWith(3, "get_rocketmq_topic", {
+      connectionId: "rocket-1",
+      topic: "orders",
+    });
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
-      3,
+      4,
       "list_rocketmq_consumer_groups",
       {
         connectionId: "rocket-1",
@@ -57,7 +62,7 @@ describe("RocketMQ workspace service", () => {
       },
     );
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
-      4,
+      5,
       "get_rocketmq_consumer_group",
       {
         connectionId: "rocket-1",

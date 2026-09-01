@@ -112,6 +112,22 @@ pub async fn list_rocketmq_topics(
 }
 
 #[tauri::command]
+pub async fn get_rocketmq_topic(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+    topic: String,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_describe_topic",
+            serde_json::json!({ "topic": topic }),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn list_rocketmq_consumer_groups(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,

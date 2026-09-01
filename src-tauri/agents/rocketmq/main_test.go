@@ -84,3 +84,16 @@ func TestConsumerAssignmentsAreSortedAndKeepSubscriptionDetails(t *testing.T) {
 		t.Fatalf("subscription details were not retained: %#v", assignments[0])
 	}
 }
+
+func TestTopicRouteResultPreservesPerBrokerQueueCounts(t *testing.T) {
+	result := topicRouteResult("orders", &admin.TopicRouteData{
+		QueueDatas: []*admin.QueueData{
+			{BrokerName: "broker-b", ReadQueueNums: 8, WriteQueueNums: 6, Perm: 6},
+			{BrokerName: "broker-a", ReadQueueNums: 4, WriteQueueNums: 4, Perm: 6},
+		},
+	})
+	queues := result["queueDatas"].([]map[string]any)
+	if queues[0]["brokerName"] != "broker-a" || queues[1]["writeQueueNums"] != 6 {
+		t.Fatalf("route result = %#v", result)
+	}
+}
