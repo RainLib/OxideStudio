@@ -68,10 +68,9 @@ describe("tab store organization actions", () => {
       "right",
     ]);
     expect(useTabStore.getState().activeTabId).toBe("right");
-    expect(useTabStore.getState().closedTabsStack.map((item) => item.id)).toEqual([
-      "active",
-      "left",
-    ]);
+    expect(
+      useTabStore.getState().closedTabsStack.map((item) => item.id),
+    ).toEqual(["active", "left"]);
   });
 
   it("releases result payloads instead of retaining them in closed-tab history", () => {
@@ -102,5 +101,46 @@ describe("tab store organization actions", () => {
 
     useTabStore.getState().reopenTab();
     expect(useTabStore.getState().tabs[0]?.results).toBeNull();
+  });
+
+  it("isolates local grid filters for each query result and keeps them aligned after closing one", () => {
+    const result = (name: string) => ({
+      columns: [{ name, data_type: "text" }],
+      rows: [[name]],
+    });
+    useTabStore.setState({
+      tabs: [
+        {
+          ...tab("query"),
+          results: [result("first"), result("second"), result("third")],
+          activeResultIndex: 0,
+        },
+      ],
+      activeTabId: "query",
+    });
+
+    const store = useTabStore.getState();
+    store.setGridFilter("query", "first", { operator: "equals", value: "one" });
+    store.setActiveResultIndex("query", 1);
+    expect(useTabStore.getState().tabs[0]?.gridState).toBeUndefined();
+
+    store.setGridFilter("query", "second", {
+      operator: "contains",
+      value: "two",
+    });
+    store.setActiveResultIndex("query", 0);
+    expect(useTabStore.getState().tabs[0]?.gridState?.columnFilters).toEqual({
+      first: { operator: "equals", value: "one" },
+    });
+
+    store.closeResultAt("query", 0);
+    const current = useTabStore.getState().tabs[0];
+    expect(current?.activeResultIndex).toBe(0);
+    expect(current?.gridState?.columnFilters).toEqual({
+      second: { operator: "contains", value: "two" },
+    });
+    expect(current?.resultGridStates?.[0]?.columnFilters).toEqual({
+      second: { operator: "contains", value: "two" },
+    });
   });
 });

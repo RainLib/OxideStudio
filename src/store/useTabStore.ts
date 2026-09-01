@@ -210,10 +210,7 @@ export function queryTextForLanguage(
     return query;
   }
   if (language !== "elasticsearch-eql") {
-    return compileElasticsearchConsoleExecution(
-      query,
-      elasticsearchVariables,
-    );
+    return compileElasticsearchConsoleExecution(query, elasticsearchVariables);
   }
   if (ELASTICSEARCH_REQUEST_LINE.test(trimmed)) return query;
 
@@ -248,6 +245,28 @@ export interface ProjectFileImagePreview {
   size: number;
 }
 
+/**
+ * Presentation-only state for one query result set.  Query tabs may hold the
+ * results of several statements, so this must not be shared implicitly by
+ * every result in the tab.
+ */
+export interface QueryResultGridState {
+  columnFilters: Record<string, { operator: string; value: string }>;
+  sortColumn: string | null;
+  sortDirection: "asc" | "desc" | null;
+}
+
+function cloneQueryResultGridState(
+  gridState: QueryResultGridState | undefined,
+): QueryResultGridState | undefined {
+  return gridState
+    ? {
+        ...gridState,
+        columnFilters: { ...gridState.columnFilters },
+      }
+    : undefined;
+}
+
 export interface TabData {
   id: string;
   title: string;
@@ -280,11 +299,10 @@ export interface TabData {
   queryError?: QueryExecutionErrorDetail | null;
   activeResultIndex?: number;
   isPinned: boolean;
-  gridState?: {
-    columnFilters: Record<string, { operator: string; value: string }>;
-    sortColumn: string | null;
-    sortDirection: "asc" | "desc" | null;
-  };
+  /** State for the active result set, retained for table tabs and legacy tabs. */
+  gridState?: QueryResultGridState;
+  /** Query-local grid state keyed by result index; never contains row data. */
+  resultGridStates?: Record<number, QueryResultGridState>;
   pendingEdits?: Map<string, any>; // key: "rowIndex:colIndex" or "new-N:colIndex", value: new value
   newRowsCount?: number;
   /** Parallel to pending new-row offsets; cloned rows carry a stable display anchor. */
@@ -472,6 +490,7 @@ export function tabAfterReleasingRuntimePayload(tab: TabData): TabData {
     explainPlan: null,
     queryOutputView: "results",
     activeResultIndex: 0,
+    resultGridStates: undefined,
     isExecuting: false,
     runningQueryId: null,
     error: null,
@@ -545,7 +564,9 @@ export function dataCompareSourceFromTab(
   const primaryKeys = (tab.tableColumns || [])
     .filter((column) => column.is_primary_key)
     .map((column) => column.name)
-    .filter((column) => result.columns.some((candidate) => candidate.name === column));
+    .filter((column) =>
+      result.columns.some((candidate) => candidate.name === column),
+    );
   return {
     id: `${tab.id}:${resultIndex}:${capturedAt}`,
     tabId: tab.id,
@@ -942,7 +963,10 @@ interface TabState {
     history: SchemaDiagramCanvasHistory,
   ) => void;
   selectSchemaDiagramArea: (tabId: string, areaId: string | null) => void;
-  selectSchemaDiagramRelations: (tabId: string, relationNames: string[]) => void;
+  selectSchemaDiagramRelations: (
+    tabId: string,
+    relationNames: string[],
+  ) => void;
   openDataCompareTab: (leftTabId: string, rightTabId: string) => string | null;
   openDataCompareSourcesTab: (
     left: DataCompareSource,
@@ -998,7 +1022,10 @@ interface TabState {
   closeAllTabs: () => void;
   closeTabsToLeft: (id: string) => void;
   closeTabsToRight: (id: string) => void;
-  closeTabsByIds: (ids: readonly string[], fallbackTabId?: string | null) => void;
+  closeTabsByIds: (
+    ids: readonly string[],
+    fallbackTabId?: string | null,
+  ) => void;
   togglePinTab: (id: string) => void;
   reorderTab: (
     draggedId: string,
@@ -1129,14 +1156,19 @@ function editorSelectionsEqual(
   left: EditorSelectionState | null | undefined,
   right: EditorSelectionState | null,
 ) {
-  return left === right || Boolean(
-    left && right &&
+  return (
+    left === right ||
+    Boolean(
+      left &&
+      right &&
       left.text === right.text &&
       left.startLineNumber === right.startLineNumber &&
       left.startColumn === right.startColumn &&
       left.endLineNumber === right.endLineNumber &&
       left.endColumn === right.endColumn,
-  ) || (!left && !right);
+    ) ||
+    (!left && !right)
+  );
 }
 
 function editorViewSelectionsEqual(
@@ -1154,8 +1186,8 @@ function editorViewportsEqual(
 ) {
   return Boolean(
     left &&
-      left.scrollTop === right.scrollTop &&
-      left.scrollLeft === right.scrollLeft,
+    left.scrollTop === right.scrollTop &&
+    left.scrollLeft === right.scrollLeft,
   );
 }
 
@@ -1163,11 +1195,15 @@ function normalizeDiagramAreaHistory(
   history: SchemaDiagramAreaHistory | undefined,
   snapshot: SchemaSnapshot,
 ): SchemaDiagramAreaHistory {
-  const relationNames = new Set(snapshot.relations.map((relation) => relation.name));
+  const relationNames = new Set(
+    snapshot.relations.map((relation) => relation.name),
+  );
   const normalize = (areas: SchemaDiagramAreaHistory["present"]) =>
     areas.map((area) => ({
       ...area,
-      relationNames: area.relationNames.filter((name) => relationNames.has(name)),
+      relationNames: area.relationNames.filter((name) =>
+        relationNames.has(name),
+      ),
     }));
   return history
     ? {
@@ -1184,11 +1220,17 @@ function normalizeDiagramCanvasHistory(
   legacyNotes: SchemaDiagramNote[] | undefined,
   snapshot: SchemaSnapshot,
 ): SchemaDiagramCanvasHistory {
-  const relationNames = new Set(snapshot.relations.map((relation) => relation.name));
-  const normalize = (state: SchemaDiagramCanvasState): SchemaDiagramCanvasState => ({
+  const relationNames = new Set(
+    snapshot.relations.map((relation) => relation.name),
+  );
+  const normalize = (
+    state: SchemaDiagramCanvasState,
+  ): SchemaDiagramCanvasState => ({
     areas: state.areas.map((area) => ({
       ...area,
-      relationNames: area.relationNames.filter((name) => relationNames.has(name)),
+      relationNames: area.relationNames.filter((name) =>
+        relationNames.has(name),
+      ),
     })),
     notes: state.notes,
     draft: state.draft,
@@ -1199,11 +1241,14 @@ function normalizeDiagramCanvasHistory(
       legacyNotes || [],
     );
   }
-  return rebaseSchemaDiagramCanvasDraft({
-    past: history.past.map(normalize),
-    present: normalize(history.present),
-    future: history.future.map(normalize),
-  }, snapshot.fingerprint);
+  return rebaseSchemaDiagramCanvasDraft(
+    {
+      past: history.past.map(normalize),
+      present: normalize(history.present),
+      future: history.future.map(normalize),
+    },
+    snapshot.fingerprint,
+  );
 }
 
 export const useTabStore = create<TabState>((set, get) => ({
@@ -1650,7 +1695,10 @@ export const useTabStore = create<TabState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === tabId
-          ? { ...tab, selectedDiagramRelationNames: [...new Set(relationNames)] }
+          ? {
+              ...tab,
+              selectedDiagramRelationNames: [...new Set(relationNames)],
+            }
           : tab,
       ),
     }));
@@ -1670,7 +1718,11 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   openDataCompareSourcesTab: (left, right) => {
-    if (left.tabId === right.tabId || left.columns.length === 0 || right.columns.length === 0) {
+    if (
+      left.tabId === right.tabId ||
+      left.columns.length === 0 ||
+      right.columns.length === 0
+    ) {
       return null;
     }
 
@@ -2248,7 +2300,11 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs.splice(draggedIndex, 1);
       const targetIndex = tabs.findIndex((tab) => tab.id === targetId);
       if (targetIndex < 0) return state;
-      tabs.splice(position === "before" ? targetIndex : targetIndex + 1, 0, dragged);
+      tabs.splice(
+        position === "before" ? targetIndex : targetIndex + 1,
+        0,
+        dragged,
+      );
       if (tabs.every((tab, index) => tab === state.tabs[index])) return state;
       moved = true;
       return { tabs };
@@ -2292,9 +2348,10 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tab.sql === sql || !tab.explainPlan
                   ? tab.queryOutputView
                   : "results",
-              isDirty: tab.fileRelativePath || tab.savedSqlFileId
-                ? tab.isDirty || tab.sql !== sql
-                : tab.isDirty,
+              isDirty:
+                tab.fileRelativePath || tab.savedSqlFileId
+                  ? tab.isDirty || tab.sql !== sql
+                  : tab.isDirty,
               fileError:
                 tab.fileRelativePath || tab.savedSqlFileId
                   ? null
@@ -2350,7 +2407,8 @@ export const useTabStore = create<TabState>((set, get) => ({
   setEditorViewport: (id, viewport) => {
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === id);
-      if (!tab || editorViewportsEqual(tab.editorViewport, viewport)) return state;
+      if (!tab || editorViewportsEqual(tab.editorViewport, viewport))
+        return state;
       return {
         tabs: state.tabs.map((candidate) =>
           candidate.id === id
@@ -2432,9 +2490,20 @@ export const useTabStore = create<TabState>((set, get) => ({
       tabs: state.tabs.map((t) => {
         if (t.id !== id) return t;
         const maxIndex = Math.max(0, (t.results?.length ?? 1) - 1);
+        const activeResultIndex = Math.max(0, Math.min(index, maxIndex));
+        if (t.type === "table") return { ...t, activeResultIndex };
+        const resultGridStates = { ...t.resultGridStates };
+        const currentGridState = cloneQueryResultGridState(t.gridState);
+        if (currentGridState) {
+          resultGridStates[t.activeResultIndex ?? 0] = currentGridState;
+        }
         return {
           ...t,
-          activeResultIndex: Math.max(0, Math.min(index, maxIndex)),
+          activeResultIndex,
+          resultGridStates,
+          gridState: cloneQueryResultGridState(
+            resultGridStates[activeResultIndex],
+          ),
         };
       }),
     }));
@@ -2464,11 +2533,35 @@ export const useTabStore = create<TabState>((set, get) => ({
               : index === currentIndex
                 ? Math.min(currentIndex, nextResults.length - 1)
                 : currentIndex;
+        const gridStatesBeforeClose = { ...t.resultGridStates };
+        if (t.type !== "table") {
+          const currentGridState = cloneQueryResultGridState(t.gridState);
+          if (currentGridState)
+            gridStatesBeforeClose[currentIndex] = currentGridState;
+        }
+        const resultGridStates =
+          t.type === "table"
+            ? undefined
+            : Object.fromEntries(
+                Object.entries(gridStatesBeforeClose)
+                  .filter(([resultIndex]) => Number(resultIndex) !== index)
+                  .map(([resultIndex, gridState]) => [
+                    Number(resultIndex) > index
+                      ? Number(resultIndex) - 1
+                      : Number(resultIndex),
+                    gridState,
+                  ]),
+              );
 
         return {
           ...t,
           results: nextResults.length > 0 ? nextResults : null,
           activeResultIndex: nextActiveIndex,
+          resultGridStates,
+          gridState:
+            t.type === "table"
+              ? t.gridState
+              : cloneQueryResultGridState(resultGridStates?.[nextActiveIndex]),
         };
       }),
     }));
@@ -2571,7 +2664,10 @@ export const useTabStore = create<TabState>((set, get) => ({
         currentTab.databaseName === tab.databaseName,
       );
       if (!tabContextIsCurrent || readiness.status === "cancelled") {
-        taskStore.cancelTask(taskId, "Workspace changed before the query began");
+        taskStore.cancelTask(
+          taskId,
+          "Workspace changed before the query began",
+        );
         set((state) => ({
           tabs: state.tabs.map((candidate) =>
             candidate.id === id && candidate.runningQueryId === queryId
@@ -2681,6 +2777,8 @@ export const useTabStore = create<TabState>((set, get) => ({
                 results: results || null,
                 resultSql: sqlToRun,
                 activeResultIndex: 0,
+                gridState: undefined,
+                resultGridStates: undefined,
                 queryError: null,
               }
             : t,
@@ -2853,7 +2951,17 @@ export const useTabStore = create<TabState>((set, get) => ({
         } else {
           delete columnFilters[column];
         }
-        return { ...t, gridState: { ...gridState, columnFilters } };
+        const nextGridState = { ...gridState, columnFilters };
+        if (t.type === "table") return { ...t, gridState: nextGridState };
+        const resultIndex = t.activeResultIndex ?? 0;
+        return {
+          ...t,
+          gridState: nextGridState,
+          resultGridStates: {
+            ...t.resultGridStates,
+            [resultIndex]: cloneQueryResultGridState(nextGridState)!,
+          },
+        };
       }),
     }));
   },
@@ -2877,12 +2985,18 @@ export const useTabStore = create<TabState>((set, get) => ({
           sortColumn: null,
           sortDirection: null,
         };
+        const nextGridState = {
+          ...gridState,
+          sortColumn: column,
+          sortDirection: direction,
+        };
+        const resultIndex = t.activeResultIndex ?? 0;
         return {
           ...t,
-          gridState: {
-            ...gridState,
-            sortColumn: column,
-            sortDirection: direction,
+          gridState: nextGridState,
+          resultGridStates: {
+            ...t.resultGridStates,
+            [resultIndex]: cloneQueryResultGridState(nextGridState)!,
           },
         };
       }),
@@ -3179,7 +3293,8 @@ export const useTabStore = create<TabState>((set, get) => ({
         const key = rowMutationKey(originalRow, resultColumns, keyColumns);
 
         if (
-          (Object.keys(values).length > 0 || Object.keys(expressions).length > 0) &&
+          (Object.keys(values).length > 0 ||
+            Object.keys(expressions).length > 0) &&
           key
         ) {
           updates.push({
@@ -3777,7 +3892,10 @@ export const useTabStore = create<TabState>((set, get) => ({
               tab.databaseName,
               true,
             )
-          : await tableService.previewTablePage(...pageRequest, tab.databaseName)
+          : await tableService.previewTablePage(
+              ...pageRequest,
+              tab.databaseName,
+            )
         : options?.includeTotal
           ? await tableService.previewTablePage(...pageRequest, undefined, true)
           : await tableService.previewTablePage(...pageRequest);
@@ -3792,10 +3910,10 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tablePage: pageResult.page,
                 tablePageSize: pageResult.pageSize,
                 tableTotalRows: options?.includeTotal
-                  ? pageResult.totalRows ?? null
+                  ? (pageResult.totalRows ?? null)
                   : totalScopeChanged
                     ? null
-                    : t.tableTotalRows ?? null,
+                    : (t.tableTotalRows ?? null),
                 tableFilterSql: nextFilterSql || null,
                 tableFilters: nextFilters || null,
                 pendingEdits: new Map(),
@@ -3861,22 +3979,22 @@ export const useTabStore = create<TabState>((set, get) => ({
 
     const nextPage = Math.max(0, page ?? tab.tablePage ?? 0);
     const pageSize = Math.min(1_000, Math.max(1, tab.tablePageSize || 100));
-    const cursor = nextPage === 0
-      ? null
-      : tab.documentPageCursors?.[nextPage] || null;
+    const cursor =
+      nextPage === 0 ? null : tab.documentPageCursors?.[nextPage] || null;
     if (nextPage > 0 && !cursor) return false;
 
-    const nextFilter = options?.filter === undefined
-      ? tab.documentFilter || null
-      : options.filter;
-    const nextSort = options?.sort === undefined
-      ? tab.documentSort || null
-      : options.sort;
-    const previousCursor = nextPage === 0
-      ? [...(tab.documentPageCursors || [])]
-        .reverse()
-        .find((value): value is string => Boolean(value))
-      : undefined;
+    const nextFilter =
+      options?.filter === undefined
+        ? tab.documentFilter || null
+        : options.filter;
+    const nextSort =
+      options?.sort === undefined ? tab.documentSort || null : options.sort;
+    const previousCursor =
+      nextPage === 0
+        ? [...(tab.documentPageCursors || [])]
+            .reverse()
+            .find((value): value is string => Boolean(value))
+        : undefined;
     if (previousCursor) {
       void schemaService
         .closeDocumentCursor(tab.connectionId, previousCursor)
@@ -3932,16 +4050,23 @@ export const useTabStore = create<TabState>((set, get) => ({
             .closeDocumentCursor(tab.connectionId, pageResult.nextCursor)
             .catch(() => undefined);
         }
-        taskStore.cancelTask(taskId, "Workspace changed while loading documents");
+        taskStore.cancelTask(
+          taskId,
+          "Workspace changed while loading documents",
+        );
         return false;
       }
 
       set((state) => ({
         tabs: state.tabs.map((candidate) => {
           if (candidate.id !== tabId) return candidate;
-          const cursors = nextPage === 0
-            ? [null]
-            : (candidate.documentPageCursors || [null]).slice(0, nextPage + 1);
+          const cursors =
+            nextPage === 0
+              ? [null]
+              : (candidate.documentPageCursors || [null]).slice(
+                  0,
+                  nextPage + 1,
+                );
           cursors[nextPage + 1] = pageResult.nextCursor || null;
           return {
             ...candidate,
@@ -4017,12 +4142,15 @@ export const useTabStore = create<TabState>((set, get) => ({
   cloneRows: (tabId, rowIndexes) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => {
-        if (tab.id !== tabId || tab.isExecuting || tab.type !== "table") return tab;
+        if (tab.id !== tabId || tab.isExecuting || tab.type !== "table")
+          return tab;
         const result = tab.results?.[0];
         if (!result) return tab;
         const sources = [...new Set(rowIndexes)].filter(
           (rowIndex) =>
-            Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex < result.rows.length,
+            Number.isInteger(rowIndex) &&
+            rowIndex >= 0 &&
+            rowIndex < result.rows.length,
         );
         if (sources.length === 0) return tab;
 
@@ -4142,9 +4270,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const nextTab = { ...tab, frozenColumnCount };
     saveTabGridLayout(nextTab);
     set((state) => ({
-      tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? nextTab : tab,
-      ),
+      tabs: state.tabs.map((tab) => (tab.id === tabId ? nextTab : tab)),
     }));
   },
 
@@ -4170,9 +4296,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     const nextTab = { ...tab, hiddenColumns: [] };
     saveTabGridLayout(nextTab);
     set((state) => ({
-      tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? nextTab : tab,
-      ),
+      tabs: state.tabs.map((tab) => (tab.id === tabId ? nextTab : tab)),
     }));
   },
 

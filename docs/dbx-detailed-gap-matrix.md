@@ -873,3 +873,19 @@ Rust 回归覆盖 planner/catalog fail-closed、复合 FK 顺序/action metadata
 验证，而不是为 SQL Server 等尚未可用 runtime 增加不可达的前端/解析分支。所有真实数据库、SSH、WebView
 和 70+ 驱动矩阵验证仍统一保留在 `dbx-alignment-deferred-validation.md`，不得将上述静态/fixture 回归表述为
 实库验收。
+
+## Phase 155 增量：多结果集本地 Grid 筛选隔离
+
+复审 DBX `cb754cd0c` 后发现 Oxide 的 query tab 虽已有本地列筛选和排序，但它们此前挂在 tab 单例
+`gridState` 上：一个多语句查询在 Result 1 设定筛选后切换到 Result 2，会错误复用该条件。现改为：
+
+- query tab 把轻量 `columnFilters`/sort state 按 active result index 保存到 `resultGridStates`；不复制 rows、
+  columns 或 backend payload，因此关闭 tab 的 runtime payload 释放和内存上限不受影响。
+- 切换结果集先冻结离开结果的 presentation state，再恢复目标结果状态；从未筛选过的结果不分配空对象。
+  关闭一个结果集时，后续 result index 的状态同步左移，当前可见结果恢复对应筛选，避免索引错位。
+- 新一次 query execution 清除旧 result state，防止不同 SQL 的筛选条件意外落到新结果上。table tab 保持既有
+  server-side sort/filter 行为，不混入 query-local state。
+
+`useTabStore.organization.test.ts` 覆盖跨结果集隔离、关闭中间/当前结果后的索引重映射；前端 production
+build 已验证 TypeScript 和 bundle。真实 Grid 交互（虚拟滚动、键盘筛选菜单、WebView 焦点）仍按统一延期
+清单执行。
