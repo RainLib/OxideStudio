@@ -16,6 +16,7 @@ import {
   type RocketMqConsumerGroups,
   type RocketMqConsumerLag,
   type RocketMqMessagePreview,
+  type RocketMqProducers,
   type RocketMqTopicConfig,
   type RocketMqTopicDetail,
   type RocketMqTopicStats,
@@ -24,12 +25,13 @@ import {
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
 
-type ConsoleSection = "overview" | "topics" | "groups" | "acl";
+type ConsoleSection = "overview" | "topics" | "groups" | "producers" | "acl";
 
 const sections: Array<{ id: ConsoleSection; label: string }> = [
   { id: "overview", label: "Cluster" },
   { id: "topics", label: "Topics" },
   { id: "groups", label: "Consumer groups" },
+  { id: "producers", label: "Producers" },
   { id: "acl", label: "Access control" },
 ];
 
@@ -55,6 +57,7 @@ export function RocketMqWorkspace() {
   const [topics, setTopics] = useState<RocketMqTopics | null>(null);
   const [groups, setGroups] = useState<RocketMqConsumerGroups | null>(null);
   const [acls, setAcls] = useState<RocketMqAcls | null>(null);
+  const [producers, setProducers] = useState<RocketMqProducers | null>(null);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [topicDetail, setTopicDetail] = useState<RocketMqTopicDetail | null>(
     null,
@@ -79,6 +82,7 @@ export function RocketMqWorkspace() {
   const [topicConfigLoading, setTopicConfigLoading] = useState(false);
   const [topicStatsLoading, setTopicStatsLoading] = useState(false);
   const [aclLoading, setAclLoading] = useState(false);
+  const [producersLoading, setProducersLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -114,6 +118,7 @@ export function RocketMqWorkspace() {
     setTopicConfig(null);
     setTopicStats(null);
     setAcls(null);
+    setProducers(null);
     void refresh();
   }, [connection?.id, refresh]);
 
@@ -135,6 +140,25 @@ export function RocketMqWorkspace() {
       void loadAcls();
     }
   }, [aclLoading, acls, loadAcls, section]);
+
+  const loadProducers = useCallback(async () => {
+    if (!connection) return;
+    setProducersLoading(true);
+    try {
+      setProducers(await rocketMqService.listProducers(connection.id));
+    } catch (cause) {
+      setProducers(null);
+      setError(failureMessage(cause));
+    } finally {
+      setProducersLoading(false);
+    }
+  }, [connection]);
+
+  useEffect(() => {
+    if (section === "producers" && !producers && !producersLoading) {
+      void loadProducers();
+    }
+  }, [loadProducers, producers, producersLoading, section]);
 
   const loadGroup = useCallback(
     async (groupId: string) => {
@@ -360,6 +384,13 @@ export function RocketMqWorkspace() {
                   onLoadLag={loadConsumerLag}
                 />
               )}
+              {section === "producers" && (
+                <ProducerList
+                  producers={producers}
+                  loading={producersLoading}
+                  onRefresh={loadProducers}
+                />
+              )}
               {section === "acl" && (
                 <AclList
                   acls={acls}
@@ -372,6 +403,68 @@ export function RocketMqWorkspace() {
         </main>
       </div>
     </section>
+  );
+}
+
+function ProducerList({
+  producers,
+  loading,
+  onRefresh,
+}: {
+  producers: RocketMqProducers | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Producers</h2>
+          <p className="mt-1 max-w-2xl text-xs wb-muted">
+            Live producer connections reported by reachable master brokers.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={onRefresh}
+          className="flex h-7 shrink-0 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+        >
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} />
+          Refresh producers
+        </button>
+      </div>
+      {loading && !producers ? (
+        <div className="flex h-24 items-center justify-center gap-2 text-xs wb-muted">
+          <Loader2 size={14} className="animate-spin" /> Loading producers…
+        </div>
+      ) : (
+        <>
+          {producers?.unavailableBrokers.length ? (
+            <div className="rounded-[5px] border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              Producer data was unavailable from:{" "}
+              {producers.unavailableBrokers.join(", ")}
+            </div>
+          ) : null}
+          {producers?.truncated ? (
+            <div className="rounded-[5px] border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              Producer rows were capped at 2,000 to keep the Console responsive.
+            </div>
+          ) : null}
+          <ResourceTable
+            headers={["Group", "Client", "Host", "Broker", "Language"]}
+            rows={(producers?.producers || []).map((producer) => [
+              producer.groupId,
+              producer.clientId,
+              producer.host,
+              producer.brokerName,
+              producer.language || "—",
+            ])}
+            empty="No producer connections were reported by reachable masters."
+          />
+        </>
+      )}
+    </div>
   );
 }
 

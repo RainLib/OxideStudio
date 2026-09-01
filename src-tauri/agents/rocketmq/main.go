@@ -30,10 +30,11 @@ const (
 	maxMessageBodyBytes = 64 * 1024
 	maxStatsPartitions  = 2048
 	maxLagPartitions    = 4096
+	maxProducerRows     = 2000
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group", "mq_get_consumer_lag",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_list_producers", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group", "mq_get_consumer_lag",
 }
 
 type rpcRequest struct {
@@ -136,6 +137,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.getTopicStats(params)
 	case "mq_list_acls":
 		return a.listAcls(params)
+	case "mq_list_producers":
+		return a.listProducers(params)
 	case "mq_peek_messages":
 		return a.peekMessages(params)
 	case "mq_query_message_by_key":
@@ -548,6 +551,58 @@ func (a *rocketMQAgent) listAcls(_ map[string]any) (any, error) {
 		})
 	}
 	return map[string]any{"acls": rows, "unavailableBrokers": unavailable}, nil
+}
+
+// listProducers is a bounded, read-only aggregation. The admin API is broker
+// local, so a row retains its broker source and missing masters are reported
+// instead of making a partial topology look complete.
+func (a *rocketMQAgent) listProducers(_ map[string]any) (any, error) {
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	info, err := client.ExamineBrokerClusterInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	masters := masterBrokerAddressByName(info)
+	rows := make([]map[string]any, 0)
+	unavailable := make([]string, 0)
+	for _, brokerName := range sortedKeys(masters) {
+		entries, listErr := client.GetAllProducerInfo(ctx, masters[brokerName])
+		if listErr != nil {
+			unavailable = append(unavailable, brokerName)
+			continue
+		}
+		for _, groupID := range sortedKeys(entries) {
+			connections := append([]admin.Connection(nil), entries[groupID]...)
+			sort.Slice(connections, func(left, right int) bool {
+				if connections[left].ClientId != connections[right].ClientId {
+					return connections[left].ClientId < connections[right].ClientId
+				}
+				return connections[left].ClientAddr < connections[right].ClientAddr
+			})
+			for _, connection := range connections {
+				if len(rows) >= maxProducerRows {
+					return map[string]any{"producers": rows, "unavailableBrokers": unavailable, "truncated": true}, nil
+				}
+				rows = append(rows, map[string]any{
+					"brokerName": brokerName,
+					"groupId":    groupID,
+					"clientId":   connection.ClientId,
+					"host":       connection.ClientAddr,
+					"language":   connection.Language,
+					"version":    connection.Version,
+				})
+			}
+		}
+	}
+	if len(rows) == 0 && len(masters) > 0 && len(unavailable) == len(masters) {
+		return nil, fmt.Errorf("producer information is unavailable on all master brokers")
+	}
+	return map[string]any{"producers": rows, "unavailableBrokers": unavailable, "truncated": false}, nil
 }
 
 // peekMessages is deliberately read-only and bounded. It pulls from concrete

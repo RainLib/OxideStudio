@@ -97,6 +97,19 @@ export type RocketMqAcls = {
   unavailableBrokers: string[];
 };
 
+export type RocketMqProducers = {
+  producers: Array<{
+    brokerName: string;
+    groupId: string;
+    clientId: string;
+    host: string;
+    language: string;
+    version: number;
+  }>;
+  unavailableBrokers: string[];
+  truncated: boolean;
+};
+
 export type RocketMqConsumerGroups = {
   groups: Array<{
     groupId: string;
@@ -179,6 +192,10 @@ export const rocketMqService = {
     }),
   listAcls: (connectionId: string) =>
     invokeRawCommand<RocketMqAcls>("list_rocketmq_acls", { connectionId }),
+  listProducers: (connectionId: string) =>
+    invokeRawCommand<RocketMqProducers>("list_rocketmq_producers", {
+      connectionId,
+    }),
   peekMessages: (
     connectionId: string,
     topic: string,

@@ -175,6 +175,21 @@ pub async fn list_rocketmq_acls(
 }
 
 #[tauri::command]
+pub async fn list_rocketmq_producers(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_list_producers",
+            Value::Object(Default::default()),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn peek_rocketmq_messages(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,

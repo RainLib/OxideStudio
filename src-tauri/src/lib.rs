@@ -180,6 +180,7 @@ pub fn run() {
             commands::mq::get_rocketmq_topic_config,
             commands::mq::get_rocketmq_topic_stats,
             commands::mq::list_rocketmq_acls,
+            commands::mq::list_rocketmq_producers,
             commands::mq::peek_rocketmq_messages,
             commands::mq::query_rocketmq_messages_by_key,
             commands::mq::query_rocketmq_messages_by_time,
