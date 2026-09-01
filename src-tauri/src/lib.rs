@@ -170,6 +170,7 @@ pub fn run() {
             commands::connection::import_connection_config_file,
             commands::connection::save_connections,
             commands::connection::load_connections,
+            commands::mq::probe_rocketmq_nameservers,
             commands::database::get_database_driver_store_info,
             commands::database::prune_database_driver_cache,
             commands::database::migrate_database_driver_store,
