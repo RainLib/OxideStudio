@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { cachedCurrentStatementRangeAtOffset } from "./currentStatementDecoration";
+import {
+  cachedCurrentStatementRangeAtOffset,
+  currentStatementLineFrames,
+  MAX_CURRENT_STATEMENT_FRAME_LINES,
+} from "./currentStatementDecoration";
 
 describe("current statement range cache", () => {
   const cache = {
@@ -39,5 +43,17 @@ describe("current statement range cache", () => {
         10,
       ),
     ).toBeNull();
+  });
+
+  it("skips statement frames above the logical-line cap", () => {
+    const model = {
+      getPositionAt: (offset: number) => ({ lineNumber: offset + 1 }),
+    };
+    expect(
+      currentStatementLineFrames(model, 0, MAX_CURRENT_STATEMENT_FRAME_LINES + 2),
+    ).toEqual([]);
+    expect(
+      currentStatementLineFrames(model, 0, MAX_CURRENT_STATEMENT_FRAME_LINES + 1),
+    ).toHaveLength(MAX_CURRENT_STATEMENT_FRAME_LINES + 1);
   });
 });

@@ -18,6 +18,13 @@ export type CurrentStatementRangeCache = {
 };
 
 /**
+ * A frame uses one Monaco whole-line decoration per logical line. Very large
+ * Oracle/PLSQL packages are commonly one statement, so cap decorative work
+ * without changing the executable statement range.
+ */
+export const MAX_CURRENT_STATEMENT_FRAME_LINES = 500;
+
+/**
  * Reuses only ranges returned by the authoritative backend scanner and only
  * while the Monaco model version is unchanged. A cursor on an exclusive end
  * boundary is resolved again; whitespace before/between/after ranges follows
@@ -48,6 +55,9 @@ export function currentStatementLineFrames(
   if (startOffset < 0 || endOffset <= startOffset) return [];
   const start = model.getPositionAt(startOffset);
   const end = model.getPositionAt(Math.max(startOffset, endOffset - 1));
+  if (end.lineNumber - start.lineNumber > MAX_CURRENT_STATEMENT_FRAME_LINES) {
+    return [];
+  }
   const frames: CurrentStatementLineFrame[] = [];
   for (let lineNumber = start.lineNumber; lineNumber <= end.lineNumber; lineNumber += 1) {
     const edgeClasses = [

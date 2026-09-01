@@ -104,7 +104,6 @@ export function attachCurrentStatementDecoration(
       publishSql("");
       return;
     }
-    publishSql(model.getValue().slice(startOffset, endOffset));
     const modelVersion = model.getVersionId();
     if (
       renderedRange !== null &&
@@ -115,11 +114,19 @@ export function attachCurrentStatementDecoration(
     ) {
       return;
     }
-    const decorations = currentStatementLineFrames(
+    const frames = currentStatementLineFrames(
       model,
       startOffset,
       endOffset,
-    ).map((frame) => ({
+    );
+    if (frames.length === 0) {
+      decorationIds = editor.deltaDecorations(decorationIds, []);
+      renderedRange = { modelVersion, startOffset, endOffset };
+      publishSql("");
+      return;
+    }
+    publishSql(model.getValue().slice(startOffset, endOffset));
+    const decorations = frames.map((frame) => ({
       range: new monaco.Range(frame.lineNumber, 1, frame.lineNumber, 1),
       options: {
         isWholeLine: true,

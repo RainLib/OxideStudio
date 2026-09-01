@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachCurrentStatementDecoration } from "./useCurrentStatementDecoration";
+import { MAX_CURRENT_STATEMENT_FRAME_LINES } from "../model/currentStatementDecoration";
 
 class TestRange {
   constructor(
@@ -153,6 +154,66 @@ describe("current statement decoration lifecycle", () => {
 
     expect(resolve).toHaveBeenCalledOnce();
     expect(decorations[decorations.length - 1]).toEqual([]);
+    attachment.dispose();
+  });
+
+  it("does not materialize decorations or preview SQL for a huge statement", async () => {
+    const text = Array.from(
+      { length: MAX_CURRENT_STATEMENT_FRAME_LINES + 2 },
+      () => "body_line;",
+    ).join("\n");
+    const decorations: any[][] = [];
+    const positionAt = (offset: number) => {
+      const bounded = Math.max(0, Math.min(text.length, offset));
+      const before = text.slice(0, bounded);
+      const lines = before.split("\n");
+      return {
+        lineNumber: lines.length,
+        column: (lines[lines.length - 1] || "").length + 1,
+      };
+    };
+    const model = {
+      getVersionId: () => 1,
+      getValue: () => text,
+      getOffsetAt: () => 0,
+      getLineContent: () => "body_line;",
+      getPositionAt: positionAt,
+    };
+    const selection = {
+      isEmpty: () => true,
+      getStartPosition: () => positionAt(0),
+      getEndPosition: () => positionAt(0),
+    };
+    const disposable = { dispose: vi.fn() };
+    const editor = {
+      getModel: () => model,
+      getSelection: () => selection,
+      getPosition: () => positionAt(0),
+      deltaDecorations: (_previous: string[], next: any[]) => {
+        decorations.push(next);
+        return [];
+      },
+      onDidChangeCursorSelection: () => disposable,
+      onDidChangeModelContent: () => disposable,
+      onDidChangeModel: () => disposable,
+    };
+    const onCurrentStatementChange = vi.fn();
+    const attachment = attachCurrentStatementDecoration({
+      connectionId: "connection-1",
+      editor,
+      enabled: true,
+      isMongoDbConsole: false,
+      monaco: { Range: TestRange },
+      resolveSqlStatementAtCursor: vi.fn(async () => ({
+        startOffset: 0,
+        endOffset: text.length,
+      })),
+      onCurrentStatementChange,
+    });
+
+    await vi.advanceTimersByTimeAsync(80);
+    expect(decorations[decorations.length - 1]).toEqual([]);
+    expect(onCurrentStatementChange).not.toHaveBeenCalled();
     attachment.dispose();
   });
 });
