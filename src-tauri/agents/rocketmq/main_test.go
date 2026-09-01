@@ -81,6 +81,21 @@ func TestMasterBrokerAddressByNameKeepsBrokerIdentity(t *testing.T) {
 	}
 }
 
+func TestParseMessageQueueKeySupportsAdminWireFormats(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  parsedMessageQueue
+	}{
+		{`{"topic":"orders","brokerName":"broker-a","queueId":2}`, parsedMessageQueue{Topic: "orders", BrokerName: "broker-a", QueueID: 2}},
+		{"MessageQueue [topic=orders, brokerName=broker-a, queueId=2]", parsedMessageQueue{Topic: "orders", BrokerName: "broker-a", QueueID: 2}},
+		{"orders-broker-2", parsedMessageQueue{Topic: "orders", BrokerName: "broker", QueueID: 2}},
+	} {
+		if got := parseMessageQueueKey(test.input); got != test.want {
+			t.Fatalf("parseMessageQueueKey(%q) = %#v, want %#v", test.input, got, test.want)
+		}
+	}
+}
+
 func TestConsumerAssignmentsAreSortedAndKeepSubscriptionDetails(t *testing.T) {
 	assignments := consumerAssignments(&admin.ConsumerConnection{SubscriptionTable: map[string]*admin.SubscriptionData{
 		"orders": {Topic: "orders", SubString: "paid || shipped", ExpressionType: "TAG"},

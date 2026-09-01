@@ -29,10 +29,11 @@ const (
 	maxPeekMessages     = 100
 	maxMessageBodyBytes = 64 * 1024
 	maxStatsPartitions  = 2048
+	maxLagPartitions    = 4096
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group", "mq_get_consumer_lag",
 }
 
 type rpcRequest struct {
@@ -145,6 +146,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
 		return a.describeConsumerGroup(params)
+	case "mq_get_consumer_lag":
+		return a.getConsumerLag(params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -842,6 +845,64 @@ func (a *rocketMQAgent) describeConsumerGroup(params map[string]any) (any, error
 	}, nil
 }
 
+// getConsumerLag is a read-only snapshot of one group and topic. The topic is
+// mandatory: it avoids an unbounded cross-cluster stats response and makes the
+// displayed offsets unambiguous when a group consumes multiple topics.
+func (a *rocketMQAgent) getConsumerLag(params map[string]any) (any, error) {
+	groupID, groupOK := params["groupId"].(string)
+	topic, topicOK := params["topic"].(string)
+	groupID, topic = strings.TrimSpace(groupID), strings.TrimSpace(topic)
+	if !groupOK || groupID == "" {
+		return nil, fmt.Errorf("groupId is required")
+	}
+	if !topicOK || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	stats, err := client.ExamineConsumeStatsByTopic(ctx, groupID, topic)
+	if err != nil {
+		return nil, err
+	}
+	if len(stats.OffsetTable) > maxLagPartitions {
+		return nil, fmt.Errorf("consumer lag has %d partitions; limit is %d", len(stats.OffsetTable), maxLagPartitions)
+	}
+	partitions := make([]map[string]any, 0, len(stats.OffsetTable))
+	var totalLag int64
+	for key, offset := range stats.OffsetTable {
+		if offset == nil {
+			continue
+		}
+		queue := parseMessageQueueKey(key)
+		lag := offset.BrokerOffset - offset.ConsumerOffset
+		if lag < 0 {
+			lag = 0
+		}
+		totalLag += lag
+		partitions = append(partitions, map[string]any{
+			"brokerName":    queue.BrokerName,
+			"partition":     queue.QueueID,
+			"currentOffset": offset.ConsumerOffset,
+			"endOffset":     offset.BrokerOffset,
+			"lag":           lag,
+			"lastTimestamp": offset.LastTimestamp,
+		})
+	}
+	sort.Slice(partitions, func(left, right int) bool {
+		if partitions[left]["brokerName"].(string) != partitions[right]["brokerName"].(string) {
+			return partitions[left]["brokerName"].(string) < partitions[right]["brokerName"].(string)
+		}
+		return partitions[left]["partition"].(int) < partitions[right]["partition"].(int)
+	})
+	return map[string]any{
+		"groupId": groupID, "topic": topic, "partitions": partitions, "totalLag": totalLag,
+	}, nil
+}
+
 func consumerAssignments(connection *admin.ConsumerConnection) []map[string]any {
 	if connection == nil {
 		return []map[string]any{}
@@ -890,6 +951,43 @@ func masterBrokerAddressByName(info *admin.ClusterInfo) map[string]string {
 		}
 	}
 	return masters
+}
+
+type parsedMessageQueue struct {
+	Topic      string `json:"topic"`
+	BrokerName string `json:"brokerName"`
+	QueueID    int    `json:"queueId"`
+}
+
+func parseMessageQueueKey(value string) parsedMessageQueue {
+	value = strings.TrimSpace(value)
+	var queue parsedMessageQueue
+	if strings.HasPrefix(value, "{") && json.Unmarshal([]byte(value), &queue) == nil {
+		return queue
+	}
+	if strings.HasPrefix(value, "MessageQueue [") && strings.HasSuffix(value, "]") {
+		for _, field := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(value, "MessageQueue ["), "]"), ",") {
+			keyValue := strings.SplitN(strings.TrimSpace(field), "=", 2)
+			if len(keyValue) != 2 {
+				continue
+			}
+			switch keyValue[0] {
+			case "topic":
+				queue.Topic = keyValue[1]
+			case "brokerName":
+				queue.BrokerName = keyValue[1]
+			case "queueId":
+				queue.QueueID, _ = strconv.Atoi(keyValue[1])
+			}
+		}
+		return queue
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) >= 3 {
+		queueID, _ := strconv.Atoi(parts[len(parts)-1])
+		return parsedMessageQueue{Topic: strings.Join(parts[:len(parts)-2], "-"), BrokerName: parts[len(parts)-2], QueueID: queueID}
+	}
+	return queue
 }
 
 func jsonInt(value any, fallback int) int {

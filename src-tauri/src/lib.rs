@@ -185,6 +185,7 @@ pub fn run() {
             commands::mq::query_rocketmq_messages_by_time,
             commands::mq::list_rocketmq_consumer_groups,
             commands::mq::get_rocketmq_consumer_group,
+            commands::mq::get_rocketmq_consumer_lag,
             commands::mq::disconnect_rocketmq_workspace,
             commands::database::get_database_driver_store_info,
             commands::database::prune_database_driver_cache,

@@ -14,6 +14,7 @@ import {
   type RocketMqAcls,
   type RocketMqConsumerGroupDetail,
   type RocketMqConsumerGroups,
+  type RocketMqConsumerLag,
   type RocketMqMessagePreview,
   type RocketMqTopicConfig,
   type RocketMqTopicDetail,
@@ -67,8 +68,12 @@ export function RocketMqWorkspace() {
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [groupDetail, setGroupDetail] =
     useState<RocketMqConsumerGroupDetail | null>(null);
+  const [consumerLag, setConsumerLag] = useState<RocketMqConsumerLag | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [consumerLagLoading, setConsumerLagLoading] = useState(false);
   const [topicDetailLoading, setTopicDetailLoading] = useState(false);
   const [messagePreviewLoading, setMessagePreviewLoading] = useState(false);
   const [topicConfigLoading, setTopicConfigLoading] = useState(false);
@@ -102,6 +107,7 @@ export function RocketMqWorkspace() {
   useEffect(() => {
     setSelectedGroup(null);
     setGroupDetail(null);
+    setConsumerLag(null);
     setSelectedTopic(null);
     setTopicDetail(null);
     setMessagePreview(null);
@@ -134,6 +140,7 @@ export function RocketMqWorkspace() {
     async (groupId: string) => {
       if (!connection) return;
       setSelectedGroup(groupId);
+      setConsumerLag(null);
       setDetailLoading(true);
       try {
         setGroupDetail(
@@ -144,6 +151,24 @@ export function RocketMqWorkspace() {
         setError(failureMessage(cause));
       } finally {
         setDetailLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const loadConsumerLag = useCallback(
+    async (groupId: string, topic: string) => {
+      if (!connection) return;
+      setConsumerLagLoading(true);
+      try {
+        setConsumerLag(
+          await rocketMqService.getConsumerLag(connection.id, groupId, topic),
+        );
+      } catch (cause) {
+        setConsumerLag(null);
+        setError(failureMessage(cause));
+      } finally {
+        setConsumerLagLoading(false);
       }
     },
     [connection],
@@ -330,6 +355,9 @@ export function RocketMqWorkspace() {
                   detail={groupDetail}
                   loading={detailLoading}
                   onSelect={loadGroup}
+                  lag={consumerLag}
+                  lagLoading={consumerLagLoading}
+                  onLoadLag={loadConsumerLag}
                 />
               )}
               {section === "acl" && (
@@ -721,12 +749,18 @@ function ConsumerGroups({
   detail,
   loading,
   onSelect,
+  lag,
+  lagLoading,
+  onLoadLag,
 }: {
   groups: RocketMqConsumerGroups["groups"];
   selectedGroup: string | null;
   detail: RocketMqConsumerGroupDetail | null;
   loading: boolean;
   onSelect: (groupId: string) => void;
+  lag: RocketMqConsumerLag | null;
+  lagLoading: boolean;
+  onLoadLag: (groupId: string, topic: string) => void;
 }) {
   return (
     <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
@@ -763,7 +797,12 @@ function ConsumerGroups({
             details…
           </div>
         ) : detail ? (
-          <GroupDetail detail={detail} />
+          <GroupDetail
+            detail={detail}
+            lag={lag}
+            lagLoading={lagLoading}
+            onLoadLag={onLoadLag}
+          />
         ) : (
           <div className="flex h-full items-center justify-center text-xs wb-muted">
             <Users size={14} className="mr-2" /> Select a consumer group for
@@ -775,7 +814,22 @@ function ConsumerGroups({
   );
 }
 
-function GroupDetail({ detail }: { detail: RocketMqConsumerGroupDetail }) {
+function GroupDetail({
+  detail,
+  lag,
+  lagLoading,
+  onLoadLag,
+}: {
+  detail: RocketMqConsumerGroupDetail;
+  lag: RocketMqConsumerLag | null;
+  lagLoading: boolean;
+  onLoadLag: (groupId: string, topic: string) => void;
+}) {
+  const [lagTopic, setLagTopic] = useState("");
+  useEffect(() => {
+    setLagTopic(detail.assignments[0]?.topic || "");
+  }, [detail.assignments, detail.groupId]);
+
   return (
     <div className="space-y-4">
       <div>
@@ -785,6 +839,62 @@ function GroupDetail({ detail }: { detail: RocketMqConsumerGroupDetail }) {
           <span>{detail.messageModel || "model unavailable"}</span>
           <span>{detail.members.length} active members</span>
         </div>
+      </div>
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-xs font-medium">Consumer lag</h3>
+          <div className="flex items-center gap-2">
+            <select
+              value={lagTopic}
+              onChange={(event) => setLagTopic(event.target.value)}
+              disabled={detail.assignments.length === 0 || lagLoading}
+              className="h-7 max-w-48 rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] px-2 text-[11px] disabled:opacity-50"
+              aria-label="RocketMQ lag topic"
+            >
+              {detail.assignments.length === 0 ? (
+                <option value="">No subscribed topic</option>
+              ) : (
+                detail.assignments.map((assignment) => (
+                  <option key={assignment.topic} value={assignment.topic}>
+                    {assignment.topic}
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              type="button"
+              disabled={!lagTopic || lagLoading}
+              onClick={() => void onLoadLag(detail.groupId, lagTopic)}
+              className="flex h-7 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+            >
+              {lagLoading && <Loader2 size={12} className="animate-spin" />}
+              Load lag
+            </button>
+          </div>
+        </div>
+        {lag ? (
+          <>
+            <div className="mb-2 text-[11px] wb-muted">
+              {lag.totalLag.toLocaleString()} messages behind on {lag.topic}
+            </div>
+            <ResourceTable
+              headers={["Broker", "Partition", "Current", "End", "Lag"]}
+              rows={lag.partitions.map((partition) => [
+                partition.brokerName,
+                String(partition.partition),
+                String(partition.currentOffset),
+                String(partition.endOffset),
+                String(partition.lag),
+              ])}
+              empty="No consumer offsets were reported for this topic."
+            />
+          </>
+        ) : (
+          <div className="rounded-[5px] border border-dashed border-[hsl(var(--wb-border-subtle))] p-3 text-xs wb-muted">
+            Read-only offset snapshot. Resetting offsets remains unavailable
+            until a dedicated approval boundary is implemented.
+          </div>
+        )}
       </div>
       <div>
         <h3 className="mb-2 text-xs font-medium">Subscriptions</h3>

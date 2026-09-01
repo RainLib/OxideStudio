@@ -49,6 +49,7 @@ describe("RocketMQ workspace service", () => {
       limit: 100,
     });
     await rocketMqService.getConsumerGroup("rocket-1", "order-workers");
+    await rocketMqService.getConsumerLag("rocket-1", "order-workers", "orders");
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
       1,
       "connect_rocketmq_workspace",
@@ -118,6 +119,15 @@ describe("RocketMQ workspace service", () => {
       {
         connectionId: "rocket-1",
         groupId: "order-workers",
+      },
+    );
+    expect(invokeRawCommand).toHaveBeenNthCalledWith(
+      12,
+      "get_rocketmq_consumer_lag",
+      {
+        connectionId: "rocket-1",
+        groupId: "order-workers",
+        topic: "orders",
       },
     );
   });

@@ -129,6 +129,20 @@ export type RocketMqConsumerGroupDetail = {
   }>;
 };
 
+export type RocketMqConsumerLag = {
+  groupId: string;
+  topic: string;
+  partitions: Array<{
+    brokerName: string;
+    partition: number;
+    currentOffset: number;
+    endOffset: number;
+    lag: number;
+    lastTimestamp: number;
+  }>;
+  totalLag: number;
+};
+
 export const rocketMqService = {
   probeNameServers: (namesrvAddr: string) =>
     invokeCommand<{ endpoints: string[] }>("probe_rocketmq_nameservers", {
@@ -217,6 +231,12 @@ export const rocketMqService = {
         groupId,
       },
     ),
+  getConsumerLag: (connectionId: string, groupId: string, topic: string) =>
+    invokeRawCommand<RocketMqConsumerLag>("get_rocketmq_consumer_lag", {
+      connectionId,
+      groupId,
+      topic,
+    }),
   disconnect: (connectionId: string) =>
     invokeRawCommand<void>("disconnect_rocketmq_workspace", { connectionId }),
 };
