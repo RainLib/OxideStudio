@@ -5,7 +5,7 @@ import {
   revealLspProjectDefinition,
 } from "@/lib/lspNavigation";
 import {
-  findEnclosingDollarQuoteBodyStart,
+  findEnclosingDollarQuoteBodyStartInText,
   sqlInsertValueHints,
 } from "@/lib/sqlInsertValueHints";
 import {
@@ -71,6 +71,12 @@ export function registerLspCoreProviders({
     version: number;
     resultId?: string;
     data: Uint32Array;
+  } | null = null;
+  let dollarQuoteBodyCache: {
+    model: any;
+    version: number;
+    rangeStart: number;
+    bodyStart: number | null;
   } | null = null;
 
   disposables.push(
@@ -292,11 +298,7 @@ export function registerLspCoreProviders({
     monaco.languages.registerCodeActionProvider(
       editorLanguageId,
       {
-        provideCodeActions: async (
-          model: any,
-          range: any,
-          context: any,
-        ) => {
+        provideCodeActions: async (model: any, range: any, context: any) => {
           if (!handlesModel(model)) {
             return emptyDisposableResult({ actions: [] });
           }
@@ -514,9 +516,8 @@ export function registerLspCoreProviders({
         // metadata; this local path remains useful while schema sync is pending.
         const provisionalScanStart = Math.max(0, rangeStart - 32 * 1024);
         const scanEnd = Math.min(model.getValueLength(), rangeEnd + 32 * 1024);
-        const provisionalScanStartPosition = model.getPositionAt(
-          provisionalScanStart,
-        );
+        const provisionalScanStartPosition =
+          model.getPositionAt(provisionalScanStart);
         const scanStart =
           provisionalScanStartPosition.lineNumber < range.startLineNumber
             ? model.getOffsetAt({
@@ -533,11 +534,48 @@ export function registerLspCoreProviders({
           endColumn: scanEndPosition.column,
         };
         const scanText = model.getValueInRange(scanRange);
-        const localRangeStart = Math.max(0, rangeStart - scanStart);
-        const routineBodyStart = findEnclosingDollarQuoteBodyStart(
-          scanText,
-          localRangeStart,
-        );
+        const cachedDollarQuoteBody = dollarQuoteBodyCache;
+        let documentDollarQuoteBodyStart: number | null;
+        if (
+          modelVersion !== undefined &&
+          cachedDollarQuoteBody !== null &&
+          cachedDollarQuoteBody.model === model &&
+          cachedDollarQuoteBody.version === modelVersion &&
+          cachedDollarQuoteBody.rangeStart === rangeStart
+        ) {
+          documentDollarQuoteBodyStart = cachedDollarQuoteBody.bodyStart;
+        } else {
+          documentDollarQuoteBodyStart =
+            findEnclosingDollarQuoteBodyStartInText(
+              {
+                length: model.getValueLength(),
+                sliceString: (from, to) => {
+                  const start = model.getPositionAt(from);
+                  const end = model.getPositionAt(to);
+                  return model.getValueInRange({
+                    startLineNumber: start.lineNumber,
+                    startColumn: start.column,
+                    endLineNumber: end.lineNumber,
+                    endColumn: end.column,
+                  });
+                },
+              },
+              rangeStart,
+            );
+        }
+        if (modelVersion !== undefined) {
+          dollarQuoteBodyCache = {
+            model,
+            version: modelVersion,
+            rangeStart,
+            bodyStart: documentDollarQuoteBodyStart,
+          };
+        }
+        const routineBodyStart =
+          documentDollarQuoteBodyStart === null ||
+          documentDollarQuoteBodyStart < scanStart
+            ? null
+            : documentDollarQuoteBodyStart - scanStart;
         const fallbackText =
           routineBodyStart === null
             ? scanText
@@ -545,7 +583,9 @@ export function registerLspCoreProviders({
         const fallbackOffset = scanStart + (routineBodyStart ?? 0);
         const insertValueHints = sqlInsertValueHints(fallbackText)
           .map((hint) => ({ ...hint, offset: hint.offset + fallbackOffset }))
-          .filter((hint) => hint.offset >= rangeStart && hint.offset <= rangeEnd)
+          .filter(
+            (hint) => hint.offset >= rangeStart && hint.offset <= rangeEnd,
+          )
           .map((hint) => ({
             position: model.getPositionAt(hint.offset),
             label: `${hint.column}:`,

@@ -44,7 +44,10 @@ function coordinatorFixture() {
     formatDocument: vi.fn(async () => []),
     formatRange: vi.fn(async () => []),
     getSignatureHelp: vi.fn(async () => null),
-    getSemanticTokens: vi.fn(async () => ({ resultId: "tokens-1", data: [0, 0, 4, 1, 0] })),
+    getSemanticTokens: vi.fn(async () => ({
+      resultId: "tokens-1",
+      data: [0, 0, 4, 1, 0],
+    })),
     getInlayHints: vi.fn(async () => []),
   } as unknown as LspClient;
 
@@ -149,8 +152,16 @@ describe("LSP core provider coordinator", () => {
     const provider = providers.get("semanticTokens");
     const token = { isCancellationRequested: false };
 
-    const first = await provider.provideDocumentSemanticTokens(model, null, token);
-    const cached = await provider.provideDocumentSemanticTokens(model, first.resultId, token);
+    const first = await provider.provideDocumentSemanticTokens(
+      model,
+      null,
+      token,
+    );
+    const cached = await provider.provideDocumentSemanticTokens(
+      model,
+      first.resultId,
+      token,
+    );
     expect(lspClient.getSemanticTokens).toHaveBeenCalledTimes(1);
     expect(Array.from(cached.data)).toEqual([0, 0, 4, 1, 0]);
     expect(cached.data).not.toBe(first.data);
@@ -175,7 +186,10 @@ describe("LSP core provider coordinator", () => {
     const model = {
       uri: { toString: () => "oxide://query/active.postgres.sql" },
       getOffsetAt: ({ column }: { column: number }) => column - 1,
-      getPositionAt: (offset: number) => ({ lineNumber: 1, column: offset + 1 }),
+      getPositionAt: (offset: number) => ({
+        lineNumber: 1,
+        column: offset + 1,
+      }),
       getValueLength: () => text.length,
       getValueInRange,
     };
@@ -188,11 +202,26 @@ describe("LSP core provider coordinator", () => {
       endColumn: text.length + 1,
     });
 
-    expect(getValueInRange).toHaveBeenCalledTimes(1);
-    expect(getValueInRange.mock.calls[0]?.[0].startColumn).toBe(
-      prefix.length - 32 * 1024 + 1,
-    );
-    expect(result.hints.map((hint: any) => hint.label)).toEqual(["id:", "name:"]);
+    // The local INSERT parse remains viewport-bounded. A separate bounded
+    // document scan may inspect dollar-quoted routine state before that range.
+    expect(getValueInRange).toHaveBeenCalledTimes(2);
+    expect(getValueInRange.mock.calls).toContainEqual([
+      expect.objectContaining({
+        startColumn: prefix.length - 32 * 1024 + 1,
+      }),
+    ]);
+    expect(
+      Math.max(
+        ...getValueInRange.mock.calls.map(
+          ([callRange]: [{ startColumn: number; endColumn: number }]) =>
+            callRange.endColumn - callRange.startColumn,
+        ),
+      ),
+    ).toBeLessThanOrEqual(64 * 1024);
+    expect(result.hints.map((hint: any) => hint.label)).toEqual([
+      "id:",
+      "name:",
+    ]);
     expect(result.hints[0]?.position.column).toBe(valueOffset + 1);
   });
 
@@ -254,8 +283,13 @@ describe("LSP core provider coordinator", () => {
       endColumn: lines[2]!.length + 1,
     });
 
-    expect(result.hints.map((hint: any) => hint.label)).toEqual(["id:", "name:"]);
-    expect(result.hints.map((hint: any) => hint.position.lineNumber)).toEqual([3, 3]);
+    expect(result.hints.map((hint: any) => hint.label)).toEqual([
+      "id:",
+      "name:",
+    ]);
+    expect(result.hints.map((hint: any) => hint.position.lineNumber)).toEqual([
+      3, 3,
+    ]);
   });
 
   it("drops stale signature and inlay responses after the model changes", async () => {
@@ -277,16 +311,20 @@ describe("LSP core provider coordinator", () => {
       uri: { toString: () => "oxide://query/active.postgres.sql" },
       getVersionId: () => version,
     };
-    const signature = providers.get("signature").provideSignatureHelp(
-      model,
-      { lineNumber: 1, column: 4 },
-      { isCancellationRequested: false },
-    );
-    const hints = providers.get("inlayHints").provideInlayHints(
-      model,
-      { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
-      { isCancellationRequested: false },
-    );
+    const signature = providers
+      .get("signature")
+      .provideSignatureHelp(
+        model,
+        { lineNumber: 1, column: 4 },
+        { isCancellationRequested: false },
+      );
+    const hints = providers
+      .get("inlayHints")
+      .provideInlayHints(
+        model,
+        { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
+        { isCancellationRequested: false },
+      );
     version = 2;
     resolveSignature({ signatures: [{ label: "count(value)" }] });
     resolveHints([]);
@@ -314,17 +352,21 @@ describe("LSP core provider coordinator", () => {
       uri: { toString: () => "oxide://query/active.postgres.sql" },
       getVersionId: () => version,
     };
-    const documentEdits = providers.get("format").provideDocumentFormattingEdits(
-      model,
-      { tabSize: 2, insertSpaces: true },
-      { isCancellationRequested: false },
-    );
-    const rangeEdits = providers.get("rangeFormat").provideDocumentRangeFormattingEdits(
-      model,
-      { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
-      { tabSize: 2, insertSpaces: true },
-      { isCancellationRequested: false },
-    );
+    const documentEdits = providers
+      .get("format")
+      .provideDocumentFormattingEdits(
+        model,
+        { tabSize: 2, insertSpaces: true },
+        { isCancellationRequested: false },
+      );
+    const rangeEdits = providers
+      .get("rangeFormat")
+      .provideDocumentRangeFormattingEdits(
+        model,
+        { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 4 },
+        { tabSize: 2, insertSpaces: true },
+        { isCancellationRequested: false },
+      );
     version = 4;
     resolveDocument([{ newText: "SELECT 1", range: {} }]);
     resolveRange([{ newText: "SELECT 1", range: {} }]);

@@ -215,7 +215,7 @@ import { lspClient } from "@/services/lsp";
 const items = await lspClient.getCompletions(
   "file:///query.sql",
   10, // line (0-indexed)
-  15 // character (0-indexed)
+  15, // character (0-indexed)
 );
 ```
 
@@ -289,6 +289,13 @@ Unicode cached metadata, MongoDB automatic-trigger classification, Elasticsearch
 quoted-field and ES 6/7/8 REST completion, WHERE virtual documents/fuzzy
 ranking/keyboard acceptance, table-tab schema mappings, stale completion rejection,
 and didChange deduplication.
+
+INSERT value hints also retain their local, explicit-column fallback inside a
+PostgreSQL dollar-quoted routine body. The editor reads the document in bounded
+64 KiB chunks to locate an enclosing `$tag$` even when its opening delimiter is
+outside the visible 32 KiB hint window; repeated requests for the same Monaco
+document version and range reuse that result. This preserves hint correctness for
+large procedures without materializing the complete editor text.
 
 Run the protocol-level bundled LSP test after rebuilding `src-tauri/binaries/sql-lsp`:
 

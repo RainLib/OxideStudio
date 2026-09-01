@@ -6,6 +6,15 @@ export type SqlInsertValueHint = {
   column: string;
 };
 
+/** Minimal read-only text contract shared by string and editor-model scans. */
+export type SqlTextSlice = {
+  length: number;
+  sliceString(from: number, to: number): string;
+};
+
+const DOLLAR_QUOTE_SCAN_CHUNK_BYTES = 64 * 1024;
+const MAX_DOLLAR_QUOTE_TAG_BYTES = 129;
+
 function dollarQuoteTagAt(sql: string, index: number, to: number) {
   if (sql[index] !== "$") return null;
   const candidate = sql.slice(index, Math.min(to, index + 129));
@@ -21,73 +30,137 @@ export function findEnclosingDollarQuoteBodyStart(
   sql: string,
   position: number,
 ) {
-  const to = Math.max(0, Math.min(position, sql.length));
+  return findEnclosingDollarQuoteBodyStartInText(
+    {
+      length: sql.length,
+      sliceString: (from, to) => sql.slice(from, to),
+    },
+    position,
+  );
+}
+
+/**
+ * Return the first character inside an enclosing PostgreSQL dollar-quoted
+ * body without materializing an editor's complete document. The scan keeps a
+ * single bounded chunk and asks for a small lookahead only when a dollar tag
+ * crosses that chunk's boundary.
+ */
+export function findEnclosingDollarQuoteBodyStartInText(
+  text: SqlTextSlice,
+  position: number,
+) {
+  const to = Math.max(0, Math.min(position, text.length));
   let index = 0;
   let activeTag: string | null = null;
   let bodyStart = -1;
   let quote: string | null = null;
   let lineComment = false;
   let blockComment = false;
+
   while (index < to) {
-    if (activeTag) {
-      if (sql.startsWith(activeTag, index)) {
-        index += activeTag.length;
-        activeTag = null;
-        bodyStart = -1;
-      } else {
-        index += 1;
-      }
-      continue;
-    }
-    if (lineComment) {
-      if (sql[index] === "\n") lineComment = false;
-      index += 1;
-      continue;
-    }
-    if (blockComment) {
-      if (sql.startsWith("*/", index)) {
-        index += 2;
-        blockComment = false;
-      } else {
-        index += 1;
-      }
-      continue;
-    }
-    if (quote) {
-      if (sql[index] === quote) {
-        if (sql[index + 1] === quote) index += 2;
-        else {
-          index += 1;
-          quote = null;
+    const chunkEnd = Math.min(to, index + DOLLAR_QUOTE_SCAN_CHUNK_BYTES);
+    const chunk = text.sliceString(index, chunkEnd);
+    let local = 0;
+    while (local < chunk.length) {
+      const absolute = index + local;
+      const char = chunk[local] || "";
+      if (activeTag) {
+        if (
+          absolute + activeTag.length <= to &&
+          text.sliceString(absolute, absolute + activeTag.length) === activeTag
+        ) {
+          local += activeTag.length;
+          activeTag = null;
+          bodyStart = -1;
+        } else {
+          local += 1;
         }
-      } else {
-        index += 1;
+        continue;
       }
-      continue;
+      if (lineComment) {
+        if (char === "\n") lineComment = false;
+        local += 1;
+        continue;
+      }
+      if (blockComment) {
+        if (
+          char === "*" &&
+          absolute + 2 <= to &&
+          (local + 2 <= chunk.length
+            ? chunk.slice(local, local + 2)
+            : text.sliceString(absolute, absolute + 2)) === "*/"
+        ) {
+          local += 2;
+          blockComment = false;
+        } else {
+          local += 1;
+        }
+        continue;
+      }
+      if (quote) {
+        if (char === quote) {
+          if (
+            absolute + 2 <= to &&
+            (local + 2 <= chunk.length
+              ? chunk.slice(local, local + 2)
+              : text.sliceString(absolute, absolute + 2)) === `${quote}${quote}`
+          ) {
+            local += 2;
+          } else {
+            local += 1;
+            quote = null;
+          }
+        } else {
+          local += 1;
+        }
+        continue;
+      }
+      if (
+        char === "-" &&
+        absolute + 2 <= to &&
+        (local + 2 <= chunk.length
+          ? chunk.slice(local, local + 2)
+          : text.sliceString(absolute, absolute + 2)) === "--"
+      ) {
+        local += 2;
+        lineComment = true;
+        continue;
+      }
+      if (
+        char === "/" &&
+        absolute + 2 <= to &&
+        (local + 2 <= chunk.length
+          ? chunk.slice(local, local + 2)
+          : text.sliceString(absolute, absolute + 2)) === "/*"
+      ) {
+        local += 2;
+        blockComment = true;
+        continue;
+      }
+      if (["'", '"', "`", "["].includes(char)) {
+        quote = char === "[" ? "]" : char;
+        local += 1;
+        continue;
+      }
+      if (char === "$") {
+        const tag = dollarQuoteTagAt(
+          text.sliceString(
+            absolute,
+            Math.min(to, absolute + MAX_DOLLAR_QUOTE_TAG_BYTES),
+          ),
+          0,
+          MAX_DOLLAR_QUOTE_TAG_BYTES,
+        );
+        if (tag) {
+          activeTag = tag;
+          bodyStart = absolute + tag.length;
+          local += tag.length;
+          continue;
+        }
+      }
+      local += 1;
     }
-    if (sql.startsWith("--", index)) {
-      index += 2;
-      lineComment = true;
-      continue;
-    }
-    if (sql.startsWith("/*", index)) {
-      index += 2;
-      blockComment = true;
-      continue;
-    }
-    if (["'", '"', "`", "["].includes(sql[index] || "")) {
-      quote = sql[index] === "[" ? "]" : sql[index] || null;
-      index += 1;
-      continue;
-    }
-    const tag = dollarQuoteTagAt(sql, index, to);
-    if (tag) {
-      activeTag = tag;
-      bodyStart = index + tag.length;
-      index = bodyStart;
-      continue;
-    }
-    index += 1;
+    index = chunkEnd;
   }
   return activeTag ? bodyStart : null;
 }
@@ -197,10 +270,15 @@ function unquoteIdentifier(value: string) {
   if (trimmed.length < 2) return trimmed;
   const opener = trimmed[0];
   const closer = opener === "[" ? "]" : opener;
-  if (!['"', "`", "["].includes(opener || "") || trimmed.charAt(trimmed.length - 1) !== closer) {
+  if (
+    !['"', "`", "["].includes(opener || "") ||
+    trimmed.charAt(trimmed.length - 1) !== closer
+  ) {
     return trimmed;
   }
-  return trimmed.slice(1, -1).replace(new RegExp(`${closer}${closer}`, "g"), closer);
+  return trimmed
+    .slice(1, -1)
+    .replace(new RegExp(`${closer}${closer}`, "g"), closer);
 }
 
 function explicitColumns(sql: string, from: number, to: number) {
@@ -208,7 +286,7 @@ function explicitColumns(sql: string, from: number, to: number) {
   let start = from;
   let quote: string | null = null;
   for (let index = from; index <= to; index += 1) {
-    const char = index === to ? "," : (sql[index] || ",");
+    const char = index === to ? "," : sql[index] || ",";
     if (quote) {
       if (char === quote) {
         if (sql[index + 1] === quote) index += 1;
@@ -230,7 +308,12 @@ function explicitColumns(sql: string, from: number, to: number) {
   return columns;
 }
 
-function nextValueStart(sql: string, maskedSql: string, from: number, to: number) {
+function nextValueStart(
+  sql: string,
+  maskedSql: string,
+  from: number,
+  to: number,
+) {
   for (let index = from; index < to; index += 1) {
     if (!/\s/.test(maskedSql[index] || "")) return index;
     if (["'", '"', "`", "["].includes(sql[index] || "")) return index;
@@ -392,7 +475,10 @@ function selectProjectionStarts(
       depth = Math.max(0, depth - 1);
     } else if (char === "," && depth === selectDepth) {
       const start = nextValueStart(sql, maskedSql, expressionStart, cursor);
-      if (start < 0 || projectionIsWildcard(maskedSql, expressionStart, cursor)) {
+      if (
+        start < 0 ||
+        projectionIsWildcard(maskedSql, expressionStart, cursor)
+      ) {
         return [];
       }
       starts.push(start);
