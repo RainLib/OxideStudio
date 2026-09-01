@@ -156,6 +156,23 @@ export type RocketMqConsumerLag = {
   totalLag: number;
 };
 
+export type RocketMqConsumerGroupConfig = {
+  groupId: string;
+  configs: Array<{
+    brokerName: string;
+    groupId: string;
+    consumeEnabled: boolean;
+    consumeFromMinEnabled: boolean;
+    consumeBroadcastEnabled: boolean;
+    retryQueueNums: number;
+    retryMaxTimes: number;
+    brokerId: number;
+    whichBrokerWhenConsumeSlowly: number;
+    notifyConsumerIdsChangedEnabled: boolean;
+  }>;
+  unavailableBrokers: string[];
+};
+
 export const rocketMqService = {
   probeNameServers: (namesrvAddr: string) =>
     invokeCommand<{ endpoints: string[] }>("probe_rocketmq_nameservers", {
@@ -247,6 +264,11 @@ export const rocketMqService = {
         connectionId,
         groupId,
       },
+    ),
+  getConsumerGroupConfig: (connectionId: string, groupId: string) =>
+    invokeRawCommand<RocketMqConsumerGroupConfig>(
+      "get_rocketmq_consumer_group_config",
+      { connectionId, groupId },
     ),
   getConsumerLag: (connectionId: string, groupId: string, topic: string) =>
     invokeRawCommand<RocketMqConsumerLag>("get_rocketmq_consumer_lag", {

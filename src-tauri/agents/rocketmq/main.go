@@ -34,7 +34,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_list_producers", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group", "mq_get_consumer_lag",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_list_producers", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group", "mq_get_consumer_group_config", "mq_get_consumer_lag",
 }
 
 type rpcRequest struct {
@@ -149,6 +149,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
 		return a.describeConsumerGroup(params)
+	case "mq_get_consumer_group_config":
+		return a.getConsumerGroupConfig(params)
 	case "mq_get_consumer_lag":
 		return a.getConsumerLag(params)
 	default:
@@ -898,6 +900,62 @@ func (a *rocketMQAgent) describeConsumerGroup(params map[string]any) (any, error
 		"members":          members,
 		"assignments":      assignments,
 	}, nil
+}
+
+// getConsumerGroupConfig exposes per-master configuration rather than picking
+// an arbitrary broker response. This keeps replication drift visible while
+// retaining a strictly read-only Console surface.
+func (a *rocketMQAgent) getConsumerGroupConfig(params map[string]any) (any, error) {
+	groupID, ok := params["groupId"].(string)
+	groupID = strings.TrimSpace(groupID)
+	if !ok || groupID == "" {
+		return nil, fmt.Errorf("groupId is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	info, err := client.ExamineBrokerClusterInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	masters := masterBrokerAddressByName(info)
+	configs := make([]map[string]any, 0, len(masters))
+	unavailable := make([]string, 0)
+	for _, brokerName := range sortedKeys(masters) {
+		groupConfig, configErr := client.ExamineSubscriptionGroupConfig(ctx, masters[brokerName], groupID)
+		if configErr != nil {
+			unavailable = append(unavailable, brokerName)
+			continue
+		}
+		configs = append(configs, subscriptionGroupConfigResult(brokerName, groupID, groupConfig))
+	}
+	if len(configs) == 0 && len(masters) > 0 {
+		return nil, fmt.Errorf("consumer group config is unavailable on all master brokers")
+	}
+	return map[string]any{
+		"groupId": groupID, "configs": configs, "unavailableBrokers": unavailable,
+	}, nil
+}
+
+func subscriptionGroupConfigResult(brokerName, fallbackGroupID string, value *admin.SubscriptionGroupConfig) map[string]any {
+	if value == nil {
+		value = &admin.SubscriptionGroupConfig{GroupName: fallbackGroupID}
+	}
+	return map[string]any{
+		"brokerName":                      brokerName,
+		"groupId":                         valueOrDefault(value.GroupName, fallbackGroupID),
+		"consumeEnabled":                  value.ConsumeEnable,
+		"consumeFromMinEnabled":           value.ConsumeFromMinEnable,
+		"consumeBroadcastEnabled":         value.ConsumeBroadcastEnable,
+		"retryQueueNums":                  value.RetryQueueNums,
+		"retryMaxTimes":                   value.RetryMaxTimes,
+		"brokerId":                        value.BrokerId,
+		"whichBrokerWhenConsumeSlowly":    value.WhichBrokerWhenConsumeSlowly,
+		"notifyConsumerIdsChangedEnabled": value.NotifyConsumerIdsChangedEnable,
+	}
 }
 
 // getConsumerLag is a read-only snapshot of one group and topic. The topic is

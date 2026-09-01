@@ -294,6 +294,22 @@ pub async fn get_rocketmq_consumer_group(
 }
 
 #[tauri::command]
+pub async fn get_rocketmq_consumer_group_config(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+    group_id: String,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_get_consumer_group_config",
+            serde_json::json!({ "groupId": group_id }),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_rocketmq_consumer_lag(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,

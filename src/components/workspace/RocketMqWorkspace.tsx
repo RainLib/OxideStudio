@@ -13,6 +13,7 @@ import {
   type RocketMqCluster,
   type RocketMqAcls,
   type RocketMqConsumerGroupDetail,
+  type RocketMqConsumerGroupConfig,
   type RocketMqConsumerGroups,
   type RocketMqConsumerLag,
   type RocketMqMessagePreview,
@@ -74,9 +75,13 @@ export function RocketMqWorkspace() {
   const [consumerLag, setConsumerLag] = useState<RocketMqConsumerLag | null>(
     null,
   );
+  const [consumerGroupConfig, setConsumerGroupConfig] =
+    useState<RocketMqConsumerGroupConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [consumerLagLoading, setConsumerLagLoading] = useState(false);
+  const [consumerGroupConfigLoading, setConsumerGroupConfigLoading] =
+    useState(false);
   const [topicDetailLoading, setTopicDetailLoading] = useState(false);
   const [messagePreviewLoading, setMessagePreviewLoading] = useState(false);
   const [topicConfigLoading, setTopicConfigLoading] = useState(false);
@@ -112,6 +117,7 @@ export function RocketMqWorkspace() {
     setSelectedGroup(null);
     setGroupDetail(null);
     setConsumerLag(null);
+    setConsumerGroupConfig(null);
     setSelectedTopic(null);
     setTopicDetail(null);
     setMessagePreview(null);
@@ -165,6 +171,7 @@ export function RocketMqWorkspace() {
       if (!connection) return;
       setSelectedGroup(groupId);
       setConsumerLag(null);
+      setConsumerGroupConfig(null);
       setDetailLoading(true);
       try {
         setGroupDetail(
@@ -193,6 +200,24 @@ export function RocketMqWorkspace() {
         setError(failureMessage(cause));
       } finally {
         setConsumerLagLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const loadConsumerGroupConfig = useCallback(
+    async (groupId: string) => {
+      if (!connection) return;
+      setConsumerGroupConfigLoading(true);
+      try {
+        setConsumerGroupConfig(
+          await rocketMqService.getConsumerGroupConfig(connection.id, groupId),
+        );
+      } catch (cause) {
+        setConsumerGroupConfig(null);
+        setError(failureMessage(cause));
+      } finally {
+        setConsumerGroupConfigLoading(false);
       }
     },
     [connection],
@@ -382,6 +407,9 @@ export function RocketMqWorkspace() {
                   lag={consumerLag}
                   lagLoading={consumerLagLoading}
                   onLoadLag={loadConsumerLag}
+                  config={consumerGroupConfig}
+                  configLoading={consumerGroupConfigLoading}
+                  onLoadConfig={loadConsumerGroupConfig}
                 />
               )}
               {section === "producers" && (
@@ -845,6 +873,9 @@ function ConsumerGroups({
   lag,
   lagLoading,
   onLoadLag,
+  config,
+  configLoading,
+  onLoadConfig,
 }: {
   groups: RocketMqConsumerGroups["groups"];
   selectedGroup: string | null;
@@ -854,6 +885,9 @@ function ConsumerGroups({
   lag: RocketMqConsumerLag | null;
   lagLoading: boolean;
   onLoadLag: (groupId: string, topic: string) => void;
+  config: RocketMqConsumerGroupConfig | null;
+  configLoading: boolean;
+  onLoadConfig: (groupId: string) => void;
 }) {
   return (
     <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
@@ -895,6 +929,9 @@ function ConsumerGroups({
             lag={lag}
             lagLoading={lagLoading}
             onLoadLag={onLoadLag}
+            config={config}
+            configLoading={configLoading}
+            onLoadConfig={onLoadConfig}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-xs wb-muted">
@@ -912,11 +949,17 @@ function GroupDetail({
   lag,
   lagLoading,
   onLoadLag,
+  config,
+  configLoading,
+  onLoadConfig,
 }: {
   detail: RocketMqConsumerGroupDetail;
   lag: RocketMqConsumerLag | null;
   lagLoading: boolean;
   onLoadLag: (groupId: string, topic: string) => void;
+  config: RocketMqConsumerGroupConfig | null;
+  configLoading: boolean;
+  onLoadConfig: (groupId: string) => void;
 }) {
   const [lagTopic, setLagTopic] = useState("");
   useEffect(() => {
@@ -932,6 +975,51 @@ function GroupDetail({
           <span>{detail.messageModel || "model unavailable"}</span>
           <span>{detail.members.length} active members</span>
         </div>
+      </div>
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-xs font-medium">Group configuration</h3>
+          <button
+            type="button"
+            disabled={configLoading}
+            onClick={() => void onLoadConfig(detail.groupId)}
+            className="flex h-7 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+          >
+            {configLoading && <Loader2 size={12} className="animate-spin" />}
+            Load config
+          </button>
+        </div>
+        {config ? (
+          <>
+            {config.unavailableBrokers.length ? (
+              <div className="mb-2 rounded-[5px] border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                Configuration was unavailable from:{" "}
+                {config.unavailableBrokers.join(", ")}
+              </div>
+            ) : null}
+            <ResourceTable
+              headers={[
+                "Broker",
+                "Enabled",
+                "Retries",
+                "Retry max",
+                "Broadcast",
+              ]}
+              rows={config.configs.map((item) => [
+                item.brokerName,
+                item.consumeEnabled ? "Yes" : "No",
+                String(item.retryQueueNums),
+                String(item.retryMaxTimes),
+                item.consumeBroadcastEnabled ? "Yes" : "No",
+              ])}
+              empty="No master broker returned this group configuration."
+            />
+          </>
+        ) : (
+          <div className="rounded-[5px] border border-dashed border-[hsl(var(--wb-border-subtle))] p-3 text-xs wb-muted">
+            Configuration is queried per master broker so drift stays visible.
+          </div>
+        )}
       </div>
       <div>
         <div className="mb-2 flex items-center justify-between gap-2">
