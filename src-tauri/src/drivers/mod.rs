@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 pub mod elasticsearch;
 pub mod external;
+pub mod influxdb3;
 pub mod mongodb;
 mod mongodb_shell;
 pub mod mysql;
@@ -53,6 +54,15 @@ pub async fn connect_driver(driver: &str, url: &str) -> Result<Box<dyn DatabaseD
             .connect()
             .await
             .context("Failed to connect to Redis")?;
+        return Ok(Box::new(driver));
+    }
+
+    if canonical_driver == "influxdb3" {
+        let mut driver = influxdb3::InfluxDb3Driver::new(url)?;
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to InfluxDB 3")?;
         return Ok(Box::new(driver));
     }
 

@@ -1,13 +1,37 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`e43e36e7a`
+> DBX 参考提交：`5d6f66777`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新增量审计（`264f5c483` → `5d6f66777`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `cb754cd0c` | 历史结果窗口切换及结果快照保留本地列过滤器 | 架构不直接适用：DBX 的修复位于 `apps/desktop/src/lib/tabs/tabResultCache.ts` 与 `queryStore.ts`，绑定 `resultRuns`；Oxide 当前每个 Query Tab 只有当前 `results`，本地过滤器保存在 tab-owned `gridState.columnFilters`，不存在历史 run/cache 解码时丢字段的路径。后续若引入历史结果窗口，必须把过滤器纳入每个 run 的不可变快照，不能继续复用 tab 单例。 |
+| `a7922b9cb` | Schema 与 Table 使用不同图标色 | 语义已有、视觉仍待增量调整：Oxide 已用不同图形区分 schema/table，且主树、跨 database 树有独立组件；尚未在所有树路径统一 DBX 的 amber schema / green table 色。DBX 位置：`apps/desktop/src/components/sidebar/TreeItem.vue`。 |
+| `440c41f5b` | SQL Server 本地临时表的结果总数查询复用原查询 session | 当前无同类调用链：DBX 的自动 Query Result `COUNT(*)` 会启动独立 count session，修复位于 `queryResultCountSession.ts` 与 `queryStore.ts`；Oxide 任意查询结果不自动生成第二条 count SQL，Table Page 总数由 Host 在同一次结构化分页请求内按需计算，因此不会跨 session 访问 `#temp`。若以后增加任意查询精确总数，必须先移植该 session 检测。 |
+| `e9a90173a` | 外部 `.sql` 文件记忆 schema，Sidebar Locate 不再回退到错误 database-as-schema | Oxide 的 Project Files 不保存文件级数据库目标，打开后使用当前 tab/workspace 上下文；SQL Library 条目则已持久化 connection/database/schema。不存在 DBX `externalSqlFileTarget` 的字段丢失，但“真实项目文件永久绑定目标”仍是产品能力差异，不能计为已对齐。DBX 位置：`externalSqlFileTarget.ts`、`jdbcDialect.ts`、`App.vue`。 |
+| `5d6f66777` | MySQL 迁移避免 FK 文案误删列，并在 structure-only + 既有目标时阻止缺列 | Oxide 不对 `SHOW CREATE TABLE` 做包含 `FOREIGN KEY` 的逐行删除，而是从结构化 constraint/index metadata 生成 reviewed post-copy DDL，因此不存在 comment/default 文案误删列的路径；“创建迁移目标”也明确拒绝既有同名表，数据传输到既有表会逐列生成映射并显式列出 source-only skipped columns。DBX 位置：`crates/dbx-core/src/transfer.rs`。真实 MySQL 5.7/8 迁移仍延期。 |
+
+### 上一增量审计（`e43e36e7a` → `264f5c483`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `4d3d64bd3`、`1aa9f0671` | PostgreSQL arbitrary-precision NUMERIC 与 CI decoder 修复 | 已对齐：bundled PostgreSQL driver 使用 `sqlx::types::BigDecimal` 解码并以十进制字符串跨 IPC，不经过 `f64`；新增 10,000 位整数及 scale 回归。DBX 位置：`crates/dbx-core/src/db/postgres.rs`。 |
+| `55611706b` | Redis 大字符串改为 bounded preview | 已对齐并增加 Host 终极边界：GET 使用 `GETRANGE` 读取 64 KiB + sentinel，并用 `STRLEN` 返回总长；大值结果带 preview/loadedBytes/totalBytes/truncated/readOnly，小值保持原字符串。DBX 位置：`crates/dbx-core/src/db/redis_driver.rs`、`RedisValueViewer.vue`。 |
+| `6588f27fb` | 独立 SSH Tunnel Test，不要求目标数据库可达 | 已对齐：Rust 对 primary/jump hosts 完成真实握手、host-key 与认证验证，Tauri command、typed service 和 Connection Form 均有独立测试入口。DBX 位置：`crates/dbx-core/src/connection.rs`、`ConnectionDialog.vue`。 |
+| `264f5c483` | InfluxDB 3 Core HTTP SQL engine | 逻辑对齐阶段已实现，等待本阶段全量回归与提交：新增 native `POST /api/v3/query_sql`、database/table/column metadata、Bearer token、HTTP/HTTPS、只读 capability、N+1 行上限及 32 MiB streamed response guard；连接测试走真实 query endpoint。DBX 位置：`crates/dbx-core/src/db/influxdb3_driver.rs`、`ConnectionDialog.vue`。真实 InfluxDB 3 Core/Enterprise 验证延期。 |
+| `70d7a78c6` | Danger dialog 重开时保护 selection/focus | 架构不直接适用：Oxide 使用同步原生 `window.confirm`，没有 DBX animated dialog 的 reopen lifecycle；Monaco 的 pointer-down frame snapshot 仍需最终 WebView 验证。 |
+| `f19439ad7` | Loading mask 只覆盖正在执行的历史 result run | 架构不直接适用：Oxide 尚无 DBX `resultRuns` 历史结果窗口，只有 tab 当前执行结果；mask 绑定当前 tab `isExecuting`。引入历史 run 时必须增加 executing-run identity。 |
+| `1e75a7822` | Kingbase timezoneless datetime 不做 UTC 转换 | 仍是正式 Kingbase signed package 的缺口；实现位于 DBX `agents/drivers/kingbase-go/main.go`，不能在 Host 用产品名分支伪装完成。 |
+| `613c4f7ca` | IoTDB 1.3 aggregate columns 与 `max_time` 格式 | 仍是正式 IoTDB signed package 的缺口；实现位于 DBX `agents/drivers/iotdb/query.go` 与 vendored IoTDB client，需 package conformance evidence。 |
+| `7f9e35d1e` | RocketMQ consumer group 跨页查找 | 仍是 MQ 专用 package/工作台缺口；DBX 位置：`crates/dbx-core/src/mq/adapters/rocketmq.rs`、`SubscriptionsPanel.vue`。Oxide Host 不应把它误归为 SQL/通用 HTTP driver。 |
 
 ### 最新增量审计（`8be503bf4` → `e43e36e7a`）
 

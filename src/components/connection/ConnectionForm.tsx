@@ -478,6 +478,7 @@ export function ConnectionForm({
   const showConnectionUrl = shouldShowConnectionUrl(capabilities.dataModel);
   const fileDriver = selectedConnection.driver.toLowerCase();
   const isRemoteSqlite = fileDriver === "sqlite";
+  const isInfluxDb3 = fileDriver === "influxdb3";
   const fileExtension =
     fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
   const formSections: ReadonlyArray<readonly [FormSection, string]> =
@@ -1380,21 +1381,25 @@ export function ConnectionForm({
 
               {!isFileBased && (
               <>
-              <label className={labelClass} htmlFor="connection-user">
-                User
-              </label>
-              <input
-                id="connection-user"
-                value={selectedConnection.user || ""}
-                onChange={(event) =>
-                  updateField("user", event.target.value, true)
-                }
-                className={fieldClass}
-                autoComplete="off"
-              />
+              {!isInfluxDb3 && (
+                <>
+                  <label className={labelClass} htmlFor="connection-user">
+                    User
+                  </label>
+                  <input
+                    id="connection-user"
+                    value={selectedConnection.user || ""}
+                    onChange={(event) =>
+                      updateField("user", event.target.value, true)
+                    }
+                    className={fieldClass}
+                    autoComplete="off"
+                  />
+                </>
+              )}
 
               <label className={labelClass} htmlFor="connection-password">
-                Password
+                {isInfluxDb3 ? "API token" : "Password"}
               </label>
               <div className="relative">
                 <input
@@ -1406,6 +1411,7 @@ export function ConnectionForm({
                   }
                   className={cn(fieldClass, "pr-8")}
                   autoComplete="off"
+                  placeholder={isInfluxDb3 ? "Optional when authentication is disabled" : undefined}
                 />
                 <button
                   type="button"
@@ -1416,6 +1422,14 @@ export function ConnectionForm({
                   {showPassword ? <EyeOff size={12} /> : <Eye size={12} />}
                 </button>
               </div>
+              {isInfluxDb3 && (
+                <>
+                  <span />
+                  <p className="text-[10px] leading-4 wb-muted">
+                    The token is sent only as a Bearer credential to this InfluxDB 3 endpoint.
+                  </p>
+                </>
+              )}
               </>
               )}
 

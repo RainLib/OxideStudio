@@ -29,7 +29,8 @@ export type KnownDatabaseDriver =
   | "sqlite"
   | "redis"
   | "elasticsearch"
-  | "mongodb";
+  | "mongodb"
+  | "influxdb3";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
 export type DatabaseDataModel =
   | "relational"

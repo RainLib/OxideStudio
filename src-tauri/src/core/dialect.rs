@@ -320,6 +320,16 @@ const MONGODB_COMMON_DATA_TYPES: &[&str] = &[
     "null",
 ];
 
+const INFLUXDB3_COMMON_DATA_TYPES: &[&str] = &[
+    "BOOLEAN",
+    "INT64",
+    "UINT64",
+    "FLOAT64",
+    "STRING",
+    "TIMESTAMP",
+    "DICTIONARY",
+];
+
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
     aliases: &["postgresql", "pgsql"],
@@ -594,6 +604,54 @@ const MONGODB_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: MONGODB_COMMON_DATA_TYPES,
 };
 
+const INFLUXDB3_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "influxdb3",
+    aliases: &["influxdb-3", "influxdb3-core"],
+    display_name: "InfluxDB 3",
+    // InfluxDB 3 exposes SQL relations and stable table/column metadata. Keep
+    // the Grid read-only through the mutation flags rather than hiding the
+    // table workspace behind a broad time-series label.
+    data_model: DatabaseDataModel::Relational,
+    connection_mode: DatabaseConnectionMode::Network,
+    lsp_language_id: "sql",
+    namespace_label: "database",
+    identifier_quote: '"',
+    default_port: 8181,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
+    supports_schemas: true,
+    supports_database_catalogs: true,
+    supports_connection_database: true,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    supports_explain_plan: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "TIMESTAMP",
+    common_data_types: INFLUXDB3_COMMON_DATA_TYPES,
+};
+
 const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &POSTGRES_SPEC,
     &MYSQL_SPEC,
@@ -601,6 +659,7 @@ const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &ELASTICSEARCH_SPEC,
     &MONGODB_SPEC,
     &REDIS_SPEC,
+    &INFLUXDB3_SPEC,
 ];
 
 pub fn redis_capabilities() -> DatabaseCapabilities {
@@ -2124,6 +2183,7 @@ WITH NO DATA;"#
         assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
         assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
         assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
+        assert_eq!(canonical_driver_name("influxdb-3"), Some("influxdb3"));
         assert_eq!(canonical_driver_name("unknown"), None);
 
         assert_eq!(
@@ -2151,8 +2211,17 @@ WITH NO DATA;"#
                 "elasticsearch",
                 "mongodb",
                 "redis",
+                "influxdb3",
             ]
         );
+
+        let influxdb3 = database_capabilities_for_driver("influxdb3").unwrap();
+        assert!(influxdb3.supports_sql_query);
+        assert!(influxdb3.supports_table_browsing);
+        assert!(influxdb3.supports_database_catalogs);
+        assert!(!influxdb3.supports_table_row_mutation);
+        assert!(!influxdb3.supports_table_ddl);
+        assert!(!influxdb3.supports_transactions);
 
         assert!(DatabaseKind::from_str("redis").is_err());
         assert_eq!(

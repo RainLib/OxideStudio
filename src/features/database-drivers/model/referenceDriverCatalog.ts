@@ -52,7 +52,7 @@ const candidate = (
   source,
 });
 
-// The 69 DBX reference types, plus five widely used compatible SQL products.
+// The 70 DBX reference types, plus five widely used compatible SQL products.
 // The latter are intentionally labelled compatibility instead of pretending
 // that DBX itself ships a profile for them.
 export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
@@ -125,6 +125,7 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("turso", "Turso", "relational", "http"),
   candidate("cloudflare-d1", "Cloudflare D1", "relational", "http"),
   candidate("influxdb", "InfluxDB", "timeSeries", "http"),
+  candidate("influxdb3", "InfluxDB 3", "timeSeries", "bundled", "sql"),
   // QuestDB's DBX dialect is SQL-shaped. This is editor-only guidance: it
   // does not turn a time-series package into a relational grid driver.
   candidate("questdb", "QuestDB", "timeSeries", "http", "sql"),
@@ -253,6 +254,7 @@ const BUNDLED_DRIVER_IDS = new Set([
   "redis",
   "elasticsearch",
   "mongodb",
+  "influxdb3",
 ]);
 
 const SIDECAR_SOURCE_DRIVER_IDS = new Set(["duckdb", "rqlite", "clickhouse"]);

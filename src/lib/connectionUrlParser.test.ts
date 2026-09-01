@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
   applyElasticsearchConnectionOptions,
+  buildConnectionUrl,
   elasticsearchConnectionOptionsFromQueryParams,
   normalizeElasticsearchConnectivityCheckPath,
   normalizeKibanaBasePath,
   parseConnectionUrl,
 } from "./connectionUrlParser";
+
+describe("InfluxDB 3 connection URL", () => {
+  it("encodes the API token and switches HTTP transport through SSL mode", () => {
+    expect(
+      buildConnectionUrl({
+        driver: "influxdb3",
+        host: "metrics.example.test",
+        port: 8181,
+        password: "token with spaces",
+        database: "customer metrics",
+        sslMode: "require",
+      }),
+    ).toBe(
+      "https://:token%20with%20spaces@metrics.example.test:8181/customer%20metrics",
+    );
+  });
+});
 
 describe("Elasticsearch connection URL options", () => {
   it("serializes the complete proxy and safety configuration", () => {

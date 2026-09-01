@@ -17,7 +17,7 @@ describe("reference database driver catalogue", () => {
     );
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(74);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(75);
     expect(DBX_REFERENCE_DRIVER_IDS).toEqual([
       "mysql", "postgres", "sqlite", "rqlite", "redis", "duckdb",
       "clickhouse", "sqlserver", "mongodb", "oracle", "elasticsearch",
@@ -29,7 +29,7 @@ describe("reference database driver catalogue", () => {
       "gbase", "access", "h2", "snowflake", "trino", "prestosql", "hive",
       "argo", "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "kylin",
       "sundb", "oscar", "tdengine", "xugu", "iotdb", "etcd", "zookeeper",
-      "nacos", "iris", "turso", "cloudflare-d1", "influxdb", "questdb", "jdbc",
+      "nacos", "iris", "turso", "cloudflare-d1", "influxdb", "influxdb3", "questdb", "jdbc",
       "mq",
     ]);
     expect(ids).toEqual(
@@ -43,6 +43,7 @@ describe("reference database driver catalogue", () => {
         "elasticsearch",
         "neo4j",
         "influxdb",
+        "influxdb3",
         "cloudflare-d1",
         "mq",
       ]),

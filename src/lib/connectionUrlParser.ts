@@ -389,9 +389,11 @@ export function buildConnectionUrl(config: {
   const encodedPassword = encodeURIComponent(password);
 
   // Build base URL
-  const secureElasticsearch =
-    driver === "elasticsearch" && sslMode && sslMode !== "disable";
-  const scheme = secureElasticsearch ? "https" : connectionUrlScheme(driver);
+  const isHttpDatabase =
+    driver === "elasticsearch" || driver === "influxdb3";
+  const secureHttpDatabase =
+    isHttpDatabase && sslMode && sslMode !== "disable";
+  const scheme = secureHttpDatabase ? "https" : connectionUrlScheme(driver);
   let url = `${scheme}://`;
 
   if (encodedUser || encodedPassword) {
@@ -411,7 +413,7 @@ export function buildConnectionUrl(config: {
   }
 
   // Add SSL mode if specified
-  if (driver !== "elasticsearch" && sslMode && sslMode !== "disable") {
+  if (!isHttpDatabase && sslMode && sslMode !== "disable") {
     url += `?${sslModeParamName(driver)}=${sslMode.toLowerCase()}`;
   }
 

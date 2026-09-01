@@ -1,5 +1,32 @@
 # DBX alignment: deferred validation queue
 
+## Phase 147 -- DBX `5d6f66777` native/runtime validation
+
+- Start InfluxDB 3 Core with and without authentication, then repeat against an
+  Enterprise endpoint. Verify HTTP/HTTPS, optional token, database discovery,
+  `iox` table filtering, column types, leading-comment SELECT row bounding,
+  invalid JSON, 401/403/404 hints, the 32 MiB success-body limit and 64 KiB
+  error-body limit. Confirm the Grid remains read-only and never exposes DDL,
+  transaction, mutation or cancellation controls.
+- Load Redis strings immediately below and above 64 KiB, including invalid
+  UTF-8 and multi-megabyte values. Confirm the first request never materializes
+  the complete value and that preview/total/truncated/read-only metadata remains
+  stable after refresh.
+- Exercise the dedicated SSH test against password/key auth, strict and relaxed
+  host-key policies, and one/multiple jump hosts while the database endpoint is
+  deliberately unavailable. Database unreachability must not fail tunnel auth.
+- Publish and validate exact signed Kingbase, IoTDB and RocketMQ packages before
+  counting their DBX product-specific fixes as usable. The Host catalogue entry
+  alone is not implementation evidence.
+- Run disposable MySQL 5.7/8 migrations whose comments/defaults contain the
+  words `foreign key`, and verify source-only/required target columns are shown
+  before execution. Oxide does not use DBX's line-strip path, but the complete
+  migration outcome still requires live-server evidence.
+
+Static unit/build/Clippy validation is executed before this queue. These checks
+remain deliberately deferred because the current implementation phase does not
+open real database endpoints.
+
 ## Phase 140 -- physical query-column formatter inheritance
 
 - In PostgreSQL, MySQL, SQL Server and SQLite query tabs, configure a physical

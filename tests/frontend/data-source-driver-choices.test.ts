@@ -12,8 +12,12 @@ describe("data source driver choices", () => {
       [],
     );
 
-    expect(choices).toHaveLength(74);
+    expect(choices).toHaveLength(75);
     expect(choices.find((choice) => choice.driver === "postgres")).toMatchObject({
+      availability: "available",
+    });
+    expect(choices.find((choice) => choice.driver === "influxdb3")).toMatchObject({
+      label: "InfluxDB 3",
       availability: "available",
     });
     expect(choices.find((choice) => choice.driver === "oracle")).toMatchObject({
