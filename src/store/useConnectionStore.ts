@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { connectionService, SavedConnection } from "@/services/tauri";
 import { useSchemaStore } from "./useSchemaStore";
 import {
+  applyInfluxDbConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   normalizeConnectionUrlForDriver,
@@ -107,14 +108,20 @@ function connectionUrlForConfig(config: ConnectionConfig) {
       sslMode: config.sslMode || "disable",
     });
 
-  return config.driver === "elasticsearch"
-    ? applyElasticsearchConnectionOptions(connectionUrl, {
+  if (config.driver === "elasticsearch") {
+    return applyElasticsearchConnectionOptions(connectionUrl, {
         mode: config.elasticsearchMode,
         kibanaBasePath: config.elasticsearchKibanaBasePath,
         connectivityCheckPath: config.elasticsearchConnectivityCheckPath,
         connectivityCheckDisabled:
           config.elasticsearchConnectivityCheckDisabled,
         indexGroupingPattern: config.indexGroupingPattern,
+      });
+  }
+  return config.driver === "influxdb"
+    ? applyInfluxDbConnectionOptions(connectionUrl, {
+        version: config.influxDbVersion,
+        organization: config.influxDbOrganization,
       })
     : connectionUrl;
 }

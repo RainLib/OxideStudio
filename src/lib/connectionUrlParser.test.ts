@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyInfluxDbConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   elasticsearchConnectionOptionsFromQueryParams,
+  influxDbConnectionOptionsFromQueryParams,
   normalizeElasticsearchConnectivityCheckPath,
   normalizeKibanaBasePath,
   parseConnectionUrl,
@@ -22,6 +24,31 @@ describe("InfluxDB 3 connection URL", () => {
     ).toBe(
       "https://:token%20with%20spaces@metrics.example.test:8181/customer%20metrics",
     );
+  });
+});
+
+describe("InfluxDB 1.x / 2.x connection URL", () => {
+  it("round-trips the explicit v2 organization without disturbing user URL parameters", () => {
+    const url = applyInfluxDbConnectionOptions(
+      "https://:token@metrics.example.test:8086/telemetry?precision=ns&APIversion=1&organization=old",
+      { version: "2", organization: "team one" },
+    );
+    const parsed = new URL(url);
+
+    expect(parsed.searchParams.get("precision")).toBe("ns");
+    expect(parsed.searchParams.get("version")).toBe("2");
+    expect(parsed.searchParams.get("org")).toBe("team one");
+    expect(influxDbConnectionOptionsFromQueryParams(
+      parseConnectionUrl(url, "influxdb")?.queryParams,
+    )).toEqual({ version: "2", organization: "team one" });
+  });
+
+  it("removes v2-only routing fields when returning to InfluxDB 1.x", () => {
+    const url = applyInfluxDbConnectionOptions(
+      "http://localhost:8086/metrics?version=2&org=team&epoch=ms",
+      { version: "1" },
+    );
+    expect(new URL(url).search).toBe("?epoch=ms");
   });
 });
 

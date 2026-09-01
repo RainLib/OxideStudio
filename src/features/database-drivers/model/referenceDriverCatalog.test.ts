@@ -60,4 +60,15 @@ describe("DBX reference driver catalogue", () => {
       lspParserBaseline: "postgres",
     });
   });
+
+  it("routes InfluxDB 1.x / 2.x through the bundled native workspace", () => {
+    const candidate = referenceDriverCandidate("influxdb");
+    expect(candidate).toBeDefined();
+    expect(driverCandidateAvailability(candidate!, [])).toBe("bundled");
+    expect(referenceDriverDeliveryPlan(candidate!)).toMatchObject({
+      runtimeRoute: "bundled",
+      lspRoute: "notApplicable",
+      lspLanguageId: null,
+    });
+  });
 });

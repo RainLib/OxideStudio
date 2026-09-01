@@ -22,6 +22,23 @@ describe("InfluxDB 3 dialect profile", () => {
   });
 });
 
+describe("InfluxDB 1.x / 2.x dialect profile", () => {
+  it("uses the time-series workspace without claiming SQL LSP support", () => {
+    expect(connectionUrlScheme("influxdb")).toBe("http");
+    expect(defaultDatabasePort("influxdb")).toBe(8086);
+    expect(defaultDatabaseCapabilities("influxdb")).toMatchObject({
+      dataModel: "timeSeries",
+      lspLanguageId: "influxdb",
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+      supportsDatabaseCatalogs: true,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});
+
 describe("Meilisearch dialect profile", () => {
   it("exposes a native index browser without inventing a SQL workspace", () => {
     expect(connectionUrlScheme("meilisearch")).toBe("http");

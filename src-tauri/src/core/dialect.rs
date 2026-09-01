@@ -330,6 +330,17 @@ const INFLUXDB3_COMMON_DATA_TYPES: &[&str] = &[
     "DICTIONARY",
 ];
 
+const INFLUXDB_COMMON_DATA_TYPES: &[&str] = &[
+    "boolean",
+    "integer",
+    "float",
+    "string",
+    "timestamp",
+    "duration",
+    "field",
+    "tag",
+];
+
 const MEILISEARCH_COMMON_DATA_TYPES: &[&str] =
     &["string", "integer", "double", "boolean", "object", "array"];
 
@@ -655,6 +666,53 @@ const INFLUXDB3_SPEC: DatabaseSpec = DatabaseSpec {
     common_data_types: INFLUXDB3_COMMON_DATA_TYPES,
 };
 
+const INFLUXDB_SPEC: DatabaseSpec = DatabaseSpec {
+    driver: "influxdb",
+    aliases: &["influx", "influxdb1", "influxdb2"],
+    display_name: "InfluxDB",
+    // InfluxDB 1.x uses InfluxQL while 2.x uses Flux. Both retain a familiar
+    // result-grid shape but neither grammar can be claimed by the SQL LSP.
+    data_model: DatabaseDataModel::TimeSeries,
+    connection_mode: DatabaseConnectionMode::Network,
+    lsp_language_id: "influxdb",
+    namespace_label: "bucket",
+    identifier_quote: '"',
+    default_port: 8086,
+    supports_sql_query: true,
+    supports_table_browsing: true,
+    supports_table_row_mutation: false,
+    supports_table_ddl: false,
+    supports_column_alteration: false,
+    supports_index_rename: false,
+    supports_constraint_alteration: false,
+    supports_collection_browsing: false,
+    supports_key_value_browsing: false,
+    supports_schemas: true,
+    supports_database_catalogs: true,
+    supports_connection_database: true,
+    supports_create_database: false,
+    supports_create_database_owner: false,
+    supports_create_database_charset: false,
+    supports_create_database_collation: false,
+    supports_column_comments: false,
+    supports_inline_column_comments: false,
+    supports_rename_database: false,
+    supports_views: false,
+    supports_replace_view: false,
+    supports_materialized_views: false,
+    supports_table_indexes: false,
+    supports_table_constraints: false,
+    supports_foreign_keys: false,
+    supports_check_constraints: false,
+    supports_functions: false,
+    supports_transactions: false,
+    supports_query_cancellation: false,
+    supports_explain_plan: false,
+    auto_increment_keyword: None,
+    default_primary_key_type: "TIMESTAMP",
+    common_data_types: INFLUXDB_COMMON_DATA_TYPES,
+};
+
 const MEILISEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "meilisearch",
     aliases: &[],
@@ -710,6 +768,7 @@ const DATABASE_SPECS: &[&DatabaseSpec] = &[
     &ELASTICSEARCH_SPEC,
     &MONGODB_SPEC,
     &REDIS_SPEC,
+    &INFLUXDB_SPEC,
     &INFLUXDB3_SPEC,
     &MEILISEARCH_SPEC,
 ];
@@ -2258,6 +2317,7 @@ WITH NO DATA;"#
         assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
         assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
         assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
+        assert_eq!(canonical_driver_name("influxdb2"), Some("influxdb"));
         assert_eq!(canonical_driver_name("influxdb-3"), Some("influxdb3"));
         assert_eq!(canonical_driver_name("unknown"), None);
 
@@ -2286,10 +2346,19 @@ WITH NO DATA;"#
                 "elasticsearch",
                 "mongodb",
                 "redis",
+                "influxdb",
                 "influxdb3",
                 "meilisearch",
             ]
         );
+
+        let influxdb = database_capabilities_for_driver("influxdb").unwrap();
+        assert!(influxdb.supports_sql_query);
+        assert!(influxdb.supports_table_browsing);
+        assert!(influxdb.supports_database_catalogs);
+        assert!(!influxdb.supports_table_row_mutation);
+        assert!(!influxdb.supports_table_ddl);
+        assert!(!influxdb.supports_transactions);
 
         let influxdb3 = database_capabilities_for_driver("influxdb3").unwrap();
         assert!(influxdb3.supports_sql_query);

@@ -41,6 +41,7 @@ function escapeRegExp(value: string) {
 function isHttpDatabaseDriver(driver: DatabaseDriver): boolean {
   return (
     driver === "elasticsearch" ||
+    driver === "influxdb" ||
     driver === "influxdb3" ||
     driver === "meilisearch"
   );
@@ -124,6 +125,53 @@ export interface ElasticsearchConnectionOptions {
   connectivityCheckPath?: string;
   connectivityCheckDisabled?: boolean;
   indexGroupingPattern?: string;
+}
+
+export type InfluxDbConnectionOptions = {
+  version?: "1" | "2";
+  organization?: string;
+};
+
+export function influxDbConnectionOptionsFromQueryParams(
+  queryParams: Record<string, string> | undefined,
+): InfluxDbConnectionOptions {
+  const read = (name: string) => {
+    const key = Object.keys(queryParams || {}).find(
+      (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    );
+    return key ? queryParams?.[key] : undefined;
+  };
+  const version = read("version") || read("apiVersion");
+  return {
+    version: version?.trim().toLowerCase() === "2" || version?.trim().toLowerCase() === "v2" ? "2" : "1",
+    organization: read("org") || read("organization") || "",
+  };
+}
+
+/**
+ * Keeps InfluxDB's application-level routing fields explicit. Only these two
+ * known keys are changed; arbitrary user URL parameters remain untouched.
+ */
+export function applyInfluxDbConnectionOptions(
+  connectionUrl: string,
+  options: InfluxDbConnectionOptions,
+) {
+  try {
+    const url = new URL(connectionUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (["version", "apiversion", "org", "organization"].includes(key.toLowerCase())) {
+        url.searchParams.delete(key);
+      }
+    }
+    if (options.version === "2") {
+      url.searchParams.set("version", "2");
+      const organization = options.organization?.trim();
+      if (organization) url.searchParams.set("org", organization);
+    }
+    return url.toString();
+  } catch {
+    return connectionUrl;
+  }
 }
 
 export function elasticsearchConnectionOptionsFromQueryParams(

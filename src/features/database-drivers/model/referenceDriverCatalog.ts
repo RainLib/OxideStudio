@@ -135,7 +135,7 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("iris", "InterSystems IRIS", "relational", "jdbc"),
   candidate("turso", "Turso", "relational", "http"),
   candidate("cloudflare-d1", "Cloudflare D1", "relational", "http"),
-  candidate("influxdb", "InfluxDB", "timeSeries", "http"),
+  candidate("influxdb", "InfluxDB", "timeSeries", "bundled"),
   candidate("influxdb3", "InfluxDB 3", "timeSeries", "bundled", "sql"),
   // DBX exposes VictoriaMetrics through its own MetricsQL workspace. Its
   // SQL-file capability is not evidence that the bundled SQL LSP can parse
@@ -269,6 +269,7 @@ const BUNDLED_DRIVER_IDS = new Set([
   "redis",
   "elasticsearch",
   "mongodb",
+  "influxdb",
   "influxdb3",
   "meilisearch",
 ]);

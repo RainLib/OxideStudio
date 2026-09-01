@@ -33,9 +33,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
+  applyInfluxDbConnectionOptions,
   applyElasticsearchConnectionOptions,
   buildConnectionUrl,
   elasticsearchConnectionOptionsFromQueryParams,
+  influxDbConnectionOptionsFromQueryParams,
   parseConnectionUrl,
 } from "@/lib/connectionUrlParser";
 import {
@@ -479,6 +481,9 @@ export function ConnectionForm({
   const fileDriver = selectedConnection.driver.toLowerCase();
   const isRemoteSqlite = fileDriver === "sqlite";
   const isInfluxDb3 = fileDriver === "influxdb3";
+  const isInfluxDb = fileDriver === "influxdb";
+  const influxDbVersion = selectedConnection.influxDbVersion || "1";
+  const isInfluxDb2 = isInfluxDb && influxDbVersion === "2";
   const fileExtension =
     fileDriver === "duckdb" ? "duckdb" : fileDriver === "sqlite" ? "sqlite" : "db";
   const formSections: ReadonlyArray<readonly [FormSection, string]> =
@@ -536,6 +541,11 @@ export function ConnectionForm({
           connectivityCheckDisabled:
             selectedConnection.elasticsearchConnectivityCheckDisabled,
           indexGroupingPattern: selectedConnection.indexGroupingPattern,
+      })
+    : selectedConnection.driver === "influxdb"
+      ? applyInfluxDbConnectionOptions(baseGeneratedUrl, {
+          version: selectedConnection.influxDbVersion,
+          organization: selectedConnection.influxDbOrganization,
         })
       : baseGeneratedUrl;
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
@@ -727,6 +737,10 @@ export function ConnectionForm({
       parsed?.driver === "elasticsearch"
         ? elasticsearchConnectionOptionsFromQueryParams(parsed.queryParams)
         : null;
+    const influxDbOptions =
+      parsed?.driver === "influxdb"
+        ? influxDbConnectionOptionsFromQueryParams(parsed.queryParams)
+        : null;
     updateConnectionConfig(
       parsed
         ? {
@@ -738,6 +752,12 @@ export function ConnectionForm({
             password: parsed.password || "",
             database: parsed.database || "",
             sslMode: parsed.sslMode,
+            ...(influxDbOptions
+              ? {
+                  influxDbVersion: influxDbOptions.version,
+                  influxDbOrganization: influxDbOptions.organization,
+                }
+              : {}),
             ...(elasticsearchOptions
               ? {
                   elasticsearchMode: elasticsearchOptions.mode,
@@ -1381,7 +1401,7 @@ export function ConnectionForm({
 
               {!isFileBased && (
               <>
-              {!isInfluxDb3 && (
+              {!isInfluxDb3 && !isInfluxDb2 && (
                 <>
                   <label className={labelClass} htmlFor="connection-user">
                     User
@@ -1399,7 +1419,7 @@ export function ConnectionForm({
               )}
 
               <label className={labelClass} htmlFor="connection-password">
-                {isInfluxDb3 ? "API token" : "Password"}
+                {isInfluxDb3 || isInfluxDb2 ? "API token" : "Password"}
               </label>
               <div className="relative">
                 <input
@@ -1411,7 +1431,13 @@ export function ConnectionForm({
                   }
                   className={cn(fieldClass, "pr-8")}
                   autoComplete="off"
-                  placeholder={isInfluxDb3 ? "Optional when authentication is disabled" : undefined}
+                  placeholder={
+                    isInfluxDb3
+                      ? "Optional when authentication is disabled"
+                      : isInfluxDb2
+                        ? "Required InfluxDB 2.x token"
+                        : undefined
+                  }
                 />
                 <button
                   type="button"
@@ -1427,6 +1453,56 @@ export function ConnectionForm({
                   <span />
                   <p className="text-[10px] leading-4 wb-muted">
                     The token is sent only as a Bearer credential to this InfluxDB 3 endpoint.
+                  </p>
+                </>
+              )}
+              {isInfluxDb && (
+                <>
+                  <label className={labelClass} htmlFor="connection-influx-version">
+                    Version
+                  </label>
+                  <Select
+                    value={influxDbVersion}
+                    onValueChange={(value: "1" | "2") => {
+                      updateConnectionConfig({
+                        influxDbVersion: value,
+                        // v1 does not use an organization. Clear stale v2
+                        // configuration instead of retaining it invisibly.
+                        ...(value === "1" ? { influxDbOrganization: "" } : {}),
+                      });
+                      setStatus(null);
+                    }}
+                  >
+                    <SelectTrigger id="connection-influx-version" className={fieldClass}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">InfluxDB 1.x (InfluxQL)</SelectItem>
+                      <SelectItem value="2">InfluxDB 2.x (Flux)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {isInfluxDb2 && (
+                    <>
+                      <label className={labelClass} htmlFor="connection-influx-org">
+                        Organization
+                      </label>
+                      <input
+                        id="connection-influx-org"
+                        value={selectedConnection.influxDbOrganization || ""}
+                        onChange={(event) =>
+                          updateConnectionConfig({ influxDbOrganization: event.target.value })
+                        }
+                        className={fieldClass}
+                        placeholder="my-org"
+                        autoComplete="off"
+                      />
+                    </>
+                  )}
+                  <span />
+                  <p className="text-[10px] leading-4 wb-muted">
+                    {isInfluxDb2
+                      ? "Uses the InfluxDB 2.x token, organization, bucket and Flux API."
+                      : "Uses InfluxDB 1.x credentials and the InfluxQL HTTP API."}
                   </p>
                 </>
               )}

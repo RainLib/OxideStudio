@@ -131,6 +131,21 @@ open real database endpoints.
   reviewed UI and mutation contract. Do not expose arbitrary REST forwarding
   through the SQL editor.
 
+## Phase 159 -- InfluxDB 1.x / 2.x native HTTP runtime
+
+- Validate InfluxDB 1.x with anonymous and Basic authentication, including
+  `SHOW DATABASES`, configured-database fallback, measurements, tag/field
+  metadata, multi-series tag merging, server-side query errors encoded in a
+  successful JSON response, and connection loss.
+- Validate InfluxDB 2.x with a scoped token, organization and bucket against
+  bucket pagination, Flux query CSV annotations, measurement/tag/field schema
+  functions, 401/403 error redaction and base-path deployments. Confirm the
+  token is sent only in the `Authorization` header and never in diagnostics.
+- Exercise oversized declared/streamed responses, malformed JSON/CSV, deleted
+  buckets between metadata requests and a configured v2 connection missing its
+  token, organization or bucket. Real InfluxDB fixtures remain deferred under
+  the project-wide live-database validation deferral.
+
 ## Phase 137 -- locale-aware grid input and interaction feedback
 
 - In packaged Tauri WebViews with `en-US`, `de-DE`, `fr-FR` and a locale whose

@@ -30,6 +30,7 @@ export type KnownDatabaseDriver =
   | "redis"
   | "elasticsearch"
   | "mongodb"
+  | "influxdb"
   | "influxdb3"
   | "meilisearch";
 export type DatabaseDriver = KnownDatabaseDriver | (string & {});
@@ -1638,6 +1639,10 @@ export interface SavedConnection {
   database?: string;
   connectionUrl?: string;
   sslMode?: string;
+  /** Native InfluxDB protocol generation. InfluxDB 3 uses its own driver id. */
+  influxDbVersion?: "1" | "2";
+  /** InfluxDB 2.x organization. It is serialized only into the live URL query. */
+  influxDbOrganization?: string;
   /** Elasticsearch HTTP transport. Kibana mode uses the Console proxy endpoint. */
   elasticsearchMode?: "direct" | "kibana";
   /** Optional Kibana/OpenSearch Dashboards deployment base path. */
