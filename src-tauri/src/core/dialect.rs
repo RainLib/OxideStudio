@@ -684,7 +684,10 @@ const NACOS_SPEC: DatabaseSpec = DatabaseSpec {
 
 const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "elasticsearch",
-    aliases: &["elastic"],
+    // DBX's Easysearch client delegates its read/browser and REST transport to
+    // the Elasticsearch client. Keep it as a named connection profile while
+    // sharing the reviewed bounded Elasticsearch runtime.
+    aliases: &["elastic", "easysearch"],
     display_name: "Elasticsearch",
     data_model: DatabaseDataModel::Search,
     connection_mode: DatabaseConnectionMode::Network,
@@ -2526,6 +2529,7 @@ WITH NO DATA;"#
         assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
         assert_eq!(canonical_driver_name("tidb"), Some("mysql"));
         assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
+        assert_eq!(canonical_driver_name("easysearch"), Some("elasticsearch"));
         assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
         assert_eq!(canonical_driver_name("influxdb2"), Some("influxdb"));
         assert_eq!(canonical_driver_name("influxdb-3"), Some("influxdb3"));

@@ -369,7 +369,7 @@ const DATABASE_DRIVER_PROFILES: Record<
     menuLabel: "Elasticsearch",
     defaultDatabase: "",
     urlScheme: "http",
-    protocolAliases: ["elasticsearch", "elastic"],
+    protocolAliases: ["elasticsearch", "elastic", "easysearch"],
     sslModeParamName: "ssl",
     sslModeParamAliases: ["ssl", "tls"],
     defaultIcon: "Search",

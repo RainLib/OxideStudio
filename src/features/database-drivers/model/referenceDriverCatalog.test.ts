@@ -93,5 +93,13 @@ describe("DBX reference driver catalogue", () => {
         lspRoute: "compatibleSql",
       });
     }
+
+    const easysearch = referenceDriverCandidate("easysearch");
+    expect(easysearch).toBeDefined();
+    expect(driverCandidateAvailability(easysearch!, [])).toBe("bundled");
+    expect(referenceDriverDeliveryPlan(easysearch!)).toMatchObject({
+      runtimeRoute: "bundled",
+      lspRoute: "nativeProvider",
+    });
   });
 });

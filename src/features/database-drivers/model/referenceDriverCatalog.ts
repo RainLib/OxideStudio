@@ -270,6 +270,7 @@ const BUNDLED_DRIVER_IDS = new Set([
   "consul",
   "nacos",
   "elasticsearch",
+  "easysearch",
   "mongodb",
   "influxdb",
   "influxdb3",

@@ -153,5 +153,14 @@ describe("DBX protocol-compatible connection profiles", () => {
 
     expect(normalizeDatabaseDriverName("tidb")).toBe("mysql");
     expect(normalizeDatabaseDriverName("cockroachdb")).toBe("postgres");
+    expect(defaultDatabasePort("easysearch")).toBe(9200);
+    expect(connectionUrlScheme("easysearch")).toBe("http");
+    expect(defaultDatabaseCapabilities("easysearch")).toMatchObject({
+      driver: "easysearch",
+      dataModel: "search",
+      lspLanguageId: "elasticsearch-dsl",
+      supportsCollectionBrowsing: true,
+    });
+    expect(normalizeDatabaseDriverName("easysearch")).toBe("elasticsearch");
   });
 });
