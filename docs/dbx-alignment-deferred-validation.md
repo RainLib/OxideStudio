@@ -78,6 +78,17 @@ open real database endpoints.
   REST-console surfaces stay unavailable until their independently reviewed
   approval and conflict contracts are implemented.
 
+## Phase 162 -- etcd v3 JSON Gateway read-only KV browser
+
+- Start etcd v3 with the HTTP JSON gateway exposed directly and behind a
+  path-prefixed HTTP/HTTPS proxy. Verify `/health`, Basic authentication,
+  `v3/kv/range` prefix paging, exact-key reads, UTF-8/binary key handling,
+  base64 values, response-size rejection and 401/403/404 error mapping.
+- The bundled browser is deliberately limited to read-only gateway operations.
+  DBX gRPC Agent capabilities (watch, lease, compaction, defragmentation,
+  authentication administration and all mutations) remain unavailable until
+  they have an equivalent scoped approval, receipt and recovery contract.
+
 ## Phase 140 -- physical query-column formatter inheritance
 
 - In PostgreSQL, MySQL, SQL Server and SQLite query tabs, configure a physical
