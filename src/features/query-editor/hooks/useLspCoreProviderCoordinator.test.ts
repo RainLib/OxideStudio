@@ -44,6 +44,7 @@ function coordinatorFixture() {
     formatDocument: vi.fn(async () => []),
     formatRange: vi.fn(async () => []),
     getSignatureHelp: vi.fn(async () => null),
+    getSemanticTokens: vi.fn(async () => ({ resultId: "tokens-1", data: [0, 0, 4, 1, 0] })),
     getInlayHints: vi.fn(async () => []),
   } as unknown as LspClient;
 
@@ -136,6 +137,31 @@ describe("LSP core provider coordinator", () => {
       [],
       ["source"],
     );
+  });
+
+  it("reuses semantic tokens only for the same Monaco model version", async () => {
+    const { lspClient, providers } = coordinatorFixture();
+    let version = 4;
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getVersionId: () => version,
+    };
+    const provider = providers.get("semanticTokens");
+    const token = { isCancellationRequested: false };
+
+    const first = await provider.provideDocumentSemanticTokens(model, null, token);
+    const cached = await provider.provideDocumentSemanticTokens(model, first.resultId, token);
+    expect(lspClient.getSemanticTokens).toHaveBeenCalledTimes(1);
+    expect(Array.from(cached.data)).toEqual([0, 0, 4, 1, 0]);
+    expect(cached.data).not.toBe(first.data);
+
+    version = 5;
+    await provider.provideDocumentSemanticTokens(model, cached.resultId, token);
+    expect(lspClient.getSemanticTokens).toHaveBeenCalledTimes(2);
+
+    provider.releaseDocumentSemanticTokens(cached.resultId);
+    await provider.provideDocumentSemanticTokens(model, null, token);
+    expect(lspClient.getSemanticTokens).toHaveBeenCalledTimes(3);
   });
 
   it("bounds the local INSERT hint fallback to the visible neighborhood", async () => {

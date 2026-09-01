@@ -66,6 +66,12 @@ export function registerLspCoreProviders({
   const handlesModel = (model: any) =>
     canUseLsp && model.uri.toString() === documentUri;
   const disposables: Disposable[] = [];
+  let semanticTokensCache: {
+    model: any;
+    version: number;
+    resultId?: string;
+    data: Uint32Array;
+  } | null = null;
 
   disposables.push(
     monaco.languages.registerDefinitionProvider(editorLanguageId, {
@@ -401,16 +407,40 @@ export function registerLspCoreProviders({
         token: { isCancellationRequested?: boolean },
       ) => {
         if (!handlesModel(model)) return { data: new Uint32Array() };
+        const modelVersion = providerModelVersion(model);
+        const cachedSemanticTokens = semanticTokensCache;
+        if (
+          modelVersion !== undefined &&
+          cachedSemanticTokens &&
+          cachedSemanticTokens.model === model &&
+          cachedSemanticTokens.version === modelVersion
+        ) {
+          return {
+            resultId: cachedSemanticTokens.resultId,
+            data: cachedSemanticTokens.data.slice(),
+          };
+        }
         const result = await lspClient.getSemanticTokens(documentUri);
-        if (token.isCancellationRequested || !result) {
+        if (!providerRequestIsCurrent(model, modelVersion, token) || !result) {
           return { data: new Uint32Array() };
         }
-        return {
+        const response = {
           resultId: result.resultId,
           data: Uint32Array.from(result.data),
         };
+        if (modelVersion !== undefined) {
+          semanticTokensCache = {
+            model,
+            version: modelVersion,
+            resultId: response.resultId,
+            data: response.data,
+          };
+        }
+        return { ...response, data: response.data.slice() };
       },
-      releaseDocumentSemanticTokens: () => undefined,
+      releaseDocumentSemanticTokens: () => {
+        semanticTokensCache = null;
+      },
     }),
     monaco.languages.registerInlayHintsProvider(editorLanguageId, {
       displayName: "Database parameter and INSERT column hints",
