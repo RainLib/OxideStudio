@@ -226,7 +226,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | T01 | 部分对齐：单表 transfer | `crates/dbx-core/src/transfer.rs:5734 transfer_table`；`DataTransferDialog.vue` | 单表 preview/确认/type map/事务/取消/append/overwrite | 保持同一 target transaction；失败和取消必须回滚；源端 query cancellation 有 fixture。 |
 | T02 | 本轮已对齐：主键 upsert | `transfer.rs:2984 generate_upsert`、`:3515 keyset_pagination_sql` | `commands/table.rs:build_upsert_mutation`；Transfer Dialog | 仅 bundled PG/MySQL/SQLite；目标必须有完整映射的 PK；token 绑定 key；外置包默认拒绝。 |
 | T03 | PostgreSQL 逻辑已对齐，其他产品部分对齐：多表与 schema-object transfer | `transfer.rs:TransferObjectSelection`、`transfer_schema_objects`；`ObjectSelectionTree.vue` | `preview_table_data_transfer_batch_plan` 同时接受显式表和对象选择；表按 FK 父子关系排序，对象复用 catalog-backed Schema Diff 的依赖顺序和 DDL，不接受调用方原始 DDL。目标已有同 identity 对象会明确 `skipExisting`，定义、父对象或外部依赖无法证明时阻断。执行前重新捕获两端快照并比对整个确认计划；PostgreSQL 在同一目标事务中先复制表数据、再创建 sequence/view/materialized view/routine/trigger，失败统一回滚，避免复制期间触发新 trigger，且 `WITH DATA` materialized view 读取最终行。表和对象都写入不含 DDL、参数或行值的逐对象终态报告。Explorer 的表、Schema、数据库三级入口共享同一选择器和精确 namespace 边界。 | MySQL/MariaDB、Oracle、SQL Server 等对象执行仍保持 blocked，需分别完成可验证 source DDL、依赖图与事务/补偿语义；真实产品 fixture 延期。 |
-| T04 | 部分对齐：FK 依赖排序 | `transfer.rs:5375 sort_tables_by_fk_dependency` | `table_data_transfer_batch_plan` 对同 schema 被选表构图，父表优先拓扑排序，循环 FK 返回 `cyclicTables` 并拒绝生成顺序 | deferred/disable policy 必须由目标 driver capability 决定；当前无该契约时不自动执行循环。 |
+| T04 | PostgreSQL 逻辑已对齐、MySQL 部分对齐：FK 依赖排序与循环恢复 | `transfer.rs:sort_tables_by_fk_dependency_with_foreign_keys`、`generate_mysql_foreign_key_alter_statements` | `table_data_transfer_batch_plan` 对同 schema 被选表构图，非循环部分父表优先；无法拓扑消解的表保持用户选择的确定性顺序。原生 PostgreSQL 只有在循环内每条 FK 都确认未存在于目标、且精确 DDL 已绑定到一次性批量确认 token 时才可执行；所有表数据成功后再统一创建 FK，仍处于同一目标事务。已有/冲突/缺失 metadata 的循环约束继续 fail closed。 | MySQL-family 虽已能生成结构化后置 FK DDL，但 `ALTER TABLE` 隐式提交，循环批量仍阻断；需先增加行提交与 DDL 部分完成的独立回执、失败后人工核对状态及禁止自动重试，不能沿用 PostgreSQL rollback 文案。 |
 | T05 | 本阶段逻辑已对齐，跨产品与真实验证延期：sequence/identity/ownership | `transfer.rs:PostgresOwnedSequence`、`PostgresSequenceSnapshot`、ownership preview；`DataTransferDialog.vue` ownership flow | PostgreSQL 目标可显式启用 serial/identity generator 同事务同步；单表和批量预览均通过 catalog 精确解析目标 sequence schema/name、owner schema/table/column、当前 last value 与目标表最大值，并在界面逐列展示。对象身份、owner 和数值状态绑定一次性确认 token；执行不再重新猜测 sequence 名称，而是在同一目标事务内对已审阅的 qualified sequence 按写入后的 `MAX(column)` 同步。提交后仍以只读布尔比较确认 generator 不落后于对应表最大键；逐表持久报告只保存列名与 verified 状态，不保存 sequence 数值、SQL 或行值。owner 不匹配、计划变化和无 attached generator 均 fail closed；提交后的权限/读取失败转为 `needsReview`，不会回滚已提交数据或伪造成功。备份/Schema Diff 已额外捕获并恢复 PostgreSQL `is_called`；从未调用的 sequence 使用 start value + `false`，旧快照保持历史 `true` 语义。 | 仍缺跨产品 ownership plan 和真实 fixture；旧 PostgreSQL、权限不足、never-called sequence 及提交断连时必须验证 review-only/needs-review 降级。 |
 | T06 | PostgreSQL 主路径已对齐：安全 schema-object 审阅与受限 native DDL | `transfer.rs:ordered_transfer_object_kinds`、`transfer_postgres_schema_dependencies`、`transfer_postgres_schema_objects` | schema snapshot/diff 现同时服务独立迁移和数据 transfer 的显式对象选择。内置 PostgreSQL（regular/materialized）和 MySQL（regular）snapshot 读取 view 的 SELECT body；PostgreSQL materialized view 同时记录 `relispopulated`，创建时按源状态生成 `WITH DATA` 或 `WITH NO DATA`，旧快照/不可读状态保守使用 `WITH NO DATA`，不自动 `REFRESH`。变更的 PostgreSQL materialized view 会生成无 `CASCADE` 的 review-gated `DROP` + `CREATE`，属于 destructive、不可逆计划，必须再确认；其相同快照内、拥有可验证 SELECT source 的普通依赖 view 会按依赖链显式 `DROP` 后重建，且任何缺失/已变更的依赖均会阻断 materialized view 操作，绝不使用 `CASCADE`。MySQL 从 `information_schema.TRIGGERS/EVENTS` 暴露 trigger/event descriptor，并从安全字段重建**不带 DEFINER**的单语句 trigger 和 Event create DDL。Event 必须是 `SYSTEM` 时区、一次或受限 interval schedule、明确 ENABLED/DISABLED、明确 completion policy，且 body 经既有单语句 DML/CALL 白名单复验；触发器/事件含 compound `BEGIN/END` body 因需要 delimiter-aware 协议而保持 blocked。PostgreSQL 从 `pg_rewrite`/`pg_depend` 捕获同 schema direct relation 依赖，并以限定 `schema.relation` 保留跨 schema 依赖；当用户明确选择不同的 native PostgreSQL 源/目标 schema 时，已在 view、index、列类型/默认值（含 `regclass`）、constraint/FK preflight、routine、trigger 和 sequence 的可验证 catalog identifier 位置执行一对一映射，且整个计划保持 review-gated。普通字符串、注释和 dollar-quoted routine body 不改写，动态 SQL、外部依赖和跨数据库映射必须人工验证。`pg_get_functiondef`、`pg_get_triggerdef`、`pg_sequence` 提供 function/procedure、trigger、sequence 原生 DDL；trigger 通过 `tgfoid` 建立至其 callback routine 的精确计划边。sequence 会在引用 `nextval()` 的新关系之前创建，再以独立、review-gated 后置 change 恢复 `OWNED BY` 与可读的整数 last value；权限不足或未调用的 sequence 则只迁移结构。仅同方言 catalog-backed create/replace/create 进入 migration SQL，删除及任何无法验证的定义继续阻断。 | 继续补跨数据库映射及真实目标验证、materialized view 的权限/index/外部对象依赖 conformance、MySQL compound trigger/Event 的 delimiter/依赖 conformance，Oracle/SQL Server object-source conformance与真实 fixture。 |
 | T07 | 本阶段增强：持久化 transfer report 与 append baseline | `useExportTracker.ts` 有后台任务、失败明细上限和终态；DBX 当前主要是会话级任务 | `TableDataTransferReport` 已按项目和目标连接保存 terminal report；单表与多表执行都写入逐对象终态。Transfer 对话框显示目标的最近历史，并且仅在当前源端点/库/schema/表完全一致时可用历史记录预填一次重试。重试会生成新 transfer id，且仍强制重新 preview/确认。overwrite 成功后会在提交后只读核对目标行数；append 在 preview 捕获目标行数、将其绑定 confirmation token，并在提交后核对 `baseline + copied rows`。并发写入、计数不可读或溢出均只标为 `needsReview`，绝不伪装为失败或触发第二次写入。报告包含哈希 plan digest、端点标识、模式、追加/覆盖的目标基线、行数、批次、终态和安全错误摘要，不保存 URL/凭据/SQL/参数/行值 | 真实多表、并发写入和跨驱动迁移报告 fixture 仍待完成；不保存行值或凭据。 |
@@ -472,3 +472,24 @@ Oxide 原先“只复制列和主键”的边界扩展为显式、可审阅且�
 同名 drift 拒绝和 backing-index 去重。循环 FK 仍由现有拓扑计划阻断；SQLite rebuild、跨产品
 object mapping、trigger/collation/extension dependency 和真实 PostgreSQL/MySQL 权限/版本验证继续
 留在统一延期验证清单中。
+
+## Phase 140 增量：循环外键的事务内延迟恢复
+
+DBX 对 MySQL-family 使用先建表/复制、最后 `ALTER TABLE ADD FOREIGN KEY` 的方式绕开循环依赖；
+Oxide 此前只返回 `cyclicTables` 并完全阻断。本阶段先闭环具备事务 DDL 的原生 PostgreSQL：
+
+- Kahn 排序仍优先输出可消解的父表；未消解集合不再丢失，按用户选择顺序稳定追加，因此预览、
+  执行复算和确认摘要拥有相同顺序。
+- index、UNIQUE/CHECK 与 FK 恢复计划在 Host 内部分层；批量执行逐表恢复非 FK 对象，但把所有 FK
+  聚合到全部表数据及 identity 同步之后统一执行。单表入口仍在本表复制后执行完整计划。
+- 循环不因开关本身自动放行。Host 逐条核对循环依赖的 owner table/constraint name，只有对应
+  目标约束确实缺失且同一 FK 精确出现在 deferred plan 中才允许；已有约束、metadata 缺失、同名
+  drift 或未启用恢复都会阻断。
+- 循环表集合、确定性顺序、逐表完整 DDL 和可执行状态继续共同进入批量确认 token；执行时再次
+  捕获元数据并比对逐表 plan digest，避免预览后约束被创建或修改。
+- MySQL-family 循环保持明确 blocked：其 `ALTER TABLE` 会隐式提交，不能复用“失败后整批回滚”的
+  PostgreSQL 语义。后续必须增加 row-commit 与 DDL receipt、partial/needs-review 终态和禁止自动
+  重试边界后再开放，不能用 `FOREIGN_KEY_CHECKS=0` 掩盖非原子事实。
+
+纯函数回归覆盖确定性循环顺序、完整 deferred FK 集合放行以及缺少任一循环约束时的精确阻断；
+真实 PostgreSQL mutual/self FK、权限失败和 commit 断连验证仍按统一真实数据库阶段延期。

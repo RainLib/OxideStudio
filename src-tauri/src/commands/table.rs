@@ -6879,6 +6879,9 @@ struct ResolvedTableDataTransferPlan {
     identity_reseed_columns: Vec<String>,
     identity_reseed_plans: Vec<TableDataTransferIdentityReseedPlan>,
     schema_restore_statements: Vec<String>,
+    immediate_schema_restore_statements: Vec<String>,
+    deferred_foreign_key_statements: Vec<String>,
+    deferred_foreign_key_names: Vec<String>,
     confirmation_token: String,
     warnings: Vec<String>,
 }
@@ -7555,14 +7558,22 @@ struct TransferTableSchemaObjects<'a> {
     constraints: &'a [ConstraintInfo],
 }
 
-fn build_transfer_schema_restore_statements(
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TransferSchemaRestorePlan {
+    statements: Vec<String>,
+    immediate_statements: Vec<String>,
+    deferred_foreign_key_statements: Vec<String>,
+    deferred_foreign_key_names: Vec<String>,
+}
+
+fn build_transfer_schema_restore_plan(
     kind: DatabaseKind,
     source_schema: &str,
     target_schema: &str,
     table: &str,
     source: TransferTableSchemaObjects<'_>,
     target: TransferTableSchemaObjects<'_>,
-) -> Result<Vec<String>, String> {
+) -> Result<TransferSchemaRestorePlan, String> {
     let target_indexes_by_name = target
         .indexes
         .iter()
@@ -7623,7 +7634,7 @@ fn build_transfer_schema_restore_statements(
             )
         })?;
         if transfer_constraint_is_foreign(constraint) {
-            foreign_keys.push(statement);
+            foreign_keys.push((name.to_string(), statement));
         } else {
             regular_constraints.push(statement);
         }
@@ -7678,30 +7689,45 @@ fn build_transfer_schema_restore_statements(
     }
 
     regular_constraints.extend(indexes);
-    regular_constraints.extend(foreign_keys);
-    if regular_constraints.len() > MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS {
+    let immediate_statements = regular_constraints;
+    let deferred_foreign_key_names = foreign_keys
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let deferred_foreign_key_statements = foreign_keys
+        .into_iter()
+        .map(|(_, statement)| statement)
+        .collect::<Vec<_>>();
+    let mut statements = immediate_statements.clone();
+    statements.extend(deferred_foreign_key_statements.iter().cloned());
+    if statements.len() > MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS {
         return Err(format!(
             "Schema restoration is limited to {MAX_TRANSFER_SCHEMA_RESTORE_OBJECTS} statements per table."
         ));
     }
-    let total_bytes = regular_constraints.iter().map(String::len).sum::<usize>();
+    let total_bytes = statements.iter().map(String::len).sum::<usize>();
     if total_bytes > MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES {
         return Err(format!(
             "Schema restoration SQL exceeds the {} byte review limit.",
             MAX_TRANSFER_SCHEMA_RESTORE_SQL_BYTES
         ));
     }
-    Ok(regular_constraints)
+    Ok(TransferSchemaRestorePlan {
+        statements,
+        immediate_statements,
+        deferred_foreign_key_statements,
+        deferred_foreign_key_names,
+    })
 }
 
-async fn resolve_transfer_schema_restore_statements(
+async fn resolve_transfer_schema_restore_plan(
     manager: &ConnectionManager,
     request: &TableDataTransferRequest,
     source_kind: DatabaseKind,
     target_kind: DatabaseKind,
-) -> Result<Vec<String>, String> {
+) -> Result<TransferSchemaRestorePlan, String> {
     if !request.restore_source_schema_objects {
-        return Ok(Vec::new());
+        return Ok(TransferSchemaRestorePlan::default());
     }
     let source_driver = normalized_transfer_driver_id(&request.source.driver);
     let target_driver = normalized_transfer_driver_id(&request.target.driver);
@@ -7797,7 +7823,7 @@ async fn resolve_transfer_schema_restore_statements(
         }
     }
 
-    build_transfer_schema_restore_statements(
+    build_transfer_schema_restore_plan(
         target_kind,
         &request.source.schema,
         &request.target.schema,
@@ -9433,9 +9459,8 @@ async fn resolve_table_data_transfer_plan(
     let identity_reseed_plans =
         resolve_postgres_identity_reseed_plans(manager, &request.target, &identity_reseed_columns)
             .await?;
-    let schema_restore_statements =
-        resolve_transfer_schema_restore_statements(manager, request, source_kind, target_kind)
-            .await?;
+    let schema_restore_plan =
+        resolve_transfer_schema_restore_plan(manager, request, source_kind, target_kind).await?;
     let max_rows = normalized_transfer_limit(request.max_rows);
     let batch_size = normalized_transfer_batch_size(request.batch_size);
     let target_rows_before = if matches!(
@@ -9486,7 +9511,7 @@ async fn resolve_table_data_transfer_plan(
             target_rows_to_delete,
             upsert_key_columns: &upsert_key_columns,
             identity_reseed_plans: &identity_reseed_plans,
-            schema_restore_statements: &schema_restore_statements,
+            schema_restore_statements: &schema_restore_plan.statements,
         },
     )?;
 
@@ -9531,13 +9556,13 @@ async fn resolve_table_data_transfer_plan(
         }
     }
     if request.restore_source_schema_objects {
-        warnings.push(if schema_restore_statements.is_empty() {
+        warnings.push(if schema_restore_plan.statements.is_empty() {
             "Catalog-backed secondary indexes and constraints are already present on the target; no post-copy DDL is required."
                 .to_string()
         } else {
             format!(
                 "After all row writes, {} reviewed secondary index/constraint statement(s) will run inside the same target transaction; foreign keys run last.",
-                schema_restore_statements.len()
+                schema_restore_plan.statements.len()
             )
         });
     }
@@ -9573,7 +9598,10 @@ async fn resolve_table_data_transfer_plan(
         upsert_key_columns,
         identity_reseed_columns,
         identity_reseed_plans,
-        schema_restore_statements,
+        schema_restore_statements: schema_restore_plan.statements,
+        immediate_schema_restore_statements: schema_restore_plan.immediate_statements,
+        deferred_foreign_key_statements: schema_restore_plan.deferred_foreign_key_statements,
+        deferred_foreign_key_names: schema_restore_plan.deferred_foreign_key_names,
         confirmation_token,
         warnings,
     })
@@ -10436,14 +10464,20 @@ fn table_data_transfer_batch_plan(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let ordered_tables = if cyclic_tables.is_empty() {
-        ordered_keys
+    let cyclic_keys = cyclic_tables
+        .iter()
+        .map(|table| table.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut ordered_tables = ordered_keys
+        .iter()
+        .map(|key| table_by_key[key].clone())
+        .collect::<Vec<_>>();
+    ordered_tables.extend(
+        tables
             .iter()
-            .map(|key| table_by_key[key].clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
+            .filter(|table| cyclic_keys.contains(&table.to_ascii_lowercase()))
+            .cloned(),
+    );
     let mut warnings = Vec::new();
     if !tables.is_empty() {
         warnings.push(
@@ -10453,7 +10487,7 @@ fn table_data_transfer_batch_plan(
     }
     if !cyclic_tables.is_empty() {
         warnings.push(
-            "Selected tables contain a foreign-key cycle. No automatic copy order is safe until the target driver declares a reviewed defer/disable-constraints policy."
+            "Selected tables contain an unresolved foreign-key dependency cycle. Execution is allowed only when every in-cycle foreign key is absent from the target and is bound to the reviewed post-copy restoration plan."
                 .to_string(),
         );
     }
@@ -10469,10 +10503,48 @@ fn table_data_transfer_batch_plan(
         cyclic_tables: cyclic_tables.clone(),
         table_preflights: Vec::new(),
         object_preflights: Vec::new(),
-        can_execute: cyclic_tables.is_empty(),
+        can_execute: true,
         confirmation_token: String::new(),
         warnings,
     })
+}
+
+fn missing_deferred_cycle_foreign_keys(
+    plan: &TableDataTransferBatchPlan,
+    deferred_foreign_keys_by_table: &HashMap<String, HashSet<String>>,
+) -> Vec<String> {
+    if plan.cyclic_tables.is_empty() {
+        return Vec::new();
+    }
+    let unresolved = plan
+        .cyclic_tables
+        .iter()
+        .map(|table| table.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut missing = plan
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            unresolved.contains(&dependency.prerequisite_table.to_ascii_lowercase())
+                && unresolved.contains(&dependency.dependent_table.to_ascii_lowercase())
+        })
+        .filter_map(|dependency| {
+            let table_key = dependency.dependent_table.to_ascii_lowercase();
+            let constraint_key = dependency.constraint_name.to_ascii_lowercase();
+            (!deferred_foreign_keys_by_table
+                .get(&table_key)
+                .is_some_and(|names| names.contains(&constraint_key)))
+            .then(|| {
+                format!(
+                    "{}.{}",
+                    dependency.dependent_table, dependency.constraint_name
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 async fn resolve_table_data_transfer_object_plan(
@@ -10634,72 +10706,107 @@ async fn resolve_table_data_transfer_batch_plan(
         constraints_by_table.push((table.clone(), constraints));
     }
     let mut plan = table_data_transfer_batch_plan(&request, &tables, &constraints_by_table)?;
-    if plan.cyclic_tables.is_empty() {
-        for table in &plan.ordered_tables {
-            let preflight_request = TableDataTransferRequest {
-                project_id: None,
-                // Deterministic validation-only identity: the aggregate
-                // confirmation token must be stable across preview and
-                // execution while still satisfying transfer-id rules.
-                transfer_id: table_data_transfer_batch_preflight_id(&request, table)?,
-                source: TableDataTransferEndpoint {
-                    connection_id: request.source_connection_id.clone(),
-                    driver: request.source_driver.clone(),
-                    database: request.source_database.clone(),
-                    schema: request.source_schema.clone(),
-                    table: table.clone(),
-                },
-                target: TableDataTransferEndpoint {
-                    connection_id: request.target_connection_id.clone(),
-                    driver: request.target_driver.clone(),
-                    database: request.target_database.clone(),
-                    schema: request.target_schema.clone(),
-                    table: table.clone(),
-                },
-                mode: request.mode,
-                max_rows: request.max_rows,
-                batch_size: request.batch_size,
-                reseed_identity: request.reseed_identity,
-                quote_target_column_names: request.quote_target_column_names,
-                restore_source_schema_objects: request.restore_source_schema_objects,
-            };
-            match resolve_table_data_transfer_plan(manager, &preflight_request).await {
-                Ok(table_plan) => {
-                    let can_execute = transfer_plan_can_execute(&table_plan.mapped_columns);
-                    plan.table_preflights
-                        .push(TableDataTransferBatchTablePreflight {
-                            table: table.clone(),
-                            can_execute,
-                            mapped_columns: table_plan.mapped_columns.len() as u32,
-                            plan_digest: Some(table_data_transfer_plan_digest(
-                                &table_plan.confirmation_token,
-                            )),
-                            identity_reseed_plans: table_plan.identity_reseed_plans,
-                            schema_restore_statements: table_plan.schema_restore_statements,
-                            warnings: table_plan.warnings,
-                        });
-                    plan.can_execute &= can_execute;
-                }
-                Err(error) => {
-                    plan.table_preflights
-                        .push(TableDataTransferBatchTablePreflight {
-                            table: table.clone(),
-                            can_execute: false,
-                            mapped_columns: 0,
-                            plan_digest: None,
-                            identity_reseed_plans: Vec::new(),
-                            schema_restore_statements: Vec::new(),
-                            warnings: vec![bounded_table_data_transfer_message(&error)],
-                        });
-                    plan.can_execute = false;
-                }
+    let mut deferred_foreign_keys_by_table = HashMap::<String, HashSet<String>>::new();
+    for table in &plan.ordered_tables {
+        let preflight_request = TableDataTransferRequest {
+            project_id: None,
+            // Deterministic validation-only identity: the aggregate
+            // confirmation token must be stable across preview and
+            // execution while still satisfying transfer-id rules.
+            transfer_id: table_data_transfer_batch_preflight_id(&request, table)?,
+            source: TableDataTransferEndpoint {
+                connection_id: request.source_connection_id.clone(),
+                driver: request.source_driver.clone(),
+                database: request.source_database.clone(),
+                schema: request.source_schema.clone(),
+                table: table.clone(),
+            },
+            target: TableDataTransferEndpoint {
+                connection_id: request.target_connection_id.clone(),
+                driver: request.target_driver.clone(),
+                database: request.target_database.clone(),
+                schema: request.target_schema.clone(),
+                table: table.clone(),
+            },
+            mode: request.mode,
+            max_rows: request.max_rows,
+            batch_size: request.batch_size,
+            reseed_identity: request.reseed_identity,
+            quote_target_column_names: request.quote_target_column_names,
+            restore_source_schema_objects: request.restore_source_schema_objects,
+        };
+        match resolve_table_data_transfer_plan(manager, &preflight_request).await {
+            Ok(table_plan) => {
+                let can_execute = transfer_plan_can_execute(&table_plan.mapped_columns);
+                deferred_foreign_keys_by_table.insert(
+                    table.to_ascii_lowercase(),
+                    table_plan
+                        .deferred_foreign_key_names
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect(),
+                );
+                plan.table_preflights
+                    .push(TableDataTransferBatchTablePreflight {
+                        table: table.clone(),
+                        can_execute,
+                        mapped_columns: table_plan.mapped_columns.len() as u32,
+                        plan_digest: Some(table_data_transfer_plan_digest(
+                            &table_plan.confirmation_token,
+                        )),
+                        identity_reseed_plans: table_plan.identity_reseed_plans,
+                        schema_restore_statements: table_plan.schema_restore_statements,
+                        warnings: table_plan.warnings,
+                    });
+                plan.can_execute &= can_execute;
+            }
+            Err(error) => {
+                plan.table_preflights
+                    .push(TableDataTransferBatchTablePreflight {
+                        table: table.clone(),
+                        can_execute: false,
+                        mapped_columns: 0,
+                        plan_digest: None,
+                        identity_reseed_plans: Vec::new(),
+                        schema_restore_statements: Vec::new(),
+                        warnings: vec![bounded_table_data_transfer_message(&error)],
+                    });
+                plan.can_execute = false;
             }
         }
-        if !plan.can_execute {
-            plan.warnings.push(
+    }
+    if !plan.can_execute {
+        plan.warnings.push(
                     "At least one selected table failed a fresh source/target mapping preflight. Review every table before attempting a batch transfer."
                         .to_string(),
                 );
+    }
+    if !plan.cyclic_tables.is_empty() {
+        let target_driver = normalized_transfer_driver_id(&request.target_driver);
+        let missing = missing_deferred_cycle_foreign_keys(&plan, &deferred_foreign_keys_by_table);
+        if target_driver != "postgres" {
+            plan.can_execute = false;
+            plan.warnings.push(
+                "Cyclic foreign-key batches currently require native PostgreSQL transactional DDL. MySQL-family ALTER TABLE implicitly commits and needs a separate partial-completion receipt before it can be enabled safely."
+                    .to_string(),
+            );
+        } else if !request.restore_source_schema_objects {
+            plan.can_execute = false;
+            plan.warnings.push(
+                "Enable reviewed source index/constraint restoration so every in-cycle foreign key can be created only after all table rows are copied."
+                    .to_string(),
+            );
+        } else if !missing.is_empty() {
+            plan.can_execute = false;
+            plan.warnings.push(format!(
+                "The cycle is still enforced by target or unproven constraint(s): {}. Remove or separately review those target constraints before retrying.",
+                missing.join(", ")
+            ));
+        } else {
+            plan.warnings.push(
+                "Every unresolved in-cycle foreign key is absent from the target and bound to post-copy PostgreSQL DDL. Tables keep deterministic selection order inside the transaction; all foreign keys are restored after every table copy succeeds."
+                    .to_string(),
+            );
         }
     }
     let object_plan = resolve_table_data_transfer_object_plan(manager, &request, &objects).await?;
@@ -10990,27 +11097,32 @@ async fn execute_resolved_table_data_transfer_in_transaction(
                 format!("Could not synchronize PostgreSQL identity generators: {error}")
             })?;
     }
-    if !plan.schema_restore_statements.is_empty() {
-        let statements = plan
-            .schema_restore_statements
-            .iter()
-            .map(|sql| ParameterizedStatement {
-                sql: sql.clone(),
-                params: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        manager
-            .execute_parameterized_transaction(
-                &request.target.connection_id,
-                transaction_id,
-                &statements,
-            )
-            .await
-            .map_err(|error| {
-                format!("Could not restore the reviewed target indexes and constraints: {error}")
-            })?;
-    }
     Ok((rows_transferred, batches, limit_reached))
+}
+
+async fn execute_transfer_schema_restore_statements(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    transaction_id: &str,
+    statements: &[String],
+) -> Result<(), String> {
+    if statements.is_empty() {
+        return Ok(());
+    }
+    let statements = statements
+        .iter()
+        .map(|sql| ParameterizedStatement {
+            sql: sql.clone(),
+            params: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    manager
+        .execute_parameterized_transaction(connection_id, transaction_id, &statements)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            format!("Could not restore the reviewed target indexes and constraints: {error}")
+        })
 }
 
 #[tauri::command]
@@ -11113,6 +11225,17 @@ pub async fn execute_table_data_transfer(
             &mut on_progress,
         )
         .await;
+        let transfer_result = match transfer_result {
+            Ok(summary) => execute_transfer_schema_restore_statements(
+                &manager,
+                &request.target.connection_id,
+                &transaction_id,
+                &plan.schema_restore_statements,
+            )
+            .await
+            .map(|()| summary),
+            Err(error) => Err(error),
+        };
 
         let (rows_transferred, batches, limit_reached) =
             finish_table_data_transfer_transaction(
@@ -11294,7 +11417,7 @@ pub async fn execute_table_data_transfer_batch(
         if confirmation_token.trim() != batch_plan.confirmation_token {
             return Err("Batch transfer plan changed or the confirmation token is invalid. Preview again before copying rows.".to_string());
         }
-        if !batch_plan.can_execute || !batch_plan.cyclic_tables.is_empty() {
+        if !batch_plan.can_execute {
             return Err("Batch transfer cannot execute because its foreign-key graph or a table mapping requires review.".to_string());
         }
 
@@ -11370,6 +11493,7 @@ pub async fn execute_table_data_transfer_batch(
             let mut batches = 0_u64;
             let mut limit_reached = false;
             let mut tables = Vec::with_capacity(resolved_tables.len());
+            let mut deferred_foreign_key_statements = Vec::new();
             for (table_request, table_plan) in &resolved_tables {
                 let completed_rows = rows_transferred;
                 let completed_batches = batches;
@@ -11388,6 +11512,15 @@ pub async fn execute_table_data_transfer_batch(
                         &manager, table_request, table_plan, &transaction_id, &transfer_id, &mut cancel_rx, &mut on_progress,
                     ).await?
                 };
+                execute_transfer_schema_restore_statements(
+                    &manager,
+                    &request.plan.target_connection_id,
+                    &transaction_id,
+                    &table_plan.immediate_schema_restore_statements,
+                )
+                .await?;
+                deferred_foreign_key_statements
+                    .extend(table_plan.deferred_foreign_key_statements.iter().cloned());
                 // Empty tables never invoke the progress callback.
                 rows_transferred = completed_rows + table_rows;
                 batches = completed_batches + table_batches;
@@ -11402,6 +11535,18 @@ pub async fn execute_table_data_transfer_batch(
                     restored_schema_objects: table_plan.schema_restore_statements.len() as u32,
                 });
             }
+            if *cancel_rx.borrow() {
+                return Err(format!(
+                    "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled before deferred foreign-key restoration"
+                ));
+            }
+            execute_transfer_schema_restore_statements(
+                &manager,
+                &request.plan.target_connection_id,
+                &transaction_id,
+                &deferred_foreign_key_statements,
+            )
+            .await?;
             // Non-table objects run after all table data so triggers cannot
             // observe the copy and materialized views populated WITH DATA see
             // the reviewed final rows. PostgreSQL keeps this DDL in the same
@@ -18571,38 +18716,38 @@ mod tests {
         build_structured_filter_where, build_table_data_compare_result,
         build_table_data_compare_sync_parameterized_statements,
         build_table_data_compare_sync_statements, build_table_data_transfer_object_plan,
-        build_table_order_by, build_transfer_schema_restore_statements,
-        build_transfer_target_columns, build_update_mutation, build_upsert_mutation,
-        build_upsert_mutation_with_column_quoting, canonical_import_columns, column_lookup,
-        csv_delimiter, csv_escape, csv_import_reader, csv_import_row_selected,
-        csv_import_source_columns, csv_record_values, data_compare_degradation_level,
-        data_compare_key, data_compare_key_columns_are_declared_unique,
-        data_compare_keyset_continuation, data_compare_row_values,
-        data_compare_sample_key_predicate, delete_table_data_transfer_target_for_overwrite,
-        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
-        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
-        execute_frozen_table_data_compare_sync, execute_target_parameterized_batch,
-        filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        import_string_inferred_type, infer_csv_import_columns, infer_json_lines_import_columns,
+        build_table_order_by, build_transfer_schema_restore_plan, build_transfer_target_columns,
+        build_update_mutation, build_upsert_mutation, build_upsert_mutation_with_column_quoting,
+        canonical_import_columns, column_lookup, csv_delimiter, csv_escape, csv_import_reader,
+        csv_import_row_selected, csv_import_source_columns, csv_record_values,
+        data_compare_degradation_level, data_compare_key,
+        data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
+        data_compare_row_values, data_compare_sample_key_predicate,
+        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
+        ensure_sql_insert_conflict_policy, ensure_table_export_format,
+        ensure_transfer_endpoint_driver_matches_connection, execute_frozen_table_data_compare_sync,
+        execute_target_parameterized_batch, filter_sql_export_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
+        infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
         json_import_rows_with_cancel, merge_data_compare_sample_keys,
-        normalized_data_compare_threshold, normalized_table_data_transfer_objects,
-        normalized_table_data_transfer_project_id, object_label_from_type,
-        object_type_is_foreign_table, object_type_is_materialized_view, object_type_is_view,
-        order_postgres_views, overwrite_transfer_verification, postgres_backup_index_definitions,
-        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
-        postgres_identity_reseed_plan_from_results, postgres_identity_reseed_plan_query,
-        postgres_identity_reseed_statements, postgres_identity_reseed_verification_query,
-        postgres_materialized_view_populated_query, postgres_multirange_type_names,
-        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
-        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_metadata_query,
-        postgres_sequence_setval_sql, postgres_view_definition_query,
-        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
-        query_target, query_target_parameterized, read_csv_import_preview,
-        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_csv_import_row_range, resolve_csv_text_encoding,
+        missing_deferred_cycle_foreign_keys, normalized_data_compare_threshold,
+        normalized_table_data_transfer_objects, normalized_table_data_transfer_project_id,
+        object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
+        object_type_is_view, order_postgres_views, overwrite_transfer_verification,
+        postgres_backup_index_definitions, postgres_backup_routine_definitions,
+        postgres_backup_routine_definitions_query, postgres_identity_reseed_plan_from_results,
+        postgres_identity_reseed_plan_query, postgres_identity_reseed_statements,
+        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
+        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
+        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
+        postgres_sequence_metadata_query, postgres_sequence_setval_sql,
+        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
+        push_delimited_export_row, query_target, query_target_parameterized,
+        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
+        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_transfer_target_column_quoting, resolve_transfer_upsert_key_columns,
         reviewed_table_data_dialect, sanitize_file_part, select_database_sql_export_tables,
         skipped_table_data_compare_result, sql_export_insert_batch_rows, sql_insert_statements,
@@ -18660,7 +18805,7 @@ mod tests {
     use calamine::{open_workbook_auto, Data, Reader};
     use serde_json::{json, Value};
     use std::{
-        collections::{BTreeMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet},
         fs,
         io::Read,
         path::{Path, PathBuf},
@@ -18759,7 +18904,7 @@ mod tests {
             },
         ];
 
-        let statements = build_transfer_schema_restore_statements(
+        let restore_plan = build_transfer_schema_restore_plan(
             DatabaseKind::Postgres,
             "template",
             "public",
@@ -18774,6 +18919,13 @@ mod tests {
             },
         )
         .expect("reviewable PostgreSQL restoration");
+        assert_eq!(
+            restore_plan.deferred_foreign_key_names,
+            vec!["orders_account_fk"]
+        );
+        assert_eq!(restore_plan.deferred_foreign_key_statements.len(), 1);
+        assert_eq!(restore_plan.immediate_statements.len(), 4);
+        let statements = restore_plan.statements;
 
         assert_eq!(statements.len(), 5);
         assert!(statements[0].contains("orders_email_key"));
@@ -18809,7 +18961,7 @@ mod tests {
             on_delete: Some("set_null".to_string()),
         }];
 
-        let statements = build_transfer_schema_restore_statements(
+        let restore_plan = build_transfer_schema_restore_plan(
             DatabaseKind::Mysql,
             "template",
             "app",
@@ -18824,6 +18976,7 @@ mod tests {
             },
         )
         .expect("reviewable MySQL restoration");
+        let statements = restore_plan.statements;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains("ALTER TABLE `app`.`orders`"));
@@ -18851,7 +19004,7 @@ mod tests {
             ..source.clone()
         };
 
-        let error = build_transfer_schema_restore_statements(
+        let error = build_transfer_schema_restore_plan(
             DatabaseKind::Postgres,
             "public",
             "public",
@@ -21435,7 +21588,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_transfer_plan_orders_selected_tables_by_foreign_key_and_blocks_cycles() {
+    fn batch_transfer_plan_orders_acyclic_tables_and_keeps_cycles_deterministic() {
         let request = TableDataTransferBatchPlanRequest {
             source_connection_id: "source".to_string(),
             source_driver: "postgres".to_string(),
@@ -21513,9 +21666,30 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(cycle.ordered_tables.is_empty());
+        assert_eq!(cycle.ordered_tables, vec!["orders", "users"]);
         assert_eq!(cycle.cyclic_tables, vec!["orders", "users"]);
-        assert!(!cycle.can_execute);
+        assert!(cycle.can_execute);
+
+        let deferred = HashMap::from([
+            (
+                "orders".to_string(),
+                HashSet::from(["orders_user_fk".to_string()]),
+            ),
+            (
+                "users".to_string(),
+                HashSet::from(["users_order_fk".to_string()]),
+            ),
+        ]);
+        assert!(missing_deferred_cycle_foreign_keys(&cycle, &deferred).is_empty());
+
+        let incomplete = HashMap::from([(
+            "orders".to_string(),
+            HashSet::from(["orders_user_fk".to_string()]),
+        )]);
+        assert_eq!(
+            missing_deferred_cycle_foreign_keys(&cycle, &incomplete),
+            vec!["users.users_order_fk"]
+        );
     }
 
     #[tokio::test]
