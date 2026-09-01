@@ -27,7 +27,7 @@
 - Open project `.sql` files against multiple saved connections/databases/schemas,
   close and reopen them, then rename/delete files and directories and change the
   project root. Static tests cover persistence, stale connections, path safety,
-  rename/delete scoping and the 2,000-record bound; packaged WebView interaction
+  rename/delete scoping and the 200-record bound; packaged WebView interaction
   remains deferred.
 
 Static unit/build/Clippy validation is executed before this queue. These checks

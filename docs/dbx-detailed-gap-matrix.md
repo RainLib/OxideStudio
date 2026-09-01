@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`5d6f66777`
+> DBX 参考提交：`77b90eac7`
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,14 +9,20 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`264f5c483` → `5d6f66777`）
+### 最新增量审计（`5d6f66777` → `77b90eac7`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `01756080f`（由 `77b90eac7` 合并） | SQL Server 2008 legacy result-type probe 在改写 `SELECT TOP (0) ... FROM (...)` 时保留 CTE/comment prefix | 当前无可迁移的 Host 调用链：DBX 修复位于 native TDS driver 的 `crates/dbx-core/src/db/sqlserver.rs:SQLSERVER_RESULT_TYPE_PROBE_SQL/sqlserver_legacy_probe_with_nonce`。Oxide Host 没有 SQL Server 结果类型 probe，也不会重写外置 package 的查询文本；`ExternalDriver::query*` 将原 SQL 与显式 query context 原样交给已签名 sidecar，因此不会在 Host 丢失 CTE。正式 SQL Server package 仍须在自身 JDBC/TDS conformance 中覆盖 SQL Server 2008、CTE、前置注释、临时表与重复/未命名列，未有该 package 前不把此项计为可用能力。 |
+
+### 上一增量审计（`264f5c483` → `5d6f66777`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
 | `cb754cd0c` | 历史结果窗口切换及结果快照保留本地列过滤器 | 架构不直接适用：DBX 的修复位于 `apps/desktop/src/lib/tabs/tabResultCache.ts` 与 `queryStore.ts`，绑定 `resultRuns`；Oxide 当前每个 Query Tab 只有当前 `results`，本地过滤器保存在 tab-owned `gridState.columnFilters`，不存在历史 run/cache 解码时丢字段的路径。后续若引入历史结果窗口，必须把过滤器纳入每个 run 的不可变快照，不能继续复用 tab 单例。 |
 | `a7922b9cb` | Schema 与 Table 使用不同图标色 | 已对齐并统一复用：主树及 PostgreSQL 跨 database 树都从 `explorerObjectPresentation.ts` 读取对象角色色，schema 使用 amber、table 使用 green、view 使用 sky；连接颜色继续只表达数据源身份，pinned 状态仍可覆盖为 primary。DBX 位置：`apps/desktop/src/components/sidebar/TreeItem.vue`。Oxide 位置：`src/features/database-explorer/model/explorerObjectPresentation.ts`、`SchemaSidebar.tsx`、`PostgresRemoteDatabaseContents.tsx`。 |
 | `440c41f5b` | SQL Server 本地临时表的结果总数查询复用原查询 session | 当前无同类调用链：DBX 的自动 Query Result `COUNT(*)` 会启动独立 count session，修复位于 `queryResultCountSession.ts` 与 `queryStore.ts`；Oxide 任意查询结果不自动生成第二条 count SQL，Table Page 总数由 Host 在同一次结构化分页请求内按需计算，因此不会跨 session 访问 `#temp`。若以后增加任意查询精确总数，必须先移植该 session 检测。 |
-| `e9a90173a` | 外部 `.sql` 文件记忆 schema，Sidebar Locate 不再回退到错误 database-as-schema | 已完成等价目标上下文：Project `.sql` 文件首次打开绑定当前 connection/database/schema，关闭后重开恢复；切换 database/schema 会立即更新文件目标，连接删除后旧目标失效。缓存有版本、字段/路径校验和 2,000 条上限，只保存目标身份，不保存 SQL、连接串或凭据；文件/目录重命名、删除及项目根目录成功切换会原子迁移或清除对应记录，根目录切换失败则保留原上下文。SQL Library 继续使用自身持久化字段。DBX 位置：`externalSqlFileTarget.ts`、`jdbcDialect.ts`、`App.vue`。Oxide 位置：`src/lib/projectSqlFileTarget.ts`、`useTabStore.ts`、`ProjectFilesSidebar.tsx`。 |
+| `e9a90173a` | 外部 `.sql` 文件记忆 schema，Sidebar Locate 不再回退到错误 database-as-schema | 已完成等价目标上下文：Project `.sql` 文件首次打开绑定当前 connection/database/schema，关闭后重开恢复；切换 database/schema 会立即更新文件目标，连接删除后旧目标失效。缓存有版本、字段/路径校验和与 DBX 相同的 200 条最近使用上限，只保存目标身份，不保存 SQL、连接串或凭据；文件/目录重命名、删除及项目根目录成功切换会原子迁移或清除对应记录，根目录切换失败则保留原上下文。SQL Library 继续使用自身持久化字段。DBX 位置：`externalSqlFileTarget.ts`、`jdbcDialect.ts`、`App.vue`。Oxide 位置：`src/lib/projectSqlFileTarget.ts`、`useTabStore.ts`、`ProjectFilesSidebar.tsx`。 |
 | `5d6f66777` | MySQL 迁移避免 FK 文案误删列，并在 structure-only + 既有目标时阻止缺列 | 已完成等价且 fail-closed：Oxide 不解析/删改 `SHOW CREATE TABLE` 文本，而是从结构化 constraint/index metadata 生成 reviewed post-copy DDL，因此 comment/default 中出现 `foreign key` 不会误删列；创建迁移目标继续拒绝既有同名表。向既有目标传输时，只要任一源列在目标结构中不存在，预览即拒绝，不再把 source-only 列降级为警告；目标同名 generated/hidden 列仍由数据库维护，目标端无默认值的必填列也继续拒绝。DBX 位置：`crates/dbx-core/src/transfer.rs`。Oxide 位置：`src-tauri/src/commands/table.rs:build_data_transfer_column_mapping`。真实 MySQL 5.7/8 迁移仍延期。 |
 
 ### 上一增量审计（`e43e36e7a` → `264f5c483`）
