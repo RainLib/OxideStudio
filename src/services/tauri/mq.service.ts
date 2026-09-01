@@ -130,6 +130,18 @@ export const rocketMqService = {
       connectionId,
       topic,
     }),
+  getTopicStats: (connectionId: string, topic: string) =>
+    invokeRawCommand<{
+      topic: string;
+      partitions: Array<{
+        brokerName: string;
+        partition: number;
+        beginOffset: number;
+        endOffset: number;
+        messageCount: number;
+      }>;
+      totalMessages: number;
+    }>("get_rocketmq_topic_stats", { connectionId, topic }),
   peekMessages: (
     connectionId: string,
     topic: string,

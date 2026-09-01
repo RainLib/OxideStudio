@@ -144,6 +144,22 @@ pub async fn get_rocketmq_topic_config(
 }
 
 #[tauri::command]
+pub async fn get_rocketmq_topic_stats(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+    topic: String,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_get_topic_stats",
+            serde_json::json!({ "topic": topic }),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn peek_rocketmq_messages(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,

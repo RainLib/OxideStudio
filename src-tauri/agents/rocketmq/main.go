@@ -28,10 +28,11 @@ const (
 	defaultTimeout      = 10 * time.Second
 	maxPeekMessages     = 100
 	maxMessageBodyBytes = 64 * 1024
+	maxStatsPartitions  = 2048
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -130,6 +131,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.describeTopic(params)
 	case "mq_get_topic_config":
 		return a.getTopicConfig(params)
+	case "mq_get_topic_stats":
+		return a.getTopicStats(params)
 	case "mq_peek_messages":
 		return a.peekMessages(params)
 	case "mq_query_message_by_key":
@@ -431,6 +434,60 @@ func (a *rocketMQAgent) getTopicConfig(params map[string]any) (any, error) {
 		"configs":            configs,
 		"unavailableBrokers": unavailable,
 	}, nil
+}
+
+func (a *rocketMQAgent) getTopicStats(params map[string]any) (any, error) {
+	topic, ok := params["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if !ok || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	route, err := client.ExamineTopicRouteInfo(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	addresses := topicMasterAddresses(route)
+	partitionCount := 0
+	for _, queue := range route.QueueDatas {
+		if queue != nil {
+			partitionCount += queue.ReadQueueNums
+		}
+	}
+	if partitionCount > maxStatsPartitions {
+		return nil, fmt.Errorf("topic has %d partitions; stats are limited to %d", partitionCount, maxStatsPartitions)
+	}
+	rows := make([]map[string]any, 0, partitionCount)
+	var total int64
+	for _, queue := range route.QueueDatas {
+		if queue == nil || addresses[queue.BrokerName] == "" {
+			continue
+		}
+		for partition := 0; partition < queue.ReadQueueNums; partition++ {
+			result, pullErr := client.PullMessage(ctx, addresses[queue.BrokerName], topic, partition, 0, 1)
+			if pullErr != nil {
+				return nil, fmt.Errorf("read stats for %s partition %d: %w", queue.BrokerName, partition, pullErr)
+			}
+			count := result.MaxOffset - result.MinOffset
+			if count < 0 {
+				count = 0
+			}
+			total += count
+			rows = append(rows, map[string]any{"brokerName": queue.BrokerName, "partition": partition, "beginOffset": result.MinOffset, "endOffset": result.MaxOffset, "messageCount": count})
+		}
+	}
+	sort.Slice(rows, func(left, right int) bool {
+		if rows[left]["brokerName"].(string) != rows[right]["brokerName"].(string) {
+			return rows[left]["brokerName"].(string) < rows[right]["brokerName"].(string)
+		}
+		return rows[left]["partition"].(int) < rows[right]["partition"].(int)
+	})
+	return map[string]any{"topic": topic, "partitions": rows, "totalMessages": total}, nil
 }
 
 // peekMessages is deliberately read-only and bounded. It pulls from concrete
