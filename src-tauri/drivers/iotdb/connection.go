@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/apache/iotdb-client-go/v2/client"
 )
 
 const DefaultPort = 6667
@@ -34,7 +36,17 @@ type ConnectionConfig struct {
 // Host. It does not retain or log it. Tree/Table dialect selection remains
 // explicit because IoTDB applies database context only in Table SQL.
 func ParseConnectionConfig(raw string, options map[string]string) (ConnectionConfig, error) {
-	config := ConnectionConfig{Host: "127.0.0.1", Port: DefaultPort, Username: "root", Password: "root", Dialect: TreeDialect, FetchSize: 1024, TimeZone: "Asia/Shanghai", ConnectTimeoutMS: 15_000}
+	config := ConnectionConfig{
+		Host:             "127.0.0.1",
+		Port:             DefaultPort,
+		Username:         "root",
+		Password:         "root",
+		Dialect:          TreeDialect,
+		FetchSize:        1024,
+		TimeZone:         client.DefaultTimeZone,
+		ConnectRetryMax:  client.DefaultConnectRetryMax,
+		ConnectTimeoutMS: 15_000,
+	}
 	value := strings.TrimSpace(strings.TrimPrefix(raw, "jdbc:"))
 	if value == "" {
 		return config, fmt.Errorf("IoTDB connection URL is required")

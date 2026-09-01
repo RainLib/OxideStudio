@@ -1,6 +1,20 @@
 package iotdb
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/apache/iotdb-client-go/v2/client"
+)
+
+func TestConnectionDefaultsMatchTheNativeClient(t *testing.T) {
+	config, err := ParseConnectionConfig("iotdb://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.TimeZone != client.DefaultTimeZone || config.ConnectRetryMax != client.DefaultConnectRetryMax {
+		t.Fatalf("defaults = %#v", config)
+	}
+}
 
 func TestParseConnectionConfigSupportsTableClusterTLS(t *testing.T) {
 	config, err := ParseConnectionConfig("jdbc:iotdb://alice:secret@db.example:6668/metrics?dialect=table&node_urls=a:6667,b:6667&ssl=true&ssl_ca=C:/certs/ca.pem&rpc_compression=true", map[string]string{"fetch_size": "2048", "time_zone": "UTC", "connect_retry_max": "5", "connect_timeout_ms": "12000"})
