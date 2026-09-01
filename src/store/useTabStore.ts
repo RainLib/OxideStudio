@@ -298,6 +298,8 @@ export interface TabData {
   error: string | null;
   queryError?: QueryExecutionErrorDetail | null;
   activeResultIndex?: number;
+  /** Result selected when the current query execution began. */
+  executingResultIndex?: number;
   isPinned: boolean;
   /** State for the active result set, retained for table tabs and legacy tabs. */
   gridState?: QueryResultGridState;
@@ -490,6 +492,7 @@ export function tabAfterReleasingRuntimePayload(tab: TabData): TabData {
     explainPlan: null,
     queryOutputView: "results",
     activeResultIndex: 0,
+    executingResultIndex: undefined,
     resultGridStates: undefined,
     isExecuting: false,
     runningQueryId: null,
@@ -2645,6 +2648,8 @@ export const useTabStore = create<TabState>((set, get) => ({
               explainPlan: null,
               queryOutputView: "results",
               activeResultIndex: t.activeResultIndex ?? 0,
+              executingResultIndex:
+                t.type === "table" ? undefined : (t.activeResultIndex ?? 0),
             }
           : t,
       ),
@@ -2675,6 +2680,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                   ...candidate,
                   isExecuting: false,
                   runningQueryId: null,
+                  executingResultIndex: undefined,
                 }
               : candidate,
           ),
@@ -2729,6 +2735,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                     ...candidate,
                     isExecuting: false,
                     runningQueryId: null,
+                    executingResultIndex: undefined,
                   }
                 : candidate,
             ),
@@ -2777,6 +2784,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 results: results || null,
                 resultSql: sqlToRun,
                 activeResultIndex: 0,
+                executingResultIndex: undefined,
                 gridState: undefined,
                 resultGridStates: undefined,
                 queryError: null,
@@ -2820,6 +2828,7 @@ export const useTabStore = create<TabState>((set, get) => ({
                 ...t,
                 isExecuting: false,
                 runningQueryId: null,
+                executingResultIndex: undefined,
                 error: message,
                 queryError,
               }

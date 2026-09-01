@@ -901,3 +901,18 @@ chunk，用户未启用 Vim 时不进入 workspace startup graph。此前 Vite �
   单一 startup module 和无静态 import cycle。
 - 此变更不改变 Vim 功能、用户设置或 production 代码拆分；真正的 Vim 首次启用延迟仍应在 packaged
   WebView 性能矩阵中实测，而不是用本机构建耗时替代。
+
+## Phase 157 增量：仅遮罩正在执行的查询结果集
+
+对照 DBX `f19439ad7`，Oxide 原先把 query tab 的 `isExecuting` 直接用于整个 DataGrid：多结果集查询在
+执行期间切换到另一份已完成结果也会被 loading overlay 遮住。现引入瞬态 `executingResultIndex`：
+
+- 查询开始时冻结当前 active result index；Grid 的 `aria-busy`、空态和 busy indicator 只在 active index
+  与该值相同时显示。用户可在同一执行期间查看其他已完成结果，编辑仍由原有 `isExecuting` 门禁禁止。
+- 成功、错误、取消和连接恢复被中止时都会清理该索引；新执行替换 results 后也清理，避免旧 execution
+  identity 泄漏到下一次结果集。
+- table tab 继续遮罩唯一的 live table-data surface；旧持久化/in-memory tab 没有该字段时保持保守遮罩，首次
+  新执行后即迁移到精确行为。
+
+`queryResultLoadingState.test.ts` 覆盖 query index matching/mismatch、table 与 legacy fallback；production
+build 验证 DataGrid 选择器和 TypeScript。真实 WebView 下并行切换、焦点和动画继续进入延期矩阵。

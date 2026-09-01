@@ -115,6 +115,7 @@ import { databaseDriverProfile } from "@/lib/databaseDialect";
 import { cachedSqlProjectionSources } from "@/lib/queryEditorCachedCompletion";
 import { ValueEditorDialog, type ValueEditorTarget } from "./ValueEditorDialog";
 import { isTableCellExpression } from "@/lib/tableCellExpression";
+import { isActiveQueryResultLoading } from "@/lib/queryResultLoadingState";
 import type {
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -271,6 +272,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               results: tab.results,
               resultSql: tab.resultSql,
               activeResultIndex: tab.activeResultIndex,
+              executingResultIndex: tab.executingResultIndex,
               error: tab.error,
               queryError: tab.queryError,
               isExecuting: tab.isExecuting,
@@ -351,6 +353,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
 
     const resultIndex = activeTab?.activeResultIndex ?? 0;
+    const activeTabKind = activeTab?.type === "table" ? "table" : "query";
+    const isActiveResultExecuting = isActiveQueryResultLoading({
+      isExecuting: Boolean(activeTab?.isExecuting),
+      tabType: activeTabKind,
+      activeResultIndex: resultIndex,
+      executingResultIndex: activeTab?.executingResultIndex,
+    });
     const sourceResult =
       activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
     const [queryResultTransposed, setQueryResultTransposed] = useState(false);
@@ -3046,10 +3055,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         <div
           ref={gridContainerRef}
           className="flex-1 overflow-hidden relative"
-          aria-busy={activeTab?.isExecuting || undefined}
+          aria-busy={isActiveResultExecuting || undefined}
         >
           {!result && (!overrideColumns || overrideColumns.length === 0) ? (
-            !activeTab?.isExecuting && (
+            !isActiveResultExecuting && (
               <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
                 {activeTab?.type === "table"
                   ? "No data loaded"
@@ -3170,10 +3179,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
           <DataGridHoverTooltip tooltip={hoverTooltip} />
 
-          {activeTab?.isExecuting && (
-            <DataGridBusyIndicator
-              kind={activeTab.type === "table" ? "table" : "query"}
-            />
+          {isActiveResultExecuting && (
+            <DataGridBusyIndicator kind={activeTabKind} />
           )}
         </div>
         <ValueEditorDialog
