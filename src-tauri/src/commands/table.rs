@@ -140,6 +140,9 @@ const TABLE_IMPORT_REPORT_PARENT_ID: &str = "table-import-reports-v1";
 const TABLE_IMPORT_REPORT_KIND: &str = "TABLE_IMPORT_REPORT";
 const MAX_POSTGRES_ROUTINE_SOURCE_CHARS: usize = 262_144;
 const MAX_POSTGRES_ROUTINE_SOURCE_OVERLOADS: usize = 20;
+/// Catalog defaults are included in a reviewed CREATE TABLE plan, never in an
+/// unbounded renderer payload or unchecked SQL fragment.
+const MAX_DEFAULT_EXPRESSION_BYTES: usize = 16 * 1024;
 /// A whole-schema backup must not silently truncate source definitions. Keep
 /// routine discovery bounded, but fail the export if the schema exceeds this
 /// reviewed host-owned limit instead of publishing a partial logical backup.
@@ -4600,6 +4603,7 @@ fn render_table_column_definition(
     schema: &str,
     table: &str,
     column: &CreateTableColumn,
+    default_value: Option<&str>,
     inline_primary_key: bool,
     comment_statements: &mut Vec<String>,
 ) -> Result<(String, String), String> {
@@ -4619,6 +4623,16 @@ fn render_table_column_definition(
         kind.quote_identifier(column_name),
         render_column_type(column)?
     );
+
+    if column.is_auto_increment && default_value.is_some() {
+        return Err(format!(
+            "Column {column_name} cannot combine a copied default with a target-owned identity"
+        ));
+    }
+    if let Some(default_value) = default_value {
+        definition.push_str(" DEFAULT ");
+        definition.push_str(validate_default_expression(default_value)?);
+    }
 
     if column.is_auto_increment {
         if let Some(clause) = kind
@@ -4685,6 +4699,7 @@ fn sqlite_qualified_relation(schema: &str, relation: &str) -> Result<String, Str
 
 fn sqlite_column_definition(
     column: &CreateTableColumn,
+    default_value: Option<&str>,
     allow_primary_key: bool,
 ) -> Result<(String, String), String> {
     let name = column.name.trim();
@@ -4727,6 +4742,15 @@ fn sqlite_column_definition(
         sqlite_quote_identifier(name),
         render_column_type(column)?
     );
+    if column.is_auto_increment && default_value.is_some() {
+        return Err(format!(
+            "Column {name} cannot combine a copied default with SQLite AUTOINCREMENT"
+        ));
+    }
+    if let Some(default_value) = default_value {
+        definition.push_str(" DEFAULT ");
+        definition.push_str(validate_default_expression(default_value)?);
+    }
     if column.is_primary_key {
         definition.push_str(" PRIMARY KEY");
     }
@@ -4743,6 +4767,15 @@ fn build_sqlite_create_table_statements(
     schema: &str,
     table: &str,
     columns: &[CreateTableColumn],
+) -> Result<Vec<String>, String> {
+    build_sqlite_create_table_statements_with_defaults(schema, table, columns, &BTreeMap::new())
+}
+
+fn build_sqlite_create_table_statements_with_defaults(
+    schema: &str,
+    table: &str,
+    columns: &[CreateTableColumn],
+    default_expressions: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
     if columns.is_empty() {
         return Err("At least one column is required".to_string());
@@ -4762,7 +4795,11 @@ fn build_sqlite_create_table_statements(
         if primary_key_count > 1 {
             rendered_column.is_primary_key = false;
         }
-        let (definition, name) = sqlite_column_definition(&rendered_column, true)?;
+        let (definition, name) = sqlite_column_definition(
+            &rendered_column,
+            default_expressions.get(&column.name).map(String::as_str),
+            true,
+        )?;
         if column.is_primary_key && primary_key_count > 1 {
             primary_keys.push(name);
         }
@@ -4788,7 +4825,7 @@ fn build_sqlite_add_column_statements(
     column: &CreateTableColumn,
 ) -> Result<Vec<String>, String> {
     let table = sqlite_qualified_relation(schema, table)?;
-    let (definition, _) = sqlite_column_definition(column, false)?;
+    let (definition, _) = sqlite_column_definition(column, None, false)?;
     Ok(vec![format!(
         "ALTER TABLE {table} ADD COLUMN {definition};"
     )])
@@ -4932,6 +4969,16 @@ fn build_create_table_statements(
     table: &str,
     columns: &[CreateTableColumn],
 ) -> Result<Vec<String>, String> {
+    build_create_table_statements_with_defaults(kind, schema, table, columns, &BTreeMap::new())
+}
+
+fn build_create_table_statements_with_defaults(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &[CreateTableColumn],
+    default_expressions: &BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
     let table = table.trim();
     if table.is_empty() {
         return Err("Table name is required".to_string());
@@ -4950,6 +4997,7 @@ fn build_create_table_statements(
             schema,
             table,
             column,
+            default_expressions.get(&column.name).map(String::as_str),
             false,
             &mut comment_statements,
         )?;
@@ -5090,8 +5138,15 @@ fn build_add_table_column_statements(
     }
 
     let mut comment_statements = Vec::new();
-    let (definition, _) =
-        render_table_column_definition(kind, schema, table, column, true, &mut comment_statements)?;
+    let (definition, _) = render_table_column_definition(
+        kind,
+        schema,
+        table,
+        column,
+        None,
+        true,
+        &mut comment_statements,
+    )?;
 
     let mut statements = vec![format!(
         "ALTER TABLE {} ADD COLUMN {};",
@@ -5212,8 +5267,78 @@ fn validate_default_expression(value: &str) -> Result<&str, String> {
     if value.is_empty() {
         return Err("Default value is required when default mode is set".to_string());
     }
-    if value.contains(';') || value.contains("--") || value.contains("/*") || value.contains("*/") {
-        return Err("Default value cannot contain statement separators or comments".to_string());
+    if value.len() > MAX_DEFAULT_EXPRESSION_BYTES {
+        return Err(format!(
+            "Default value exceeds the {} byte review limit",
+            MAX_DEFAULT_EXPRESSION_BYTES
+        ));
+    }
+
+    let bytes = value.as_bytes();
+    let mut index = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut bracket_identifier = false;
+    let mut parentheses = 0usize;
+    while index < bytes.len() {
+        let current = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if bracket_identifier {
+            if current == b']' {
+                if next == Some(b']') {
+                    index += 2;
+                    continue;
+                }
+                bracket_identifier = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if current == delimiter {
+                if next == Some(delimiter) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        if current == b'-' && next == Some(b'-')
+            || current == b'/' && next == Some(b'*')
+            || current == b'*' && next == Some(b'/')
+            || current == b';'
+        {
+            return Err(
+                "Default value cannot contain statement separators or comments".to_string(),
+            );
+        }
+        match current {
+            b'\'' | b'"' | b'`' => quote = Some(current),
+            b'[' => bracket_identifier = true,
+            b'(' => parentheses += 1,
+            b')' => {
+                if parentheses == 0 {
+                    return Err(
+                        "Default value contains an unmatched closing parenthesis".to_string()
+                    );
+                }
+                parentheses -= 1;
+            }
+            0 => return Err("Default value cannot contain NUL bytes".to_string()),
+            byte if byte.is_ascii_control() && !byte.is_ascii_whitespace() => {
+                return Err("Default value contains unsupported control characters".to_string());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if quote.is_some() || bracket_identifier {
+        return Err("Default value contains an unterminated quoted region".to_string());
+    }
+    if parentheses != 0 {
+        return Err("Default value contains unbalanced parentheses".to_string());
     }
     Ok(value)
 }
@@ -8054,7 +8179,232 @@ fn transfer_target_column_type(
 struct TransferTargetColumnsPlan {
     columns: Vec<TableDataTransferTargetColumn>,
     create_columns: Vec<CreateTableColumn>,
+    default_expressions: BTreeMap<String, String>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransferTargetDefaultMapping {
+    expression: Option<String>,
+    reason: String,
+}
+
+fn is_portable_numeric_default(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = usize::from(matches!(bytes[0], b'+' | b'-'));
+    let integer_start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    let mut has_digits = index > integer_start;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        has_digits |= index > fraction_start;
+    }
+    if !has_digits {
+        return false;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
+fn is_portable_single_quoted_default(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'\'' || bytes[bytes.len() - 1] != b'\'' {
+        return false;
+    }
+    let mut index = 1usize;
+    while index + 1 < bytes.len() {
+        match bytes[index] {
+            b'\'' if bytes.get(index + 1) == Some(&b'\'') => index += 2,
+            b'\'' | b'\\' => return false,
+            byte if byte.is_ascii_control() => return false,
+            _ => index += 1,
+        }
+    }
+    index == bytes.len() - 1
+}
+
+fn portable_transfer_default_expression(value: &str, family: &str) -> Option<String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("null") {
+        return Some("NULL".to_string());
+    }
+    if family == "boolean" {
+        if value.eq_ignore_ascii_case("true") || value == "1" {
+            return Some("TRUE".to_string());
+        }
+        if value.eq_ignore_ascii_case("false") || value == "0" {
+            return Some("FALSE".to_string());
+        }
+    }
+    if matches!(family, "integer" | "numeric") && is_portable_numeric_default(value) {
+        return Some(value.to_string());
+    }
+    if matches!(family, "text" | "uuid" | "temporal") && is_portable_single_quoted_default(value) {
+        return Some(value.to_string());
+    }
+    if family == "temporal" {
+        for keyword in ["CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP"] {
+            if value.eq_ignore_ascii_case(keyword)
+                || value.eq_ignore_ascii_case(&format!("{keyword}()"))
+            {
+                return Some(keyword.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn default_expression_invokes_function(value: &str, function_name: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut bracket_identifier = false;
+    while index < bytes.len() {
+        let current = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if bracket_identifier {
+            if current == b']' {
+                if next == Some(b']') {
+                    index += 2;
+                    continue;
+                }
+                bracket_identifier = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if current == delimiter {
+                if next == Some(delimiter) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match current {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(current);
+                index += 1;
+            }
+            b'[' => {
+                bracket_identifier = true;
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+                {
+                    index += 1;
+                }
+                let token = &value[start..index];
+                let mut next_index = index;
+                while bytes
+                    .get(next_index)
+                    .is_some_and(|byte| byte.is_ascii_whitespace())
+                {
+                    next_index += 1;
+                }
+                if token.eq_ignore_ascii_case(function_name) && bytes.get(next_index) == Some(&b'(')
+                {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn transfer_target_default_expression(
+    source: &ColumnInfo,
+    source_driver: &str,
+    target_driver: &str,
+    identity_retained: bool,
+) -> Option<TransferTargetDefaultMapping> {
+    let value = source
+        .default_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if identity_retained {
+        return Some(TransferTargetDefaultMapping {
+            expression: None,
+            reason: "The source default belongs to its source generator; the new target-owned identity supplies its own default."
+                .to_string(),
+        });
+    }
+    if source.is_generated == Some(true) {
+        return Some(TransferTargetDefaultMapping {
+            expression: None,
+            reason: "Generated-column expressions are not copied as target defaults.".to_string(),
+        });
+    }
+    if let Err(error) = validate_default_expression(value) {
+        return Some(TransferTargetDefaultMapping {
+            expression: None,
+            reason: format!("The source default is not a bounded single SQL expression: {error}."),
+        });
+    }
+    if default_expression_invokes_function(value, "nextval") {
+        return Some(TransferTargetDefaultMapping {
+            expression: None,
+            reason:
+                "The source sequence reference is not portable to a newly created target table."
+                    .to_string(),
+        });
+    }
+
+    let source_driver = normalized_transfer_driver_id(source_driver);
+    let target_driver = normalized_transfer_driver_id(target_driver);
+    if source_driver == target_driver {
+        return Some(TransferTargetDefaultMapping {
+            expression: Some(value.to_string()),
+            reason: "The exact same-product default expression is retained for explicit review."
+                .to_string(),
+        });
+    }
+    let family = transfer_type_family(&source.data_type);
+    if let Some(expression) = portable_transfer_default_expression(value, family) {
+        return Some(TransferTargetDefaultMapping {
+            expression: Some(expression),
+            reason: format!(
+                "A portable {family} default literal/system value is retained across the reviewed product mapping."
+            ),
+        });
+    }
+    Some(TransferTargetDefaultMapping {
+        expression: None,
+        reason:
+            "The source default is product-specific and has no reviewed target-dialect mapping."
+                .to_string(),
+    })
 }
 
 fn review_transfer_compatibility(
@@ -8134,8 +8484,10 @@ fn build_transfer_target_columns(
 
     let mut planned = Vec::with_capacity(source_columns.len());
     let mut create_columns = Vec::with_capacity(source_columns.len());
+    let mut default_expressions = BTreeMap::new();
     let mut retained_identity_columns = Vec::new();
     let mut omitted_identity_columns = Vec::new();
+    let mut retained_default_columns = Vec::new();
     let mut omitted_default_columns = Vec::new();
     for source in source_columns
         .iter()
@@ -8149,10 +8501,17 @@ fn build_transfer_target_columns(
             &mapping.data_type,
             visible_primary_key_count,
         );
-        let has_source_default = source
-            .default_value
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
+        let default_mapping = transfer_target_default_expression(
+            source,
+            source_driver,
+            target_driver,
+            identity_retained,
+        );
+        let has_source_default = default_mapping.is_some();
+        let default_retained = default_mapping
+            .as_ref()
+            .and_then(|mapping| mapping.expression.as_ref())
+            .is_some();
         let mut compatibility = mapping.compatibility;
         let mut reasons = vec![mapping.reason];
         if source.is_auto_increment {
@@ -8172,12 +8531,14 @@ fn build_transfer_target_columns(
                 compatibility = review_transfer_compatibility(compatibility);
             }
         }
-        if has_source_default {
-            omitted_default_columns.push(source.name.clone());
-            reasons.push(
-                "The source default expression is not retained because it has not passed a target-dialect semantic mapping."
-                    .to_string(),
-            );
+        if let Some(default_mapping) = default_mapping {
+            reasons.push(default_mapping.reason);
+            if let Some(expression) = default_mapping.expression {
+                retained_default_columns.push(source.name.clone());
+                default_expressions.insert(source.name.clone(), expression);
+            } else {
+                omitted_default_columns.push(source.name.clone());
+            }
             compatibility = review_transfer_compatibility(compatibility);
         }
         planned.push(TableDataTransferTargetColumn {
@@ -8190,7 +8551,7 @@ fn build_transfer_target_columns(
             source_auto_increment: source.is_auto_increment,
             identity_retained,
             has_source_default,
-            default_retained: false,
+            default_retained,
             compatibility,
             reason: reasons.join(" "),
         });
@@ -8229,15 +8590,22 @@ fn build_transfer_target_columns(
             omitted_identity_columns.join(", ")
         ));
     }
+    if !retained_default_columns.is_empty() {
+        warnings.push(format!(
+            "Reviewed source default expression(s) are retained in the target CREATE TABLE plan: {}.",
+            retained_default_columns.join(", ")
+        ));
+    }
     if !omitted_default_columns.is_empty() {
         warnings.push(format!(
-            "Source default expressions are omitted pending target-dialect semantic mapping: {}.",
+            "Source default expressions without a reviewed target-dialect mapping are omitted: {}.",
             omitted_default_columns.join(", ")
         ));
     }
     Ok(TransferTargetColumnsPlan {
         columns: planned,
         create_columns,
+        default_expressions,
         warnings,
     })
 }
@@ -8315,26 +8683,32 @@ async fn resolve_table_data_transfer_target_plan(
     let mapping_profile = transfer_target_mapping_profile(&source_driver, &target_driver);
     let target_columns_plan =
         build_transfer_target_columns(&source_columns, &source_driver, &target_driver)?;
-    let columns = target_columns_plan.columns;
-    let create_columns = target_columns_plan.create_columns;
+    let TransferTargetColumnsPlan {
+        columns,
+        create_columns,
+        default_expressions,
+        warnings: target_column_warnings,
+    } = target_columns_plan;
     let can_execute = columns
         .iter()
         .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported);
     let statements = if !can_execute {
         Vec::new()
     } else if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
-        build_sqlite_create_table_statements(
+        build_sqlite_create_table_statements_with_defaults(
             &request.target.schema,
             &request.target.table,
             &create_columns,
+            &default_expressions,
         )?
     } else {
         let kind = DatabaseKind::from_str(&target_driver).map_err(|error| error.to_string())?;
-        build_create_table_statements(
+        build_create_table_statements_with_defaults(
             kind,
             &request.target.schema,
             &request.target.table,
             &create_columns,
+            &default_expressions,
         )?
     };
     let confirmation_token = if can_execute {
@@ -8347,10 +8721,10 @@ async fn resolve_table_data_transfer_target_plan(
         endpoint_label(&request.target)
     )];
     warnings.push(
-        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators; source sequence names/current values, generated expressions, foreign keys, checks, triggers, indexes, and default expressions are not copied."
+        "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained; source sequence names/current values, generated expressions, foreign keys, checks, triggers, indexes, and unmapped defaults are not copied."
             .to_string(),
     );
-    warnings.extend(target_columns_plan.warnings);
+    warnings.extend(target_column_warnings);
     if !can_execute {
         warnings.push(
             "Executable CREATE TABLE DDL is blocked because at least one source type has no explicit cross-product mapping. No textual fallback DDL was generated."
@@ -17599,13 +17973,14 @@ mod tests {
         build_alter_table_column_statements, build_create_check_constraint_statement,
         build_create_foreign_key_statement, build_create_materialized_view_statement,
         build_create_primary_key_statement, build_create_table_index_statement,
-        build_create_table_statements, build_create_unique_constraint_statement,
-        build_create_view_statement, build_data_transfer_column_mapping,
-        build_drop_table_column_statement, build_drop_table_constraint_statement,
-        build_drop_table_index_statement, build_insert_mutation,
-        build_insert_mutation_with_column_quoting, build_rename_table_column_statement,
-        build_rename_table_index_statement, build_sqlite_add_column_statements,
-        build_sqlite_create_index_statement, build_sqlite_create_table_statements,
+        build_create_table_statements, build_create_table_statements_with_defaults,
+        build_create_unique_constraint_statement, build_create_view_statement,
+        build_data_transfer_column_mapping, build_drop_table_column_statement,
+        build_drop_table_constraint_statement, build_drop_table_index_statement,
+        build_insert_mutation, build_insert_mutation_with_column_quoting,
+        build_rename_table_column_statement, build_rename_table_index_statement,
+        build_sqlite_add_column_statements, build_sqlite_create_index_statement,
+        build_sqlite_create_table_statements, build_sqlite_create_table_statements_with_defaults,
         build_sqlite_drop_column_statement, build_sqlite_drop_index_statement,
         build_structured_filter_where, build_table_data_compare_result,
         build_table_data_compare_sync_parameterized_statements,
@@ -17649,8 +18024,9 @@ mod tests {
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
         transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
-        transfer_target_confirmation_token, transfer_type_mapping_assessment,
-        transfer_type_mapping_warnings, tsv_escape, validate_table_data_compare_sync_preview,
+        transfer_target_confirmation_token, transfer_target_default_expression,
+        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
+        validate_default_expression, validate_table_data_compare_sync_preview,
         validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
         validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
         write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
@@ -19110,7 +19486,9 @@ mod tests {
             warning.contains("new target-owned generators") && warning.contains("id")
         }));
         assert!(postgres.warnings.iter().any(|warning| {
-            warning.contains("default expressions are omitted") && warning.contains("id")
+            warning.contains("default expressions")
+                && warning.contains("omitted")
+                && warning.contains("id")
         }));
 
         let cross_product =
@@ -19124,6 +19502,191 @@ mod tests {
         assert!(cross_product.warnings.iter().any(|warning| {
             warning.contains("ordinary target columns") && warning.contains("id")
         }));
+    }
+
+    #[test]
+    fn transfer_target_retains_reviewed_same_product_and_portable_defaults() {
+        let mut created_at = target_column("created_at");
+        created_at.data_type = "timestamp".to_string();
+        created_at.default_value = Some("now()".to_string());
+        let same_product =
+            build_transfer_target_columns(&[created_at], "postgres", "postgres").unwrap();
+        assert!(same_product.columns[0].has_source_default);
+        assert!(same_product.columns[0].default_retained);
+        assert_eq!(
+            same_product.default_expressions.get("created_at"),
+            Some(&"now()".to_string())
+        );
+        let postgres_ddl = build_create_table_statements_with_defaults(
+            DatabaseKind::Postgres,
+            "public",
+            "events_copy",
+            &same_product.create_columns,
+            &same_product.default_expressions,
+        )
+        .unwrap()
+        .join("\n");
+        assert!(postgres_ddl.contains("\"created_at\" timestamp DEFAULT now()"));
+
+        let mut portable_time = target_column("created_at");
+        portable_time.data_type = "timestamp".to_string();
+        portable_time.default_value = Some("CURRENT_TIMESTAMP()".to_string());
+        let mut portable_text = target_column("status");
+        portable_text.data_type = "text".to_string();
+        portable_text.default_value = Some("'guest'".to_string());
+        let mut portable_boolean = target_column("active");
+        portable_boolean.data_type = "boolean".to_string();
+        portable_boolean.default_value = Some("1".to_string());
+        let mut product_function = target_column("event_id");
+        product_function.data_type = "uuid".to_string();
+        product_function.default_value = Some("gen_random_uuid()".to_string());
+        let cross_product = build_transfer_target_columns(
+            &[
+                portable_time,
+                portable_text,
+                portable_boolean,
+                product_function,
+            ],
+            "postgres",
+            "mysql",
+        )
+        .unwrap();
+        assert_eq!(
+            cross_product
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.default_retained))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created_at", true),
+                ("status", true),
+                ("active", true),
+                ("event_id", false),
+            ]
+        );
+        assert_eq!(
+            cross_product.default_expressions.get("created_at"),
+            Some(&"CURRENT_TIMESTAMP".to_string())
+        );
+        assert_eq!(
+            cross_product.default_expressions.get("active"),
+            Some(&"TRUE".to_string())
+        );
+        let mysql_ddl = build_create_table_statements_with_defaults(
+            DatabaseKind::Mysql,
+            "app",
+            "events_copy",
+            &cross_product.create_columns,
+            &cross_product.default_expressions,
+        )
+        .unwrap()
+        .join("\n");
+        assert!(mysql_ddl.contains("`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"));
+        assert!(mysql_ddl.contains("`status` TEXT DEFAULT 'guest'"));
+        assert!(mysql_ddl.contains("`active` BOOLEAN DEFAULT TRUE"));
+        assert!(!mysql_ddl.contains("gen_random_uuid"));
+        assert!(cross_product
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("retained") && warning.contains("created_at") }));
+        assert!(cross_product
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("omitted") && warning.contains("event_id") }));
+    }
+
+    #[test]
+    fn transfer_defaults_use_quote_aware_single_expression_validation() {
+        assert!(validate_default_expression("'literal; -- /* text'").is_ok());
+        assert!(validate_default_expression("timezone('UTC', now())").is_ok());
+        for invalid in [
+            "now(); DROP TABLE users",
+            "now() -- trailing",
+            "now(/* comment */)",
+            "(now()",
+            "'unterminated",
+            "$body$; -- dialect-specific quoting$body$",
+        ] {
+            assert!(
+                validate_default_expression(invalid).is_err(),
+                "default should be rejected: {invalid}"
+            );
+        }
+        assert!(validate_default_expression(&"x".repeat(16 * 1024 + 1)).is_err());
+
+        let mut unsafe_default = target_column("payload");
+        unsafe_default.default_value = Some("'safe'; DROP TABLE audit".to_string());
+        let plan =
+            build_transfer_target_columns(&[unsafe_default], "postgres", "postgres").unwrap();
+        assert!(plan.columns[0].has_source_default);
+        assert!(!plan.columns[0].default_retained);
+        assert!(plan.default_expressions.is_empty());
+    }
+
+    #[test]
+    fn transfer_defaults_do_not_copy_generated_or_source_sequence_expressions() {
+        let mut generated = target_column("search_text");
+        generated.default_value = Some("lower(title)".to_string());
+        generated.is_generated = Some(true);
+
+        let mut source_sequence = target_column("legacy_id");
+        source_sequence.data_type = "integer".to_string();
+        source_sequence.default_value =
+            Some("pg_catalog.nextval ('legacy_id_seq'::regclass)".to_string());
+
+        let mut sequence_literal = target_column("sequence_label");
+        sequence_literal.default_value = Some("'nextval('".to_string());
+
+        let plan = build_transfer_target_columns(
+            &[generated, source_sequence, sequence_literal],
+            "postgres",
+            "postgres",
+        )
+        .unwrap();
+        assert!(plan.columns.iter().all(|column| column.has_source_default));
+        assert!(plan.columns[..2]
+            .iter()
+            .all(|column| !column.default_retained));
+        assert!(plan.columns[2].default_retained);
+        assert_eq!(
+            plan.default_expressions.get("sequence_label"),
+            Some(&"'nextval('".to_string())
+        );
+        assert!(plan.columns.iter().any(|column| {
+            column.name == "search_text" && column.reason.contains("Generated-column")
+        }));
+        assert!(plan.columns.iter().any(|column| {
+            column.name == "legacy_id" && column.reason.contains("sequence reference")
+        }));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("search_text") && warning.contains("legacy_id") }));
+    }
+
+    #[test]
+    fn sqlite_transfer_defaults_share_the_reviewed_ddl_renderer() {
+        let mut enabled = target_column("enabled");
+        enabled.data_type = "boolean".to_string();
+        enabled.default_value = Some("false".to_string());
+        let plan = build_transfer_target_columns(&[enabled], "postgres", "sqlite").unwrap();
+        let ddl = build_sqlite_create_table_statements_with_defaults(
+            "main",
+            "settings_copy",
+            &plan.create_columns,
+            &plan.default_expressions,
+        )
+        .unwrap()
+        .join("\n");
+        assert!(ddl.contains("\"enabled\" BOOLEAN DEFAULT FALSE"));
+
+        let mapping = transfer_target_default_expression(
+            &target_column("without_default"),
+            "postgres",
+            "sqlite",
+            false,
+        );
+        assert!(mapping.is_none());
     }
 
     #[test]
