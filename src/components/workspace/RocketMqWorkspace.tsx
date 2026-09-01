@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import {
   rocketMqService,
   type RocketMqCluster,
+  type RocketMqAcls,
   type RocketMqConsumerGroupDetail,
   type RocketMqConsumerGroups,
   type RocketMqMessagePreview,
@@ -21,12 +22,13 @@ import {
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useTabStore } from "@/store/useTabStore";
 
-type ConsoleSection = "overview" | "topics" | "groups";
+type ConsoleSection = "overview" | "topics" | "groups" | "acl";
 
 const sections: Array<{ id: ConsoleSection; label: string }> = [
   { id: "overview", label: "Cluster" },
   { id: "topics", label: "Topics" },
   { id: "groups", label: "Consumer groups" },
+  { id: "acl", label: "Access control" },
 ];
 
 function failureMessage(cause: unknown) {
@@ -50,6 +52,7 @@ export function RocketMqWorkspace() {
   const [cluster, setCluster] = useState<RocketMqCluster | null>(null);
   const [topics, setTopics] = useState<RocketMqTopics | null>(null);
   const [groups, setGroups] = useState<RocketMqConsumerGroups | null>(null);
+  const [acls, setAcls] = useState<RocketMqAcls | null>(null);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [topicDetail, setTopicDetail] = useState<RocketMqTopicDetail | null>(
     null,
@@ -67,6 +70,7 @@ export function RocketMqWorkspace() {
   const [topicDetailLoading, setTopicDetailLoading] = useState(false);
   const [messagePreviewLoading, setMessagePreviewLoading] = useState(false);
   const [topicConfigLoading, setTopicConfigLoading] = useState(false);
+  const [aclLoading, setAclLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -99,8 +103,28 @@ export function RocketMqWorkspace() {
     setTopicDetail(null);
     setMessagePreview(null);
     setTopicConfig(null);
+    setAcls(null);
     void refresh();
   }, [connection?.id, refresh]);
+
+  const loadAcls = useCallback(async () => {
+    if (!connection) return;
+    setAclLoading(true);
+    try {
+      setAcls(await rocketMqService.listAcls(connection.id));
+    } catch (cause) {
+      setAcls(null);
+      setError(failureMessage(cause));
+    } finally {
+      setAclLoading(false);
+    }
+  }, [connection]);
+
+  useEffect(() => {
+    if (section === "acl" && !acls && !aclLoading) {
+      void loadAcls();
+    }
+  }, [aclLoading, acls, loadAcls, section]);
 
   const loadGroup = useCallback(
     async (groupId: string) => {
@@ -282,11 +306,91 @@ export function RocketMqWorkspace() {
                   onSelect={loadGroup}
                 />
               )}
+              {section === "acl" && (
+                <AclList
+                  acls={acls}
+                  loading={aclLoading}
+                  onRefresh={loadAcls}
+                />
+              )}
             </>
           )}
         </main>
       </div>
     </section>
+  );
+}
+
+function AclList({
+  acls,
+  loading,
+  onRefresh,
+}: {
+  acls: RocketMqAcls | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const policies = (acls?.acls || []).flatMap((acl) =>
+    acl.policies.map((policy) => ({ ...policy, principal: acl.principal })),
+  );
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Access control</h2>
+          <p className="mt-1 max-w-2xl text-xs wb-muted">
+            ACLs are read from every reachable master broker. Source brokers
+            remain visible so inconsistent policies are not hidden.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={onRefresh}
+          className="flex h-7 shrink-0 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+        >
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} />
+          Refresh ACLs
+        </button>
+      </div>
+      {loading && !acls ? (
+        <div className="flex h-24 items-center justify-center gap-2 text-xs wb-muted">
+          <Loader2 size={14} className="animate-spin" /> Loading ACLs…
+        </div>
+      ) : (
+        <>
+          {acls?.unavailableBrokers.length ? (
+            <div className="rounded-[5px] border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              ACL data was unavailable from:{" "}
+              {acls.unavailableBrokers.join(", ")}
+            </div>
+          ) : null}
+          <ResourceTable
+            headers={[
+              "Principal",
+              "Broker",
+              "Resource",
+              "Actions",
+              "Effect",
+              "Source IPs",
+            ]}
+            rows={policies.map((policy) => [
+              policy.principal,
+              policy.brokerName,
+              policy.resource,
+              policy.actions.join(", "),
+              policy.effect,
+              policy.sourceIps.join(", "),
+            ])}
+            empty="No ACL policies were reported by reachable master brokers."
+          />
+          <p className="text-[11px] wb-muted">
+            ACL mutations remain unavailable until a dedicated desktop approval
+            boundary is implemented.
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 

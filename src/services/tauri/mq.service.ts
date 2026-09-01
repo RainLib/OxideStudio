@@ -69,6 +69,22 @@ export type RocketMqTopicConfig = {
   unavailableBrokers: string[];
 };
 
+export type RocketMqAcls = {
+  acls: Array<{
+    principal: string;
+    description: string;
+    policies: Array<{
+      brokerName: string;
+      resource: string;
+      actions: string[];
+      effect: string;
+      sourceIps: string[];
+      decision: string;
+    }>;
+  }>;
+  unavailableBrokers: string[];
+};
+
 export type RocketMqConsumerGroups = {
   groups: Array<{
     groupId: string;
@@ -142,6 +158,8 @@ export const rocketMqService = {
       }>;
       totalMessages: number;
     }>("get_rocketmq_topic_stats", { connectionId, topic }),
+  listAcls: (connectionId: string) =>
+    invokeRawCommand<RocketMqAcls>("list_rocketmq_acls", { connectionId }),
   peekMessages: (
     connectionId: string,
     topic: string,

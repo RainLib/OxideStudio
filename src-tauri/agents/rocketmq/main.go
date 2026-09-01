@@ -32,7 +32,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_get_topic_stats", "mq_list_acls", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -133,6 +133,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.getTopicConfig(params)
 	case "mq_get_topic_stats":
 		return a.getTopicStats(params)
+	case "mq_list_acls":
+		return a.listAcls(params)
 	case "mq_peek_messages":
 		return a.peekMessages(params)
 	case "mq_query_message_by_key":
@@ -490,6 +492,61 @@ func (a *rocketMQAgent) getTopicStats(params map[string]any) (any, error) {
 	return map[string]any{"topic": topic, "partitions": rows, "totalMessages": total}, nil
 }
 
+// listAcls reads ACLs from every master broker. ACL configuration can drift
+// between masters, so policy rows retain their source broker rather than
+// silently deduplicating records from the first response.
+func (a *rocketMQAgent) listAcls(_ map[string]any) (any, error) {
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	info, err := client.ExamineBrokerClusterInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	masters := masterBrokerAddressByName(info)
+	principalPolicies := map[string][]map[string]any{}
+	descriptions := map[string]string{}
+	unavailable := make([]string, 0)
+	for _, brokerName := range sortedKeys(masters) {
+		address := masters[brokerName]
+		listed, listErr := client.ListAcl(ctx, address)
+		if listErr != nil {
+			unavailable = append(unavailable, brokerName)
+			continue
+		}
+		for _, acl := range listed.Acls {
+			if _, exists := descriptions[acl.Subject]; !exists {
+				descriptions[acl.Subject] = acl.Description
+			}
+			for _, policy := range acl.Policies {
+				principalPolicies[acl.Subject] = append(principalPolicies[acl.Subject], map[string]any{
+					"brokerName": brokerName,
+					"resource":   policy.Resource,
+					"actions":    policy.Actions,
+					"effect":     policy.Effect,
+					"sourceIps":  policy.SourceIPs,
+					"decision":   policy.Decision,
+				})
+			}
+		}
+	}
+	if len(descriptions) == 0 && len(masters) > 0 && len(unavailable) == len(masters) {
+		return nil, fmt.Errorf("ACLs are unavailable on all master brokers")
+	}
+	rows := make([]map[string]any, 0, len(descriptions))
+	for _, principal := range sortedKeys(descriptions) {
+		rows = append(rows, map[string]any{
+			"principal":   principal,
+			"description": descriptions[principal],
+			"policies":    principalPolicies[principal],
+		})
+	}
+	return map[string]any{"acls": rows, "unavailableBrokers": unavailable}, nil
+}
+
 // peekMessages is deliberately read-only and bounded. It pulls from concrete
 // queues without registering a consumer or committing offsets.
 func (a *rocketMQAgent) peekMessages(params map[string]any) (any, error) {
@@ -820,6 +877,19 @@ func masterBrokerAddresses(info *admin.ClusterInfo) []string {
 	}
 	sort.Strings(items)
 	return items
+}
+
+func masterBrokerAddressByName(info *admin.ClusterInfo) map[string]string {
+	masters := map[string]string{}
+	if info == nil {
+		return masters
+	}
+	for brokerName, broker := range info.BrokerAddrTable {
+		if broker != nil && broker.BrokerAddrs["0"] != "" {
+			masters[brokerName] = broker.BrokerAddrs["0"]
+		}
+	}
+	return masters
 }
 
 func jsonInt(value any, fallback int) int {

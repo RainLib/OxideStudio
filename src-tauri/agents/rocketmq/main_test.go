@@ -70,6 +70,17 @@ func TestMasterBrokerAddressesAreSortedAndMasterOnly(t *testing.T) {
 	}
 }
 
+func TestMasterBrokerAddressByNameKeepsBrokerIdentity(t *testing.T) {
+	info := &admin.ClusterInfo{BrokerAddrTable: map[string]*admin.BrokerData{
+		"broker-b":  {BrokerAddrs: map[string]string{"0": "b:10911"}},
+		"broker-a":  {BrokerAddrs: map[string]string{"0": "a:10911", "1": "a-slave:10912"}},
+		"no-master": {BrokerAddrs: map[string]string{"1": "slave:10912"}},
+	}}
+	if got, want := masterBrokerAddressByName(info), map[string]string{"broker-a": "a:10911", "broker-b": "b:10911"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("masters = %#v, want %#v", got, want)
+	}
+}
+
 func TestConsumerAssignmentsAreSortedAndKeepSubscriptionDetails(t *testing.T) {
 	assignments := consumerAssignments(&admin.ConsumerConnection{SubscriptionTable: map[string]*admin.SubscriptionData{
 		"orders": {Topic: "orders", SubString: "paid || shipped", ExpressionType: "TAG"},
