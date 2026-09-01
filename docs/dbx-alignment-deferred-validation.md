@@ -1643,3 +1643,15 @@ explicit deferred validation task rather than an implicit release check.
 - Repeat native menu quit, updater restart and OS shutdown after those lifecycle
   exits exist in Oxide; the current implementation only has the guarded custom
   window-close command. Phase 129 performs no live database validation.
+
+## Viewport-bounded popovers
+
+- Resize packaged Windows, macOS and Linux WebViews below each long popover's
+  preferred width/height. Provider/model menus, workspace context, connection
+  selectors and toolbar option panels must stay at least 8px inside the
+  viewport and retain keyboard scrolling/focus traversal.
+- Verify nested scroll regions do not trap wheel/touch input and that a caller's
+  explicit `overflow-hidden`, width or max-height class still overrides the
+  shared default through `cn`/Tailwind merging.
+- Phase 130 adds a pure shared-primitive contract test and production build;
+  it does not claim real WebView geometry verification.

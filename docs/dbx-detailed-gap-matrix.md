@@ -327,3 +327,18 @@ Dameng、Db2 及兼容产品的 Monaco 接受行为与 server-version 语法仍�
 
 本阶段运行了 7 个前端按压反馈测试、3 个 Rust 窗口命令测试、前端生产构建和
 Tauri 配置解析；macOS 真实首击、关闭动画和多窗口行为仍进入统一的系统验证清单。
+
+## Phase 130 增量：DBX `d69cf9da7` 最新前端差距复核
+
+| DBX 增量 | OxideStudio 当前证据 | 状态 |
+| --- | --- | --- |
+| 详情弹窗方向键导航 `d69cf9da7` | `src/features/data-grid/model/dataGridDetailNavigation.ts`、`ValueEditorDialog.tsx`（`301d3547`） | 已对齐；输入、Monaco、菜单和 listbox 保留原生方向键。 |
+| MySQL VARBINARY/二进制 dump `14ad5ef9b`、`49926f25f` | `src/lib/exportUtils.ts`、`src-tauri/src/commands/query.rs`（`7a91bc44`） | 已对齐；剪贴板仅把可逆 UTF-8 VARBINARY 显示为文本，导入在字节层将 `_binary` 原始字面量转换为 lossless hex。 |
+| DDL 按需刷新与 hover 开关 `cd008b2d5`、`5eb071bc2` | `TableDdlView.tsx`、`TableDataView.tsx`、`SettingsDialog.tsx`、`useLspHoverProviderCoordinator.ts`（`e7a76120`） | 主路径已对齐；刷新绕过缓存，默认打开策略和 hover DDL 请求可独立关闭。 |
+| Elasticsearch JSON key 尾引号 `cb3de0ef4` | `src/lib/elasticsearchConsole.ts`、`elasticsearchCompletionRange.ts`（`3ea234f1`、`3d139c68`） | 已对齐；接受候选会消费自动闭合引号，已有 `:` 时不重复插入值 scaffold。 |
+| AI API 自定义 Header `42c0dc7f8` | `src-tauri/src/commands/ai.rs`、`agent/model.rs`、`SettingsDialog.tsx`（`bef53c0a`） | 已对齐并加强：Header 值进入 Rust 凭据存储，不进入前端状态、日志或 provider 快照。 |
+| 左侧页签关闭、分页服务端排序、Gauss 未引号迁移标识符 `662037295`、`40a806a24`、`4baa46ca8` | `useTabStore.ts`、`TabBar.tsx`、`TableDataView.tsx`、`DataGrid.tsx`、`commands/table.rs` | 已在前序阶段对齐；dirty/pinned tab 保留防丢失边界，关系表排序进入分页请求，Gauss policy 有独立测试。 |
+| View options/长内容 popover 越出窗口 `b41dac461` | `src/components/ui/popover.tsx`、`popover.test.ts` | 本阶段已对齐到共享 primitive：默认 8px collision padding，使用 Radix 可用高度变量，横向裁剪、纵向滚动；调用方仍可显式覆盖尺寸/overflow。 |
+| DDL hover 内联搜索 `f9ff9245c` | Oxide 当前 Monaco Markdown hover + 可搜索的完整 DDL tab | 尚未完成；Monaco 安全 Markdown 不允许 DBX CodeMirror tooltip 直接嵌入 input，需以受控 content widget 实现，不能开启任意 HTML/command trust。 |
+
+这次复核没有用“相似入口”替代缺失的 hover 搜索；该项继续保留为明确实现任务。
