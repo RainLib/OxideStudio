@@ -27,6 +27,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { resolveInitialTransferTableSelection } from "@/features/database-explorer/model/tableTransferSelection";
+import { canRetryTableDataTransferReport } from "@/features/database-explorer/model/tableDataTransferRetry";
 import {
   TRANSFER_LIST_ROW_HEIGHT,
   TRANSFER_LIST_VIRTUALIZATION_THRESHOLD,
@@ -45,6 +46,7 @@ import type {
   TableDataTransferMode,
   TableDataTransferObjectKind,
   TableDataTransferObjectSelection,
+  TableDataTransferPostCommitReceipt,
   TableDataTransferProgress,
   TableDataTransferPreview,
   TableDataTransferReport,
@@ -52,6 +54,8 @@ import type {
   TableDataTransferTargetPlanRequest,
   TableInfo,
 } from "@/services/tauri/types";
+
+export { canRetryTableDataTransferReport };
 
 interface TableDataTransferDialogProps {
   open: boolean;
@@ -294,25 +298,6 @@ export function buildTransferObjectInventory(
       `${right.parentName || ""}:${right.name}`,
     );
   });
-}
-
-/**
- * A transfer report is deliberately not an executable job. It can only seed a
- * fresh review when this dialog is still opened for the same source relation;
- * the target's current metadata and a new confirmation token remain the
- * authority before any rows can be written.
- */
-export function canRetryTableDataTransferReport(
-  report: TableDataTransferReport,
-  source: TableDataTransferEndpoint,
-) {
-  return (
-    report.source.connectionId === source.connectionId &&
-    report.source.driver === source.driver &&
-    report.source.database === source.database &&
-    report.source.schema === source.schema &&
-    report.source.table === source.table
-  );
 }
 
 export function TableDataTransferDialog({
@@ -1301,12 +1286,25 @@ export function TableDataTransferDialog({
     setIsCancelling(false);
     setError(null);
     try {
+      let postCommitReceipt: TableDataTransferPostCommitReceipt | null = null;
       if (isBatchTransfer && batchRequest) {
-        await tableService.executeTableDataTransferBatch(batchRequest, confirmation);
+        const result = await tableService.executeTableDataTransferBatch(
+          batchRequest,
+          confirmation,
+        );
+        postCommitReceipt = result.postCommitReceipt || null;
       } else if (request) {
-        await tableService.executeTableDataTransfer(request, confirmation);
+        const result = await tableService.executeTableDataTransfer(
+          request,
+          confirmation,
+        );
+        postCommitReceipt = result.postCommitReceipt || null;
       }
       onTransferred();
+      if (postCommitReceipt?.status === "needsManualReview") {
+        setError(postCommitReceipt.message);
+        return;
+      }
       onClose();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
@@ -1810,13 +1808,15 @@ export function TableDataTransferDialog({
                       Restore source indexes and constraints after the row copy
                       <span className="mt-0.5 block wb-muted">
                         Same-product catalog metadata only. The exact DDL is reviewed first,
-                        runs inside the target transaction, and restores foreign keys last.
+                        {transferSchemaRestoreFamily(targetConnection?.driver || "") === "mysql"
+                          ? " runs after the row transaction commits, and returns a manual-review receipt if any statement fails. Foreign keys run last."
+                          : " runs inside the target transaction, and restores foreign keys last."}
                       </span>
                     </span>
                   </label>
                 )}
                 <p className="text-[10px] leading-4 wb-muted">
-                  Transfer streams bounded batches through one target transaction and commits only after every step succeeds. {mode === "overwrite" ? "Replace mode deletes the previewed target rows inside that transaction and rolls the deletion back on failure." : mode === "upsert" ? "Upsert mode uses the target table's declared primary key and updates only mapped non-key columns." : "Append mode leaves existing rows unchanged."} Only verified paging, binding, and transaction paths are listed.
+                  Transfer streams bounded row batches through one target transaction. {restoreSourceSchemaObjects && transferSchemaRestoreFamily(targetConnection?.driver || "") === "mysql" ? "MySQL index and constraint DDL starts only after those rows commit because ALTER TABLE implicitly commits; a partial receipt blocks automatic retry." : "The target commits only after every reviewed transactional step succeeds."} {mode === "overwrite" ? "Replace mode deletes the previewed target rows inside that transaction and rolls the deletion back on row-copy failure." : mode === "upsert" ? "Upsert mode uses the target table's declared primary key and updates only mapped non-key columns." : "Append mode leaves existing rows unchanged."} Only verified paging, binding, and transaction paths are listed.
                 </p>
                 {isBatchTransfer && (
                   <p className="text-[10px] leading-4 text-[hsl(var(--wb-warning))]">
@@ -1873,6 +1873,14 @@ export function TableDataTransferDialog({
                             : report.verification.identityReseedVerified === true
                               ? "generator verified"
                               : "count n/a"}
+                        </span>
+                      )}
+                      {report.retryPolicy === "manualReviewRequired" && (
+                        <span
+                          className="shrink-0 text-[hsl(var(--wb-warning))]"
+                          title={report.postCommitReceipt?.message || "Inspect the target manually before starting another transfer."}
+                        >
+                          manual review
                         </span>
                       )}
                       {retryable && (

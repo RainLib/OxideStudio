@@ -1257,6 +1257,17 @@ export interface TableDataTransferBatchTableResult {
   reportId?: string | null;
 }
 
+export type TableDataTransferPostCommitStatus =
+  | "completed"
+  | "needsManualReview";
+
+export interface TableDataTransferPostCommitReceipt {
+  status: TableDataTransferPostCommitStatus;
+  statementsTotal: number;
+  statementsSucceeded: number;
+  message: string;
+}
+
 export interface TableDataTransferBatchResult {
   rowsTransferred: number;
   batches: number;
@@ -1266,6 +1277,7 @@ export interface TableDataTransferBatchResult {
     action: TableDataTransferObjectAction;
     reportId?: string | null;
   }>;
+  postCommitReceipt?: TableDataTransferPostCommitReceipt | null;
 }
 
 export type TableDataTransferCompatibility =
@@ -1365,6 +1377,7 @@ export interface TableDataTransferResult {
   mappedColumns: TableDataTransferColumnMapping[];
   identityReseedColumns: string[];
   restoredSchemaObjects?: number;
+  postCommitReceipt?: TableDataTransferPostCommitReceipt | null;
   /** Set when the terminal transfer report was stored successfully. */
   reportId?: string | null;
 }
@@ -1421,6 +1434,8 @@ export interface TableDataTransferReport {
   error?: string | null;
   /** Missing for reports written before post-commit verification existed. */
   verification?: TableDataTransferVerification | null;
+  retryPolicy?: "freshPreview" | "manualReviewRequired";
+  postCommitReceipt?: TableDataTransferPostCommitReceipt | null;
 }
 
 export interface SqlScriptImportResult {

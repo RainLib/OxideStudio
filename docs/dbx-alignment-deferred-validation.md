@@ -1917,3 +1917,18 @@ explicit deferred validation task rather than an implicit release check.
   edit, keep a single closing delimiter and preserve Monaco undo boundaries.
   Phase 149 covers the deterministic cached fallback and existing PostgreSQL
   CTE execution classification; live database/LSP ordering remains deferred.
+
+## MySQL cyclic foreign-key transfer receipts
+
+- On supported MySQL and MariaDB versions, transfer two or more tables with a
+  reviewed FK cycle. Confirm row batches commit before any ALTER TABLE, regular
+  indexes/constraints execute before foreign keys, and every FK executes last.
+- Inject permission denial, connection loss and cancellation before the first,
+  between two, and after the last post-commit statement. The receipt must show
+  only exact completed/total counts, stop all later DDL, retain the dialog for
+  manual review, and never expose SQL or database diagnostics.
+- Reopen transfer history after an interrupted post-commit phase. The report
+  must remain non-retryable across application restarts; a user may proceed
+  only by manually inspecting the target and starting a new preview. Phase 150
+  covers fake-driver ordering/failure and renderer policy tests; live implicit
+  commit and disconnect behavior remain deferred.

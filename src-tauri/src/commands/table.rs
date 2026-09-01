@@ -1266,6 +1266,24 @@ pub struct TableDataTransferBatchTableResult {
     pub report_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferPostCommitStatus {
+    Completed,
+    NeedsManualReview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDataTransferPostCommitReceipt {
+    pub status: TableDataTransferPostCommitStatus,
+    pub statements_total: u32,
+    pub statements_succeeded: u32,
+    /// Privacy-bounded terminal guidance. Database errors and reviewed SQL
+    /// are deliberately excluded because MySQL DDL may already be committed.
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataTransferBatchResult {
@@ -1275,6 +1293,11 @@ pub struct TableDataTransferBatchResult {
     pub tables: Vec<TableDataTransferBatchTableResult>,
     #[serde(default)]
     pub objects: Vec<TableDataTransferObjectResult>,
+    /// Present for MySQL-family schema restoration, which runs only after row
+    /// commit because ALTER TABLE implicitly commits. A review receipt is
+    /// returned instead of pretending the entire operation was transactional.
+    #[serde(default)]
+    pub post_commit_receipt: Option<TableDataTransferPostCommitReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1440,6 +1463,8 @@ pub struct TableDataTransferResult {
     pub identity_reseed_columns: Vec<String>,
     #[serde(default)]
     pub restored_schema_objects: u32,
+    #[serde(default)]
+    pub post_commit_receipt: Option<TableDataTransferPostCommitReceipt>,
     /// Present only when the caller supplied a project id and the terminal
     /// report was persisted successfully.
     pub report_id: Option<String>,
@@ -1452,6 +1477,14 @@ pub enum TableDataTransferProgressStatus {
     Done,
     Cancelled,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TableDataTransferRetryPolicy {
+    #[default]
+    FreshPreview,
+    ManualReviewRequired,
 }
 
 /// A post-commit, read-only observation of the target. It is deliberately a
@@ -1522,6 +1555,13 @@ pub struct TableDataTransferReport {
     /// readable and simply have no post-commit observation.
     #[serde(default)]
     pub verification: Option<TableDataTransferVerification>,
+    /// Old reports default to a fresh reviewed preview. A MySQL post-commit
+    /// DDL failure permanently disables the convenience retry action until
+    /// the user has inspected the target and starts a new transfer manually.
+    #[serde(default)]
+    pub retry_policy: TableDataTransferRetryPolicy,
+    #[serde(default)]
+    pub post_commit_receipt: Option<TableDataTransferPostCommitReceipt>,
 }
 
 #[derive(Clone)]
@@ -10058,6 +10098,11 @@ async fn resolve_table_data_transfer_plan(
         warnings.push(if schema_restore_plan.statements.is_empty() {
             "Catalog-backed secondary indexes and constraints are already present on the target; no post-copy DDL is required."
                 .to_string()
+        } else if target_kind == DatabaseKind::Mysql {
+            format!(
+                "After the row transaction commits, {} reviewed MySQL secondary index/constraint statement(s) will run one at a time; foreign keys run last. A failure produces a partial-completion receipt, requires manual target inspection, and disables automatic retry.",
+                schema_restore_plan.statements.len()
+            )
         } else {
             format!(
                 "After all row writes, {} reviewed secondary index/constraint statement(s) will run inside the same target transaction; foreign keys run last.",
@@ -11283,10 +11328,10 @@ async fn resolve_table_data_transfer_batch_plan(
     if !plan.cyclic_tables.is_empty() {
         let target_driver = normalized_transfer_driver_id(&request.target_driver);
         let missing = missing_deferred_cycle_foreign_keys(&plan, &deferred_foreign_keys_by_table);
-        if target_driver != "postgres" {
+        if !matches!(target_driver.as_str(), "postgres" | "mysql") {
             plan.can_execute = false;
             plan.warnings.push(
-                "Cyclic foreign-key batches currently require native PostgreSQL transactional DDL. MySQL-family ALTER TABLE implicitly commits and needs a separate partial-completion receipt before it can be enabled safely."
+                "Cyclic foreign-key batches require reviewed native PostgreSQL transactional DDL or native MySQL post-commit restoration with a partial-completion receipt."
                     .to_string(),
             );
         } else if !request.restore_source_schema_objects {
@@ -11301,6 +11346,11 @@ async fn resolve_table_data_transfer_batch_plan(
                 "The cycle is still enforced by target or unproven constraint(s): {}. Remove or separately review those target constraints before retrying.",
                 missing.join(", ")
             ));
+        } else if target_driver == "mysql" {
+            plan.warnings.push(
+                "Every unresolved in-cycle foreign key is absent from the target and bound to reviewed post-copy MySQL DDL. Row copies commit first; indexes and constraints then run one statement at a time. Any cancellation or failure produces a partial-completion receipt, requires manual target inspection, and disables automatic retry."
+                    .to_string(),
+            );
         } else {
             plan.warnings.push(
                 "Every unresolved in-cycle foreign key is absent from the target and bound to post-copy PostgreSQL DDL. Tables keep deterministic selection order inside the transaction; all foreign keys are restored after every table copy succeeds."
@@ -11624,6 +11674,87 @@ async fn execute_transfer_schema_restore_statements(
         })
 }
 
+#[derive(Debug, Clone)]
+struct PostCommitSchemaStatement {
+    table_index: usize,
+    sql: String,
+}
+
+#[derive(Debug, Clone)]
+struct PostCommitSchemaExecution {
+    receipt: TableDataTransferPostCommitReceipt,
+    succeeded_by_table: Vec<u32>,
+}
+
+fn post_commit_schema_receipt(
+    statements_total: usize,
+    statements_succeeded: usize,
+    cancelled: bool,
+) -> TableDataTransferPostCommitReceipt {
+    let needs_review = statements_succeeded < statements_total;
+    let status = if needs_review {
+        TableDataTransferPostCommitStatus::NeedsManualReview
+    } else {
+        TableDataTransferPostCommitStatus::Completed
+    };
+    let message = if needs_review {
+        let cause = if cancelled {
+            "restoration was cancelled"
+        } else {
+            "a reviewed statement failed"
+        };
+        format!(
+            "Row writes are committed. {statements_succeeded} of {statements_total} reviewed schema statement(s) completed before {cause}. Inspect target indexes and constraints manually; automatic retry is disabled."
+        )
+    } else {
+        format!(
+            "Row writes are committed and all {statements_total} reviewed schema statement(s) completed."
+        )
+    };
+    TableDataTransferPostCommitReceipt {
+        status,
+        statements_total: statements_total.min(u32::MAX as usize) as u32,
+        statements_succeeded: statements_succeeded.min(u32::MAX as usize) as u32,
+        message,
+    }
+}
+
+async fn execute_mysql_post_commit_schema_statements(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    statements: &[PostCommitSchemaStatement],
+    table_count: usize,
+    cancel_rx: &watch::Receiver<bool>,
+) -> PostCommitSchemaExecution {
+    let mut statements_succeeded = 0_usize;
+    let mut succeeded_by_table = vec![0_u32; table_count];
+    let mut cancelled = false;
+    for statement in statements {
+        if *cancel_rx.borrow() {
+            cancelled = true;
+            break;
+        }
+        if manager
+            .execute_parameterized(connection_id, &statement.sql, &[])
+            .await
+            .is_err()
+        {
+            // Do not log the database error or SQL. This terminal receipt is
+            // intentionally bounded and the target must be inspected before
+            // any new transfer is started.
+            break;
+        }
+        statements_succeeded += 1;
+        if let Some(count) = succeeded_by_table.get_mut(statement.table_index) {
+            *count = count.saturating_add(1);
+        }
+    }
+    PostCommitSchemaExecution {
+        receipt: post_commit_schema_receipt(statements.len(), statements_succeeded, cancelled),
+        succeeded_by_table,
+    }
+}
+
 #[tauri::command]
 pub async fn execute_table_data_transfer(
     app: AppHandle,
@@ -11724,8 +11855,10 @@ pub async fn execute_table_data_transfer(
             &mut on_progress,
         )
         .await;
+        let mysql_post_commit = plan.target_kind == DatabaseKind::Mysql
+            && !plan.schema_restore_statements.is_empty();
         let transfer_result = match transfer_result {
-            Ok(summary) => execute_transfer_schema_restore_statements(
+            Ok(summary) if !mysql_post_commit => execute_transfer_schema_restore_statements(
                 &manager,
                 &request.target.connection_id,
                 &transaction_id,
@@ -11733,6 +11866,7 @@ pub async fn execute_table_data_transfer(
             )
             .await
             .map(|()| summary),
+            Ok(summary) => Ok(summary),
             Err(error) => Err(error),
         };
 
@@ -11745,6 +11879,34 @@ pub async fn execute_table_data_transfer(
             )
             .await?;
 
+        let post_commit = if mysql_post_commit {
+            let statements = plan
+                .schema_restore_statements
+                .iter()
+                .cloned()
+                .map(|sql| PostCommitSchemaStatement {
+                    table_index: 0,
+                    sql,
+                })
+                .collect::<Vec<_>>();
+            Some(
+                execute_mysql_post_commit_schema_statements(
+                    &manager,
+                    &request.target.connection_id,
+                    &statements,
+                    1,
+                    &cancel_rx,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let restored_schema_objects = post_commit
+            .as_ref()
+            .and_then(|execution| execution.succeeded_by_table.first().copied())
+            .unwrap_or(plan.schema_restore_statements.len() as u32);
+
         Ok(TableDataTransferResult {
             rows_transferred,
             batches,
@@ -11752,7 +11914,8 @@ pub async fn execute_table_data_transfer(
             target_rows_before: plan.target_rows_before,
             mapped_columns: plan.mapped_columns,
             identity_reseed_columns: plan.identity_reseed_columns,
-            restored_schema_objects: plan.schema_restore_statements.len() as u32,
+            restored_schema_objects,
+            post_commit_receipt: post_commit.map(|execution| execution.receipt),
             report_id: None,
         })
     }
@@ -11768,9 +11931,24 @@ pub async fn execute_table_data_transfer(
                 rows_transferred: transfer.rows_transferred,
                 max_rows: normalized_transfer_limit(request.max_rows),
                 batches: transfer.batches,
-                status: TableDataTransferProgressStatus::Done,
+                status: if transfer
+                    .post_commit_receipt
+                    .as_ref()
+                    .is_some_and(|receipt| {
+                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                    }) {
+                    TableDataTransferProgressStatus::Error
+                } else {
+                    TableDataTransferProgressStatus::Done
+                },
                 terminal: true,
-                message: None,
+                message: transfer
+                    .post_commit_receipt
+                    .as_ref()
+                    .filter(|receipt| {
+                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                    })
+                    .map(|receipt| receipt.message.clone()),
             },
         ),
         Err(error) => emit_table_data_transfer_progress(
@@ -11804,11 +11982,21 @@ pub async fn execute_table_data_transfer(
         };
         let (status, rows_transferred, batches, limit_reached, error) = match &result {
             Ok(transfer) => (
-                TableDataTransferProgressStatus::Done,
+                if transfer.post_commit_receipt.as_ref().is_some_and(|receipt| {
+                    receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                }) {
+                    TableDataTransferProgressStatus::Error
+                } else {
+                    TableDataTransferProgressStatus::Done
+                },
                 transfer.rows_transferred,
                 transfer.batches,
                 transfer.limit_reached,
-                None,
+                transfer.post_commit_receipt.as_ref().and_then(|receipt| {
+                    (receipt.status
+                        == TableDataTransferPostCommitStatus::NeedsManualReview)
+                        .then(|| receipt.message.clone())
+                }),
             ),
             Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => (
                 TableDataTransferProgressStatus::Cancelled,
@@ -11853,6 +12041,22 @@ pub async fn execute_table_data_transfer(
             finished_at: current_table_timestamp_millis(),
             error,
             verification,
+            retry_policy: if result.as_ref().ok().is_some_and(|transfer| {
+                transfer
+                    .post_commit_receipt
+                    .as_ref()
+                    .is_some_and(|receipt| {
+                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                    })
+            }) {
+                TableDataTransferRetryPolicy::ManualReviewRequired
+            } else {
+                TableDataTransferRetryPolicy::FreshPreview
+            },
+            post_commit_receipt: result
+                .as_ref()
+                .ok()
+                .and_then(|transfer| transfer.post_commit_receipt.clone()),
         };
         match persist_table_data_transfer_report(meta_store.inner(), &report).await {
             Ok(()) => {
@@ -11964,6 +12168,29 @@ pub async fn execute_table_data_transfer_batch(
             resolved_tables.push((table_request, table_plan));
         }
 
+        let mysql_post_commit =
+            normalized_transfer_driver_id(&request.plan.target_driver) == "mysql";
+        let mysql_post_commit_statements = if mysql_post_commit {
+            let mut immediate = Vec::new();
+            let mut foreign_keys = Vec::new();
+            for (table_index, (_, table_plan)) in resolved_tables.iter().enumerate() {
+                immediate.extend(table_plan.immediate_schema_restore_statements.iter().cloned().map(
+                    |sql| PostCommitSchemaStatement { table_index, sql },
+                ));
+                foreign_keys.extend(
+                    table_plan
+                        .deferred_foreign_key_statements
+                        .iter()
+                        .cloned()
+                        .map(|sql| PostCommitSchemaStatement { table_index, sql }),
+                );
+            }
+            immediate.extend(foreign_keys);
+            immediate
+        } else {
+            Vec::new()
+        };
+
         let transaction_id = format!("table-transfer-batch-{}", uuid::Uuid::new_v4());
         match request.plan.target_database.as_deref() {
             Some(database) => manager.begin_database_transaction(
@@ -12011,13 +12238,15 @@ pub async fn execute_table_data_transfer_batch(
                         &manager, table_request, table_plan, &transaction_id, &transfer_id, &mut cancel_rx, &mut on_progress,
                     ).await?
                 };
-                execute_transfer_schema_restore_statements(
-                    &manager,
-                    &request.plan.target_connection_id,
-                    &transaction_id,
-                    &table_plan.immediate_schema_restore_statements,
-                )
-                .await?;
+                if !mysql_post_commit {
+                    execute_transfer_schema_restore_statements(
+                        &manager,
+                        &request.plan.target_connection_id,
+                        &transaction_id,
+                        &table_plan.immediate_schema_restore_statements,
+                    )
+                    .await?;
+                }
                 deferred_foreign_key_statements
                     .extend(table_plan.deferred_foreign_key_statements.iter().cloned());
                 // Empty tables never invoke the progress callback.
@@ -12031,7 +12260,11 @@ pub async fn execute_table_data_transfer_batch(
                     batches: table_batches, limit_reached: table_limit_reached,
                     target_rows_before: table_plan.target_rows_before,
                     identity_reseed_columns: table_plan.identity_reseed_columns.clone(), report_id: None,
-                    restored_schema_objects: table_plan.schema_restore_statements.len() as u32,
+                    restored_schema_objects: if mysql_post_commit {
+                        0
+                    } else {
+                        table_plan.schema_restore_statements.len() as u32
+                    },
                 });
             }
             if *cancel_rx.borrow() {
@@ -12039,13 +12272,15 @@ pub async fn execute_table_data_transfer_batch(
                     "{TABLE_DATA_TRANSFER_CANCELLED}: Transfer cancelled before deferred foreign-key restoration"
                 ));
             }
-            execute_transfer_schema_restore_statements(
-                &manager,
-                &request.plan.target_connection_id,
-                &transaction_id,
-                &deferred_foreign_key_statements,
-            )
-            .await?;
+            if !mysql_post_commit {
+                execute_transfer_schema_restore_statements(
+                    &manager,
+                    &request.plan.target_connection_id,
+                    &transaction_id,
+                    &deferred_foreign_key_statements,
+                )
+                .await?;
+            }
             // Non-table objects run after all table data so triggers cannot
             // observe the copy and materialized views populated WITH DATA see
             // the reviewed final rows. PostgreSQL keeps this DDL in the same
@@ -12070,14 +12305,33 @@ pub async fn execute_table_data_transfer_batch(
                 limit_reached,
                 tables,
                 objects: object_plan.results,
+                post_commit_receipt: None,
             })
         }.await;
 
         match execution {
-            Ok(summary) => {
+            Ok(mut summary) => {
                 manager.commit_transaction(&request.plan.target_connection_id, &transaction_id).await.map_err(|error| {
                     format!("Batch transfer writes completed but the final target commit failed; verify the target transaction state before retrying: {error}")
                 })?;
+                if mysql_post_commit && !mysql_post_commit_statements.is_empty() {
+                    let post_commit = execute_mysql_post_commit_schema_statements(
+                        &manager,
+                        &request.plan.target_connection_id,
+                        &mysql_post_commit_statements,
+                        summary.tables.len(),
+                        &cancel_rx,
+                    )
+                    .await;
+                    for (table, restored) in summary
+                        .tables
+                        .iter_mut()
+                        .zip(post_commit.succeeded_by_table.iter().copied())
+                    {
+                        table.restored_schema_objects = restored;
+                    }
+                    summary.post_commit_receipt = Some(post_commit.receipt);
+                }
                 Ok(summary)
             }
             Err(error) => {
@@ -12101,9 +12355,21 @@ pub async fn execute_table_data_transfer_batch(
                 rows_transferred: summary.rows_transferred,
                 max_rows: total_max_rows,
                 batches: summary.batches,
-                status: TableDataTransferProgressStatus::Done,
+                status: if summary.post_commit_receipt.as_ref().is_some_and(|receipt| {
+                    receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                }) {
+                    TableDataTransferProgressStatus::Error
+                } else {
+                    TableDataTransferProgressStatus::Done
+                },
                 terminal: true,
-                message: None,
+                message: summary
+                    .post_commit_receipt
+                    .as_ref()
+                    .filter(|receipt| {
+                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                    })
+                    .map(|receipt| receipt.message.clone()),
             },
         ),
         Err(error) => emit_table_data_transfer_progress(
@@ -12129,6 +12395,15 @@ pub async fn execute_table_data_transfer_batch(
         normalized_table_data_transfer_project_id(request.project_id.as_deref())
     {
         let (status, error) = match &result {
+            Ok(summary) if summary.post_commit_receipt.as_ref().is_some_and(|receipt| {
+                receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+            }) => (
+                TableDataTransferProgressStatus::Error,
+                summary
+                    .post_commit_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.message.clone()),
+            ),
             Ok(_) => (TableDataTransferProgressStatus::Done, None),
             Err(error) if error.contains(TABLE_DATA_TRANSFER_CANCELLED) => (TableDataTransferProgressStatus::Cancelled, Some("Batch transfer cancelled and target changes were rolled back.".to_string())),
             Err(error) if error.contains("rollback also failed") => (
@@ -12158,6 +12433,10 @@ pub async fn execute_table_data_transfer_batch(
                         mapped_columns: Vec::new(),
                         identity_reseed_columns: table.identity_reseed_columns.clone(),
                         restored_schema_objects: table.restored_schema_objects,
+                        post_commit_receipt: result
+                            .as_ref()
+                            .ok()
+                            .and_then(|summary| summary.post_commit_receipt.clone()),
                         report_id: None,
                     };
                     Some(
@@ -12195,6 +12474,19 @@ pub async fn execute_table_data_transfer_batch(
                 finished_at: current_table_timestamp_millis(),
                 error: error.clone(),
                 verification,
+                retry_policy: if result.as_ref().ok().is_some_and(|summary| {
+                    summary.post_commit_receipt.as_ref().is_some_and(|receipt| {
+                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                    })
+                }) {
+                    TableDataTransferRetryPolicy::ManualReviewRequired
+                } else {
+                    TableDataTransferRetryPolicy::FreshPreview
+                },
+                post_commit_receipt: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|summary| summary.post_commit_receipt.clone()),
             };
             match persist_table_data_transfer_report(meta_store.inner(), &report).await {
                 Ok(()) => {
@@ -19225,28 +19517,29 @@ mod tests {
         delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
         ensure_sql_insert_conflict_policy, ensure_table_export_format,
         ensure_transfer_endpoint_driver_matches_connection, execute_frozen_table_data_compare_sync,
-        execute_target_parameterized_batch, filter_sql_export_batch,
-        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
-        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
-        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
-        infer_csv_import_columns, infer_json_lines_import_columns,
+        execute_mysql_post_commit_schema_statements, execute_target_parameterized_batch,
+        filter_sql_export_batch, finish_table_data_transfer_transaction,
+        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
+        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
+        import_string_inferred_type, infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
         json_import_rows_with_cancel, merge_data_compare_sample_keys,
         missing_deferred_cycle_foreign_keys, normalized_data_compare_threshold,
         normalized_table_data_transfer_objects, normalized_table_data_transfer_project_id,
         object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
         object_type_is_view, order_postgres_views, overwrite_transfer_verification,
-        postgres_backup_index_definitions, postgres_backup_routine_definitions,
-        postgres_backup_routine_definitions_query, postgres_identity_reseed_plan_from_results,
-        postgres_identity_reseed_plan_query, postgres_identity_reseed_statements,
-        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
-        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
-        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
-        postgres_sequence_metadata_query, postgres_sequence_setval_sql,
-        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
-        push_delimited_export_row, query_target, query_target_parameterized,
-        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
-        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
+        post_commit_schema_receipt, postgres_backup_index_definitions,
+        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
+        postgres_identity_reseed_plan_from_results, postgres_identity_reseed_plan_query,
+        postgres_identity_reseed_statements, postgres_identity_reseed_verification_query,
+        postgres_materialized_view_populated_query, postgres_multirange_type_names,
+        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
+        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_metadata_query,
+        postgres_sequence_setval_sql, postgres_view_definition_query,
+        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
+        query_target, query_target_parameterized, read_csv_import_preview,
+        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
+        resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_table_data_transfer_target_plan, resolve_transfer_target_column_quoting,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
         rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
@@ -19265,24 +19558,24 @@ mod tests {
         write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
         xlsx_import_rows_with_cancel, AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind,
         AnalyticalTypePolicy, CreateTableColumn, FrozenTableDataCompareSyncPlan,
-        ImportInferredType, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
-        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
-        TableDataCompareCancellationState, TableDataCompareDegradationLevel,
-        TableDataCompareDegradationThreshold, TableDataCompareEndpoint, TableDataCompareResult,
-        TableDataCompareSamplingStrategy, TableDataCompareSyncPlanState,
-        TableDataCompareSyncPreviewRequest, TableDataTransferBatchPlanRequest,
-        TableDataTransferCancellationState, TableDataTransferColumnMapping,
-        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
-        TableDataTransferConversion, TableDataTransferEndpoint,
-        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
-        TableDataTransferObjectKind, TableDataTransferObjectReport,
-        TableDataTransferObjectSelection, TableDataTransferPreview,
-        TableDataTransferProgressStatus, TableDataTransferReport, TableDataTransferRequest,
-        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
-        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
-        TableExportWriterContext, TableExportWriterMessage, TableFilter,
-        TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
-        TableRowUpdate, TableSort, TransferTableSchemaObjects,
+        ImportInferredType, PostCommitSchemaStatement, RelationOperation, SqlExportDialect,
+        SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
+        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareCancellationState,
+        TableDataCompareDegradationLevel, TableDataCompareDegradationThreshold,
+        TableDataCompareEndpoint, TableDataCompareResult, TableDataCompareSamplingStrategy,
+        TableDataCompareSyncPlanState, TableDataCompareSyncPreviewRequest,
+        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
+        TableDataTransferColumnMapping, TableDataTransferCompatibility,
+        TableDataTransferConfirmationBinding, TableDataTransferConversion,
+        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
+        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
+        TableDataTransferObjectSelection, TableDataTransferPostCommitStatus,
+        TableDataTransferPreview, TableDataTransferProgressStatus, TableDataTransferReport,
+        TableDataTransferRequest, TableDataTransferRetryPolicy, TableDataTransferTargetColumn,
+        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
+        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
+        TableFilter, TableImportCancellationState, TableImportFormat, TableImportMode,
+        TableImportTextEncoding, TableRowUpdate, TableSort, TransferTableSchemaObjects,
         MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
         MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
@@ -19325,6 +19618,10 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         delete_rows: u64,
         rollback_error: Option<String>,
+    }
+
+    struct PostCommitTransferDriver {
+        events: Arc<Mutex<Vec<String>>>,
     }
 
     struct SyncTransactionDriver {
@@ -19758,6 +20055,40 @@ mod tests {
                 return Err(anyhow::anyhow!(error.clone()));
             }
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for PostCommitTransferDriver {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn ping(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query(&self, _sql: &str) -> Result<Vec<QueryResult>> {
+            Ok(Vec::new())
+        }
+
+        async fn execute_parameterized(
+            &self,
+            sql: &str,
+            _params: &[QueryParameter],
+        ) -> Result<u64> {
+            self.events
+                .lock()
+                .expect("post-commit event mutex")
+                .push(sql.to_string());
+            if sql == "FAIL" {
+                return Err(anyhow::anyhow!("fixture failure with sensitive detail"));
+            }
+            Ok(0)
         }
     }
 
@@ -23132,6 +23463,85 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
     }
 
     #[test]
+    fn mysql_post_commit_receipt_blocks_ambiguous_automatic_retry() {
+        let completed = post_commit_schema_receipt(3, 3, false);
+        assert_eq!(
+            completed.status,
+            TableDataTransferPostCommitStatus::Completed
+        );
+        assert_eq!(completed.statements_succeeded, 3);
+        assert!(!completed.message.contains("automatic retry is disabled"));
+
+        let partial = post_commit_schema_receipt(3, 1, false);
+        assert_eq!(
+            partial.status,
+            TableDataTransferPostCommitStatus::NeedsManualReview
+        );
+        assert_eq!(partial.statements_total, 3);
+        assert_eq!(partial.statements_succeeded, 1);
+        assert!(partial.message.contains("Row writes are committed"));
+        assert!(partial.message.contains("automatic retry is disabled"));
+        assert!(!partial.message.contains("ALTER TABLE"));
+
+        let cancelled = post_commit_schema_receipt(2, 0, true);
+        assert_eq!(
+            cancelled.status,
+            TableDataTransferPostCommitStatus::NeedsManualReview
+        );
+        assert!(cancelled.message.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn mysql_post_commit_execution_stops_at_first_failure_and_counts_per_table() {
+        let manager = ConnectionManager::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager
+            .add_connection(
+                "target".to_string(),
+                Box::new(PostCommitTransferDriver {
+                    events: Arc::clone(&events),
+                }),
+            )
+            .await;
+        let statements = vec![
+            PostCommitSchemaStatement {
+                table_index: 0,
+                sql: "FIRST".to_string(),
+            },
+            PostCommitSchemaStatement {
+                table_index: 1,
+                sql: "FAIL".to_string(),
+            },
+            PostCommitSchemaStatement {
+                table_index: 0,
+                sql: "MUST_NOT_RUN".to_string(),
+            },
+        ];
+        let (_, cancel_rx) = watch::channel(false);
+
+        let execution = execute_mysql_post_commit_schema_statements(
+            &manager,
+            "target",
+            &statements,
+            2,
+            &cancel_rx,
+        )
+        .await;
+
+        assert_eq!(
+            execution.receipt.status,
+            TableDataTransferPostCommitStatus::NeedsManualReview
+        );
+        assert_eq!(execution.receipt.statements_succeeded, 1);
+        assert_eq!(execution.succeeded_by_table, vec![1, 0]);
+        assert_eq!(
+            events.lock().expect("post-commit event mutex").as_slice(),
+            ["FIRST", "FAIL"]
+        );
+        assert!(!execution.receipt.message.contains("sensitive detail"));
+    }
+
+    #[test]
     fn transfer_report_fixture_preserves_baseline_and_legacy_compatibility() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/table-data-transfer-report.json"
@@ -23162,6 +23572,11 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
         );
         assert_eq!(legacy.target_rows_before, None);
         assert!(legacy.verification.is_none());
+        assert_eq!(
+            legacy.retry_policy,
+            TableDataTransferRetryPolicy::FreshPreview
+        );
+        assert!(legacy.post_commit_receipt.is_none());
         let encoded = serde_json::to_value(&current)
             .expect("current transfer report fixture should serialize");
         assert!(encoded.get("connectionString").is_none());
