@@ -162,6 +162,7 @@ pub fn run() {
             // Connection commands
             commands::connection::connect_db,
             commands::connection::test_db_connection,
+            commands::connection::test_ssh_tunnel,
             commands::connection::get_remote_sqlite_worker_status,
             commands::connection::prepare_remote_sqlite_worker,
             commands::connection::disconnect_db,

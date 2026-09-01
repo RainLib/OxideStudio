@@ -10,6 +10,7 @@ import {
   Palette,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
 } from "lucide-react";
 import {
   CONNECTION_ICON_OPTIONS,
@@ -81,6 +82,7 @@ type FormSection = "general" | "ssl" | "advanced";
 type ConnectionStatus = {
   type: "success" | "error" | "loading";
   message: string;
+  scope?: "connection" | "ssh";
 } | null;
 
 interface ConnectionFormProps {
@@ -930,13 +932,21 @@ export function ConnectionForm({
       });
       return;
     }
-    setStatus({ type: "loading", message: "Testing connection..." });
+    setStatus({
+      type: "loading",
+      message: "Testing connection...",
+      scope: "connection",
+    });
     try {
       const error = await testConnection(selectedConnection);
       setStatus(
         error
           ? { type: "error", message: error }
-          : { type: "success", message: "Connection successful" },
+          : {
+              type: "success",
+              message: "Connection successful",
+              scope: "connection",
+            },
       );
     } catch (error) {
       setStatus({
@@ -1003,6 +1013,32 @@ export function ConnectionForm({
       });
     } finally {
       setIsPreparingSqliteWorker(false);
+    }
+  };
+
+  const handleTestSshTunnel = async () => {
+    if (!sshTunnel.enabled) {
+      setStatus({
+        type: "error",
+        message: "Enable the SSH tunnel before testing it.",
+        scope: "ssh",
+      });
+      return;
+    }
+    setStatus({
+      type: "loading",
+      message: "Authenticating SSH tunnel…",
+      scope: "ssh",
+    });
+    try {
+      const message = await connectionService.testSshTunnel(sshTunnel);
+      setStatus({ type: "success", message, scope: "ssh" });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+        scope: "ssh",
+      });
     }
   };
 
@@ -2061,6 +2097,28 @@ export function ConnectionForm({
                         ))}
                       </div>
                     )}
+                  </div>
+
+                  <span />
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      className="wb-text-button h-7 border border-[hsl(var(--wb-border))] px-3 text-[11px] text-[hsl(var(--wb-text))]"
+                      onClick={() => void handleTestSshTunnel()}
+                      disabled={status?.type === "loading"}
+                    >
+                      {status?.type === "loading" && status.scope === "ssh" ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <ShieldCheck size={12} />
+                      )}
+                      {status?.type === "loading" && status.scope === "ssh"
+                        ? "Testing SSH…"
+                        : "Test SSH Tunnel"}
+                    </button>
+                    <span className="text-[10px] wb-muted">
+                      Verifies host keys and every jump-host credential without contacting the database.
+                    </span>
                   </div>
 
                   {isRemoteSqlite && (

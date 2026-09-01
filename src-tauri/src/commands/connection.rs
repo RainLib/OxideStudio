@@ -8,7 +8,7 @@ use crate::core::{
     protocol::Response,
     redaction::redact_connection_url,
     sqlite_worker_artifact::SqliteWorkerArtifactRegistry,
-    ssh::SshTunnel,
+    ssh::{test_ssh_tunnel as probe_ssh_tunnel, SshTunnel},
     store::{MetaStore, SavedConnection as StoreSavedConnection},
 };
 use crate::drivers::connect_preferred_driver;
@@ -426,6 +426,20 @@ pub async fn test_db_connection(
             Some(error_context),
         )),
     }
+}
+
+/// Tests only the configured SSH authentication chain. Database credentials,
+/// target reachability and external driver activation are intentionally not
+/// part of this probe.
+#[tauri::command]
+pub async fn test_ssh_tunnel(ssh_tunnel: SshTunnelConfig) -> Result<Response<String>, String> {
+    let result = probe_ssh_tunnel(&ssh_tunnel).await;
+    Ok(match result {
+        Ok(()) => Response::ok("SSH tunnel authentication successful".to_string()),
+        Err(error) => {
+            Response::err_with_details("SSH_TUNNEL_TEST_ERROR", &error.to_string(), true, None)
+        }
+    })
 }
 
 pub(crate) async fn connect_driver_with_transport(

@@ -64,6 +64,13 @@ export async function testConnection(
   });
 }
 
+/** Authenticate the SSH chain without opening the database connection. */
+export async function testSshTunnel(
+  sshTunnel: SshTunnelConfig,
+): Promise<string> {
+  return invokeWithInterceptors<string>("test_ssh_tunnel", { sshTunnel });
+}
+
 export async function prepareRemoteSqliteWorker(
   sshTunnel: SshTunnelConfig,
   downloadBaseUrl: string,
@@ -157,6 +164,7 @@ export async function deleteConnection(
 export const connectionService = {
   connect,
   testConnection,
+  testSshTunnel,
   prepareRemoteSqliteWorker,
   getRemoteSqliteWorkerStatus,
   disconnect,

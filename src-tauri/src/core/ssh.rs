@@ -480,6 +480,46 @@ async fn connect_ssh_chain(config: &SshTunnelConfig) -> Result<ConnectedSshChain
     })
 }
 
+/// Authenticate every configured SSH hop without opening a database
+/// connection or retaining a local forwarder. This is deliberately separate
+/// from `SshTunnel::prepare`: connection settings can validate bastion
+/// credentials and host keys before database address or credentials are
+/// complete.
+pub async fn test_ssh_tunnel(config: &SshTunnelConfig) -> Result<()> {
+    if !config.enabled {
+        bail!("SSH tunnel must be enabled before it can be tested");
+    }
+
+    let ConnectedSshChain {
+        final_session,
+        upstream_sessions,
+    } = connect_ssh_chain(config).await?;
+
+    if let Err(error) = final_session
+        .disconnect(
+            russh::Disconnect::ByApplication,
+            "SSH tunnel test complete",
+            "en",
+        )
+        .await
+    {
+        tracing::debug!("Failed to close tested SSH session: {error}");
+    }
+    for session in upstream_sessions.into_iter().rev() {
+        if let Err(error) = session
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                "SSH tunnel test complete",
+                "en",
+            )
+            .await
+        {
+            tracing::debug!("Failed to close tested SSH jump-host session: {error}");
+        }
+    }
+    Ok(())
+}
+
 async fn connect_ssh_hop_direct(hop: &SshHop) -> Result<client::Handle<SshClientHandler>> {
     let handler = ssh_handler(hop);
     let mut session = timeout(
@@ -850,6 +890,28 @@ mod tests {
             .expect("incomplete hop must fail")
             .to_string()
             .contains("host"));
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_probe_rejects_disabled_configuration_without_network_io() {
+        let config = SshTunnelConfig {
+            enabled: false,
+            host: "bastion.example.com".to_string(),
+            port: 22,
+            username: "deploy".to_string(),
+            auth_method: "password".to_string(),
+            password: Some("secret".to_string()),
+            private_key_path: None,
+            private_key_passphrase: None,
+            strict_host_key_checking: true,
+            jump_hosts: Vec::new(),
+            remote_sqlite: None,
+        };
+
+        assert_eq!(
+            test_ssh_tunnel(&config).await.unwrap_err().to_string(),
+            "SSH tunnel must be enabled before it can be tested"
+        );
     }
 
     #[test]
