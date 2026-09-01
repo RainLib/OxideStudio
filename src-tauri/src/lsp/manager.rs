@@ -316,13 +316,16 @@ impl LspServerManager {
                 // Start a header block. A few servers accidentally log plain
                 // text to stdout, so skip non-header lines and recover at the
                 // next valid LSP frame.
-                if read_lsp_header_line(&mut reader, &mut line)
-                    .await
-                    .unwrap_or(0)
-                    == 0
-                {
-                    tracing::warn!("LSP stdout closed");
-                    break;
+                match read_lsp_header_line(&mut reader, &mut line).await {
+                    Ok(0) => {
+                        tracing::warn!("LSP stdout closed");
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!("Rejecting LSP response header: {error}");
+                        break;
+                    }
                 }
                 if line == b"\r\n" || line == b"\n" || !line.contains(&b':') {
                     continue;
