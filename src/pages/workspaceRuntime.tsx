@@ -32,6 +32,7 @@ import { subscribeStartupIntents } from "@/startup/startupIntents";
 import { startWorkspaceHydration } from "@/startup/startupProgress";
 import { cn } from "@/lib/utils";
 import { presentQueryError } from "@/lib/queryErrorPresentation";
+import { tabPlacementFlexDirection } from "@/lib/tabOrganization";
 import type { WorkbenchSide } from "@/lib/appSettings";
 import { toolWindowAtSide, type SideToolWindowId } from "@/lib/workbenchLayout";
 import {
@@ -190,6 +191,12 @@ export function WorkspaceRuntime() {
   const hasLspSurface = Boolean(lspTabSignature);
   const splitDirection = useEditorGroupStore((state) => state.splitDirection);
   const resetEditorGroups = useEditorGroupStore((state) => state.reset);
+  const usesSplitEditor = Boolean(
+    activeTab?.type === "query" && splitDirection,
+  );
+  const tabWorkspaceLayoutClass = usesSplitEditor
+    ? "flex-col"
+    : tabPlacementFlexDirection(appSettings.editor.tabPlacement);
   const activeConnection = connections.find(
     (connection) => connection.id === activeConnectionId,
   );
@@ -647,14 +654,20 @@ export function WorkspaceRuntime() {
               {tabCount === 0 ? (
                 <QueryShortcuts />
               ) : (
-                <div className="z-10 flex h-full min-w-0 flex-col gap-1 bg-[hsl(var(--wb-editor))]">
-                  {!(activeTab?.type === "query" && splitDirection) && (
-                    <div className="z-20">
+                <div
+                  className={cn(
+                    "z-10 flex h-full min-h-0 min-w-0 gap-1 bg-[hsl(var(--wb-editor))]",
+                    tabWorkspaceLayoutClass,
+                  )}
+                >
+                  {!usesSplitEditor && (
+                    <div className="z-20 min-h-0 min-w-0 shrink-0">
                       <TabBar />
                     </div>
                   )}
 
-                  <Suspense fallback={<WorkbenchSurfaceFallback />}>
+                  <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                    <Suspense fallback={<WorkbenchSurfaceFallback />}>
                     {activeTab?.type === "table" ? (
                       <TableDataView />
                     ) : activeTab?.type === "create_table" ? (
@@ -937,7 +950,8 @@ export function WorkspaceRuntime() {
                         )}
                       </div>
                     )}
-                  </Suspense>
+                    </Suspense>
+                  </div>
                 </div>
               )}
             </div>

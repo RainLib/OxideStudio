@@ -174,6 +174,40 @@ describe("app settings workbench layout", () => {
     });
   });
 
+  it("normalizes editor tab placement, grouping, and sorting", () => {
+    expect(DEFAULT_APP_SETTINGS.editor).toMatchObject({
+      tabPlacement: "top",
+      tabGroupMode: "none",
+      tabSortMode: "manual",
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          tabPlacement: "right",
+          tabGroupMode: "connection",
+          tabSortMode: "title-asc",
+        },
+      }).editor,
+    ).toMatchObject({
+      tabPlacement: "right",
+      tabGroupMode: "connection",
+      tabSortMode: "title-asc",
+    });
+    expect(
+      normalizeAppSettings({
+        editor: {
+          tabPlacement: "center",
+          tabGroupMode: "schema",
+          tabSortMode: "updated-desc",
+        },
+      }).editor,
+    ).toMatchObject({
+      tabPlacement: "top",
+      tabGroupMode: "none",
+      tabSortMode: "manual",
+    });
+  });
+
   it("keeps connection notes visible by default and persists an explicit opt-out", () => {
     expect(DEFAULT_APP_SETTINGS.databaseExplorer.showConnectionNotes).toBe(true);
     expect(

@@ -11,7 +11,6 @@ import {
   Terminal,
   Table as TableIcon,
   ChevronDown,
-  Database,
   FileCode2,
   Image as ImageIcon,
   Pin,
@@ -36,9 +35,14 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import {
+  canManuallyReorderTabs,
+  organizeEditorTabs,
+} from "@/lib/tabOrganization";
 import {
   useEditorGroupStore,
   type EditorSplitDirection,
@@ -75,6 +79,7 @@ interface TabBarProps {
   activeTabIdOverride?: string | null;
   queryOnly?: boolean;
   allowSplit?: boolean;
+  compact?: boolean;
   onSelectTab?: (tabId: string) => void;
   onCloseGroup?: () => void;
 }
@@ -83,6 +88,7 @@ export function TabBar({
   activeTabIdOverride,
   queryOnly = false,
   allowSplit = true,
+  compact = false,
   onSelectTab,
   onCloseGroup,
 }: TabBarProps = {}) {
@@ -93,6 +99,7 @@ export function TabBar({
           tab.id,
           tab.type,
           tab.title,
+          tab.createdAt || "",
           tab.isPinned ? "1" : "0",
           tab.fileRelativePath || "",
           tab.filePreview ? "preview" : "",
@@ -112,29 +119,90 @@ export function TabBar({
   );
   const activeTabId = useTabStore((state) => state.activeTabId);
   const setActiveTab = useTabStore((state) => state.setActiveTab);
-  const closeTab = useTabStore((state) => state.closeTab);
   const forceCloseTab = useTabStore((state) => state.forceCloseTab);
   const closeOtherTabs = useTabStore((state) => state.closeOtherTabs);
   const closeAllTabs = useTabStore((state) => state.closeAllTabs);
-  const closeTabsToLeft = useTabStore((state) => state.closeTabsToLeft);
-  const closeTabsToRight = useTabStore((state) => state.closeTabsToRight);
+  const closeTabsByIds = useTabStore((state) => state.closeTabsByIds);
   const togglePinTab = useTabStore((state) => state.togglePinTab);
+  const reorderTab = useTabStore((state) => state.reorderTab);
   const createTab = useTabStore((state) => state.createTab);
   const openDataCompareTab = useTabStore((state) => state.openDataCompareTab);
-  const { activeConnectionId, connections } = useConnectionStore();
+  const activeConnectionId = useConnectionStore(
+    (state) => state.activeConnectionId,
+  );
+  const connections = useConnectionStore((state) => state.connections);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
+  const tabPlacement = useSettingsStore(
+    (state) => state.settings.editor.tabPlacement,
+  );
+  const tabGroupMode = useSettingsStore(
+    (state) => state.settings.editor.tabGroupMode,
+  );
+  const tabSortMode = useSettingsStore(
+    (state) => state.settings.editor.tabSortMode,
+  );
+  const reduceMotion = useSettingsStore(
+    (state) => state.settings.appearance.reduceMotion,
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [hasOverflow, setHasOverflow] = useState(false);
   const tabRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [contextMenuTabId, setContextMenuTabId] = useState<string | null>(null);
+  const [tabDrag, setTabDrag] = useState<{
+    draggedId: string;
+    targetId: string | null;
+    position: "before" | "after" | null;
+  } | null>(null);
   const activeConnection = connections.find(
     (connection) => connection.id === activeConnectionId
   );
   const displayedActiveTabId =
     activeTabIdOverride === undefined ? activeTabId : activeTabIdOverride;
-  const visibleTabs = queryOnly
-    ? tabs.filter((tab) => tab.type === "query")
-    : tabs;
+  const sourceTabs = useMemo(
+    () => (queryOnly ? tabs.filter((tab) => tab.type === "query") : tabs),
+    [queryOnly, tabs],
+  );
+  const organizedTabs = useMemo(
+    () =>
+      organizeEditorTabs(
+        sourceTabs,
+        tabGroupMode,
+        tabSortMode,
+        connections.map((connection) => ({
+          id: connection.id,
+          name: connection.name,
+          driver: connection.driver,
+        })),
+      ),
+    [connections, sourceTabs, tabGroupMode, tabSortMode],
+  );
+  const visibleTabs = useMemo(
+    () => organizedTabs.map(({ tab }) => tab),
+    [organizedTabs],
+  );
+  const visibleTabIndex = useMemo(
+    () => new Map(visibleTabs.map((tab, index) => [tab.id, index])),
+    [visibleTabs],
+  );
+  const organizedTabById = useMemo(
+    () => new Map(organizedTabs.map((item) => [item.tab.id, item])),
+    [organizedTabs],
+  );
+  const hasPinnedVisibleTabs = useMemo(
+    () => visibleTabs.some((tab) => tab.isPinned),
+    [visibleTabs],
+  );
+  const dataCompareSourceIds = useMemo(
+    () =>
+      new Set(
+        tabs
+          .filter((tab) => canCreateDataCompareSource(tab))
+          .map((tab) => tab.id),
+      ),
+    [tabs],
+  );
+  const isVertical = tabPlacement === "left" || tabPlacement === "right";
+  const canDragTabs = canManuallyReorderTabs(tabSortMode);
   const activateTab = (tabId: string) => {
     onSelectTab?.(tabId);
     setActiveTab(tabId);
@@ -142,6 +210,104 @@ export function TabBar({
   const splitTab = (direction: EditorSplitDirection, tabId: string) => {
     useEditorGroupStore.getState().split(direction, tabId);
     setActiveTab(tabId);
+  };
+
+  const closeVisibleTabs = (ids: readonly string[]) => {
+    closeTabsByIds(ids);
+    setContextMenuTabId(null);
+  };
+
+  const closeVisibleTab = (tabId: string) => {
+    const index = visibleTabIndex.get(tabId);
+    const fallbackTabId =
+      index === undefined
+        ? null
+        : visibleTabs[index + 1]?.id || visibleTabs[index - 1]?.id || null;
+    closeTabsByIds([tabId], fallbackTabId);
+    setContextMenuTabId(null);
+  };
+
+  const closeVisibleOtherTabs = (tabId: string) => {
+    if (!queryOnly) {
+      closeOtherTabs(tabId);
+      setContextMenuTabId(null);
+      return;
+    }
+    closeVisibleTabs(
+      visibleTabs
+        .filter((tab) => tab.id !== tabId && !tab.isPinned)
+        .map((tab) => tab.id),
+    );
+  };
+
+  const closeVisibleAllTabs = () => {
+    if (!queryOnly) {
+      closeAllTabs();
+      setContextMenuTabId(null);
+      return;
+    }
+    closeVisibleTabs(
+      visibleTabs.filter((tab) => !tab.isPinned).map((tab) => tab.id),
+    );
+  };
+
+  const handleDragOver = (
+    event: React.DragEvent<HTMLDivElement>,
+    targetId: string,
+  ) => {
+    if (!tabDrag || !canDragTabs || tabDrag.draggedId === targetId) return;
+    const dragged = organizedTabById.get(tabDrag.draggedId);
+    const target = organizedTabById.get(targetId);
+    if (
+      !dragged ||
+      !target ||
+      dragged.tab.isPinned !== target.tab.isPinned ||
+      (tabGroupMode !== "none" && dragged.groupKey !== target.groupKey)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const offset = isVertical
+      ? event.clientY - rect.top
+      : event.clientX - rect.left;
+    const extent = isVertical ? rect.height : rect.width;
+    const position = offset < extent / 2 ? "before" : "after";
+    if (tabDrag.targetId !== targetId || tabDrag.position !== position) {
+      setTabDrag((current) =>
+        current?.draggedId === tabDrag.draggedId
+          ? { ...current, targetId, position }
+          : current,
+      );
+    }
+  };
+
+  const finishDrag = (
+    event: React.DragEvent<HTMLDivElement>,
+    targetId: string,
+  ) => {
+    if (tabDrag && tabDrag.draggedId !== targetId) {
+      const dragged = organizedTabById.get(tabDrag.draggedId);
+      const target = organizedTabById.get(targetId);
+      if (
+        dragged &&
+        target &&
+        dragged.tab.isPinned === target.tab.isPinned &&
+        (tabGroupMode === "none" || dragged.groupKey === target.groupKey)
+      ) {
+        const rect = event.currentTarget.getBoundingClientRect();
+        const offset = isVertical
+          ? event.clientY - rect.top
+          : event.clientX - rect.left;
+        const extent = isVertical ? rect.height : rect.width;
+        reorderTab(
+          tabDrag.draggedId,
+          targetId,
+          offset < extent / 2 ? "before" : "after",
+        );
+      }
+    }
+    setTabDrag(null);
   };
 
   const createQueryConsole = () => {
@@ -165,14 +331,26 @@ export function TabBar({
     const checkOverflow = () => {
       const container = scrollContainerRef.current;
       if (container) {
-        setHasOverflow(container.scrollWidth > container.clientWidth);
+        setHasOverflow(
+          isVertical
+            ? container.scrollHeight > container.clientHeight
+            : container.scrollWidth > container.clientWidth,
+        );
       }
     };
 
     checkOverflow();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(checkOverflow);
+    if (scrollContainerRef.current) observer?.observe(scrollContainerRef.current);
     window.addEventListener("resize", checkOverflow);
-    return () => window.removeEventListener("resize", checkOverflow);
-  }, [visibleTabs]);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", checkOverflow);
+    };
+  }, [isVertical, visibleTabs]);
 
   // Auto-scroll to active tab
   useEffect(() => {
@@ -181,43 +359,103 @@ export function TabBar({
       if (activeTabElement && scrollContainerRef.current) {
         // Scroll the active tab into view with smooth behavior
         activeTabElement.scrollIntoView({
-          behavior: "smooth",
-          block: "nearest",
-          inline: "center",
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: isVertical ? "center" : "nearest",
+          inline: isVertical ? "nearest" : "center",
         });
       }
     }
-  }, [displayedActiveTabId]);
+  }, [displayedActiveTabId, isVertical, reduceMotion]);
 
   return (
-    <div className="flex h-8 w-full items-center overflow-visible border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))]">
+    <div
+      className={cn(
+        "flex shrink-0 overflow-visible bg-[hsl(var(--wb-toolbar))]",
+        isVertical
+          ? cn(
+              compact ? "h-full w-40 flex-col" : "h-full w-56 flex-col",
+              tabPlacement === "right"
+                ? "border-l border-[hsl(var(--wb-border-subtle))]"
+                : "border-r border-[hsl(var(--wb-border-subtle))]",
+            )
+          : cn(
+              "h-8 w-full items-center",
+              tabPlacement === "bottom"
+                ? "border-t border-[hsl(var(--wb-border-subtle))]"
+                : "border-b border-[hsl(var(--wb-border-subtle))]",
+            ),
+      )}
+      data-tab-placement={tabPlacement}
+      data-tab-group-mode={tabGroupMode}
+      data-tab-sort-mode={tabSortMode}
+      role="tablist"
+      aria-orientation={isVertical ? "vertical" : "horizontal"}
+    >
       {/* Scrollable tabs container*/}
       <div
         ref={scrollContainerRef}
-        className="scrollbar-hide flex h-full flex-1 items-end overflow-x-auto"
+        className={cn(
+          "scrollbar-hide flex min-h-0 min-w-0 flex-1",
+          isVertical
+            ? "w-full flex-col items-stretch overflow-x-hidden overflow-y-auto py-1"
+            : "h-full items-end overflow-x-auto",
+        )}
         style={{
           scrollbarWidth: "none",
           msOverflowStyle: "none",
         }}
       >
-        {visibleTabs.map((tab) => {
-          const tabIndex = visibleTabs.findIndex((t) => t.id === tab.id);
+        {organizedTabs.map((organized) => {
+          const tab = organized.tab;
+          const tabIndex = visibleTabIndex.get(tab.id) ?? -1;
           const canCloseLeft =
             tabIndex > 0 && visibleTabs.slice(0, tabIndex).some((t) => !t.isPinned);
           const canCloseRight =
             tabIndex < visibleTabs.length - 1 &&
             visibleTabs.slice(tabIndex + 1).some((t) => !t.isPinned);
           const isContextMenuOpen = contextMenuTabId === tab.id;
-          const compareTargets = tabs.filter(
-            (candidate) =>
-              candidate.id !== tab.id &&
-              canCreateDataCompareSource(candidate),
-          );
-          const canCompareSource = canCreateDataCompareSource(tab);
+          const canCompareSource = dataCompareSourceIds.has(tab.id);
+          const compareTargets =
+            isContextMenuOpen && canCompareSource
+              ? tabs.filter(
+                  (candidate) =>
+                    candidate.id !== tab.id &&
+                    dataCompareSourceIds.has(candidate.id),
+                )
+              : [];
 
+          const showRegularDivider =
+            organized.startsRegularRegion &&
+            hasPinnedVisibleTabs &&
+            !tab.isPinned;
+          const isDropTarget = tabDrag?.targetId === tab.id;
           return (
+            <Fragment key={tab.id}>
+              {showRegularDivider && (
+                <div
+                  className={cn(
+                    "shrink-0 border-[hsl(var(--wb-border-subtle))]",
+                    isVertical
+                      ? "mx-2 my-1 border-t"
+                      : "mx-1 h-5 border-l",
+                  )}
+                  aria-hidden="true"
+                />
+              )}
+              {organized.startsGroup && (
+                <div
+                  className={cn(
+                    "shrink-0 overflow-hidden text-ellipsis whitespace-nowrap font-semibold uppercase tracking-[0.08em] text-[hsl(var(--wb-text-muted))]",
+                    isVertical
+                      ? "w-full px-3 pb-1 pt-2 text-[9px]"
+                      : "flex h-full max-w-[132px] items-center border-l border-[hsl(var(--wb-border-subtle))] px-2 text-[8px]",
+                  )}
+                  title={organized.groupLabel}
+                >
+                  {organized.groupLabel}
+                </div>
+              )}
             <DropdownMenu
-              key={tab.id}
               open={isContextMenuOpen}
               onOpenChange={(open) => {
                 if (!open) setContextMenuTabId(null);
@@ -233,12 +471,78 @@ export function TabBar({
                     }
                   }}
                   className={cn(
-                    "group my-[3px] flex h-[calc(100%-6px)] min-w-[118px] max-w-[220px] shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-[4px] border px-3 text-[11px] transition-colors",
+                    "group flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-[4px] border px-3 text-[11px] transition-[background-color,border-color,box-shadow,opacity]",
+                    isVertical
+                      ? "mx-1 my-0.5 h-7 min-w-0 max-w-none"
+                      : "my-[3px] h-[calc(100%-6px)] min-w-[118px] max-w-[220px]",
+                    canDragTabs && "cursor-grab active:cursor-grabbing",
                     displayedActiveTabId === tab.id
                       ? "border-[hsl(var(--wb-accent)/0.55)] bg-[hsl(var(--wb-editor))] font-semibold text-[hsl(var(--wb-text))] shadow-[inset_0_1px_0_hsl(var(--wb-accent)/0.18)]"
-                      : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                      : "border-transparent bg-transparent text-[hsl(var(--wb-text-muted))] hover:border-[hsl(var(--wb-border-subtle))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                    tabDrag?.draggedId === tab.id && "opacity-45",
+                    isDropTarget &&
+                      (isVertical
+                        ? tabDrag.position === "before"
+                          ? "shadow-[inset_0_2px_0_hsl(var(--wb-accent))]"
+                          : "shadow-[inset_0_-2px_0_hsl(var(--wb-accent))]"
+                        : tabDrag.position === "before"
+                          ? "shadow-[inset_2px_0_0_hsl(var(--wb-accent))]"
+                          : "shadow-[inset_-2px_0_0_hsl(var(--wb-accent))]"),
                   )}
+                  draggable={canDragTabs}
+                  aria-grabbed={tabDrag?.draggedId === tab.id}
+                  aria-selected={displayedActiveTabId === tab.id}
+                  aria-label={
+                    organized.groupLabel
+                      ? `${tab.title}, ${organized.groupLabel}`
+                      : tab.title
+                  }
+                  role="tab"
+                  tabIndex={displayedActiveTabId === tab.id ? 0 : -1}
+                  data-tab-id={tab.id}
+                  onDragStart={(event) => {
+                    if (!canDragTabs) {
+                      event.preventDefault();
+                      return;
+                    }
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", tab.id);
+                    setTabDrag({
+                      draggedId: tab.id,
+                      targetId: null,
+                      position: null,
+                    });
+                  }}
+                  onDragOver={(event) => handleDragOver(event, tab.id)}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    finishDrag(event, tab.id);
+                  }}
+                  onDragEnd={() => setTabDrag(null)}
                   onClick={() => activateTab(tab.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      activateTab(tab.id);
+                      return;
+                    }
+                    const previousKey = isVertical ? "ArrowUp" : "ArrowLeft";
+                    const nextKey = isVertical ? "ArrowDown" : "ArrowRight";
+                    if (event.key !== previousKey && event.key !== nextKey) {
+                      return;
+                    }
+                    event.preventDefault();
+                    const direction = event.key === previousKey ? -1 : 1;
+                    const nextIndex =
+                      (tabIndex + direction + visibleTabs.length) %
+                      visibleTabs.length;
+                    const nextTab = visibleTabs[nextIndex];
+                    if (!nextTab) return;
+                    activateTab(nextTab.id);
+                    requestAnimationFrame(() =>
+                      tabRefs.current.get(nextTab.id)?.focus(),
+                    );
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setContextMenuTabId(tab.id);
@@ -263,15 +567,17 @@ export function TabBar({
                     />
                   )}
                   {!tab.isPinned && (
-                    <div
+                    <button
+                      type="button"
+                      aria-label={`Close ${tab.title}`}
                       className="rounded-[3px] p-0.5 opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover:opacity-100 group-focus-within:opacity-100"
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeTab(tab.id);
+                        closeVisibleTab(tab.id);
                       }}
                     >
                       <X size={10} />
-                    </div>
+                    </button>
                   )}
                 </div>
               </DropdownMenuTrigger>
@@ -343,8 +649,7 @@ export function TabBar({
                 <DropdownMenuSeparator className="bg-border" />
                 <DropdownMenuItem
                   onClick={() => {
-                    closeTab(tab.id);
-                    setContextMenuTabId(null);
+                    closeVisibleTab(tab.id);
                   }}
                   className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={tab.isPinned}
@@ -366,8 +671,7 @@ export function TabBar({
                 )}
                 <DropdownMenuItem
                   onClick={() => {
-                    closeOtherTabs(tab.id);
-                    setContextMenuTabId(null);
+                    closeVisibleOtherTabs(tab.id);
                   }}
                   className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                 >
@@ -376,8 +680,12 @@ export function TabBar({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() => {
-                    closeTabsToLeft(tab.id);
-                    setContextMenuTabId(null);
+                    closeVisibleTabs(
+                      visibleTabs
+                        .slice(0, tabIndex)
+                        .filter((candidate) => !candidate.isPinned)
+                        .map((candidate) => candidate.id),
+                    );
                   }}
                   className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={!canCloseLeft}
@@ -387,8 +695,12 @@ export function TabBar({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() => {
-                    closeTabsToRight(tab.id);
-                    setContextMenuTabId(null);
+                    closeVisibleTabs(
+                      visibleTabs
+                        .slice(tabIndex + 1)
+                        .filter((candidate) => !candidate.isPinned)
+                        .map((candidate) => candidate.id),
+                    );
                   }}
                   className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                   disabled={!canCloseRight}
@@ -399,8 +711,7 @@ export function TabBar({
                 <DropdownMenuSeparator className="bg-border" />
                 <DropdownMenuItem
                   onClick={() => {
-                    closeAllTabs();
-                    setContextMenuTabId(null);
+                    closeVisibleAllTabs();
                   }}
                   className="text-[11px] cursor-pointer focus:bg-background-tertiary"
                 >
@@ -409,13 +720,21 @@ export function TabBar({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            </Fragment>
           );
         })}
       </div>
 
       {/* Overflow dropdown */}
       {hasOverflow && (
-        <div className="px-1 h-full flex items-center border-l border-border-subtle">
+        <div
+          className={cn(
+            "flex shrink-0 items-center border-[hsl(var(--wb-border-subtle))]",
+            isVertical
+              ? "h-9 w-full justify-center border-t px-1"
+              : "h-full border-l px-1",
+          )}
+        >
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -428,181 +747,83 @@ export function TabBar({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
-              align="end"
+              align={isVertical ? "start" : "end"}
+              side={
+                isVertical
+                  ? tabPlacement === "right"
+                    ? "left"
+                    : "right"
+                  : "bottom"
+              }
               className="w-56 bg-background-elevated border-border text-foreground max-h-[400px] overflow-y-auto"
             >
-              {(() => {
-                const queryTabs = visibleTabs.filter((t) => t.type === "query");
-                const tableTabs = visibleTabs.filter((t) => t.type === "table");
-                const otherTabs = visibleTabs.filter(
-                  (tab) => tab.type !== "query" && tab.type !== "table",
-                );
-
-                const tablesBySchema = tableTabs.reduce((acc, tab) => {
-                  const schema = tab.schemaName || "Unknown";
-                  if (!acc[schema]) {
-                    acc[schema] = [];
-                  }
-                  acc[schema].push(tab);
-                  return acc;
-                }, {} as Record<string, typeof tabs>);
-
+              {organizedTabs.map((organized) => {
+                const tab = organized.tab;
                 return (
-                  <>
-                    {queryTabs.length > 0 && (
-                      <>
-                        <DropdownMenuLabel className="text-[10px] text-muted-foreground font-semibold px-2 py-1">
-                          Queries
-                        </DropdownMenuLabel>
-                        {queryTabs.map((tab) => (
-                          <DropdownMenuItem
-                            key={tab.id}
-                            className={cn(
-                              "group/overflow flex items-center gap-2 text-[11px] cursor-pointer",
-                              displayedActiveTabId === tab.id
-                                ? "bg-background-tertiary text-foreground"
-                                : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
-                            )}
-                            onClick={() => activateTab(tab.id)}
-                          >
-                            <TabIcon
-                              type={tab.type}
-                              isFile={Boolean(tab.fileRelativePath)}
-                              isImage={Boolean(tab.filePreview)}
-                            />
-                            <span className="truncate flex-1">{tab.title}</span>
-                            {hasUnsavedTabChanges(tab) && (
-                              <span
-                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
-                                title="Unsaved changes"
-                              />
-                            )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                closeTab(tab.id);
-                              }}
-                              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-border group-hover/overflow:opacity-100 focus-visible:opacity-100"
-                            >
-                              <X size={10} />
-                            </button>
-                          </DropdownMenuItem>
-                        ))}
-                      </>
-                    )}
-
-                    {queryTabs.length > 0 && tableTabs.length > 0 && (
+                  <Fragment key={tab.id}>
+                    {organized.startsRegularRegion && (
                       <DropdownMenuSeparator className="my-1 bg-border" />
                     )}
-
-                    {Object.keys(tablesBySchema)
-                      .sort()
-                      .map((schema, idx) => (
-                        <div key={schema}>
-                          {idx > 0 && (
-                            <DropdownMenuSeparator className="my-1 bg-border" />
-                          )}
-                          <DropdownMenuLabel className="text-[10px] text-muted-foreground font-semibold px-2 py-1 flex items-center gap-1.5">
-                            <Database size={11} className="text-primary" />
-                            {schema}
-                          </DropdownMenuLabel>
-                          {tablesBySchema[schema]?.map((tab) => (
-                            <DropdownMenuItem
-                              key={tab.id}
-                              className={cn(
-                                "group/overflow flex items-center gap-2 text-[11px] cursor-pointer pl-4",
-                                displayedActiveTabId === tab.id
-                                  ? "bg-background-tertiary text-foreground"
-                                  : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary"
-                              )}
-                              onClick={() => activateTab(tab.id)}
-                            >
-                              <TabIcon
-                                type={tab.type}
-                                isFile={Boolean(tab.fileRelativePath)}
-                                isImage={Boolean(tab.filePreview)}
-                              />
-                              <span className="truncate flex-1">
-                                {tab.title}
-                              </span>
-                              {hasUnsavedTabChanges(tab) && (
-                                <span
-                                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
-                                  title="Unsaved changes"
-                                />
-                              )}
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  closeTab(tab.id);
-                                }}
-                                className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background-elevated group-hover/overflow:opacity-100 focus-visible:opacity-100"
-                              >
-                                <X size={10} />
-                              </button>
-                            </DropdownMenuItem>
-                          ))}
-                        </div>
-                      ))}
-
-                    {otherTabs.length > 0 && (
-                      <>
-                        {(queryTabs.length > 0 || tableTabs.length > 0) && (
-                          <DropdownMenuSeparator className="my-1 bg-border" />
-                        )}
-                        <DropdownMenuLabel className="px-2 py-1 text-[10px] font-semibold text-muted-foreground">
-                          Other tabs
-                        </DropdownMenuLabel>
-                        {otherTabs.map((tab) => (
-                          <DropdownMenuItem
-                            key={tab.id}
-                            className={cn(
-                              "group/overflow flex cursor-pointer items-center gap-2 text-[11px]",
-                              displayedActiveTabId === tab.id
-                                ? "bg-background-tertiary text-foreground"
-                                : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary",
-                            )}
-                            onClick={() => activateTab(tab.id)}
-                          >
-                            <TabIcon
-                              type={tab.type}
-                              isFile={Boolean(tab.fileRelativePath)}
-                              isImage={Boolean(tab.filePreview)}
-                            />
-                            <span className="min-w-0 flex-1 truncate">
-                              {tab.title}
-                            </span>
-                            {hasUnsavedTabChanges(tab) && (
-                              <span
-                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
-                                title="Unsaved changes"
-                              />
-                            )}
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                closeTab(tab.id);
-                              }}
-                              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background-elevated group-hover/overflow:opacity-100 focus-visible:opacity-100"
-                              aria-label={`Close ${tab.title}`}
-                            >
-                              <X size={10} />
-                            </button>
-                          </DropdownMenuItem>
-                        ))}
-                      </>
+                    {organized.startsGroup && (
+                      <DropdownMenuLabel className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                        {organized.groupLabel}
+                      </DropdownMenuLabel>
                     )}
-                  </>
+                    <DropdownMenuItem
+                      className={cn(
+                        "group/overflow flex cursor-pointer items-center gap-2 text-[11px]",
+                        displayedActiveTabId === tab.id
+                          ? "bg-background-tertiary text-foreground"
+                          : "text-muted-foreground hover:text-foreground focus:bg-background-tertiary",
+                      )}
+                      onClick={() => activateTab(tab.id)}
+                    >
+                      {tab.isPinned && <Pin size={10} className="text-primary" />}
+                      <TabIcon
+                        type={tab.type}
+                        isFile={Boolean(tab.fileRelativePath)}
+                        isImage={Boolean(tab.filePreview)}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {tab.title}
+                      </span>
+                      {hasUnsavedTabChanges(tab) && (
+                        <span
+                          className="h-1.5 w-1.5 shrink-0 rounded-full bg-[hsl(var(--wb-accent))]"
+                          title="Unsaved changes"
+                        />
+                      )}
+                      {!tab.isPinned && (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            closeVisibleTab(tab.id);
+                          }}
+                          className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background-elevated group-hover/overflow:opacity-100 focus-visible:opacity-100"
+                          aria-label={`Close ${tab.title}`}
+                        >
+                          <X size={10} />
+                        </button>
+                      )}
+                    </DropdownMenuItem>
+                  </Fragment>
                 );
-              })()}
+              })}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       )}
 
       {/* New tab button */}
-      <div className="px-2 h-full flex items-center border-l border-border-subtle">
+      <div
+        className={cn(
+          "flex shrink-0 items-center border-[hsl(var(--wb-border-subtle))]",
+          isVertical
+            ? "h-9 w-full justify-center border-t px-1"
+            : "h-full border-l px-2",
+        )}
+      >
         <Button
           variant="ghost"
           size="icon"
@@ -614,7 +835,14 @@ export function TabBar({
         </Button>
       </div>
       {onCloseGroup && (
-        <div className="h-full flex items-center border-l border-border-subtle px-1">
+        <div
+          className={cn(
+            "flex shrink-0 items-center border-[hsl(var(--wb-border-subtle))] px-1",
+            isVertical
+              ? "h-8 w-full justify-center border-t"
+              : "h-full border-l",
+          )}
+        >
           <button
             type="button"
             className="wb-icon-button h-6 w-6"

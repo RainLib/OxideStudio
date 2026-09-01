@@ -16,7 +16,7 @@
 | `8be503bf4` | 应用更新包在关闭对话框后继续后台下载，并在工具栏持续显示状态 | 本阶段已对齐并补充性能/安全边界：下载状态移入全局 Store，点击后立即关闭对话框但不取消请求；标题栏提供可重新打开的 available/downloading/downloaded 状态入口，已知总量显示环形进度，未知总量显示 indeterminate 动画。下载 chunk 只按 100ms 或 total/完成边界发布，避免 AppBar 高频重渲染。安装/重启前前后两层检查 Workbench `running/waiting` 任务，存在查询、迁移、导入导出或 Agent 审批时保持 downloaded，不调用 updater。Tauri 签名校验和 active `Update` handle 仍由既有 service 所有。 |
 | `23f0b1255` | Oracle Data Compare 允许显式选择 schema | Oxide 已由 capability 而非产品 allowlist 覆盖：`TableDataCompareDialog` 对不声明 database catalog 的任意关系驱动读取 `getSchemas` 并显示目标 schema，下游 column/table/compare endpoint 都携带所选 schema；声明 catalog 的驱动则按 database→schema 选择。正式 Oracle package 与真实 schema 权限验证仍延期，不能以候选身份冒充可运行能力。 |
 | `d79d35792` | SQL Library 默认折叠分组并提供 Collapse All | 尚未对齐：Oxide 当前 Project Files/Query History 不是 DBX 的持久 SQL Library，不能只增加装饰性 Collapse All 按钮。需先明确 Library 的项目级持久模型、搜索/重命名/删除/拖入编辑器及与现有 `.sql` 项目文件的去重边界，再迁移折叠状态。 |
-| `5f9ba5176` | Tab bar 位置、分组和排序可配置 | 部分对齐：Oxide 已有 pinned、Close Left/Right/Others/All、拖动排序与 Split Editor group，但没有 DBX 的 top/bottom 位置、connection/type group 和 alphabetic/created/updated sorting 设置。此项需在 `useTabStore` 的可见顺序、拖动语义、split group、active-tab 保持和 dirty close 共同建模后实现，已列为下一 UI 阶段。 |
+| `5f9ba5176` | Tab bar 位置、分组和排序可配置 | 已对齐并收紧交互语义：Oxide 持久化 top/bottom/left/right、none/database-type/connection 与 manual/created/title 设置；普通工作区和 Split Editor 共用同一布局，纵向 split 使用紧凑宽度。纯函数先隔离 pinned/regular，再稳定分组和自然排序；旧 tab 缺失创建时间时按原始顺序迁移。只有 manual 模式开放拖动，且禁止跨 pinned 或跨显式分组投放。Close Left/Right 现在接收当前可见顺序生成的精确 ID 集合并一次确认，不会在排序后按 Store 原数组误关标签。DBX 位置：`apps/desktop/src/stores/settingsStore.ts`、`components/layout/AppTabBar.vue`、`composables/useTabDrag.ts`、`App.vue`。Oxide 位置：`src/lib/tabOrganization.ts`、`src/components/workspace/TabBar.tsx`、`SplitEditor.tsx`、`src/pages/workspaceRuntime.tsx`。 |
 
 ### 上一增量审计（`f075caef2` → `d69cf9da7`）
 
@@ -546,3 +546,26 @@ Workbench 活动任务。本阶段调整为全局生命周期：
 单元测试覆盖进度节流、并发下载单飞、后台完成状态、活动任务阻断和终态任务放行。真实签名
 update、未知 content length、网络中断、Windows installer/macOS bundle/Linux AppImage 以及安装
 瞬间新增任务的竞态进入更新延期验证清单。
+
+## Phase 143 增量：标签位置、分组、排序与可见顺序操作
+
+对照 DBX `5f9ba5176` 的 `settingsStore.ts`、`AppTabBar.vue`、`useTabDrag.ts` 和 `App.vue`，
+Oxide 将标签组织从单一组件内的数组遍历拆为可测试的确定性模型：
+
+- Editor Settings 新增并持久化 top/bottom/left/right 位置、无分组/数据库类型/连接分组，以及
+  手动/创建时间/标题排序；非法旧值在读取时回退到 top + none + manual。
+- pinned 和 regular 永远是两个排序域；分组只能改变域内顺序。自然标题排序识别数字，创建时间排序对
+  旧 session 中没有 `createdAt` 的 tab 使用保持原始顺序的迁移时间，不把旧 tab 随机插入新 tab 之后。
+- 普通工作区按设置改变 TabBar 与内容区 flex 方向；Split Editor 的每个 group 复用同一位置与组织方式，
+  左右纵向布局缩窄为紧凑栏，避免多 pane 时重复占用完整宽度。
+- manual 模式使用原生 desktop drag/drop；自动排序模式明确关闭 draggable。拖动只允许相同 pinned
+  状态和相同显式 group，Store 在最终提交时再次校验 pinned 边界。
+- Close Left/Right 不再依赖内部数组位置，而是从当前排序/过滤后的可见序列生成精确、去 pinned 的
+  ID 集合，由 Store 一次确认和关闭；单 tab 关闭也优先激活可见相邻 tab。Split Editor 的 query-only
+  Close Others/All 不再误关闭不可见的 table/schema 工具页。
+- 标签组织与索引均使用 memoized 线性结构，移除了 render 内逐 tab `findIndex` 的二次复杂度；overflow
+  菜单复用相同的组织结果，ResizeObserver 只更新是否溢出，reduced-motion 时活动标签滚动不做动画。
+
+单元/组件测试覆盖设置迁移、pinned 边界、两种分组、三种排序、自然标题顺序、旧 tab 时间迁移、
+精确批量关闭、拖动 Store 约束、右侧纵向布局与 DOM 可见顺序。真实 Tauri WebView 下的鼠标拖动、
+不同 DPI、触控滚动和数百 tab 压力交互记录到延期验证清单。

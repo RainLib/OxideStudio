@@ -1505,7 +1505,61 @@ function EditorSettings({
 
   return (
     <SettingsPanel>
-      <SettingsDivider title="SQL Editor" first />
+      <SettingsDivider title="Editor tabs" first />
+      <SettingRow label="Tab bar position:">
+        <select
+          className={selectClass}
+          value={editor.tabPlacement}
+          onChange={(event) =>
+            updateEditor({
+              tabPlacement:
+                event.target.value as AppSettings["editor"]["tabPlacement"],
+            })
+          }
+        >
+          <option value="top">Top</option>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Group tabs by:">
+        <select
+          className={selectClass}
+          value={editor.tabGroupMode}
+          onChange={(event) =>
+            updateEditor({
+              tabGroupMode:
+                event.target.value as AppSettings["editor"]["tabGroupMode"],
+            })
+          }
+        >
+          <option value="none">No grouping</option>
+          <option value="database-type">Database type</option>
+          <option value="connection">Connection</option>
+        </select>
+      </SettingRow>
+      <SettingRow label="Sort tabs by:">
+        <select
+          className={selectClass}
+          value={editor.tabSortMode}
+          onChange={(event) =>
+            updateEditor({
+              tabSortMode:
+                event.target.value as AppSettings["editor"]["tabSortMode"],
+            })
+          }
+        >
+          <option value="manual">Manual order</option>
+          <option value="created-asc">Creation time</option>
+          <option value="title-asc">Title</option>
+        </select>
+      </SettingRow>
+      <p className="px-1 pb-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
+        Drag tabs to reorder them in Manual order. Pinned tabs always remain in
+        their own leading section.
+      </p>
+      <SettingsDivider title="SQL Editor" />
       <SettingRow label="Font size:">
         <NumberInput
           value={editor.fontSize}

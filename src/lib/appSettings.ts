@@ -59,6 +59,9 @@ export type WorkbenchSide = "left" | "right";
 export type AppLocale = "system" | "en-US" | "zh-CN";
 export type TableTabReuseMode = "always-new" | "same-table" | "active-tab";
 export type ExplorerActivationMode = "single" | "double";
+export type TabPlacement = "top" | "bottom" | "left" | "right";
+export type TabGroupMode = "none" | "database-type" | "connection";
+export type TabSortMode = "manual" | "created-asc" | "title-asc";
 export type AppearanceStylePreset = "oxide" | "graphite" | "violet" | "terminal";
 export type AppearanceAccent = "blue" | "violet" | "teal" | "amber";
 export type AppearanceFontFamily = "system" | "sans" | "mono";
@@ -120,6 +123,9 @@ export type AppSettings = {
   editor: {
     fontSize: number;
     tabSize: number;
+    tabPlacement: TabPlacement;
+    tabGroupMode: TabGroupMode;
+    tabSortMode: TabSortMode;
     wordWrap: "off" | "on" | "wordWrapColumn" | "bounded";
     minimap: boolean;
     confirmDestructiveSql: boolean;
@@ -275,6 +281,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   editor: {
     fontSize: 12,
     tabSize: 4,
+    tabPlacement: "top",
+    tabGroupMode: "none",
+    tabSortMode: "manual",
     wordWrap: "off",
     minimap: false,
     confirmDestructiveSql: true,
@@ -536,6 +545,24 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         defaults.editor.tabSize,
         2,
         8,
+      ),
+      tabPlacement: enumAt(
+        raw,
+        ["editor", "tabPlacement"],
+        ["top", "bottom", "left", "right"],
+        defaults.editor.tabPlacement,
+      ),
+      tabGroupMode: enumAt(
+        raw,
+        ["editor", "tabGroupMode"],
+        ["none", "database-type", "connection"],
+        defaults.editor.tabGroupMode,
+      ),
+      tabSortMode: enumAt(
+        raw,
+        ["editor", "tabSortMode"],
+        ["manual", "created-asc", "title-asc"],
+        defaults.editor.tabSortMode,
       ),
       wordWrap: enumAt(
         raw,

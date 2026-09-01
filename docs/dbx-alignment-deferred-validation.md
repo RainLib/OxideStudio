@@ -1750,3 +1750,22 @@ explicit deferred validation task rather than an implicit release check.
   install/restart succeeds. Add a new task at the installation boundary to
   characterize the remaining renderer-to-plugin race before claiming a durable
   Host-owned shutdown lease.
+
+## Configurable editor tab organization
+
+- In packaged Windows, macOS and Linux WebViews, exercise top, bottom, left and
+  right placement with one pane and nested horizontal/vertical Split Editor
+  groups. Resize through the minimum work-surface dimensions and confirm each
+  active tab remains visible without hiding the editor or result controls.
+- Open at least 300 mixed query, table, diagram, compare and database-browser
+  tabs across multiple connections and drivers. Switch grouping and sorting
+  repeatedly while queries stream results; measure render/scroll latency and
+  confirm the memoized visible order remains stable.
+- In manual mode, test mouse, trackpad, high-DPI scaling and a touch-capable
+  Windows device. Reorder before/after targets, pinned boundaries and grouped
+  tabs; automatic modes must never arm a drag. Native touch scrolling must not
+  become an accidental reorder.
+- With dirty SQL and pending table edits, run Close Left, Close Right, Close
+  Others and Close All under every group/sort combination. The confirmation
+  set must match the visible tabs exactly, remain single-shot, preserve pinned
+  tabs and activate the visible neighbor after a single close.

@@ -8,7 +8,9 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "@/lib/utils";
+import { tabPlacementFlexDirection } from "@/lib/tabOrganization";
 import { useTabStore } from "@/store/useTabStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
 import { useShallow } from "zustand/react/shallow";
 import {
   adjacentEditorGroup,
@@ -86,6 +88,10 @@ function SplitNodeView({
 }
 
 export function SplitEditor() {
+  const tabPlacement = useSettingsStore(
+    (state) => state.settings.editor.tabPlacement,
+  );
+  const groupLayoutClass = tabPlacementFlexDirection(tabPlacement);
   const queryTabIdList = useTabStore(
     useShallow((state) =>
       state.tabs.filter((tab) => tab.type === "query").map((tab) => tab.id),
@@ -185,7 +191,8 @@ export function SplitEditor() {
       <section
         key={group.id}
         className={cn(
-          "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[hsl(var(--wb-editor))]",
+          "flex h-full min-h-0 min-w-0 overflow-hidden bg-[hsl(var(--wb-editor))]",
+          groupLayoutClass,
           isActive && "shadow-[inset_0_0_0_1px_hsl(var(--wb-accent)/0.42)]"
         )}
         onPointerDown={() => activate(group.id, tabId)}
@@ -194,10 +201,11 @@ export function SplitEditor() {
         <TabBar
           activeTabIdOverride={tabId}
           queryOnly
+          compact
           onSelectTab={(nextTabId) => activate(group.id, nextTabId)}
           onCloseGroup={() => close(group.id)}
         />
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">
           <QueryEditor
             tabId={tabId}
             isActivePane={isActive}

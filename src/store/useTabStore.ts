@@ -240,6 +240,8 @@ export interface TabData {
   id: string;
   title: string;
   type: TabType;
+  /** Stable session creation time used only for deterministic tab ordering. */
+  createdAt?: number;
   sql: string;
   connectionId?: string;
   /**
@@ -908,7 +910,13 @@ interface TabState {
   closeAllTabs: () => void;
   closeTabsToLeft: (id: string) => void;
   closeTabsToRight: (id: string) => void;
+  closeTabsByIds: (ids: readonly string[], fallbackTabId?: string | null) => void;
   togglePinTab: (id: string) => void;
+  reorderTab: (
+    draggedId: string,
+    targetId: string,
+    position: "before" | "after",
+  ) => boolean;
   setActiveTab: (id: string) => void;
   reopenTab: () => void;
   updateTabSql: (id: string, sql: string) => void;
@@ -1119,6 +1127,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       id: uuidv4(),
       title,
       type,
+      createdAt: Date.now(),
       sql: initialSql,
       results: null,
       explainPlan: null,
@@ -1331,6 +1340,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       id: uuidv4(),
       title: "New Table",
       type: "create_table",
+      createdAt: Date.now(),
       sql: "",
       connectionId,
       schemaName,
@@ -1397,6 +1407,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       id: uuidv4(),
       title,
       type: "schema_diff",
+      createdAt: Date.now(),
       sql: "",
       connectionId: plan.targetConnectionId,
       databaseName: plan.targetDatabaseName || undefined,
@@ -1478,6 +1489,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       id: uuidv4(),
       title,
       type: "schema_diagram",
+      createdAt: Date.now(),
       sql: "",
       connectionId: snapshot.connectionId,
       databaseName: snapshot.databaseName || undefined,
@@ -1591,6 +1603,7 @@ export const useTabStore = create<TabState>((set, get) => ({
       id: uuidv4(),
       title,
       type: "data_compare",
+      createdAt: Date.now(),
       sql: "",
       results: null,
       isExecuting: false,
@@ -2029,6 +2042,36 @@ export const useTabStore = create<TabState>((set, get) => ({
     releaseDocumentCursors(closed);
   },
 
+  closeTabsByIds: (ids, fallbackTabId) => {
+    const requestedIds = new Set(ids);
+    let closed: TabData[] = [];
+    set((state) => {
+      const closing = state.tabs.filter(
+        (tab) => requestedIds.has(tab.id) && !tab.isPinned,
+      );
+      if (closing.length === 0) return state;
+      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
+      closed = closing;
+      const closingIds = new Set(closing.map((tab) => tab.id));
+      const tabs = state.tabs.filter((tab) => !closingIds.has(tab.id));
+      const activeTabId =
+        state.activeTabId && closingIds.has(state.activeTabId)
+          ? fallbackTabId && tabs.some((tab) => tab.id === fallbackTabId)
+            ? fallbackTabId
+            : tabs[tabs.length - 1]?.id || null
+          : state.activeTabId;
+      return {
+        tabs,
+        activeTabId,
+        closedTabsStack: [
+          ...closing.map(tableTabAfterDiscardingDrafts).reverse(),
+          ...state.closedTabsStack,
+        ].slice(0, 20),
+      };
+    });
+    releaseDocumentCursors(closed);
+  },
+
   togglePinTab: (id: string) => {
     set((state) => {
       const tabs = state.tabs.map((t) =>
@@ -2041,6 +2084,29 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       return { tabs: [...pinnedTabs, ...unpinnedTabs] };
     });
+  },
+
+  reorderTab: (draggedId, targetId, position) => {
+    let moved = false;
+    set((state) => {
+      if (draggedId === targetId) return state;
+      const draggedIndex = state.tabs.findIndex((tab) => tab.id === draggedId);
+      const target = state.tabs.find((tab) => tab.id === targetId);
+      const dragged = state.tabs[draggedIndex];
+      if (!dragged || !target || dragged.isPinned !== target.isPinned) {
+        return state;
+      }
+
+      const tabs = [...state.tabs];
+      tabs.splice(draggedIndex, 1);
+      const targetIndex = tabs.findIndex((tab) => tab.id === targetId);
+      if (targetIndex < 0) return state;
+      tabs.splice(position === "before" ? targetIndex : targetIndex + 1, 0, dragged);
+      if (tabs.every((tab, index) => tab === state.tabs[index])) return state;
+      moved = true;
+      return { tabs };
+    });
+    return moved;
   },
 
   setActiveTab: (id: string) => {
