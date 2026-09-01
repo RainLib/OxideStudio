@@ -30,14 +30,31 @@ export function isMetadataCacheSupersededError(
  */
 export class MetadataCacheGenerationRegistry {
   private readonly generations = new Map<string, number>();
+  private nextGeneration = 0;
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = 512) {
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
 
   capture(scope: string): number {
-    return this.generations.get(scope) || 0;
+    const existing = this.generations.get(scope);
+    if (existing !== undefined) {
+      this.generations.delete(scope);
+      this.generations.set(scope, existing);
+      return existing;
+    }
+    const generation = ++this.nextGeneration;
+    this.generations.set(scope, generation);
+    this.prune();
+    return generation;
   }
 
   advance(scope: string): number {
-    const generation = this.capture(scope) + 1;
+    this.generations.delete(scope);
+    const generation = ++this.nextGeneration;
     this.generations.set(scope, generation);
+    this.prune();
     return generation;
   }
 
@@ -48,6 +65,18 @@ export class MetadataCacheGenerationRegistry {
   assertCurrent(scope: string, generation: number): void {
     if (!this.isCurrent(scope, generation)) {
       throw new MetadataCacheSupersededError();
+    }
+  }
+
+  get size(): number {
+    return this.generations.size;
+  }
+
+  private prune() {
+    while (this.generations.size > this.maxEntries) {
+      const oldest = this.generations.keys().next().value;
+      if (typeof oldest !== "string") return;
+      this.generations.delete(oldest);
     }
   }
 }

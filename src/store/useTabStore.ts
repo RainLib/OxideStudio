@@ -459,29 +459,58 @@ function confirmDiscardTabChanges(tabs: TabData[], action: string) {
   );
 }
 
-function tableTabAfterDiscardingDrafts(tab: TabData) {
-  const discarded = hasPendingTableChanges(tab)
-    ? {
-        ...tab,
-        pendingEdits: new Map<string, any>(),
-        newRowsCount: 0,
-        newRowPlacements: [],
-      }
-    : tab;
-  return discarded.documentPageCursors?.some(Boolean)
-    ? {
-        ...discarded,
-        results: null,
-        tablePage: 0,
-        documentPageCursors: undefined,
-        documentHasNextCursor: false,
-      }
-    : discarded;
+/**
+ * Closed tabs retain editor/navigation state so they can be reopened, but a
+ * result grid may own hundreds of megabytes. Never move that payload into the
+ * bounded closed-tab history: reopening reruns or reloads data explicitly.
+ */
+export function tabAfterReleasingRuntimePayload(tab: TabData): TabData {
+  return {
+    ...tab,
+    results: null,
+    resultSql: undefined,
+    explainPlan: null,
+    queryOutputView: "results",
+    activeResultIndex: 0,
+    isExecuting: false,
+    runningQueryId: null,
+    error: null,
+    queryError: null,
+    pendingEdits: new Map<string, any>(),
+    newRowsCount: 0,
+    newRowPlacements: [],
+    tablePage: tab.documentPageCursors?.some(Boolean) ? 0 : tab.tablePage,
+    documentPageCursors: undefined,
+    documentHasNextCursor: false,
+  };
 }
 
-function releaseDocumentCursors(tabs: readonly TabData[]) {
-  const released = new Set<string>();
+function releaseQueryResultPayload(result: QueryResult) {
+  result.columns = [];
+  result.rows = [];
+  result.message = undefined;
+  result.responseMeta = undefined;
+}
+
+function releaseTabResultPayloads(tabs: readonly TabData[]) {
+  const released = new Set<QueryResult>();
   for (const tab of tabs) {
+    for (const result of tab.results || []) {
+      if (released.has(result)) continue;
+      released.add(result);
+      releaseQueryResultPayload(result);
+    }
+  }
+}
+
+function releaseTabRuntimeResources(tabs: readonly TabData[]) {
+  const released = new Set<string>();
+  const cancelledQueries = new Set<string>();
+  for (const tab of tabs) {
+    if (tab.runningQueryId && !cancelledQueries.has(tab.runningQueryId)) {
+      cancelledQueries.add(tab.runningQueryId);
+      void queryService.cancelQuery(tab.runningQueryId).catch(() => undefined);
+    }
     if (!tab.connectionId) continue;
     const cursor = [...(tab.documentPageCursors || [])]
       .reverse()
@@ -494,6 +523,7 @@ function releaseDocumentCursors(tabs: readonly TabData[]) {
       .closeDocumentCursor(tab.connectionId, cursor)
       .catch(() => undefined);
   }
+  releaseTabResultPayloads(tabs);
 }
 
 export function confirmDiscardTableChanges(tabId: string, action: string) {
@@ -1996,6 +2026,7 @@ export const useTabStore = create<TabState>((set, get) => ({
     if (forgetTargets) {
       forgetProjectSqlFileTargets(projectId, relativePath);
     }
+    let discarded: TabData[] = [];
     set((state) => {
       const shouldDiscard = (tab: TabData) =>
         tab.fileProjectId === projectId &&
@@ -2007,6 +2038,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         state.tabs.filter(shouldDiscard).map((tab) => tab.id),
       );
       if (discardedIds.size === 0) return state;
+      discarded = state.tabs.filter((tab) => discardedIds.has(tab.id));
 
       const tabs = state.tabs.filter((tab) => !discardedIds.has(tab.id));
       const activeTabId =
@@ -2021,6 +2053,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         ),
       };
     });
+    releaseTabRuntimeResources(discarded);
   },
 
   closeTab: (id: string) => {
@@ -2047,12 +2080,12 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs: newTabs,
         activeTabId: newActiveId,
         closedTabsStack: [
-          tableTabAfterDiscardingDrafts(tab),
-          ...state.closedTabsStack,
+          tabAfterReleasingRuntimePayload(tab),
+          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
         ].slice(0, 20), // Keep last 20
       };
     });
-    releaseDocumentCursors(closing);
+    releaseTabRuntimeResources(closing);
   },
 
   forceCloseTab: (id: string) => {
@@ -2077,12 +2110,12 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs: newTabs,
         activeTabId: newActiveId,
         closedTabsStack: [
-          tableTabAfterDiscardingDrafts(tab),
-          ...state.closedTabsStack,
+          tabAfterReleasingRuntimePayload(tab),
+          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
         ].slice(0, 20),
       };
     });
-    releaseDocumentCursors(closing);
+    releaseTabRuntimeResources(closing);
   },
 
   closeOtherTabs: (id: string) => {
@@ -2098,7 +2131,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         activeTabId: id,
       };
     });
-    releaseDocumentCursors(closed);
+    releaseTabRuntimeResources(closed);
   },
 
   closeAllTabs: () => {
@@ -2113,7 +2146,7 @@ export const useTabStore = create<TabState>((set, get) => ({
         activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
       };
     });
-    releaseDocumentCursors(closed);
+    releaseTabRuntimeResources(closed);
   },
 
   closeTabsToLeft: (id: string) => {
@@ -2132,7 +2165,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       return { tabs: newTabs };
     });
-    releaseDocumentCursors(closed);
+    releaseTabRuntimeResources(closed);
   },
 
   closeTabsToRight: (id: string) => {
@@ -2153,7 +2186,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
       return { tabs: newTabs };
     });
-    releaseDocumentCursors(closed);
+    releaseTabRuntimeResources(closed);
   },
 
   closeTabsByIds: (ids, fallbackTabId) => {
@@ -2178,12 +2211,12 @@ export const useTabStore = create<TabState>((set, get) => ({
         tabs,
         activeTabId,
         closedTabsStack: [
-          ...closing.map(tableTabAfterDiscardingDrafts).reverse(),
-          ...state.closedTabsStack,
+          ...closing.map(tabAfterReleasingRuntimePayload).reverse(),
+          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
         ].slice(0, 20),
       };
     });
-    releaseDocumentCursors(closed);
+    releaseTabRuntimeResources(closed);
   },
 
   togglePinTab: (id: string) => {

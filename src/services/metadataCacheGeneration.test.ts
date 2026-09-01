@@ -35,6 +35,28 @@ describe("MetadataCacheGenerationRegistry", () => {
     expect(() => registry.assertCurrent(scope, currentGeneration)).not.toThrow();
   });
 
+  it("bounds inactive scopes without letting evicted generations become current", () => {
+    const registry = new MetadataCacheGenerationRegistry(2);
+    const staleGeneration = registry.capture("connection-a");
+    registry.capture("connection-b");
+    registry.capture("connection-c");
+
+    expect(registry.size).toBe(2);
+    expect(registry.isCurrent("connection-a", staleGeneration)).toBe(false);
+    expect(registry.size).toBe(2);
+  });
+
+  it("refreshes least-recently-used order when a scope is read", () => {
+    const registry = new MetadataCacheGenerationRegistry(2);
+    const generationA = registry.capture("connection-a");
+    registry.capture("connection-b");
+    expect(registry.capture("connection-a")).toBe(generationA);
+    registry.capture("connection-c");
+
+    expect(registry.isCurrent("connection-a", generationA)).toBe(true);
+    expect(registry.size).toBe(2);
+  });
+
   it("identifies superseded errors across serialization boundaries", () => {
     expect(
       isMetadataCacheSupersededError({

@@ -704,3 +704,20 @@ manifest 绑定、归档内污染、缓存复用/污染/保守清理、Content-R
 Rust 回归覆盖成功恢复、失败计数、第四次预算阻断、跨 `ConnectionManager` 实例的持久计数合并、
 telemetry schema 禁止敏感字段和非法 package identity；前端 typed Tauri boundary 覆盖精确包恢复。
 真实外置 sidecar 强制崩溃、握手失败、重连中应用退出、32 连接压力和 Windows PID/文件占用验证延期。
+
+## Phase 147 增量：关闭标签后的查询结果与元数据世代释放
+
+对照 DBX `81c3cc15d` 的 `queryStore.ts`、`objectBrowserRowsCache.ts` 和
+`dataGridFilterBuilderPersistence.ts`，Oxide 按 Zustand/React 生命周期补齐等价资源回收：
+
+- 关闭、批量关闭或丢弃项目文件标签时，先为最近关闭历史建立不含结果集、原始响应、执行状态、
+  Explain Plan、游标和未提交表格草稿的轻量快照，再清空仍可能被卸载中 DataGrid 引用的结果对象。
+  重新打开标签保留 SQL、连接和编辑器上下文，但不会把已关闭的大结果重新带回内存。
+- 活动查询随标签关闭按 query id 去重取消；MongoDB、Elasticsearch 等文档分页游标仍按原有连接范围
+  释放。所有关闭入口和项目目录切换的丢弃入口使用同一释放路径，避免只修复单标签关闭。
+- 通用 `MetadataCacheGenerationRegistry` 从无界 scope Map 改为 512 项有界 LRU。世代值使用全局单调
+  令牌，scope 被淘汰后重新出现也不会与早期在途请求的令牌碰撞，旧响应不能重新发布缓存。
+
+前端回归覆盖结果对象原位释放、最近关闭标签轻量化、重新打开不恢复结果、scope 上限、LRU 刷新和
+淘汰后旧世代拒绝；331 个测试文件、1,759 项测试以及生产前端构建均通过。真实 WebView 下关闭超大
+结果时的堆快照、驱动取消延迟和浏览器 GC 时序记录为延期验证。

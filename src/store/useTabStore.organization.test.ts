@@ -73,4 +73,34 @@ describe("tab store organization actions", () => {
       "left",
     ]);
   });
+
+  it("releases result payloads instead of retaining them in closed-tab history", () => {
+    const result = {
+      columns: [{ name: "payload", data_type: "text" }],
+      rows: [["large value"]],
+      message: "done",
+      responseMeta: {
+        requestMethod: "POST",
+        requestPath: "/_search",
+        status: 200,
+        durationMs: 1,
+        rawResponse: { hits: ["large value"] },
+      },
+    };
+    useTabStore.setState({
+      tabs: [{ ...tab("query"), results: [result] }],
+      activeTabId: "query",
+    });
+
+    useTabStore.getState().closeTab("query");
+
+    expect(result.columns).toEqual([]);
+    expect(result.rows).toEqual([]);
+    expect(result.message).toBeUndefined();
+    expect(result.responseMeta).toBeUndefined();
+    expect(useTabStore.getState().closedTabsStack[0]?.results).toBeNull();
+
+    useTabStore.getState().reopenTab();
+    expect(useTabStore.getState().tabs[0]?.results).toBeNull();
+  });
 });

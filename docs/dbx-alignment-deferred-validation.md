@@ -1882,3 +1882,15 @@ explicit deferred validation task rather than an implicit release check.
   target must never update the other. Pure shortcut, navigation-key and target
   label tests plus the production frontend build are complete; this item only
   defers native WebView focus/default-action evidence.
+
+## Closed query-tab resource release
+
+- In a packaged WebView, open several result grids near the configured row and
+  raw-response limits, close them through every single/bulk tab action, and
+  compare heap snapshots before and after a forced GC. Reopening a closed tab
+  must restore its SQL and target context without restoring the released rows.
+- Close an actively executing SQL/document request and record backend cancel
+  latency plus cursor/session cleanup. No late response may republish results
+  into the closed-tab history. Phase 147 covers the pure store lifecycle, LRU
+  generation safety, full frontend tests and production bundle; native GC and
+  real-driver cancellation timing remain deferred.
