@@ -3020,6 +3020,25 @@ mod tests {
     }
 
     #[test]
+    fn postgres_numeric_text_preserves_arbitrary_precision_and_declared_scale() {
+        let integer = "9".repeat(10_000);
+        let fractional = format!("{}12300", "0".repeat(300));
+        let source = format!("{integer}.{fractional}");
+        let value = BigDecimal::from_str(&source).unwrap();
+
+        assert_eq!(
+            pg_numeric_text(value, Some(fractional.len() as i64)),
+            serde_json::Value::String(source)
+        );
+
+        let scaled_zero = BigDecimal::from_str("0").unwrap();
+        assert_eq!(
+            pg_numeric_text(scaled_zero, Some(4)),
+            serde_json::json!("0.0000")
+        );
+    }
+
+    #[test]
     fn postgres_array_json_is_converted_to_native_literal_for_round_trip() {
         assert_eq!(
             pg_array_literal(&serde_json::json!([1, "two", null, "a\\\"b", {"x": 1}])).unwrap(),

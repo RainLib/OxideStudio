@@ -15,6 +15,10 @@ const REDIS_SCAN_CURSOR_TTL: Duration = Duration::from_secs(60);
 const REDIS_SCAN_CURSOR_LIMIT: usize = 64;
 const REDIS_SCAN_PAGE_BYTE_LIMIT: usize = 256 * 1024;
 const REDIS_KEY_FILTER_BYTE_LIMIT: usize = 512;
+/// String values opened from the Explorer are previews, not bulk-export
+/// responses. Fetch one sentinel byte beyond the visible prefix so the
+/// backend can report truncation without materializing the complete value.
+const REDIS_STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 
 struct RedisKeyScanState {
     database: String,
@@ -123,6 +127,11 @@ impl RedisDriver {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("Redis command is required"))?;
+
+        if bounded_redis_string_preview_key(tokens).is_some() {
+            return load_bounded_redis_string_preview(connection, &tokens[1]).await;
+        }
+
         let mut redis_command = redis::cmd(command);
         for arg in tokens.iter().skip(1) {
             redis_command.arg(arg);
@@ -185,6 +194,51 @@ impl RedisDriver {
 
         Ok(vec![QueryResult::rows(columns, rows)])
     }
+}
+
+fn bounded_redis_string_preview_key(tokens: &[String]) -> Option<&str> {
+    (tokens.len() == 2 && tokens[0].eq_ignore_ascii_case("GET")).then(|| tokens[1].as_str())
+}
+
+async fn load_bounded_redis_string_preview(
+    connection: &mut ConnectionManager,
+    key: &str,
+) -> Result<Value> {
+    let mut bytes = redis::cmd("GETRANGE")
+        .arg(key)
+        .arg(0)
+        .arg(REDIS_STRING_PREVIEW_MAX_BYTES as i64)
+        .query_async::<Vec<u8>>(connection)
+        .await
+        .context("Redis bounded string preview failed")?;
+
+    let truncated = bytes.len() > REDIS_STRING_PREVIEW_MAX_BYTES;
+    if !truncated {
+        return Ok(redis_bytes_to_json(bytes));
+    }
+
+    bytes.truncate(REDIS_STRING_PREVIEW_MAX_BYTES);
+    let total_bytes = redis::cmd("STRLEN")
+        .arg(key)
+        .query_async::<u64>(connection)
+        .await
+        .ok();
+    Ok(redis_truncated_string_preview(bytes, total_bytes))
+}
+
+fn redis_bytes_to_json(bytes: Vec<u8>) -> Value {
+    Value::String(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn redis_truncated_string_preview(bytes: Vec<u8>, total_bytes: Option<u64>) -> Value {
+    let loaded_bytes = bytes.len() as u64;
+    json!({
+        "preview": String::from_utf8_lossy(&bytes),
+        "loadedBytes": loaded_bytes,
+        "totalBytes": total_bytes,
+        "truncated": true,
+        "readOnly": true,
+    })
 }
 
 #[async_trait]
@@ -631,7 +685,7 @@ fn redis_value_to_json(value: RedisValue) -> Value {
     match value {
         RedisValue::Nil => Value::Null,
         RedisValue::Int(value) => json!(value),
-        RedisValue::BulkString(value) => Value::String(String::from_utf8_lossy(&value).to_string()),
+        RedisValue::BulkString(value) => redis_bytes_to_json(value),
         RedisValue::Array(values) => {
             Value::Array(values.into_iter().map(redis_value_to_json).collect())
         }
@@ -740,6 +794,42 @@ mod tests {
                 RedisValue::Int(1),
             ])),
             json!(["id", 1])
+        );
+    }
+
+    #[test]
+    fn only_plain_get_commands_use_the_bounded_string_preview_path() {
+        let get = vec!["get".to_string(), "large-key".to_string()];
+        assert_eq!(bounded_redis_string_preview_key(&get), Some("large-key"));
+
+        let missing_key = vec!["GET".to_string()];
+        assert_eq!(bounded_redis_string_preview_key(&missing_key), None);
+
+        let extra_argument = vec![
+            "GET".to_string(),
+            "large-key".to_string(),
+            "unexpected".to_string(),
+        ];
+        assert_eq!(bounded_redis_string_preview_key(&extra_argument), None);
+
+        let getrange = vec!["GETRANGE".to_string(), "large-key".to_string()];
+        assert_eq!(bounded_redis_string_preview_key(&getrange), None);
+    }
+
+    #[test]
+    fn truncated_redis_string_preview_is_bounded_and_self_describing() {
+        let value = redis_truncated_string_preview(
+            vec![b'x'; REDIS_STRING_PREVIEW_MAX_BYTES],
+            Some(45 * 1024 * 1024),
+        );
+
+        assert_eq!(value["loadedBytes"], REDIS_STRING_PREVIEW_MAX_BYTES as u64);
+        assert_eq!(value["totalBytes"], 45 * 1024 * 1024_u64);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["readOnly"], true);
+        assert_eq!(
+            value["preview"].as_str().map(str::len),
+            Some(REDIS_STRING_PREVIEW_MAX_BYTES)
         );
     }
 
