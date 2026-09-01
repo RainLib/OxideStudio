@@ -13,6 +13,7 @@ export interface ColumnInfo {
     is_unique: boolean;
     is_indexed: boolean;
     is_auto_increment?: boolean;
+    identity_generation?: "always" | "byDefault";
     is_generated?: boolean;
     is_hidden?: boolean;
     default_value?: string;

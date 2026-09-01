@@ -1511,6 +1511,7 @@ fn sqlite_relation_requires_rebuild(
             || source_column.is_unique != target_column.is_unique
             || source_column.is_indexed != target_column.is_indexed
             || source_column.is_auto_increment != target_column.is_auto_increment
+            || source_column.identity_generation != target_column.identity_generation
             || source_column.is_generated != target_column.is_generated
             || source_column.is_hidden != target_column.is_hidden
             || source_column.default_value != target_column.default_value
@@ -1522,6 +1523,12 @@ fn sqlite_sql_fragment_is_safe(fragment: &str) -> bool {
 }
 
 fn sqlite_column_definition(column: &ColumnInfo) -> Result<String, String> {
+    if column.identity_generation.is_some() {
+        return Err(format!(
+            "Column {} carries PostgreSQL identity metadata that SQLite cannot replay losslessly.",
+            column.name
+        ));
+    }
     if column.is_generated != Some(false) || column.is_hidden != Some(false) {
         return Err(format!(
             "Column {} has generated/hidden metadata that is true or unknown, but its lossless SQLite expression or visibility clause was not captured.",
@@ -3751,11 +3758,46 @@ fn column_definition(
             .default_value
             .as_deref()
             .is_some_and(is_postgres_sequence_default);
+    let (identity_generation, identity_generation_valid) =
+        match normalized_identity_generation(column.identity_generation.as_deref()) {
+            Ok(identity_generation) => (identity_generation, true),
+            Err(error) => {
+                warnings.push(format!("{}: {error}", column.name));
+                (None, false)
+            }
+        };
+    let identity_generation_valid = if identity_generation.is_some() && !column.is_auto_increment {
+        warnings.push(format!(
+            "{} declares an identity generation mode without identity semantics.",
+            column.name
+        ));
+        false
+    } else {
+        identity_generation_valid
+    };
     if column.is_auto_increment && !postgres_sequence_default {
-        match kind.auto_increment_clause_for_type(&column.data_type) {
-            Ok(Some(clause)) => definition.push_str(clause),
-            Ok(None) => {}
-            Err(error) => warnings.push(format!("{}: {error}", column.name)),
+        if !identity_generation_valid {
+            // The warning above is the complete review artifact; do not emit a
+            // weaker identity clause for malformed source metadata.
+        } else if kind == DatabaseKind::Postgres && column.identity_generation.is_none() {
+            warnings.push(format!(
+                "{} has unproven PostgreSQL identity mode; no identity clause was generated.",
+                column.name
+            ));
+        } else if kind != DatabaseKind::Postgres && identity_generation.is_some() {
+            warnings.push(format!(
+                "{} carries PostgreSQL identity mode metadata for a non-PostgreSQL target.",
+                column.name
+            ));
+        } else {
+            match kind.auto_increment_clause_for_type(&column.data_type) {
+                Ok(Some(_clause)) if identity_generation == Some("always") => {
+                    definition.push_str(" GENERATED ALWAYS AS IDENTITY")
+                }
+                Ok(Some(clause)) => definition.push_str(clause),
+                Ok(None) => {}
+                Err(error) => warnings.push(format!("{}: {error}", column.name)),
+            }
         }
     }
     if column.is_generated != Some(true) {
@@ -3788,6 +3830,22 @@ fn column_definition(
 fn is_postgres_sequence_default(default_value: &str) -> bool {
     let normalized = default_value.trim().to_ascii_lowercase();
     normalized.starts_with("nextval(") && !normalized.contains(';')
+}
+
+fn normalized_identity_generation(value: Option<&str>) -> Result<Option<&'static str>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = value
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "always" => Ok(Some("always")),
+        "bydefault" => Ok(Some("byDefault")),
+        _ => Err(format!("Unsupported identity generation mode: {value}")),
+    }
 }
 
 fn alter_column_sql(
@@ -3873,10 +3931,12 @@ fn alter_column_sql(
             manual_review = true;
         }
     }
-    if source.is_auto_increment != target.is_auto_increment {
+    if source.is_auto_increment != target.is_auto_increment
+        || source.identity_generation != target.identity_generation
+    {
         manual_review = true;
         warnings.push(format!(
-            "Identity change for {table}.{} requires manual PostgreSQL sequence/identity review.",
+            "Identity generation change for {table}.{} requires manual PostgreSQL sequence/identity review.",
             source.name
         ));
     }
@@ -4073,6 +4133,7 @@ fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
     source.data_type != target.data_type
         || source.is_nullable != target.is_nullable
         || source.is_auto_increment != target.is_auto_increment
+        || source.identity_generation != target.identity_generation
         || source.is_generated != target.is_generated
         || source.is_hidden != target.is_hidden
         || source.default_value != target.default_value
@@ -5414,6 +5475,7 @@ mod tests {
             is_unique: name == "id",
             is_indexed: name == "id",
             is_auto_increment: name == "id",
+            identity_generation: None,
             default_value: None,
             comment: None,
             is_generated: Some(false),
@@ -5613,6 +5675,62 @@ mod tests {
         assert_ne!(ordinary.fingerprint, generated.fingerprint);
         assert_ne!(ordinary.fingerprint, hidden.fingerprint);
         assert_ne!(generated.fingerprint, hidden.fingerprint);
+    }
+
+    #[test]
+    fn postgres_identity_generation_is_preserved_and_diffed_without_partial_alter_sql() {
+        let mut always = column("id", "bigint", false);
+        always.identity_generation = Some("always".to_string());
+        let (always_definition, always_warnings) =
+            column_definition(DatabaseKind::Postgres, "public", "public", &always);
+        assert!(always_warnings.is_empty());
+        assert!(always_definition.contains("GENERATED ALWAYS AS IDENTITY"));
+
+        let mut by_default = always.clone();
+        by_default.identity_generation = Some("byDefault".to_string());
+        let (by_default_definition, by_default_warnings) =
+            column_definition(DatabaseKind::Postgres, "public", "public", &by_default);
+        assert!(by_default_warnings.is_empty());
+        assert!(by_default_definition.contains("GENERATED BY DEFAULT AS IDENTITY"));
+
+        let source = snapshot("desired", vec![always]);
+        let target = snapshot("actual", vec![by_default]);
+        assert_ne!(source.fingerprint, target.fingerprint);
+        let plan = compare_schema_snapshots(&source, &target, 2).unwrap();
+        let change = plan
+            .changes
+            .iter()
+            .find(|change| change.kind == SchemaChangeKind::ColumnModify)
+            .expect("identity mode change");
+        assert!(change.manual_review);
+        assert!(change.sql.is_empty());
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Identity generation change")));
+        assert!(!plan
+            .migration_sql
+            .contains("GENERATED BY DEFAULT AS IDENTITY"));
+    }
+
+    #[test]
+    fn unproven_or_invalid_postgres_identity_mode_never_emits_a_weaker_clause() {
+        let unproven = column("id", "bigint", false);
+        let (definition, warnings) =
+            column_definition(DatabaseKind::Postgres, "public", "public", &unproven);
+        assert!(!definition.contains("AS IDENTITY"));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("unproven PostgreSQL identity mode")));
+
+        let mut invalid = unproven;
+        invalid.identity_generation = Some("sometimes".to_string());
+        let (definition, warnings) =
+            column_definition(DatabaseKind::Postgres, "public", "public", &invalid);
+        assert!(!definition.contains("AS IDENTITY"));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("Unsupported identity generation mode")));
     }
 
     #[test]

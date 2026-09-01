@@ -3334,6 +3334,7 @@ mod tests {
                     is_unique: true,
                     is_indexed: true,
                     is_auto_increment: false,
+                    identity_generation: None,
                     default_value: Some("nextval('private_sequence')".to_string()),
                     comment: Some("private comment".to_string()),
                     is_generated: Some(false),

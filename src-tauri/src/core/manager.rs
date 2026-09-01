@@ -1324,6 +1324,7 @@ mod tests {
                 is_unique: false,
                 is_indexed: false,
                 is_auto_increment: false,
+                identity_generation: None,
                 default_value: None,
                 comment: None,
                 is_generated: Some(false),

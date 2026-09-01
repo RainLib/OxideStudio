@@ -589,6 +589,7 @@ impl DatabaseDriver for RemoteSqliteDriver {
                         .any(|index| index.is_unique && index.columns.contains(&name)),
                     is_indexed: indexes.iter().any(|index| index.columns.contains(&name)),
                     is_auto_increment: false,
+                    identity_generation: None,
                     is_generated: Some(hidden >= 2),
                     is_hidden: Some(hidden == 1),
                     default_value: string_at(row, default),

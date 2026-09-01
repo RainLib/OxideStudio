@@ -477,6 +477,11 @@ impl PostgresDriver {
                     a.attidentity <> ''
                     OR COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '') LIKE 'nextval(%'
                 ) AS is_auto_increment,
+                CASE a.attidentity
+                    WHEN 'a' THEN 'always'
+                    WHEN 'd' THEN 'byDefault'
+                    ELSE NULL
+                END AS identity_generation,
                 COALESCE(to_jsonb(a)->>'attgenerated', '') <> '' AS is_generated,
                 d.description AS column_comment,
                 EXISTS (
@@ -534,6 +539,10 @@ impl PostgresDriver {
                     is_unique,
                     is_indexed,
                     is_auto_increment: row.try_get("is_auto_increment").unwrap_or(false),
+                    identity_generation: row
+                        .try_get::<Option<String>, _>("identity_generation")
+                        .ok()
+                        .flatten(),
                     is_generated: Some(row.try_get("is_generated").unwrap_or(false)),
                     is_hidden: Some(false),
                     default_value: row.try_get("column_default").ok(),

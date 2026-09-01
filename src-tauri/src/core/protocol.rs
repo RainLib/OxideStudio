@@ -319,6 +319,11 @@ pub struct ColumnInfo {
     pub is_indexed: bool,
     #[serde(default)]
     pub is_auto_increment: bool,
+    /// Database-proven identity generation mode. Bundled PostgreSQL emits
+    /// `always` or `byDefault`; `None` also covers sequence-backed serial and
+    /// older external-driver payloads that do not expose identity semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_generation: Option<String>,
     /// Structured database-owned generation metadata. `None` means that the
     /// driver did not prove the classification and must not be treated as a
     /// writable `false` by INSERT-oriented consumers.

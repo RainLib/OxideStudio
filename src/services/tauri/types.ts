@@ -1253,7 +1253,9 @@ export interface TableDataTransferTargetColumn {
   isPrimaryKey: boolean;
   isNotNull: boolean;
   sourceAutoIncrement: boolean;
+  sourceIdentityGeneration?: "always" | "byDefault" | null;
   identityRetained: boolean;
+  targetIdentityGeneration?: "always" | "byDefault" | null;
   hasSourceDefault: boolean;
   defaultRetained: boolean;
   compatibility: TableDataTransferCompatibility;
@@ -1589,6 +1591,8 @@ export interface ColumnInfo {
   is_unique?: boolean;
   is_indexed?: boolean;
   is_auto_increment?: boolean;
+  /** PostgreSQL identity mode proven by the bundled driver. */
+  identity_generation?: "always" | "byDefault";
   /** Absent when the driver cannot prove generated/computed-column status. */
   is_generated?: boolean;
   /** Absent when the driver cannot prove hidden/invisible-column status. */

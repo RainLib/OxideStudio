@@ -1003,6 +1003,7 @@ impl DatabaseDriver for MysqlDriver {
                     is_unique,
                     is_indexed,
                     is_auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
+                    identity_generation: None,
                     is_generated: Some(is_generated),
                     is_hidden: Some(is_hidden),
                     default_value: mysql_string_by_name(r, "cd"),

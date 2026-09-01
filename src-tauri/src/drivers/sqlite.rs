@@ -548,6 +548,7 @@ impl DatabaseDriver for SqliteDriver {
                         .iter()
                         .any(|index| index.columns.iter().any(|column| column == &name)),
                     is_auto_increment: false,
+                    identity_generation: None,
                     is_generated: Some(is_generated),
                     is_hidden: Some(is_hidden),
                     default_value: row.try_get("dflt_value").ok(),

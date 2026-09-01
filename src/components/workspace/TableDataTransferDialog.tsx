@@ -1810,7 +1810,13 @@ export function TableDataTransferDialog({
                             {column.isPrimaryKey ? "primary key · " : ""}
                             {column.isNotNull ? "not null · " : "nullable · "}
                             {column.identityRetained
-                              ? "new target identity · "
+                              ? `new target identity${
+                                  column.targetIdentityGeneration === "always"
+                                    ? " (always)"
+                                    : column.targetIdentityGeneration === "byDefault"
+                                      ? " (by default)"
+                                      : ""
+                                } · `
                               : column.sourceAutoIncrement
                                 ? "identity materialized · "
                                 : ""}

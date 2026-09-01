@@ -1384,8 +1384,12 @@ pub struct TableDataTransferTargetColumn {
     pub is_not_null: bool,
     #[serde(default)]
     pub source_auto_increment: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity_generation: Option<String>,
     #[serde(default)]
     pub identity_retained: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_identity_generation: Option<String>,
     #[serde(default)]
     pub has_source_default: bool,
     #[serde(default)]
@@ -4598,13 +4602,19 @@ fn render_column_type(column: &CreateTableColumn) -> Result<String, String> {
     Ok(rendered)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TableColumnRenderOptions<'a> {
+    default_value: Option<&'a str>,
+    identity_generation: Option<&'a str>,
+    inline_primary_key: bool,
+}
+
 fn render_table_column_definition(
     kind: DatabaseKind,
     schema: &str,
     table: &str,
     column: &CreateTableColumn,
-    default_value: Option<&str>,
-    inline_primary_key: bool,
+    options: TableColumnRenderOptions<'_>,
     comment_statements: &mut Vec<String>,
 ) -> Result<(String, String), String> {
     let column_name = column.name.trim();
@@ -4624,21 +4634,52 @@ fn render_table_column_definition(
         render_column_type(column)?
     );
 
-    if column.is_auto_increment && default_value.is_some() {
+    if column.is_auto_increment && options.default_value.is_some() {
         return Err(format!(
             "Column {column_name} cannot combine a copied default with a target-owned identity"
         ));
     }
-    if let Some(default_value) = default_value {
+    if let Some(default_value) = options.default_value {
         definition.push_str(" DEFAULT ");
         definition.push_str(validate_default_expression(default_value)?);
     }
 
-    if column.is_auto_increment {
-        if let Some(clause) = kind
-            .auto_increment_clause_for_type(&data_type)
-            .map_err(|err| err.to_string())?
+    let identity_generation = match options.identity_generation {
+        Some(_value) if !column.is_auto_increment => {
+            return Err(format!(
+                "Column {column_name} has an identity mode without target identity semantics"
+            ));
+        }
+        Some(_value) if kind != DatabaseKind::Postgres => {
+            return Err(format!(
+                "Column {column_name} cannot apply a PostgreSQL identity mode to {kind:?}"
+            ));
+        }
+        Some(value) if value.eq_ignore_ascii_case("always") => Some("always"),
+        Some(value)
+            if value.eq_ignore_ascii_case("byDefault")
+                || value.eq_ignore_ascii_case("by_default") =>
         {
+            Some("byDefault")
+        }
+        Some(value) => {
+            return Err(format!(
+                "Column {column_name} has unsupported identity generation mode: {value}"
+            ));
+        }
+        None => None,
+    };
+
+    if column.is_auto_increment {
+        let clause = if identity_generation == Some("always") {
+            kind.auto_increment_clause_for_type(&data_type)
+                .map_err(|err| err.to_string())?
+                .map(|_| "GENERATED ALWAYS AS IDENTITY")
+        } else {
+            kind.auto_increment_clause_for_type(&data_type)
+                .map_err(|err| err.to_string())?
+        };
+        if let Some(clause) = clause {
             definition.push(' ');
             definition.push_str(clause.trim());
         }
@@ -4648,7 +4689,7 @@ fn render_table_column_definition(
         definition.push_str(" NOT NULL");
     }
 
-    if inline_primary_key && column.is_primary_key {
+    if options.inline_primary_key && column.is_primary_key {
         definition.push_str(" PRIMARY KEY");
     }
 
@@ -4979,6 +5020,24 @@ fn build_create_table_statements_with_defaults(
     columns: &[CreateTableColumn],
     default_expressions: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
+    build_create_table_statements_with_transfer_metadata(
+        kind,
+        schema,
+        table,
+        columns,
+        default_expressions,
+        &BTreeMap::new(),
+    )
+}
+
+fn build_create_table_statements_with_transfer_metadata(
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &[CreateTableColumn],
+    default_expressions: &BTreeMap<String, String>,
+    identity_generations: &BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
     let table = table.trim();
     if table.is_empty() {
         return Err("Table name is required".to_string());
@@ -4997,8 +5056,11 @@ fn build_create_table_statements_with_defaults(
             schema,
             table,
             column,
-            default_expressions.get(&column.name).map(String::as_str),
-            false,
+            TableColumnRenderOptions {
+                default_value: default_expressions.get(&column.name).map(String::as_str),
+                identity_generation: identity_generations.get(&column.name).map(String::as_str),
+                inline_primary_key: false,
+            },
             &mut comment_statements,
         )?;
         if column.is_primary_key {
@@ -5143,8 +5205,10 @@ fn build_add_table_column_statements(
         schema,
         table,
         column,
-        None,
-        true,
+        TableColumnRenderOptions {
+            inline_primary_key: true,
+            ..TableColumnRenderOptions::default()
+        },
         &mut comment_statements,
     )?;
 
@@ -8180,6 +8244,7 @@ struct TransferTargetColumnsPlan {
     columns: Vec<TableDataTransferTargetColumn>,
     create_columns: Vec<CreateTableColumn>,
     default_expressions: BTreeMap<String, String>,
+    identity_generations: BTreeMap<String, String>,
     warnings: Vec<String>,
 }
 
@@ -8342,6 +8407,24 @@ fn default_expression_invokes_function(value: &str, function_name: &str) -> bool
     false
 }
 
+fn normalized_identity_generation(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = value
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "always" => Ok(Some("always".to_string())),
+        "bydefault" => Ok(Some("byDefault".to_string())),
+        _ => Err(format!(
+            "Unsupported source identity generation mode: {value}"
+        )),
+    }
+}
+
 fn transfer_target_default_expression(
     source: &ColumnInfo,
     source_driver: &str,
@@ -8422,6 +8505,7 @@ fn transfer_identity_can_be_retained(
     target_driver: &str,
     target_data_type: &str,
     visible_primary_key_count: usize,
+    source_identity_generation: Option<&str>,
 ) -> bool {
     if !source.is_auto_increment
         || source.is_generated == Some(true)
@@ -8431,9 +8515,17 @@ fn transfer_identity_can_be_retained(
         return false;
     }
     match normalized_transfer_driver_id(target_driver).as_str() {
-        "postgres" => DatabaseKind::Postgres
-            .auto_increment_clause_for_type(target_data_type)
-            .is_ok(),
+        "postgres" => {
+            let is_proven_identity = source_identity_generation.is_some()
+                || source
+                    .default_value
+                    .as_deref()
+                    .is_some_and(|value| default_expression_invokes_function(value, "nextval"));
+            is_proven_identity
+                && DatabaseKind::Postgres
+                    .auto_increment_clause_for_type(target_data_type)
+                    .is_ok()
+        }
         "mysql" => DatabaseKind::Mysql
             .auto_increment_clause_for_type(target_data_type)
             .is_ok(),
@@ -8485,6 +8577,7 @@ fn build_transfer_target_columns(
     let mut planned = Vec::with_capacity(source_columns.len());
     let mut create_columns = Vec::with_capacity(source_columns.len());
     let mut default_expressions = BTreeMap::new();
+    let mut identity_generations = BTreeMap::new();
     let mut retained_identity_columns = Vec::new();
     let mut omitted_identity_columns = Vec::new();
     let mut retained_default_columns = Vec::new();
@@ -8493,6 +8586,14 @@ fn build_transfer_target_columns(
         .iter()
         .filter(|column| column.is_hidden != Some(true))
     {
+        let source_identity_generation =
+            normalized_identity_generation(source.identity_generation.as_deref())?;
+        if source_identity_generation.is_some() && !source.is_auto_increment {
+            return Err(format!(
+                "Source column {} declares an identity generation mode without identity semantics",
+                source.name
+            ));
+        }
         let mapping = transfer_target_column_type(&source.data_type, source_driver, target_driver);
         let identity_retained = transfer_identity_can_be_retained(
             source,
@@ -8500,7 +8601,19 @@ fn build_transfer_target_columns(
             target_driver,
             &mapping.data_type,
             visible_primary_key_count,
+            source_identity_generation.as_deref(),
         );
+        let target_identity_generation =
+            if identity_retained && normalized_transfer_driver_id(target_driver) == "postgres" {
+                source_identity_generation.clone().or_else(|| {
+                    source.default_value.as_deref().and_then(|value| {
+                        default_expression_invokes_function(value, "nextval")
+                            .then(|| "byDefault".to_string())
+                    })
+                })
+            } else {
+                None
+            };
         let default_mapping = transfer_target_default_expression(
             source,
             source_driver,
@@ -8521,6 +8634,13 @@ fn build_transfer_target_columns(
                     "Same-product auto-increment semantics are recreated with a target-owned generator; the source generator name and current value are not copied."
                         .to_string(),
                 );
+                if let Some(identity_generation) = target_identity_generation.as_deref() {
+                    reasons.push(format!(
+                        "The reviewed PostgreSQL identity generation mode {identity_generation} is retained."
+                    ));
+                    identity_generations
+                        .insert(source.name.clone(), identity_generation.to_string());
+                }
                 compatibility = review_transfer_compatibility(compatibility);
             } else {
                 omitted_identity_columns.push(source.name.clone());
@@ -8549,7 +8669,9 @@ fn build_transfer_target_columns(
             is_primary_key: source.is_primary_key,
             is_not_null: !source.is_nullable,
             source_auto_increment: source.is_auto_increment,
+            source_identity_generation,
             identity_retained,
+            target_identity_generation,
             has_source_default,
             default_retained,
             compatibility,
@@ -8606,6 +8728,7 @@ fn build_transfer_target_columns(
         columns: planned,
         create_columns,
         default_expressions,
+        identity_generations,
         warnings,
     })
 }
@@ -8687,6 +8810,7 @@ async fn resolve_table_data_transfer_target_plan(
         columns,
         create_columns,
         default_expressions,
+        identity_generations,
         warnings: target_column_warnings,
     } = target_columns_plan;
     let can_execute = columns
@@ -8703,12 +8827,13 @@ async fn resolve_table_data_transfer_target_plan(
         )?
     } else {
         let kind = DatabaseKind::from_str(&target_driver).map_err(|error| error.to_string())?;
-        build_create_table_statements_with_defaults(
+        build_create_table_statements_with_transfer_metadata(
             kind,
             &request.target.schema,
             &request.target.table,
             &create_columns,
             &default_expressions,
+            &identity_generations,
         )?
     };
     let confirmation_token = if can_execute {
@@ -17974,6 +18099,7 @@ mod tests {
         build_create_foreign_key_statement, build_create_materialized_view_statement,
         build_create_primary_key_statement, build_create_table_index_statement,
         build_create_table_statements, build_create_table_statements_with_defaults,
+        build_create_table_statements_with_transfer_metadata,
         build_create_unique_constraint_statement, build_create_view_statement,
         build_data_transfer_column_mapping, build_drop_table_column_statement,
         build_drop_table_constraint_statement, build_drop_table_index_statement,
@@ -18250,7 +18376,9 @@ mod tests {
             is_primary_key: true,
             is_not_null: true,
             source_auto_increment: false,
+            source_identity_generation: None,
             identity_retained: false,
+            target_identity_generation: None,
             has_source_default: false,
             default_retained: false,
             compatibility: TableDataTransferCompatibility::Review,
@@ -19464,7 +19592,12 @@ mod tests {
         )
         .unwrap();
         assert!(postgres.columns[0].source_auto_increment);
+        assert_eq!(postgres.columns[0].source_identity_generation, None);
         assert!(postgres.columns[0].identity_retained);
+        assert_eq!(
+            postgres.columns[0].target_identity_generation.as_deref(),
+            Some("byDefault")
+        );
         assert!(postgres.columns[0].has_source_default);
         assert!(!postgres.columns[0].default_retained);
         assert_eq!(
@@ -19472,11 +19605,13 @@ mod tests {
             TableDataTransferCompatibility::Review
         );
         assert!(postgres.create_columns[0].is_auto_increment);
-        let postgres_ddl = build_create_table_statements(
+        let postgres_ddl = build_create_table_statements_with_transfer_metadata(
             DatabaseKind::Postgres,
             "public",
             "events_copy",
             &postgres.create_columns,
+            &postgres.default_expressions,
+            &postgres.identity_generations,
         )
         .unwrap();
         assert!(postgres_ddl
@@ -19502,6 +19637,76 @@ mod tests {
         assert!(cross_product.warnings.iter().any(|warning| {
             warning.contains("ordinary target columns") && warning.contains("id")
         }));
+    }
+
+    #[test]
+    fn transfer_target_preserves_proven_postgres_identity_generation_mode() {
+        let mut always = target_column("id");
+        always.data_type = "bigint".to_string();
+        always.is_primary_key = true;
+        always.is_nullable = false;
+        always.is_auto_increment = true;
+        always.identity_generation = Some("always".to_string());
+
+        let plan =
+            build_transfer_target_columns(&[always.clone()], "postgres", "postgres").unwrap();
+        assert!(plan.columns[0].identity_retained);
+        assert_eq!(
+            plan.columns[0].source_identity_generation.as_deref(),
+            Some("always")
+        );
+        assert_eq!(
+            plan.columns[0].target_identity_generation.as_deref(),
+            Some("always")
+        );
+        assert_eq!(
+            plan.identity_generations.get("id").map(String::as_str),
+            Some("always")
+        );
+        let ddl = build_create_table_statements_with_transfer_metadata(
+            DatabaseKind::Postgres,
+            "public",
+            "events_copy",
+            &plan.create_columns,
+            &plan.default_expressions,
+            &plan.identity_generations,
+        )
+        .unwrap()
+        .join("\n");
+        assert!(ddl.contains("GENERATED ALWAYS AS IDENTITY"));
+        assert!(!ddl.contains("GENERATED BY DEFAULT AS IDENTITY"));
+        let wire = serde_json::to_value(&plan.columns[0]).unwrap();
+        assert_eq!(wire["sourceIdentityGeneration"], json!("always"));
+        assert_eq!(wire["targetIdentityGeneration"], json!("always"));
+
+        always.identity_generation = Some("BY_DEFAULT".to_string());
+        let by_default = build_transfer_target_columns(&[always], "postgres", "postgres").unwrap();
+        assert_eq!(
+            by_default.columns[0].source_identity_generation.as_deref(),
+            Some("byDefault")
+        );
+        assert_eq!(
+            by_default.columns[0].target_identity_generation.as_deref(),
+            Some("byDefault")
+        );
+
+        let mut unproven = target_column("legacy_id");
+        unproven.data_type = "integer".to_string();
+        unproven.is_auto_increment = true;
+        let unproven_plan =
+            build_transfer_target_columns(&[unproven], "postgres", "postgres").unwrap();
+        assert!(!unproven_plan.columns[0].identity_retained);
+        assert!(unproven_plan.identity_generations.is_empty());
+
+        let mut invalid = target_column("invalid_id");
+        invalid.data_type = "integer".to_string();
+        invalid.is_auto_increment = true;
+        invalid.identity_generation = Some("sometimes".to_string());
+        assert!(
+            build_transfer_target_columns(&[invalid], "postgres", "postgres")
+                .unwrap_err()
+                .contains("Unsupported source identity generation mode")
+        );
     }
 
     #[test]
@@ -20901,6 +21106,7 @@ mod tests {
             is_unique: false,
             is_indexed: false,
             is_auto_increment: false,
+            identity_generation: None,
             default_value: None,
             comment: None,
             is_generated: Some(false),
@@ -21161,6 +21367,7 @@ mod tests {
                     is_indexed: true,
                     default_value: Some("nextval('users_id_seq'::regclass)".to_string()),
                     is_auto_increment: false,
+                    identity_generation: None,
                     comment: None,
                     is_generated: Some(false),
                     is_hidden: Some(false),
@@ -21174,6 +21381,7 @@ mod tests {
                     is_indexed: false,
                     default_value: None,
                     is_auto_increment: false,
+                    identity_generation: None,
                     comment: None,
                     is_generated: Some(false),
                     is_hidden: Some(false),
@@ -21770,6 +21978,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -21797,6 +22006,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21810,6 +22020,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: true,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21823,6 +22034,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: false,
                 default_value: Some("'pending'".to_string()),
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21898,6 +22110,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21911,6 +22124,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21953,6 +22167,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -21966,6 +22181,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22057,6 +22273,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22070,6 +22287,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22116,6 +22334,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             is_indexed: true,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22149,6 +22368,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             is_indexed: true,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22190,6 +22410,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
             is_indexed: true,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22235,6 +22456,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22248,6 +22470,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22261,6 +22484,7 @@ SELECT id FROM users WHERE active WITH NO DATA;"#
                 is_indexed: true,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22614,6 +22838,7 @@ WITH DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22627,6 +22852,7 @@ WITH DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22667,6 +22893,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22715,6 +22942,7 @@ WITH DATA;"#
             is_indexed: true,
             default_value: None,
             is_auto_increment: true,
+            identity_generation: None,
             comment: Some("identifier".to_string()),
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22758,6 +22986,7 @@ WITH DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22771,6 +23000,7 @@ WITH DATA;"#
                 is_indexed: false,
                 default_value: None,
                 is_auto_increment: false,
+                identity_generation: None,
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
@@ -22816,6 +23046,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22930,6 +23161,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22960,6 +23192,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -22990,6 +23223,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -23040,6 +23274,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -23053,6 +23288,7 @@ WITH DATA;"#
             is_indexed: true,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -23256,6 +23492,7 @@ WITH DATA;"#
             is_indexed: false,
             default_value: None,
             is_auto_increment: false,
+            identity_generation: None,
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
@@ -23637,6 +23874,7 @@ WITH DATA;"#
                 is_unique: true,
                 is_indexed: true,
                 is_auto_increment: false,
+                identity_generation: None,
                 default_value: None,
                 comment: None,
                 is_generated: Some(false),
@@ -23650,6 +23888,7 @@ WITH DATA;"#
                 is_unique: true,
                 is_indexed: true,
                 is_auto_increment: false,
+                identity_generation: None,
                 default_value: None,
                 comment: None,
                 is_generated: Some(false),
