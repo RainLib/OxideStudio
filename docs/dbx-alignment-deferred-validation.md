@@ -1783,3 +1783,30 @@ explicit deferred validation task rather than an implicit release check.
   Others and Close All under every group/sort combination. The confirmation
   set must match the visible tabs exactly, remain single-shot, preserve pinned
   tabs and activate the visible neighbor after a single close.
+
+## Bounded database row search
+
+- On packaged Windows, macOS and Linux builds, open Database Search from the
+  command palette and from data-source, database, schema and table context
+  menus. Confirm every entry freezes the intended connection/catalog/schema
+  scope and that switching the active workspace while metadata is loading
+  cannot redirect a late request.
+- Run the search against the reviewed SQL driver matrix, including TOP,
+  FIRST, ROWS, FETCH FIRST, ROWNUM and LIMIT families. Verify quoted Unicode,
+  reserved and delimiter-containing identifiers, composite primary keys,
+  nullable matches, numeric terms and escaped `%`, `_`, `~` and quote input.
+- Use at least 450 tables to verify the initial 200-table batch, next batch,
+  scan-all continuation, progress and per-table error isolation. Cancel during
+  schema enumeration, column loading and an active query; no later table may
+  start, the active query must receive cancellation and completed hits must
+  remain visible.
+- Exercise the 50,000-table planning, 100-row per-table, 5,000-hit, 8 MiB
+  stored-result and 200-error budgets with wide text/LOB columns. Confirm the
+  generated projection excludes unrelated binary values, the visible DOM is
+  paged in 200-row windows and a reached result budget does not create an
+  unbounded renderer allocation.
+- Open hits with and without primary keys and confirm the Table tab receives
+  only the Host-generated locator for the exact database/schema/table. Phase
+  141 covers pure model, IPC contract, Rust SQL/bounds tests, frontend build,
+  full Rust tests and Clippy; it deliberately does not claim live database or
+  packaged-WebView evidence.

@@ -26,7 +26,9 @@ import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
 import {
   APP_EVENT_OPEN_COMMAND_PALETTE,
   APP_EVENT_OPEN_COMMIT,
+  APP_EVENT_OPEN_DATABASE_SEARCH,
   APP_EVENT_OPEN_VERSION_CONTROL,
+  type DatabaseSearchRequest,
 } from "@/lib/actionEvents";
 import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
 import { subscribeStartupIntents } from "@/startup/startupIntents";
@@ -114,6 +116,11 @@ const LspConnectionSyncer = lazy(() =>
 const CommandPalette = lazy(() =>
   import("@/components/workspace/CommandPalette").then((module) => ({
     default: module.CommandPalette,
+  })),
+);
+const DatabaseSearchDialog = lazy(() =>
+  import("@/features/database-search/DatabaseSearchDialog").then((module) => ({
+    default: module.DatabaseSearchDialog,
   })),
 );
 const QueryHistorySync = lazy(() =>
@@ -986,7 +993,34 @@ export function WorkspaceRuntime() {
       />
 
       <DeferredCommandPalette />
+      <DeferredDatabaseSearch />
     </div>
+  );
+}
+
+function DeferredDatabaseSearch() {
+  const [request, setRequest] = useState<DatabaseSearchRequest | null>(null);
+  const [requestVersion, setRequestVersion] = useState(0);
+
+  useEffect(() => {
+    const openSearch = (event: Event) => {
+      const detail = (event as CustomEvent<DatabaseSearchRequest>).detail;
+      setRequest(detail || {});
+      setRequestVersion((version) => version + 1);
+    };
+    window.addEventListener(APP_EVENT_OPEN_DATABASE_SEARCH, openSearch);
+    return () =>
+      window.removeEventListener(APP_EVENT_OPEN_DATABASE_SEARCH, openSearch);
+  }, []);
+
+  if (!request) return null;
+  return (
+    <Suspense fallback={null}>
+      <DatabaseSearchDialog
+        request={request}
+        requestVersion={requestVersion}
+      />
+    </Suspense>
   );
 }
 

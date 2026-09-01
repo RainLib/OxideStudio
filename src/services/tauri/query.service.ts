@@ -130,12 +130,14 @@ export async function executeReadOnlyQuery(
   sql: string,
   schema?: string,
   queryId?: string,
+  database?: string,
 ): Promise<QueryResult[]> {
   return invokeWithInterceptors<QueryResult[]>("execute_read_only_query", {
     connectionId,
     sql,
     schema,
     queryId,
+    database,
   });
 }
 

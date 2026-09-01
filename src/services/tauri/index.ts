@@ -21,6 +21,7 @@ export * from "./connection.service";
 export * from "./ai.service";
 export * from "./assistant-task.service";
 export * from "./database.service";
+export * from "./database-search.service";
 export * from "./query.service";
 export * from "./query-history.service";
 export * from "./project-files.service";

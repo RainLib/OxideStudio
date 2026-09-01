@@ -5,6 +5,7 @@ export const APP_EVENT_INSERT_LINE_BELOW = "oxide:insert-line-below";
 export const APP_EVENT_SAVE_FILE = "oxide:save-file";
 export const APP_EVENT_OPEN_COMMAND_PALETTE = "oxide:open-command-palette";
 export const APP_EVENT_OPEN_SETTINGS = "oxide:open-settings";
+export const APP_EVENT_OPEN_DATABASE_SEARCH = "oxide:open-database-search";
 export const APP_EVENT_OPEN_COMMIT = "oxide:open-commit";
 export const APP_EVENT_OPEN_VERSION_CONTROL = "oxide:open-version-control";
 export const APP_EVENT_REQUEST_TABLE_CSV_IMPORT =
@@ -13,6 +14,13 @@ export const APP_EVENT_REQUEST_TABLE_JSON_IMPORT =
   "oxide:request-table-json-import";
 export const APP_EVENT_REQUEST_TABLE_XLSX_IMPORT =
   "oxide:request-table-xlsx-import";
+
+export type DatabaseSearchRequest = {
+  connectionId?: string;
+  database?: string;
+  schema?: string;
+  table?: string;
+};
 
 export type TableCsvImportRequest = {
   connectionId: string;

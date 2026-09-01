@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod cli_provider_secret;
 pub mod config;
+pub mod database_search;
 pub mod dialect;
 pub mod dml_preview_sql;
 pub mod driver;

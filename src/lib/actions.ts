@@ -18,6 +18,7 @@ import {
   APP_EVENT_INLINE_COMPLETION_HIDE,
   APP_EVENT_INLINE_COMPLETION_TRIGGER,
   APP_EVENT_OPEN_COMMAND_PALETTE,
+  APP_EVENT_OPEN_DATABASE_SEARCH,
   APP_EVENT_OPEN_SETTINGS,
   APP_EVENT_RUN_CURRENT,
   APP_EVENT_RUN_QUERY,
@@ -35,6 +36,7 @@ export type WorkbenchActionId =
   | "editor.splitUp"
   | "editor.splitDown"
   | "query.newConsole"
+  | "query.searchDatabase"
   | "query.reopenClosed"
   | "query.closeTab"
   | "query.run"
@@ -188,6 +190,14 @@ export function workbenchActions(): WorkbenchAction[] {
       group: "Query",
       run: () => {
         window.dispatchEvent(new CustomEvent(APP_EVENT_FORMAT_SQL));
+      },
+    },
+    {
+      id: "query.searchDatabase",
+      title: "Search Data in Current Database",
+      group: "Query",
+      run: () => {
+        window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH));
       },
     },
     {

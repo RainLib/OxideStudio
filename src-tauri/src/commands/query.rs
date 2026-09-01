@@ -1122,9 +1122,11 @@ pub async fn execute_read_only_query(
     sql: String,
     schema: Option<String>,
     query_id: Option<String>,
+    database: Option<String>,
 ) -> Result<Response<Vec<QueryResult>>, String> {
     let query_context = serde_json::json!({
         "connectionId": connection_id,
+        "database": database,
         "schema": schema,
         "queryId": query_id,
     });
@@ -1181,7 +1183,7 @@ pub async fn execute_read_only_query(
         schema,
         None,
         query_id,
-        None,
+        database,
     )
     .await?;
     if let Some(results) = response.data.take() {
@@ -1336,7 +1338,7 @@ fn strip_read_only_transaction_results(mut results: Vec<QueryResult>) -> Vec<Que
 // Keep the execution inputs aligned with `execute_query` so the read-only
 // wrapper can reuse the exact same cancellation and database routing path.
 #[allow(clippy::too_many_arguments)]
-async fn execute_query_with_cancellation(
+pub(crate) async fn execute_query_with_cancellation(
     manager: &ConnectionManager,
     cancellation: &QueryCancellationState,
     connection_id: String,

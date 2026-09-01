@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import { isLoginUserSchema } from "@/lib/loginUserSchema";
 import {
+  APP_EVENT_OPEN_DATABASE_SEARCH,
   APP_EVENT_REQUEST_TABLE_CSV_IMPORT,
   APP_EVENT_REQUEST_TABLE_JSON_IMPORT,
   APP_EVENT_REQUEST_TABLE_XLSX_IMPORT,
@@ -4935,6 +4936,28 @@ export function SchemaSidebar() {
                           <ContextMenuItem
                             className={menuItemClass}
                             disabled={
+                              !relationCapabilities.supportsSqlQuery ||
+                              !relationCapabilities.supportsTableBrowsing
+                            }
+                            onClick={() =>
+                              window.dispatchEvent(
+                                new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
+                                  detail: {
+                                    connectionId,
+                                    database: navigationDatabaseName,
+                                    schema,
+                                    table: table.name,
+                                  },
+                                }),
+                              )
+                            }
+                          >
+                            <Search className="mr-2 h-3.5 w-3.5" />
+                            Search Table Rows...
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={
                               !objectConnection ||
                               !(
                                 supportsTableWorkspace(relationCapabilities) ||
@@ -6028,6 +6051,31 @@ export function SchemaSidebar() {
                         className={menuItemClass}
                         disabled={
                           !defaultDatabaseCapabilities(connection.driver)
+                            .supportsSqlQuery ||
+                          !defaultDatabaseCapabilities(connection.driver)
+                            .supportsTableBrowsing
+                        }
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
+                              detail: {
+                                connectionId: connection.id,
+                                database:
+                                  connectionCanBrowseDatabaseCatalogs
+                                    ? connectedPostgresDatabase
+                                    : undefined,
+                              },
+                            }),
+                          )
+                        }
+                      >
+                        <Search className="mr-2 h-3.5 w-3.5" />
+                        Search Current Database...
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        disabled={
+                          !defaultDatabaseCapabilities(connection.driver)
                             .supportsTableBrowsing ||
                           defaultDatabaseCapabilities(connection.driver)
                             .dataModel !== "relational"
@@ -6259,6 +6307,25 @@ export function SchemaSidebar() {
 
                           return (
                             <>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  window.dispatchEvent(
+                                    new CustomEvent(
+                                      APP_EVENT_OPEN_DATABASE_SEARCH,
+                                      {
+                                        detail: {
+                                          connectionId: connection.id,
+                                          database,
+                                        },
+                                      },
+                                    ),
+                                  )
+                                }
+                              >
+                                <Search className="mr-2 h-3.5 w-3.5" />
+                                Search Database Rows...
+                              </ContextMenuItem>
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() => void copyText(database)}
@@ -6728,6 +6795,37 @@ export function SchemaSidebar() {
                                     >
                                       <Network className="mr-2 h-3.5 w-3.5" />
                                       Open Schema Diagram
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      disabled={
+                                        !defaultDatabaseCapabilities(
+                                          connection.driver,
+                                        ).supportsSqlQuery ||
+                                        !defaultDatabaseCapabilities(
+                                          connection.driver,
+                                        ).supportsTableBrowsing
+                                      }
+                                      onClick={() =>
+                                        window.dispatchEvent(
+                                          new CustomEvent(
+                                            APP_EVENT_OPEN_DATABASE_SEARCH,
+                                            {
+                                              detail: {
+                                                connectionId: connection.id,
+                                                database:
+                                                  connectionCanBrowseDatabaseCatalogs
+                                                    ? connectedPostgresDatabase
+                                                    : undefined,
+                                                schema,
+                                              },
+                                            },
+                                          ),
+                                        )
+                                      }
+                                    >
+                                      <Search className="mr-2 h-3.5 w-3.5" />
+                                      Search Schema Rows...
                                     </ContextMenuItem>
                                     <ContextMenuItem
                                       className={menuItemClass}
