@@ -5033,14 +5033,255 @@ fn sqlite_catalog_ddl_suffix(
 
 fn rewrite_sqlite_create_table_for_transfer(
     source_sql: &str,
+    source_table: &str,
     target_schema: &str,
     target_table: &str,
 ) -> Result<String, String> {
     let suffix = sqlite_catalog_ddl_suffix(source_sql, SqliteCatalogDdlKind::Table)?;
+    let suffix = rewrite_sqlite_self_references(&suffix, source_table, target_table)?;
     Ok(format!(
         "CREATE TABLE {} {suffix};",
         sqlite_qualified_relation(target_schema, target_table)?
     ))
+}
+
+fn sqlite_skip_whitespace_and_comments(input: &str, mut index: usize) -> Result<usize, String> {
+    let bytes = input.as_bytes();
+    loop {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        match (bytes.get(index).copied(), bytes.get(index + 1).copied()) {
+            (Some(b'-'), Some(b'-')) => {
+                index += 2;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| !matches!(*byte, b'\n' | b'\r'))
+                {
+                    index += 1;
+                }
+            }
+            (Some(b'/'), Some(b'*')) => {
+                let Some(relative_end) = input[index + 2..].find("*/") else {
+                    return Err(
+                        "SQLite catalog DDL contains an unterminated block comment".to_string()
+                    );
+                };
+                index += relative_end + 4;
+            }
+            _ => return Ok(index),
+        }
+    }
+}
+
+fn sqlite_unquoted_identifier_continue(character: char) -> bool {
+    character == '_'
+        || character == '$'
+        || character.is_ascii_alphanumeric()
+        || (!character.is_ascii() && !character.is_whitespace() && !character.is_control())
+}
+
+fn sqlite_parse_reference_identifier(input: &str, start: usize) -> Result<(usize, String), String> {
+    let Some(first) = input[start..].chars().next() else {
+        return Err("SQLite REFERENCES clause is missing its target table".to_string());
+    };
+    let (close, escape) = match first {
+        '"' => ('"', Some("\"\"")),
+        '`' => ('`', Some("``")),
+        '[' => (']', None),
+        '\'' => {
+            return Err(
+                "SQLite single-quoted foreign-table identifiers are not safe to rewrite"
+                    .to_string(),
+            )
+        }
+        _ => {
+            let mut end = start;
+            for (offset, character) in input[start..].char_indices() {
+                if !sqlite_unquoted_identifier_continue(character) {
+                    break;
+                }
+                end = start + offset + character.len_utf8();
+            }
+            if end == start {
+                return Err("SQLite REFERENCES clause has an invalid target table".to_string());
+            }
+            return Ok((end, input[start..end].to_string()));
+        }
+    };
+
+    let content_start = start + first.len_utf8();
+    let mut decoded = String::new();
+    let mut index = content_start;
+    while index < input.len() {
+        if let Some(escape) = escape {
+            if input[index..].starts_with(escape) {
+                decoded.push(close);
+                index += escape.len();
+                continue;
+            }
+        }
+        let character = input[index..]
+            .chars()
+            .next()
+            .expect("index is inside a UTF-8 string");
+        if character == close {
+            return Ok((index + character.len_utf8(), decoded));
+        }
+        decoded.push(character);
+        index += character.len_utf8();
+    }
+    Err("SQLite REFERENCES clause has an unterminated target identifier".to_string())
+}
+
+/// Rewrite only catalog-proven self-referencing foreign keys when a SQLite
+/// table is copied under a new identity. The scanner deliberately ignores SQL
+/// strings, quoted identifiers and comments until it encounters the REFERENCES
+/// grammar keyword. SQLite foreign-key targets are schema-local; a qualified
+/// target is rejected rather than guessed across attached databases.
+fn rewrite_sqlite_self_references(
+    suffix: &str,
+    source_table: &str,
+    target_table: &str,
+) -> Result<String, String> {
+    if source_table.trim() == target_table.trim() {
+        return Ok(suffix.to_string());
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        SingleQuote,
+        DoubleQuote,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = suffix.as_bytes();
+    let mut state = State::Normal;
+    let mut index = 0usize;
+    let mut replacements = Vec::new();
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            State::Normal => match (byte, next) {
+                (b'\'', _) => state = State::SingleQuote,
+                (b'"', _) => state = State::DoubleQuote,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    index += 1;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    index += 1;
+                }
+                _ if byte.is_ascii_alphabetic() || byte == b'_' => {
+                    let start = index;
+                    index += 1;
+                    while bytes.get(index).is_some_and(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$')
+                    }) {
+                        index += 1;
+                    }
+                    if suffix[start..index].eq_ignore_ascii_case("REFERENCES") {
+                        let identifier_start = sqlite_skip_whitespace_and_comments(suffix, index)?;
+                        let (identifier_end, identifier) =
+                            sqlite_parse_reference_identifier(suffix, identifier_start)?;
+                        let after_identifier =
+                            sqlite_skip_whitespace_and_comments(suffix, identifier_end)?;
+                        if bytes.get(after_identifier) == Some(&b'.') {
+                            return Err(
+                                "SQLite schema-qualified foreign-key targets cannot be remapped safely"
+                                    .to_string(),
+                            );
+                        }
+                        if identifier.eq_ignore_ascii_case(source_table.trim()) {
+                            replacements.push((identifier_start, identifier_end));
+                        }
+                        index = identifier_end;
+                        continue;
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+            State::SingleQuote => {
+                if byte == b'\'' {
+                    if next == Some(b'\'') {
+                        index += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::DoubleQuote => {
+                if byte == b'"' {
+                    if next == Some(b'"') {
+                        index += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::Backtick => {
+                if byte == b'`' {
+                    if next == Some(b'`') {
+                        index += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::Bracket => {
+                if byte == b']' {
+                    state = State::Normal;
+                }
+            }
+            State::LineComment => {
+                if matches!(byte, b'\n' | b'\r') {
+                    state = State::Normal;
+                }
+            }
+            State::BlockComment => {
+                if byte == b'*' && next == Some(b'/') {
+                    state = State::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if replacements.is_empty() {
+        return Ok(suffix.to_string());
+    }
+    let quoted_target = sqlite_quote_identifier(target_table.trim());
+    let mut rewritten = String::with_capacity(suffix.len() + replacements.len() * 8);
+    let mut emitted = 0usize;
+    for (start, end) in replacements {
+        rewritten.push_str(&suffix[emitted..start]);
+        rewritten.push_str(&quoted_target);
+        emitted = end;
+    }
+    rewritten.push_str(&suffix[emitted..]);
+    Ok(rewritten)
+}
+
+fn sqlite_transfer_target_index_name(
+    source_table: &str,
+    target_table: &str,
+    source_index: &str,
+) -> String {
+    if source_table.trim() == target_table.trim() {
+        source_index.trim().to_string()
+    } else {
+        format!("{}__{}", target_table.trim(), source_index.trim())
+    }
 }
 
 fn rewrite_sqlite_create_index_for_transfer(
@@ -7781,25 +8022,49 @@ async fn get_sqlite_table_source_ddl(
     Ok(definition.to_string())
 }
 
-fn sqlite_transfer_can_preserve_exact_schema(
+fn sqlite_transfer_can_preserve_catalog_schema(
     source: &TableDataTransferEndpoint,
     target: &TableDataTransferEndpoint,
 ) -> bool {
-    is_sqlite_driver(&source.driver)
-        && is_sqlite_driver(&target.driver)
-        && source.table.trim() == target.table.trim()
-        && normalized_sqlite_schema(&source.schema)
-            .eq_ignore_ascii_case(normalized_sqlite_schema(&target.schema))
+    is_sqlite_driver(&source.driver) && is_sqlite_driver(&target.driver)
 }
 
-async fn resolve_exact_sqlite_transfer_target_statements(
+async fn ensure_sqlite_target_index_absent(
+    manager: &ConnectionManager,
+    endpoint: &TableDataTransferEndpoint,
+    index_name: &str,
+) -> Result<(), String> {
+    let schema = sqlite_quote_identifier(normalized_sqlite_schema(&endpoint.schema));
+    let sql = format!(
+        "SELECT name FROM {schema}.sqlite_schema WHERE type = 'index' AND name = {} LIMIT 1;",
+        sql_string_literal(index_name)
+    );
+    let results = query_target(
+        manager,
+        &endpoint.connection_id,
+        endpoint.database.as_deref(),
+        &sql,
+    )
+    .await
+    .map_err(|error| format!("Could not validate the SQLite target index namespace: {error}"))?;
+    if results.iter().any(|result| !result.rows.is_empty()) {
+        return Err(format!(
+            "SQLite target index name already exists in schema {}: {}",
+            normalized_sqlite_schema(&endpoint.schema),
+            index_name
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_sqlite_catalog_transfer_target_statements(
     manager: &ConnectionManager,
     request: &TableDataTransferTargetPlanRequest,
 ) -> Result<Vec<String>, String> {
-    if !sqlite_transfer_can_preserve_exact_schema(&request.source, &request.target) {
+    if !sqlite_transfer_can_preserve_catalog_schema(&request.source, &request.target) {
         return Err(
-            "Exact SQLite schema preservation requires matching source and target schema/table names."
-                .to_string(),
+            "SQLite catalog schema preservation requires native SQLite source and target endpoints."
+                .to_string()
         );
     }
     if manager
@@ -7820,6 +8085,7 @@ async fn resolve_exact_sqlite_transfer_target_statements(
     let table_definition = get_sqlite_table_source_ddl(manager, &request.source).await?;
     let mut statements = vec![rewrite_sqlite_create_table_for_transfer(
         &table_definition,
+        &request.source.table,
         &request.target.schema,
         &request.target.table,
     )?];
@@ -7834,11 +8100,17 @@ async fn resolve_exact_sqlite_transfer_target_statements(
                 index.name
             )
         })?;
+        let target_index_name = sqlite_transfer_target_index_name(
+            &request.source.table,
+            &request.target.table,
+            &index.name,
+        );
+        ensure_sqlite_target_index_absent(manager, &request.target, &target_index_name).await?;
         statements.push(rewrite_sqlite_create_index_for_transfer(
             definition,
             &request.target.schema,
             &request.target.table,
-            &index.name,
+            &target_index_name,
             index.is_unique,
         )?);
     }
@@ -9696,8 +9968,8 @@ async fn resolve_table_data_transfer_target_plan(
     let can_execute = columns
         .iter()
         .all(|column| column.compatibility != TableDataTransferCompatibility::Unsupported);
-    let exact_sqlite_schema_preserved = if can_execute
-        && sqlite_transfer_can_preserve_exact_schema(&request.source, &request.target)
+    let sqlite_catalog_schema_preserved = if can_execute
+        && sqlite_transfer_can_preserve_catalog_schema(&request.source, &request.target)
     {
         !manager
             .is_external_driver_connection(&request.source.connection_id)
@@ -9712,8 +9984,8 @@ async fn resolve_table_data_transfer_target_plan(
     };
     let statements = if !can_execute {
         Vec::new()
-    } else if exact_sqlite_schema_preserved {
-        resolve_exact_sqlite_transfer_target_statements(manager, request).await?
+    } else if sqlite_catalog_schema_preserved {
+        resolve_sqlite_catalog_transfer_target_statements(manager, request).await?
     } else if matches!(target_driver.as_str(), "sqlite" | "sqlite3") {
         build_sqlite_create_table_statements_with_defaults(
             &request.target.schema,
@@ -9741,13 +10013,13 @@ async fn resolve_table_data_transfer_target_plan(
         "This creates only the empty target table {}. Data is copied later through a separate reviewed transfer.",
         endpoint_label(&request.target)
     )];
-    if exact_sqlite_schema_preserved {
+    if sqlite_catalog_schema_preserved {
         target_column_warnings.retain(|warning| {
             !warning.starts_with("Hidden/invisible source column(s)")
                 && !warning.starts_with("Generated source column(s)")
         });
         warnings.push(
-            "The exact native SQLite catalog definition is retained for this matching schema/table name. Table-level primary/unique/check/foreign-key constraints, generated/hidden columns, collations, STRICT/WITHOUT ROWID options, and catalog-backed explicit indexes are included in the reviewed DDL. Triggers and virtual-table implementation objects are not copied."
+            "The native SQLite catalog definition is retained while the target table identity is rebuilt. Proven self-referencing foreign keys are rewritten to the target table; external foreign-key targets stay schema-local. Table-level primary/unique/check/foreign-key constraints, generated/hidden columns, collations, STRICT/WITHOUT ROWID options, and catalog-backed explicit indexes are included in the reviewed DDL. Renamed-table indexes receive deterministic target-scoped names. Triggers and virtual-table implementation objects are not copied."
                 .to_string(),
         );
         warnings.push(
@@ -9756,7 +10028,7 @@ async fn resolve_table_data_transfer_target_plan(
         );
     } else {
         warnings.push(
-            "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained. The empty-table step does not create secondary indexes or constraints by itself; an eligible same-product PostgreSQL/MySQL data transfer can separately review and restore catalog-backed indexes, unique/check constraints, and foreign keys after rows are copied. Renamed or cross-schema SQLite targets use this reduced column-only plan because self-referential constraints cannot be rewritten safely. Source sequence names/current values, generated expressions, triggers, and unmapped defaults are not copied."
+            "Primary-key and nullability metadata are retained. Supported same-product auto-increment columns receive new target-owned generators. Reviewed same-product defaults and portable literals/system values may be retained. The empty-table step does not create secondary indexes or constraints by itself; an eligible same-product PostgreSQL/MySQL data transfer can separately review and restore catalog-backed indexes, unique/check constraints, and foreign keys after rows are copied. Source sequence names/current values, generated expressions, triggers, and unmapped defaults are not copied."
                 .to_string(),
         );
     }
@@ -19544,8 +19816,8 @@ mod tests {
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
         rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
         sanitize_file_part, select_database_sql_export_tables, skipped_table_data_compare_result,
-        sql_export_insert_batch_rows, sql_insert_statements, summarize_mutation_affected,
-        table_data_compare_sync_metadata_digest, table_data_dialect,
+        sql_export_insert_batch_rows, sql_insert_statements, sqlite_transfer_target_index_name,
+        summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
@@ -25321,14 +25593,54 @@ WITH DATA;"#
             UNIQUE ("note" COLLATE NOCASE)
         ) STRICT, WITHOUT ROWID"#;
 
-        let rewritten =
-            rewrite_sqlite_create_table_for_transfer(source, "archive", "order items").unwrap();
+        let rewritten = rewrite_sqlite_create_table_for_transfer(
+            source,
+            "order items",
+            "archive",
+            "order items",
+        )
+        .unwrap();
         assert!(rewritten.starts_with("CREATE TABLE \"archive\".\"order items\" ("));
         assert!(rewritten.contains("ON UPDATE CASCADE ON DELETE SET NULL"));
         assert!(rewritten.contains("CHECK ((\"qty\" > 0))"));
         assert!(rewritten.contains("DEFAULT 'semi; (still one statement)'"));
         assert!(rewritten.contains("GENERATED ALWAYS AS ((\"qty\" * 2)) STORED"));
         assert!(rewritten.ends_with(") STRICT, WITHOUT ROWID;"));
+    }
+
+    #[test]
+    fn sqlite_catalog_table_transfer_rewrites_only_self_references_for_renamed_target() {
+        let source = r#"CREATE TABLE `nodes` (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES /* keep */ `nodes`(id),
+            owner_id INTEGER REFERENCES owners(id),
+            note TEXT DEFAULT 'REFERENCES nodes(id)',
+            CHECK (note <> 'REFERENCES `nodes`')
+        )"#;
+
+        let rewritten =
+            rewrite_sqlite_create_table_for_transfer(source, "nodes", "main", "tree_nodes")
+                .unwrap();
+        assert!(rewritten.contains("REFERENCES /* keep */ \"tree_nodes\"(id)"));
+        assert!(rewritten.contains("REFERENCES owners(id)"));
+        assert!(rewritten.contains("DEFAULT 'REFERENCES nodes(id)'"));
+        assert!(rewritten.contains("CHECK (note <> 'REFERENCES `nodes`')"));
+        assert_eq!(
+            sqlite_transfer_target_index_name("nodes", "tree_nodes", "nodes_parent_idx"),
+            "tree_nodes__nodes_parent_idx"
+        );
+    }
+
+    #[test]
+    fn sqlite_catalog_table_transfer_rejects_qualified_foreign_key_targets() {
+        let error = rewrite_sqlite_create_table_for_transfer(
+            "CREATE TABLE nodes (id INTEGER, parent_id INTEGER REFERENCES main.nodes(id))",
+            "nodes",
+            "archive",
+            "tree_nodes",
+        )
+        .unwrap_err();
+        assert!(error.contains("schema-qualified foreign-key targets"));
     }
 
     #[test]
@@ -25354,6 +25666,7 @@ WITH DATA;"#
     fn sqlite_catalog_transfer_rejects_malformed_or_multi_statement_ddl() {
         assert!(rewrite_sqlite_create_table_for_transfer(
             "CREATE TABLE users (id INTEGER); DROP TABLE audit",
+            "users",
             "main",
             "users",
         )
@@ -25361,6 +25674,7 @@ WITH DATA;"#
         .contains("trailing statement"));
         assert!(rewrite_sqlite_create_table_for_transfer(
             "CREATE TABLE users (id INTEGER",
+            "users",
             "main",
             "users",
         )
@@ -25368,6 +25682,7 @@ WITH DATA;"#
         .contains("unbalanced parentheses"));
         assert!(rewrite_sqlite_create_table_for_transfer(
             "CREATE TABLE users (id INTEGER) AS SELECT 1",
+            "users",
             "main",
             "users",
         )
@@ -25435,7 +25750,81 @@ WITH DATA;"#
         assert!(plan
             .warnings
             .iter()
-            .any(|warning| warning.contains("exact native SQLite catalog definition")));
+            .any(|warning| warning.contains("native SQLite catalog definition")));
+    }
+
+    #[tokio::test]
+    async fn sqlite_target_plan_renames_self_references_and_explicit_indexes() {
+        let manager = ConnectionManager::new();
+        let mut source = SqliteDriver::new(":memory:");
+        source.connect().await.unwrap();
+        source
+            .query(
+                "CREATE TABLE nodes (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES nodes(id), label TEXT CHECK (length(label) > 0)); CREATE INDEX nodes_label_idx ON nodes (lower(label));",
+            )
+            .await
+            .unwrap();
+        let mut target = SqliteDriver::new(":memory:");
+        target.connect().await.unwrap();
+        manager
+            .add_connection("sqlite-rename-source".to_string(), Box::new(source))
+            .await;
+        manager
+            .add_connection("sqlite-rename-target".to_string(), Box::new(target))
+            .await;
+
+        let plan = resolve_table_data_transfer_target_plan(
+            &manager,
+            &TableDataTransferTargetPlanRequest {
+                source: TableDataTransferEndpoint {
+                    connection_id: "sqlite-rename-source".to_string(),
+                    driver: "sqlite".to_string(),
+                    schema: "main".to_string(),
+                    table: "nodes".to_string(),
+                    database: None,
+                },
+                target: TableDataTransferEndpoint {
+                    connection_id: "sqlite-rename-target".to_string(),
+                    driver: "sqlite".to_string(),
+                    schema: "main".to_string(),
+                    table: "tree_nodes".to_string(),
+                    database: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(plan.can_execute);
+        assert_eq!(plan.statements.len(), 2);
+        assert!(plan.statements[0].starts_with("CREATE TABLE \"main\".\"tree_nodes\""));
+        assert!(plan.statements[0].contains("REFERENCES \"tree_nodes\"(id)"));
+        assert!(plan.statements[0].contains("CHECK (length(label) > 0)"));
+        assert!(plan.statements[1].starts_with(
+            "CREATE INDEX \"main\".\"tree_nodes__nodes_label_idx\" ON \"tree_nodes\""
+        ));
+        for statement in &plan.statements {
+            query_target(&manager, "sqlite-rename-target", None, statement)
+                .await
+                .unwrap();
+        }
+        let catalog = query_target(
+            &manager,
+            "sqlite-rename-target",
+            None,
+            "SELECT type, name, tbl_name FROM main.sqlite_schema WHERE tbl_name = 'tree_nodes' ORDER BY type, name;",
+        )
+        .await
+        .unwrap();
+        let rows = catalog
+            .iter()
+            .flat_map(|result| result.rows.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.get(1).and_then(Value::as_str) == Some("tree_nodes__nodes_label_idx")
+                && row.get(2).and_then(Value::as_str) == Some("tree_nodes")
+        }));
     }
 
     fn test_export_writer_context(
