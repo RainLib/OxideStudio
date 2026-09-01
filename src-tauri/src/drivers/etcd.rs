@@ -127,11 +127,23 @@ impl EtcdDriver {
     }
 
     async fn get_key(&self, key: &str) -> Result<QueryResult> {
-        let range = self.range(key, None, 1, false).await?;
-        let (_, entry) = range
-            .entries
-            .into_iter()
-            .next()
+        validate_key(key)?;
+        let value = self
+            .read_json(
+                self.client
+                    .post(self.endpoint("v3/kv/range")?)
+                    .json(&json!({
+                        "key": STANDARD.encode(key.as_bytes()),
+                        "limit": "1",
+                    })),
+                "KV key read",
+            )
+            .await?;
+        let entry = value
+            .get("kvs")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .cloned()
             .ok_or_else(|| anyhow!("etcd key does not exist"))?;
         let value = entry.get("value").and_then(Value::as_str).unwrap_or("");
         let bytes = STANDARD
