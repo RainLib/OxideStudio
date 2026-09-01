@@ -665,7 +665,7 @@ export function SchemaSnapshotDialog({
                 : supportsRestorePlan
                   ? "The generated plan describes how to make the live target match the selected snapshot. It opens as a read-only artifact first. OxideStudio does not execute migration SQL from this dialog."
                   : identity?.driver === "sqlite"
-                    ? "SQLite differences generate a read-only rebuild review artifact. It may include a temporary table, preserved-column copy, index recreation, and foreign-key checks, but automatic apply remains disabled."
+                    ? "SQLite differences generate a reviewed replacement-table plan. Complete existing-table rebuilds can be applied from the plan view through a verified recovery backup, one write-locked transaction, and a foreign-key check; incomplete, create/drop, or view changes remain blocked."
                     : "Document and search snapshots preserve collection or index fields and indexes for drift review and diagrams. Restore plans remain disabled because these stores require driver-specific migration commands."}
             </div>
 
@@ -938,7 +938,7 @@ export function SchemaSnapshotDialog({
                 supportsRestorePlan
                   ? "Compare the selected schema snapshot with live metadata"
                   : identity?.driver === "sqlite"
-                    ? "Compare the selected schema snapshot and generate a blocked rebuild review"
+                    ? "Compare the selected schema snapshot and generate a guarded rebuild plan"
                     : "Compare document or search metadata without generating restore commands"
               }
               onClick={() => void compare()}

@@ -1001,6 +1001,18 @@ impl ConnectionManager {
         driver.execute_parameterized_batch(statements).await
     }
 
+    pub async fn execute_sqlite_rebuild_batch(
+        &self,
+        id: &str,
+        statements: &[ParameterizedStatement],
+        backup_destination: &std::path::Path,
+    ) -> Result<super::driver::SqliteRebuildReceipt> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .execute_sqlite_rebuild_batch(statements, backup_destination)
+            .await
+    }
+
     pub async fn execute_database_parameterized_batch(
         &self,
         id: &str,

@@ -1,4 +1,6 @@
-use crate::core::driver::{DatabaseDriver, LocalDatabaseBackupControl, LocalDatabaseFileReceipt};
+use crate::core::driver::{
+    DatabaseDriver, LocalDatabaseBackupControl, LocalDatabaseFileReceipt, SqliteRebuildReceipt,
+};
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
     QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
@@ -16,7 +18,7 @@ use sqlx::sqlite::{
     SqliteRow,
 };
 use sqlx::{Column, ConnectOptions, Connection, Executor, Pool, Row, Sqlite, TypeInfo};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -369,6 +371,112 @@ impl DatabaseDriver for SqliteDriver {
         Ok(affected)
     }
 
+    async fn execute_sqlite_rebuild_batch(
+        &self,
+        statements: &[ParameterizedStatement],
+        backup_destination: &Path,
+    ) -> Result<SqliteRebuildReceipt> {
+        if self.read_only {
+            return Err(anyhow!(
+                "SQLite schema rebuild is unavailable through a read-only connection"
+            ));
+        }
+        validate_sqlite_rebuild_statements(statements)?;
+        let _operation = self.file_operation.lock().await;
+        self.ensure_no_active_transactions().await?;
+        let pool = self.pool().await?;
+        prepare_backup_destination(&pool, backup_destination).await?;
+        let mut connection = pool.acquire().await?;
+        let foreign_keys_enabled = sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+            .fetch_one(&mut *connection)
+            .await?
+            != 0;
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
+            .await?;
+        if sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+            .fetch_one(&mut *connection)
+            .await?
+            != 0
+        {
+            return Err(anyhow!(
+                "SQLite refused to suspend foreign-key enforcement for the reviewed rebuild"
+            ));
+        }
+        let memory_backup = if self.connection_string == "sqlite::memory:" {
+            Some(publish_sqlite_backup(&mut connection, backup_destination).await?)
+        } else {
+            None
+        };
+        (&mut *connection).execute("BEGIN IMMEDIATE").await?;
+
+        let apply_result: Result<SqliteRebuildReceipt> = async {
+            let backup = match memory_backup {
+                Some(receipt) => receipt,
+                None => {
+                    let mut backup_source = pool.acquire().await?;
+                    publish_sqlite_backup(&mut backup_source, backup_destination).await?
+                }
+            };
+
+            for statement in statements {
+                let mut query = sqlx::query(&statement.sql).persistent(false);
+                for parameter in &statement.params {
+                    query = bind_sqlite_parameter(query, parameter)?;
+                }
+                query.execute(&mut *connection).await?;
+            }
+            if sqlx::query("PRAGMA foreign_key_check")
+                .fetch_optional(&mut *connection)
+                .await?
+                .is_some()
+            {
+                return Err(anyhow!(
+                    "SQLite foreign_key_check found a violation; the rebuild was rolled back"
+                ));
+            }
+            (&mut *connection).execute("COMMIT").await?;
+            Ok(SqliteRebuildReceipt {
+                backup,
+                statements_applied: statements.len(),
+            })
+        }
+        .await;
+
+        if apply_result.is_err() {
+            let _ = (&mut *connection).execute("ROLLBACK").await;
+        }
+        let restore_result = if foreign_keys_enabled {
+            async {
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *connection)
+                    .await?;
+                if sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                    .fetch_one(&mut *connection)
+                    .await?
+                    == 0
+                {
+                    return Err(anyhow!(
+                        "SQLite foreign-key enforcement could not be restored after rebuild"
+                    ));
+                }
+                Ok(())
+            }
+            .await
+        } else {
+            Ok(())
+        };
+        match (apply_result, restore_result) {
+            (Ok(receipt), Ok(())) => Ok(receipt),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(restore_error)) => Err(anyhow!(
+                "{error}; SQLite foreign-key setting restoration also failed: {restore_error}"
+            )),
+        }
+    }
+
     async fn begin_transaction(&self, session_id: &str, _schema: Option<&str>) -> Result<()> {
         let pool = self.pool().await?;
         let mut connection = pool.acquire().await?;
@@ -631,28 +739,34 @@ impl DatabaseDriver for SqliteDriver {
         let rows = sqlx::query(&statement)
             .fetch_all(&self.pool().await?)
             .await?;
-        Ok(rows
-            .iter()
-            .map(|row| ConstraintInfo {
-                name: format!(
-                    "fk_{}_{}",
-                    table,
-                    row.try_get::<i64, _>("id").unwrap_or_default()
-                ),
-                constraint_type: "FOREIGN KEY".to_string(),
-                columns: row
-                    .try_get("from")
-                    .map(|value| vec![value])
-                    .unwrap_or_default(),
-                referenced_schema: Some(schema_name.to_string()),
-                referenced_table: row.try_get("table").ok(),
-                referenced_columns: row
-                    .try_get("to")
-                    .map(|value| vec![value])
-                    .unwrap_or_default(),
-                definition: None,
-                on_update: row.try_get("on_update").ok(),
-                on_delete: row.try_get("on_delete").ok(),
+        let mut grouped = BTreeMap::<i64, Vec<&SqliteRow>>::new();
+        for row in &rows {
+            grouped
+                .entry(row.try_get::<i64, _>("id").unwrap_or_default())
+                .or_default()
+                .push(row);
+        }
+        Ok(grouped
+            .into_iter()
+            .map(|(id, mut rows)| {
+                rows.sort_by_key(|row| row.try_get::<i64, _>("seq").unwrap_or_default());
+                ConstraintInfo {
+                    name: format!("fk_{table}_{id}"),
+                    constraint_type: "FOREIGN KEY".to_string(),
+                    columns: rows
+                        .iter()
+                        .filter_map(|row| row.try_get("from").ok())
+                        .collect(),
+                    referenced_schema: Some(schema_name.to_string()),
+                    referenced_table: rows.first().and_then(|row| row.try_get("table").ok()),
+                    referenced_columns: rows
+                        .iter()
+                        .filter_map(|row| row.try_get("to").ok())
+                        .collect(),
+                    definition: None,
+                    on_update: rows.first().and_then(|row| row.try_get("on_update").ok()),
+                    on_delete: rows.first().and_then(|row| row.try_get("on_delete").ok()),
+                }
             })
             .collect())
     }
@@ -670,11 +784,79 @@ impl SqliteDriver {
     }
 }
 
+pub(crate) fn validate_sqlite_rebuild_statements(
+    statements: &[ParameterizedStatement],
+) -> Result<()> {
+    if statements.is_empty() {
+        return Err(anyhow!("SQLite rebuild contains no executable statements"));
+    }
+    for statement in statements {
+        if !statement.params.is_empty() {
+            return Err(anyhow!(
+                "SQLite rebuild DDL must not contain caller-supplied parameters"
+            ));
+        }
+        let sql = statement.sql.trim();
+        if sql.is_empty() || sql.contains('\0') {
+            return Err(anyhow!("SQLite rebuild contains an invalid statement"));
+        }
+        let split = split_sql_statements(sql, StatementScanDialect::Postgres);
+        if split.len() != 1 {
+            return Err(anyhow!(
+                "SQLite rebuild statements must contain exactly one SQL statement"
+            ));
+        }
+        let first_keyword = split[0]
+            .trim_start()
+            .split(|character: char| character.is_ascii_whitespace() || character == '(')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        if !matches!(
+            first_keyword.as_str(),
+            "CREATE" | "INSERT" | "DROP" | "ALTER"
+        ) {
+            return Err(anyhow!(
+                "SQLite rebuild contains an unsupported {first_keyword} statement"
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn copy_sqlite_database(
     source: &mut SqliteConnection,
     destination: &mut SqliteConnection,
 ) -> Result<()> {
     copy_sqlite_database_controlled(source, destination, None).await
+}
+
+async fn publish_sqlite_backup(
+    source: &mut SqliteConnection,
+    destination: &Path,
+) -> Result<LocalDatabaseFileReceipt> {
+    let temporary = temporary_backup_path(destination)?;
+    let result = async {
+        let options = SqliteConnectOptions::new()
+            .filename(&temporary)
+            .create_if_missing(true)
+            .disable_statement_logging();
+        let mut backup = SqliteConnection::connect_with(&options).await?;
+        copy_sqlite_database(source, &mut backup).await?;
+        let integrity_check = sqlite_connection_integrity(&mut backup).await?;
+        backup.close().await?;
+        sync_file(&temporary).await?;
+        replace_backup_file(&temporary, destination)?;
+        Ok(LocalDatabaseFileReceipt {
+            byte_len: std::fs::metadata(destination)?.len(),
+            integrity_check,
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 async fn copy_sqlite_database_controlled(
@@ -1075,6 +1257,25 @@ mod tests {
             .any(|column| column.name == "name"));
     }
 
+    #[tokio::test]
+    async fn sqlite_composite_foreign_keys_preserve_column_order_and_actions() {
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query(
+                "CREATE TABLE parents (tenant_id INTEGER, id INTEGER, PRIMARY KEY (tenant_id, id)); CREATE TABLE children (tenant_id INTEGER, parent_id INTEGER, FOREIGN KEY (tenant_id, parent_id) REFERENCES parents (tenant_id, id) ON UPDATE CASCADE ON DELETE SET NULL);",
+            )
+            .await
+            .unwrap();
+
+        let constraints = driver.get_constraints("main", "children").await.unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].columns, vec!["tenant_id", "parent_id"]);
+        assert_eq!(constraints[0].referenced_columns, vec!["tenant_id", "id"]);
+        assert_eq!(constraints[0].on_update.as_deref(), Some("CASCADE"));
+        assert_eq!(constraints[0].on_delete.as_deref(), Some("SET NULL"));
+    }
+
     #[test]
     fn readonly_sqlite_driver_rejects_in_memory_targets() {
         assert!(SqliteDriver::new_read_only(":memory:").is_err());
@@ -1136,6 +1337,172 @@ mod tests {
         restored.connect().await.unwrap();
         let rows = restored.query("SELECT value FROM entries").await.unwrap();
         assert_eq!(rows[0].rows[0][0], Value::String("snapshot".to_string()));
+    }
+
+    #[tokio::test]
+    async fn sqlite_rebuild_publishes_backup_and_restores_foreign_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("before-rebuild.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query(
+                "PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id)); INSERT INTO parents VALUES (1, 'before'); INSERT INTO children VALUES (1, 1);",
+            )
+            .await
+            .unwrap();
+        let statements = vec![
+            ParameterizedStatement {
+                sql: "CREATE TABLE \"__oxide_rebuild_parents\" (\"id\" INTEGER PRIMARY KEY, \"name\" TEXT NOT NULL, \"email\" TEXT)".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "INSERT INTO \"__oxide_rebuild_parents\" (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "DROP TABLE \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "ALTER TABLE \"__oxide_rebuild_parents\" RENAME TO \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+        ];
+
+        let receipt = driver
+            .execute_sqlite_rebuild_batch(&statements, &backup_path)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.statements_applied, statements.len());
+        assert_eq!(receipt.backup.integrity_check, "ok");
+        assert!(backup_path.is_file());
+        assert!(driver
+            .get_columns("main", "parents")
+            .await
+            .unwrap()
+            .iter()
+            .any(|column| column.name == "email"));
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&driver.pool().await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+
+        let mut backup = SqliteDriver::new(backup_path.to_string_lossy().as_ref());
+        backup.connect().await.unwrap();
+        assert!(!backup
+            .get_columns("main", "parents")
+            .await
+            .unwrap()
+            .iter()
+            .any(|column| column.name == "email"));
+    }
+
+    #[tokio::test]
+    async fn file_sqlite_rebuild_backs_up_through_a_separate_snapshot_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("live.sqlite");
+        let backup_path = directory.path().join("before-rebuild.sqlite");
+        let mut driver = SqliteDriver::new(database_path.to_string_lossy().as_ref());
+        driver.connect().await.unwrap();
+        driver
+            .query(
+                "CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO entries VALUES (1, 'before');",
+            )
+            .await
+            .unwrap();
+        let statements = vec![
+            ParameterizedStatement {
+                sql: "CREATE TABLE \"__oxide_rebuild_entries\" (\"id\" INTEGER PRIMARY KEY, \"value\" TEXT NOT NULL, \"note\" TEXT)".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "INSERT INTO \"__oxide_rebuild_entries\" (\"id\", \"value\") SELECT \"id\", \"value\" FROM \"entries\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "DROP TABLE \"entries\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "ALTER TABLE \"__oxide_rebuild_entries\" RENAME TO \"entries\"".to_string(),
+                params: Vec::new(),
+            },
+        ];
+
+        driver
+            .execute_sqlite_rebuild_batch(&statements, &backup_path)
+            .await
+            .unwrap();
+
+        assert!(driver
+            .get_columns("main", "entries")
+            .await
+            .unwrap()
+            .iter()
+            .any(|column| column.name == "note"));
+        let mut backup = SqliteDriver::new(backup_path.to_string_lossy().as_ref());
+        backup.connect().await.unwrap();
+        assert!(!backup
+            .get_columns("main", "entries")
+            .await
+            .unwrap()
+            .iter()
+            .any(|column| column.name == "note"));
+        assert_eq!(
+            backup.query("SELECT value FROM entries").await.unwrap()[0].rows,
+            vec![vec![Value::String("before".to_string())]]
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_rebuild_rolls_back_when_foreign_key_check_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("failed-rebuild.sqlite");
+        let mut driver = SqliteDriver::new(":memory:");
+        driver.connect().await.unwrap();
+        driver
+            .query(
+                "PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id)); INSERT INTO parents VALUES (1); INSERT INTO children VALUES (1, 1);",
+            )
+            .await
+            .unwrap();
+        let statements = vec![
+            ParameterizedStatement {
+                sql: "CREATE TABLE \"__oxide_rebuild_parents\" (\"id\" INTEGER PRIMARY KEY)"
+                    .to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "DROP TABLE \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+            ParameterizedStatement {
+                sql: "ALTER TABLE \"__oxide_rebuild_parents\" RENAME TO \"parents\"".to_string(),
+                params: Vec::new(),
+            },
+        ];
+
+        let error = driver
+            .execute_sqlite_rebuild_batch(&statements, &backup_path)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("foreign_key_check"));
+        assert!(backup_path.is_file());
+        assert_eq!(
+            driver.query("SELECT id FROM parents").await.unwrap()[0].rows,
+            vec![vec![Value::from(1)]]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&driver.pool().await.unwrap())
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

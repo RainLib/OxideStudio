@@ -2088,6 +2088,9 @@ export interface SchemaRollbackArtifact {
   changeCount: number;
   requiresManualReview: boolean;
   sql?: string | null;
+  backupPath?: string | null;
+  backupByteLen?: number | null;
+  backupIntegrityCheck?: string | null;
 }
 
 export interface SchemaMigrationVerification {

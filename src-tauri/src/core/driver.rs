@@ -108,6 +108,16 @@ pub struct LocalDatabaseFileReceipt {
     pub integrity_check: String,
 }
 
+/// Receipt for one Host-reviewed SQLite table rebuild. The driver owns the
+/// backup, foreign-key suspension, transaction, integrity check, and pragma
+/// restoration boundary so callers cannot accidentally split those steps
+/// across pooled connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteRebuildReceipt {
+    pub backup: LocalDatabaseFileReceipt,
+    pub statements_applied: usize,
+}
+
 /// Process-local control shared by a scheduled backup command and the native
 /// driver. It contains no path, SQL, or credentials and only exposes bounded
 /// progress plus cooperative cancellation.
@@ -357,6 +367,19 @@ pub trait DatabaseDriver: Send + Sync {
         Err(anyhow!(
             "Parameterized batch execution is not implemented for this driver"
         ))
+    }
+
+    /// Execute an approved SQLite rebuild against one physical connection.
+    /// Implementations must publish a verified backup before the first schema
+    /// mutation, run every statement in one transaction, reject any
+    /// `foreign_key_check` row, and restore the connection's original
+    /// `foreign_keys` setting before returning.
+    async fn execute_sqlite_rebuild_batch(
+        &self,
+        _statements: &[ParameterizedStatement],
+        _backup_destination: &Path,
+    ) -> Result<SqliteRebuildReceipt> {
+        Err(unsupported_driver_feature("SQLite atomic schema rebuild"))
     }
 
     /// Execute a batch of parameterized mutations atomically against an

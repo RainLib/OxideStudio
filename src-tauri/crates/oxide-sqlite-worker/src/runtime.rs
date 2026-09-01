@@ -793,7 +793,13 @@ fn backup(
     }
     let temporary = format!("{destination}.oxide-part");
     let _ = std::fs::remove_file(&temporary);
-    let result = backup_to_path(connection, &temporary, cancelled);
+    // A reviewed schema rebuild holds BEGIN IMMEDIATE on the worker's primary
+    // connection before requesting its pre-change backup. SQLite's online
+    // backup API cannot read from that same write-transaction connection. A
+    // separate read-only connection observes the last committed snapshot while
+    // the primary connection prevents another writer from racing the backup.
+    let result = backup_source_connection(connection)
+        .and_then(|source| backup_to_path(&source, &temporary, cancelled));
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temporary);
         let code = if cancelled.load(Ordering::Acquire) {
@@ -822,6 +828,28 @@ fn backup(
         byte_len,
         integrity_check: integrity,
     }
+}
+
+fn backup_source_connection(connection: &Connection) -> Result<Connection, String> {
+    let source_path: String = connection
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to resolve the SQLite source file: {error}"))?;
+    validate_absolute_file_path(&source_path)?;
+    let source = Connection::open_with_flags(
+        source_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Failed to open the SQLite backup source: {error}"))?;
+    source
+        .busy_timeout(Duration::from_secs(10))
+        .map_err(|error| format!("Failed to configure the SQLite backup source: {error}"))?;
+    Ok(source)
 }
 
 fn restore(
@@ -1118,6 +1146,121 @@ mod tests {
                 .unwrap(),
             1
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn backup_uses_the_committed_snapshot_during_an_immediate_transaction() {
+        let (directory, database) = temporary_database();
+        let backup = directory.join("pre-rebuild.db");
+        let responses = run_requests(
+            [
+                request(
+                    1,
+                    WorkerOperation::Open {
+                        path: database.to_string_lossy().into(),
+                        read_only: false,
+                    },
+                ),
+                request(
+                    2,
+                    WorkerOperation::Execute {
+                        sql: "INSERT INTO items(name) VALUES ('committed')".into(),
+                        parameters: vec![],
+                    },
+                ),
+                request(
+                    3,
+                    WorkerOperation::Execute {
+                        sql: "BEGIN IMMEDIATE".into(),
+                        parameters: vec![],
+                    },
+                ),
+                request(
+                    4,
+                    WorkerOperation::Backup {
+                        destination: backup.to_string_lossy().into(),
+                    },
+                ),
+                request(
+                    5,
+                    WorkerOperation::Execute {
+                        sql: "INSERT INTO items(name) VALUES ('uncommitted')".into(),
+                        parameters: vec![],
+                    },
+                ),
+                request(
+                    6,
+                    WorkerOperation::Execute {
+                        sql: "ROLLBACK".into(),
+                        parameters: vec![],
+                    },
+                ),
+                request(7, WorkerOperation::Close),
+            ]
+            .concat(),
+        );
+
+        assert!(matches!(responses[3].body, WorkerResponseBody::File { .. }));
+        let backup_connection = Connection::open(&backup).unwrap();
+        assert_eq!(
+            backup_connection
+                .query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backup_connection
+                .query_row("SELECT name FROM items", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "committed"
+        );
+        drop(backup_connection);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn execute_operation_accepts_foreign_key_pragma_assignments() {
+        let (directory, database) = temporary_database();
+        let responses = run_requests(
+            [
+                request(
+                    1,
+                    WorkerOperation::Open {
+                        path: database.to_string_lossy().into(),
+                        read_only: false,
+                    },
+                ),
+                request(
+                    2,
+                    WorkerOperation::Execute {
+                        sql: "PRAGMA foreign_keys = ON".into(),
+                        parameters: vec![],
+                    },
+                ),
+                request(
+                    3,
+                    WorkerOperation::Query {
+                        sql: "PRAGMA foreign_keys".into(),
+                        parameters: vec![],
+                        max_rows: Some(1),
+                    },
+                ),
+                request(4, WorkerOperation::Close),
+            ]
+            .concat(),
+        );
+
+        assert!(matches!(
+            responses[1].body,
+            WorkerResponseBody::Result { .. }
+        ));
+        match &responses[2].body {
+            WorkerResponseBody::Result { rows, .. } => {
+                assert_eq!(rows, &vec![vec![json!(1)]]);
+            }
+            other => panic!("unexpected foreign key pragma response: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(directory);
     }
 

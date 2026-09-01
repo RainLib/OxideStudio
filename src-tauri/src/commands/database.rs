@@ -360,10 +360,11 @@ fn schema_migration_capability_mode(
             None => SchemaMigrationCapabilityMode::ReviewOnly,
         };
     }
-    match DatabaseKind::from_str(driver) {
-        Ok(DatabaseKind::Postgres) => SchemaMigrationCapabilityMode::Transactional,
-        Ok(DatabaseKind::Mysql) => SchemaMigrationCapabilityMode::NonTransactional,
-        Err(_) => SchemaMigrationCapabilityMode::ReviewOnly,
+    match canonical_driver_name(driver) {
+        Some("postgres") => SchemaMigrationCapabilityMode::Transactional,
+        Some("mysql") => SchemaMigrationCapabilityMode::NonTransactional,
+        Some("sqlite") => SchemaMigrationCapabilityMode::Transactional,
+        _ => SchemaMigrationCapabilityMode::ReviewOnly,
     }
 }
 
@@ -1537,6 +1538,20 @@ mod tests {
             },
         )
         .unwrap();
+        let sqlite = connection_database_capability_context(
+            "sqlite-1".to_string(),
+            LiveConnectionCapabilitySnapshot {
+                driver_id: Some("sqlite".to_string()),
+                managed: false,
+                external_driver_id: None,
+                package_version: None,
+                package_capabilities: None,
+                server_version: Some("3.50.4".to_string()),
+                semantic_schema_migration_mode: None,
+                has_exact_semantic_schema_migration_evidence: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             postgres.schema_migration_mode,
@@ -1545,6 +1560,10 @@ mod tests {
         assert_eq!(
             mysql.schema_migration_mode,
             SchemaMigrationCapabilityMode::NonTransactional
+        );
+        assert_eq!(
+            sqlite.schema_migration_mode,
+            SchemaMigrationCapabilityMode::Transactional
         );
     }
 

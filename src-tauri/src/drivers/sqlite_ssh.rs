@@ -1,5 +1,7 @@
 use crate::core::config::{RemoteSqliteSshConfig, SqliteWorkerPlacement, SshTunnelConfig};
-use crate::core::driver::{DatabaseDriver, LocalDatabaseBackupControl, LocalDatabaseFileReceipt};
+use crate::core::driver::{
+    DatabaseDriver, LocalDatabaseBackupControl, LocalDatabaseFileReceipt, SqliteRebuildReceipt,
+};
 use crate::core::protocol::{
     ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo, ParameterizedStatement, QueryParameter,
     QueryResult, TableInfo, DEFAULT_QUERY_RESULT_ROW_LIMIT,
@@ -206,6 +208,25 @@ impl RemoteSqliteDriver {
         worker_query_result(sql, body)
     }
 
+    async fn run_execute_statement(
+        &self,
+        query_id: Option<&str>,
+        sql: &str,
+        parameters: &[QueryParameter],
+    ) -> Result<QueryResult> {
+        let body = self
+            .client
+            .roundtrip_tracked(
+                query_id,
+                WorkerOperation::Execute {
+                    sql: sql.to_string(),
+                    parameters: worker_parameters(parameters),
+                },
+            )
+            .await?;
+        worker_query_result(sql, body)
+    }
+
     async fn run_script(&self, query_id: Option<&str>, sql: &str) -> Result<Vec<QueryResult>> {
         let statements = split_sql_statements(sql, StatementScanDialect::Postgres);
         let mut results = Vec::with_capacity(statements.len());
@@ -241,6 +262,14 @@ impl RemoteSqliteDriver {
         let _file_operation = self.file_operation.lock().await;
         let _operation = self.operation_gate.lock().await;
         self.require_no_transaction("backup").await?;
+        self.backup_controlled_locked(destination, control).await
+    }
+
+    async fn backup_controlled_locked(
+        &self,
+        destination: &Path,
+        control: &LocalDatabaseBackupControl,
+    ) -> Result<LocalDatabaseFileReceipt> {
         if control.is_cancelled() {
             bail!("SQLite backup was cancelled");
         }
@@ -396,6 +425,107 @@ impl DatabaseDriver for RemoteSqliteDriver {
         }
         self.run_statement(None, "COMMIT", &[]).await?;
         Ok(affected)
+    }
+
+    async fn execute_sqlite_rebuild_batch(
+        &self,
+        statements: &[ParameterizedStatement],
+        backup_destination: &Path,
+    ) -> Result<SqliteRebuildReceipt> {
+        if self.read_only {
+            bail!("SQLite schema rebuild is unavailable through a read-only remote connection");
+        }
+        super::sqlite::validate_sqlite_rebuild_statements(statements)?;
+        let _file_operation = self.file_operation.lock().await;
+        let _operation = self.operation_gate.lock().await;
+        self.require_no_transaction("schema rebuild").await?;
+        let foreign_keys_enabled = self
+            .run_statement(None, "PRAGMA foreign_keys", &[])
+            .await?
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            != 0;
+        self.run_execute_statement(None, "PRAGMA foreign_keys = OFF", &[])
+            .await?;
+        let suspended = self
+            .run_statement(None, "PRAGMA foreign_keys", &[])
+            .await?
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1)
+            == 0;
+        if !suspended {
+            bail!(
+                "Remote SQLite refused to suspend foreign-key enforcement for the reviewed rebuild"
+            );
+        }
+        self.run_statement(None, "BEGIN IMMEDIATE", &[]).await?;
+        let apply_result: Result<SqliteRebuildReceipt> = async {
+            let backup = self
+                .backup_controlled_locked(
+                    backup_destination,
+                    &LocalDatabaseBackupControl::default(),
+                )
+                .await?;
+            for statement in statements {
+                self.run_statement(None, &statement.sql, &statement.params)
+                    .await?;
+            }
+            if !self
+                .run_statement(None, "PRAGMA foreign_key_check", &[])
+                .await?
+                .rows
+                .is_empty()
+            {
+                bail!("Remote SQLite foreign_key_check found a violation; the rebuild was rolled back");
+            }
+            self.run_statement(None, "COMMIT", &[]).await?;
+            Ok(SqliteRebuildReceipt {
+                backup,
+                statements_applied: statements.len(),
+            })
+        }
+        .await;
+        if apply_result.is_err() {
+            let _ = self.run_statement(None, "ROLLBACK", &[]).await;
+        }
+        let restore_result = if foreign_keys_enabled {
+            async {
+                self.run_execute_statement(None, "PRAGMA foreign_keys = ON", &[])
+                    .await?;
+                let restored = self
+                    .run_statement(None, "PRAGMA foreign_keys", &[])
+                    .await?
+                    .rows
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+                    != 0;
+                if !restored {
+                    bail!(
+                        "Remote SQLite foreign-key enforcement could not be restored after rebuild"
+                    );
+                }
+                Ok(())
+            }
+            .await
+        } else {
+            Ok(())
+        };
+        match (apply_result, restore_result) {
+            (Ok(receipt), Ok(())) => Ok(receipt),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(restore_error)) => Err(anyhow!(
+                "{error}; remote SQLite foreign-key setting restoration also failed: {restore_error}"
+            )),
+        }
     }
 
     async fn begin_transaction(&self, session_id: &str, _schema: Option<&str>) -> Result<()> {

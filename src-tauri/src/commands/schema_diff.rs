@@ -3,7 +3,7 @@ use crate::commands::database_admin::events::{
     DatabaseAdminEventSchedule,
 };
 use crate::core::{
-    dialect::{database_spec_for_driver, DatabaseKind},
+    dialect::{canonical_driver_name, database_spec_for_driver},
     manager::ConnectionManager,
     protocol::{ParameterizedStatement, QueryResult, Response},
     schema_diff::{
@@ -27,11 +27,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    str::FromStr,
+    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 const SNAPSHOT_METADATA_CONCURRENCY: usize = 6;
@@ -132,6 +132,41 @@ async fn capture_native_view_definition(
     }
     .map_err(|error| error.to_string())?;
     Ok(query_native_view_definition(&results))
+}
+
+fn sqlite_table_definition_query(driver: &str, schema: &str, table: &str) -> Option<String> {
+    (canonical_driver_name(driver) == Some("sqlite")).then(|| {
+        let schema = format!("\"{}\"", schema.replace('"', "\"\""));
+        let table = sql_string_literal(table);
+        format!(
+            "SELECT sql AS definition FROM {schema}.sqlite_schema \
+             WHERE type = 'table' AND name = {table} AND sql IS NOT NULL LIMIT 1;"
+        )
+    })
+}
+
+async fn capture_sqlite_table_definition(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    driver: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Option<String>, String> {
+    let Some(sql) = sqlite_table_definition_query(driver, schema, table) else {
+        return Ok(None);
+    };
+    let results = manager
+        .query(connection_id, &sql, Some(schema.to_string()), None, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(results
+        .first()
+        .and_then(|result| result.rows.first())
+        .and_then(|row| row.first())
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty())
+        .map(str::to_string))
 }
 
 fn postgres_view_dependency_query(schema: &str) -> String {
@@ -982,19 +1017,47 @@ fn migration_is_active(id: &str) -> bool {
 enum SchemaMigrationExecutionMode {
     Transactional,
     NonTransactional,
+    SqliteRebuild,
 }
 
 fn schema_migration_execution_mode(driver: &str) -> Option<SchemaMigrationExecutionMode> {
     // Resolve aliases through the same dialect registry that generated the
     // migration plan. This keeps MariaDB and future PostgreSQL/MySQL family
     // aliases from silently losing their explicit transaction semantics.
-    match DatabaseKind::from_str(driver).ok()? {
-        DatabaseKind::Postgres => Some(SchemaMigrationExecutionMode::Transactional),
+    match canonical_driver_name(driver)? {
+        "postgres" => Some(SchemaMigrationExecutionMode::Transactional),
         // MySQL DDL may commit implicitly. It is still useful to apply a
         // reviewed plan, but it must run in an explicit statement-by-statement
         // mode with a persistent progress journal.
-        DatabaseKind::Mysql => Some(SchemaMigrationExecutionMode::NonTransactional),
+        "mysql" => Some(SchemaMigrationExecutionMode::NonTransactional),
+        "sqlite" => Some(SchemaMigrationExecutionMode::SqliteRebuild),
+        _ => None,
     }
+}
+
+fn sqlite_migration_backup_path(app: &AppHandle, journal_id: &str) -> Result<PathBuf, String> {
+    let safe_id = journal_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect::<String>();
+    if safe_id.is_empty() {
+        return Err("SQLite migration journal identity is invalid".to_string());
+    }
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Cannot resolve SQLite migration backup directory: {error}"))?
+        .join("schema-migration-backups");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Cannot create SQLite migration backup directory: {error}"))?;
+    Ok(directory.join(format!("{safe_id}.sqlite")))
 }
 
 fn ensure_host_schema_migration_capability(
@@ -1051,6 +1114,12 @@ pub struct SchemaRollbackArtifact {
     pub change_count: usize,
     pub requires_manual_review: bool,
     pub sql: Option<String>,
+    #[serde(default)]
+    pub backup_path: Option<String>,
+    #[serde(default)]
+    pub backup_byte_len: Option<u64>,
+    #[serde(default)]
+    pub backup_integrity_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1281,6 +1350,32 @@ pub(crate) async fn capture_schema_snapshot_inner(
                         None,
                         Some(format!(
                             "View source for {schema}.{relation_name} was unavailable; this view remains review-only: {error}"
+                        )),
+                    ),
+                }
+            } else if canonical_driver_name(&driver) == Some("sqlite") {
+                match capture_sqlite_table_definition(
+                    &manager,
+                    &connection_id,
+                    &driver,
+                    &schema,
+                    &relation_name,
+                )
+                .await
+                {
+                    Ok(Some(definition)) => (Some(definition), None, None),
+                    Ok(None) => (
+                        None,
+                        None,
+                        Some(format!(
+                            "SQLite catalog definition for {schema}.{relation_name} was unavailable; rebuild execution remains blocked."
+                        )),
+                    ),
+                    Err(error) => (
+                        None,
+                        None,
+                        Some(format!(
+                            "SQLite catalog definition for {schema}.{relation_name} was unavailable; rebuild execution remains blocked: {error}"
                         )),
                     ),
                 }
@@ -2293,6 +2388,9 @@ async fn execute_external_schema_migration(
             change_count: 0,
             requires_manual_review: true,
             sql: None,
+            backup_path: None,
+            backup_byte_len: None,
+            backup_integrity_check: None,
         },
         verification: None,
         error: None,
@@ -2512,6 +2610,7 @@ async fn execute_external_schema_migration(
 
 #[tauri::command]
 pub async fn execute_schema_migration(
+    app: AppHandle,
     manager: State<'_, ConnectionManager>,
     meta_store: State<'_, MetaStore>,
     sessions: State<'_, ExternalSchemaMigrationSessionState>,
@@ -2634,7 +2733,7 @@ pub async fn execute_schema_migration(
     let Some(execution_mode) = schema_migration_execution_mode(&approved_plan.driver) else {
         return Ok(Response::err_with_details(
             "SCHEMA_MIGRATION_UNSAFE_DRIVER",
-            "Automatic migration apply is available only for PostgreSQL transactional plans and explicitly acknowledged MySQL non-transactional plans; open the reviewed SQL in a console for other drivers",
+            "Automatic migration apply is available only for PostgreSQL transactional plans, explicitly acknowledged MySQL non-transactional plans, and complete SQLite existing-table rebuild plans; open the reviewed SQL in a console for other drivers",
             false,
             Some(context),
         ));
@@ -2871,6 +2970,70 @@ pub async fn execute_schema_migration(
                 }
                 journal.committed_statements += 1;
                 persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+            }
+        }
+        SchemaMigrationExecutionMode::SqliteRebuild => {
+            let backup_path = match sqlite_migration_backup_path(&app, &journal.id) {
+                Ok(path) => path,
+                Err(error) => {
+                    journal.status = SchemaMigrationStatus::Failed;
+                    journal.finished_at = Some(current_timestamp_millis());
+                    journal.error = Some(error);
+                    persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+                    return Ok(Response::ok(journal));
+                }
+            };
+            journal.rollback.backup_path = Some(backup_path.to_string_lossy().into_owned());
+            persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+            match manager
+                .execute_sqlite_rebuild_batch(
+                    &fresh_target.connection_id,
+                    &statements,
+                    &backup_path,
+                )
+                .await
+            {
+                Ok(receipt) => {
+                    journal.committed_statements = receipt.statements_applied;
+                    journal.rollback.available = true;
+                    journal.rollback.reason = Some(
+                        "Restore the verified SQLite recovery backup to roll back this rebuild."
+                            .to_string(),
+                    );
+                    journal.rollback.change_count = 1;
+                    journal.rollback.requires_manual_review = true;
+                    journal.rollback.backup_byte_len = Some(receipt.backup.byte_len);
+                    journal.rollback.backup_integrity_check = Some(receipt.backup.integrity_check);
+                }
+                Err(error) => {
+                    if backup_path.is_file() {
+                        journal.rollback.available = true;
+                        journal.rollback.reason = Some(
+                            "The rebuild did not complete cleanly. A verified pre-change SQLite backup was retained; recapture the live target before deciding whether to restore it."
+                                .to_string(),
+                        );
+                        journal.rollback.change_count = 1;
+                        journal.rollback.requires_manual_review = true;
+                        journal.rollback.backup_byte_len = std::fs::metadata(&backup_path)
+                            .ok()
+                            .map(|metadata| metadata.len());
+                        journal.rollback.backup_integrity_check = Some("ok".to_string());
+                        // The driver requests rollback for every pre-commit
+                        // failure, but an I/O failure can also occur after the
+                        // commit or while restoring connection pragmas. Never
+                        // claim a rollback without recapturing the live schema.
+                        journal.status = SchemaMigrationStatus::VerificationFailed;
+                    } else {
+                        journal.rollback.backup_path = None;
+                        journal.status = SchemaMigrationStatus::Failed;
+                    }
+                    journal.finished_at = Some(current_timestamp_millis());
+                    journal.error = Some(format!(
+                        "SQLite did not complete the rebuild cleanly. The transaction rollback was requested, but the live target must be recaptured before retrying: {error}"
+                    ));
+                    persist_journal_or_warn(meta_store.inner(), &mut journal).await;
+                    return Ok(Response::ok(journal));
+                }
             }
         }
     }
@@ -3200,6 +3363,9 @@ fn build_rollback_artifact(
             change_count: 0,
             requires_manual_review: true,
             sql: None,
+            backup_path: None,
+            backup_byte_len: None,
+            backup_integrity_check: None,
         };
     }
 
@@ -3223,6 +3389,9 @@ fn build_rollback_artifact(
                 change_count: 0,
                 requires_manual_review: true,
                 sql: None,
+                backup_path: None,
+                backup_byte_len: None,
+                backup_integrity_check: None,
             };
         }
     };
@@ -3237,6 +3406,9 @@ fn build_rollback_artifact(
                     change_count: 0,
                     requires_manual_review: true,
                     sql: None,
+                    backup_path: None,
+                    backup_byte_len: None,
+                    backup_integrity_check: None,
                 };
             }
         };
@@ -3255,6 +3427,9 @@ fn build_rollback_artifact(
             .iter()
             .any(|change| change.manual_review || change.risk != SchemaChangeRisk::Safe),
         sql: (!blocked).then_some(reverse.migration_sql),
+        backup_path: None,
+        backup_byte_len: None,
+        backup_integrity_check: None,
     }
 }
 
@@ -3302,6 +3477,7 @@ fn current_timestamp_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::dialect::DatabaseKind;
     use crate::core::protocol::{ColumnDef, ColumnInfo, ConstraintInfo, IndexInfo};
     use serde_json::json;
 
@@ -3553,8 +3729,24 @@ mod tests {
             schema_migration_execution_mode("mariadb"),
             Some(SchemaMigrationExecutionMode::NonTransactional)
         );
-        assert_eq!(schema_migration_execution_mode("sqlite"), None);
+        assert_eq!(
+            schema_migration_execution_mode("sqlite"),
+            Some(SchemaMigrationExecutionMode::SqliteRebuild)
+        );
         assert_eq!(schema_migration_execution_mode("duckdb"), None);
+    }
+
+    #[test]
+    fn sqlite_table_definition_query_is_catalog_scoped_and_read_only() {
+        let sql = sqlite_table_definition_query("sqlite", "tenant\"data", "user's table")
+            .expect("SQLite should expose its catalog definition query");
+
+        assert!(sql.contains("FROM \"tenant\"\"data\".sqlite_schema"));
+        assert!(sql.contains("name = 'user''s table'"));
+        assert!(sql.contains("type = 'table'"));
+        assert!(sql.contains("LIMIT 1"));
+        assert!(!sql.to_ascii_uppercase().contains("PRAGMA"));
+        assert!(sqlite_table_definition_query("postgres", "public", "users").is_none());
     }
 
     #[test]
@@ -3710,6 +3902,9 @@ mod tests {
                 change_count: 0,
                 requires_manual_review: true,
                 sql: None,
+                backup_path: None,
+                backup_byte_len: None,
+                backup_integrity_check: None,
             },
             verification: None,
             error: None,

@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-01
-> DBX 参考提交：`fac018f16`（v0.6.0；最新功能提交 `c4cdcbc48`）
+> DBX 参考提交：`d4d3995be`（v0.6.0 后续 CI/文档提交；最新产品功能提交仍为 `c4cdcbc48`）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,11 +9,13 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新增量审计（`5d6f66777` → `fac018f16`）
+### 最新增量审计（`5d6f66777` → `d4d3995be`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
-| `fac018f16`、`b31b6845f`、`0d75456f8` | 发布 v0.6.0 与 packages 0.4.77 | 上游强制更新后的三个提交只调整 DBX 自身版本、lockfile 和发布元数据；最新功能提交仍为下列已审计的 `c4cdcbc48`，没有新的产品逻辑需要迁移。Oxide 不跟随 DBX 产品版本号，参考仓库已前移并固定到 `fac018f16`。 |
+| `d4d3995be`、`053f5f6dc` | release asset 同步并发化、按 module path 归属 agent release note | 只修改 DBX 自身 GitHub Actions，没有桌面、driver、LSP 或迁移运行时变化；Oxide 的 release/driver packaging workflow 有独立的矩阵、磁盘清理和 OSS 上传契约，不复制仓库专属发布脚本。 |
+| `7e3db73de` | 支持数据库文档补列 ArgoDB 与 InfluxDB 3 | 产品目录已对齐：Oxide 已将 ArgoDB 作为需要签名 JDBC package/evidence 的候选，并已实现 bundled InfluxDB 3 SQL HTTP runtime、metadata、LSP 方言路由与静态回归。此次 DBX 提交只改文档数组，没有新运行逻辑。 |
+| `fac018f16`、`b31b6845f`、`0d75456f8` | 发布 v0.6.0 与 packages 0.4.77 | 上游强制更新后的三个提交只调整 DBX 自身版本、lockfile 和发布元数据；最新产品功能提交仍为下列已审计的 `c4cdcbc48`，没有新的运行逻辑需要迁移。Oxide 不跟随 DBX 产品版本号。 |
 | `8187ef9ba`（历史性能缺口复核） | MySQL routine 编辑时增量复用 lexer/block 状态，避免每个内部分号重新扫描完整语句前缀造成 O(n²) | 已完成等价并减少中间状态：Oxide 的 Rust authoritative statement scanner 在既有单次 quote/comment-aware 遍历中直接识别 routine 的有界 16-word `CREATE` 前缀，并增量维护 `BEGIN`/`CASE`/`END IF|LOOP|REPEAT|WHILE` 块栈；不为 routine 另存持续增长的 token 数组。无 `DELIMITER` 的 compound procedure/function/trigger/event 保持一个 statement，显式 custom delimiter 与普通 `CREATE TABLE` 边界不变。20,000 条内部 `SET` 的回归覆盖线性扫描路径。DBX 位置：`apps/desktop/src/lib/sql/sqlStatementRanges.ts:mysqlRoutineTokensUpTo/advanceMysqlRoutineBlockCompleteness`。Oxide 位置：`src-tauri/src/core/statement.rs:MysqlRoutineScan/split_sql_statement_spans`。真实 MySQL/MariaDB routine 执行仍归统一数据库验证阶段。 |
 | `19f8736b6`（历史诊断缺口复核） | MySQL procedure/function 使用专用 syntax diagnostics，避免通用 SQL 语义分析误报 routine body | 已对齐并增加明确资源边界：Native/custom MySQL 编辑器使用 delimiter、quote、comment aware 的 O(n)/O(depth) 单次扫描，报告参数尾逗号、procedure 中非法 `RETURN`、function 中缺少表达式的 `RETURN`；`DELIMITER $$` 紧贴 `END`/`RETURN`、嵌套 `BEGIN`/`CASE`、多 routine 与普通 SQL 隔离均有回归。编辑输入按 180ms 合并，分析结果按 model/version 复用；仅 routine 精确范围内来自 `tree-sitter-sql` 的 `SYNTAX_ERROR/PARSE_ERROR` 被隐藏，OXIDE 安全/结构 inspection 继续显示。同步扫描上限为 4 MiB，超限 fail quiet；20,000 条内部语句验证不保留增长 token 列表。DBX 位置：`apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.vue:refreshSemanticDiagnostics`。Oxide 位置：`src/features/query-editor/model/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.tsx`。真实 MySQL 版本诊断与执行验证延期。 |
 | `1e9babca4`（历史性能缺口复核） | 超大 Oracle package body 不绘制 current-statement frame，避免逐行几何探测冻结 UI | 已完成等价并覆盖 Oxide 自身实现风险：Monaco 不是 CodeMirror layer，但旧实现会为 statement 每个逻辑行生成一个 whole-line decoration，并把整段 SQL 复制进 React DML preview state。现在 statement 跨度超过 500 行时不生成 frame decorations，也不发布 preview SQL；Rust authoritative range、10,000-range 版本缓存、执行/选择语义均不改变，正好位于上限的 statement 仍绘制。DBX 位置：`apps/desktop/src/lib/editor/codemirrorCurrentStatementFrameLayer.ts:MAX_FRAME_STATEMENT_LINES/currentStatementFrameRect`。Oxide 位置：`src/features/query-editor/model/currentStatementDecoration.ts:MAX_CURRENT_STATEMENT_FRAME_LINES/currentStatementLineFrames`、`hooks/useCurrentStatementDecoration.ts:decorate`。真实 WebView 滚动帧率验证延期。 |
@@ -295,8 +297,8 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 | T07 | 本阶段增强：持久化 transfer report 与 append baseline | `useExportTracker.ts` 有后台任务、失败明细上限和终态；DBX 当前主要是会话级任务 | `TableDataTransferReport` 已按项目和目标连接保存 terminal report；单表与多表执行都写入逐对象终态。Transfer 对话框显示目标的最近历史，并且仅在当前源端点/库/schema/表完全一致时可用历史记录预填一次重试。重试会生成新 transfer id，且仍强制重新 preview/确认。overwrite 成功后会在提交后只读核对目标行数；append 在 preview 捕获目标行数、将其绑定 confirmation token，并在提交后核对 `baseline + copied rows`。并发写入、计数不可读或溢出均只标为 `needsReview`，绝不伪装为失败或触发第二次写入。报告包含哈希 plan digest、端点标识、模式、追加/覆盖的目标基线、行数、批次、终态和安全错误摘要，不保存 URL/凭据/SQL/参数/行值 | 真实多表、并发写入和跨驱动迁移报告 fixture 仍待完成；不保存行值或凭据。 |
 | M01 | 部分对齐：schema snapshot/diff | `crates/dbx-core/src/schema.rs`、`schema_diff.rs`；`components/diff/*` | relation/index/constraint/routine signature snapshot/diff；PostgreSQL/MySQL 的 view relation 额外读取 catalog SELECT body，未获取到 source 时保留明确 warning。PostgreSQL materialized view 额外快照 `relispopulated`，缺失 relation 会用相同的填充状态创建；状态不可读或来自旧快照时强制 `WITH NO DATA` 并要求人工 refresh。其 source/population 状态变更会生成无 `CASCADE` 的 destructive、review-only `DROP MATERIALIZED VIEW` + `CREATE MATERIALIZED VIEW`，需显式 destructive approval；当同快照内所有普通依赖 view 未变且其 SELECT source 完整时，计划会显式按反向 drop / 正向 recreate 依赖链重建它们；任一不可安全重建的依赖会阻断 materialized view change。单独 refresh 则保留在 Explorer 的专用操作。PostgreSQL 同 schema 依赖写入 snapshot，并将同一计划中的 table/view DDL 拓扑排序；明确的 native PostgreSQL schema→schema 映射现可在 catalog-backed view/index/column/default `regclass`/constraint/FK/routine/trigger/sequence DDL 中受审阅地重写到目标 schema，字符串、注释和 dollar-quoted body 保持不变。相同 native dialect 的常规 view create/replace 生成 review-required DDL；PostgreSQL function/procedure、trigger、sequence 也在 catalog definition 可用时生成 review-required 原生 DDL。sequence 本体会排在捕获的 `nextval()` table dependency 之前；当 catalog 可读时，会在 owning relation 创建后通过独立 review change 恢复 `OWNED BY` 和整数 `setval` state。未调用/不可读 state 只保留结构，drop 和任何未捕获 definition 仍为 blocked manual review。新增 `schemaObjects` 快照及 create/drop/modify 差异，PostgreSQL sequence/trigger/domain/enum/composite/range/multirange/extension/partition 在可见时进入快照。 | 补跨数据库映射与真实 target conformance、materialized view 的权限/index/外部对象依赖 conformance、sequence `is_called`/权限降级的真实 fixture、逐产品 event/synonym/package，并为 MySQL/Oracle/SQL Server object source 建立同等的受审核 source/DDL conformance 与真实 fixture。 |
 | M02 | Host 产品主路径已对齐，逐产品实现/证据延期：migration apply | DBX `SchemaDiffDeployStep.vue`、`deployTxResult.ts` | PG transactional；MySQL journal + post verify。外置 sidecar 使用 descriptor-only semantic `plan/preflight/token-bound apply/verify`、签名/runtime/evidence 三门禁；Host-only 15 分钟单次 session 隐藏全部 sidecar token，执行前重抓 target，执行后同时要求 sidecar verify 与 Host recapture 通过。partial/count mismatch 强制失败；journal 不保存 token/DDL/原始 observed 文本 | 为每个外置产品实现协议并取得精确 package/entrypoint/platform/server-version evidence；没有证据的产品保持 review-only。 |
-| M03 | 部分对齐：SQLite rebuild review planner | DBX SQLite schema/transfer 与 backup 实现可作行为参考 | SQLite schema diff 现生成临时表→同名列复制→rename→兼容索引重建→`foreign_key_check` 的受限审阅产物；所有变化均 manual-review 且自动 apply 继续禁用。 | 验证备份、外键依赖/失败恢复、类型转换与完整 DDL 保真后，才可评估受控执行。 |
-| M04 | 本阶段增强、仍为部分对齐：跨产品 schema mapping | `transfer.rs:map_column_type`、`generate_create_table_ddl`、`convert_cross_family_object_ddl` | 单目标表创建使用显式 `<source>-to-<target>/v1` profile：同产品保留原类型并标记 exact/review；跨产品仅为 PostgreSQL/MySQL/SQLite 的已识别标量族生成 DDL，每列返回 exact/safe/review/unsupported；unsupported 不生成 DDL、无确认 token且后端拒绝执行，review 只能经显式预览和键入确认后执行。受支持的同产品 auto-increment/identity 会创建新的 target-owned generator，并明确不复制源 generator 名称和当前值；PostgreSQL bundled metadata 结构化区分 `GENERATED ALWAYS`、`BY DEFAULT` 与 sequence-backed serial，目标计划/确认 token/DDL 精确保留已证明的 mode；旧外置 payload 未证明 mode 且没有 `nextval()` evidence 时不重建 identity。跨产品、生成列、SQLite 非单一 INTEGER 主键等场景把源值物化为普通列。默认值现使用 Host-owned 审阅映射：同产品仅保留通过 16 KiB、有界单表达式扫描的原表达式；PostgreSQL/MySQL/SQLite 跨产品仅保留 NULL、布尔/数值/标准单引号字面量和 CURRENT_DATE/TIME/TIMESTAMP。生成列、`nextval()`、注释、语句分隔符、未闭合引用和其他产品函数均 fail closed 并显式标记 omitted。逐列保留状态、原因和最终 DDL 共同绑定确认 token，所有默认值计划提升为 Review。同 native PostgreSQL 或 MySQL-family、同表名的数据迁移可显式启用二级 schema-object 恢复：Host 从两端 catalog 冻结 index/constraint metadata，冲突时 fail closed，数据写入后按普通 constraint → index/comment → FK 顺序执行并把最终 DDL 纳入确认 token；同产品可保留 catalog-backed 定义，native PostgreSQL↔MySQL 则只从结构化 metadata 重建普通 BTREE、UNIQUE 和 FK，拒绝 CHECK 原表达式、expression/partial/include/comment/non-BTREE 索引、`NULLS NOT DISTINCT`、deferrable/match/validation 等未结构化语义。MySQL metadata 现在把 functional/prefix/descending key 标记为不可由纯列名恢复，不能再静默弱化。PostgreSQL 保持同事务，MySQL 在行提交后使用 T04 的逐语句部分完成回执。约束 backing index 不重复创建。任意 native SQLite→SQLite 新目标都读取 `sqlite_schema` 原始 table/index DDL，Host 重建目标 schema/table identity 并校验单语句、引号、注释、括号和允许的 table option；改名时只在词法证明的 `REFERENCES` target token 上重写自引用 FK，字符串、注释和外部表引用保持原样，schema-qualified 歧义引用 fail closed。显式索引保留 expression/filter 并在表改名时获得确定性的目标作用域名称，目标 index namespace 冲突会在预览期阻断；CHECK/FK/UNIQUE/generated/collation/STRICT/WITHOUT ROWID 与 expression/partial index 均在一个目标事务中执行。 | 仍需补充 owned sequence/当前值的跨产品映射、SQLite 既有表 rebuild、cross-product CHECK/trigger、advanced index/cast/function、扩展/自定义类型依赖和更多逐产品 profile；真实产品版本验证已记录到 deferred queue。 |
+| M03 | 逻辑已对齐，真实文件/SSH 验证延期：SQLite existing-table rebuild | DBX SQLite schema/transfer 与 backup 实现可作行为参考 | live snapshot 额外读取 `sqlite_schema` table definition 作为完整性证据；仅对 metadata 完整、可由同名列无损复制，且 catalog 证明不含无法精确重建的 CHECK/COLLATE/generated/AUTOINCREMENT/UNIQUE/STRICT/WITHOUT ROWID/deferrable/action、复合 PK 或高级 index 语义的 existing-table modify，生成临时表→复制→drop→rename→兼容索引重建的单一 review/destructive change。catalog-only drift 可见但保持 blocked；必填新列无 default、定义不完整、create/drop/view/product object 同样 fail closed。Host 执行前重抓 target 并校验 plan/fingerprint/确认短语；驱动独占文件操作，暂停并复核 FK、创建经完整性验证的迁移前 online backup、`BEGIN IMMEDIATE` 执行、`foreign_key_check`、commit/rollback 后恢复 FK。内存库在加写锁前从独占连接备份；文件库和 SSH worker 在写锁下从独立只读连接捕获稳定的已提交快照。备份回执写入持久 journal，异常结果不声称已回滚而要求重新捕获 live target。Renderer 禁止把 rebuild SQL 旁路打开到普通 Console。 | Rust 已覆盖 planner/catalog fail-closed、复合 FK metadata、内存成功/FK 失败回滚、真实本地文件 snapshot connection，以及 worker 在 `BEGIN IMMEDIATE` 下的 committed snapshot。真实 WAL/并发写入、低磁盘、commit/断连、SSH 下载和多平台恢复继续延期。 |
+| M04 | 本阶段增强、仍为部分对齐：跨产品 schema mapping | `transfer.rs:map_column_type`、`generate_create_table_ddl`、`convert_cross_family_object_ddl` | 单目标表创建使用显式 `<source>-to-<target>/v1` profile：同产品保留原类型并标记 exact/review；跨产品仅为 PostgreSQL/MySQL/SQLite 的已识别标量族生成 DDL，每列返回 exact/safe/review/unsupported；unsupported 不生成 DDL、无确认 token且后端拒绝执行，review 只能经显式预览和键入确认后执行。受支持的同产品 auto-increment/identity 会创建新的 target-owned generator，并明确不复制源 generator 名称和当前值；PostgreSQL bundled metadata 结构化区分 `GENERATED ALWAYS`、`BY DEFAULT` 与 sequence-backed serial，目标计划/确认 token/DDL 精确保留已证明的 mode；旧外置 payload 未证明 mode 且没有 `nextval()` evidence 时不重建 identity。跨产品、生成列、SQLite 非单一 INTEGER 主键等场景把源值物化为普通列。默认值现使用 Host-owned 审阅映射：同产品仅保留通过 16 KiB、有界单表达式扫描的原表达式；PostgreSQL/MySQL/SQLite 跨产品仅保留 NULL、布尔/数值/标准单引号字面量和 CURRENT_DATE/TIME/TIMESTAMP。生成列、`nextval()`、注释、语句分隔符、未闭合引用和其他产品函数均 fail closed 并显式标记 omitted。逐列保留状态、原因和最终 DDL 共同绑定确认 token，所有默认值计划提升为 Review。同 native PostgreSQL 或 MySQL-family、同表名的数据迁移可显式启用二级 schema-object 恢复：Host 从两端 catalog 冻结 index/constraint metadata，冲突时 fail closed，数据写入后按普通 constraint → index/comment → FK 顺序执行并把最终 DDL 纳入确认 token；同产品可保留 catalog-backed 定义，native PostgreSQL↔MySQL 则只从结构化 metadata 重建普通 BTREE、UNIQUE 和 FK，拒绝 CHECK 原表达式、expression/partial/include/comment/non-BTREE 索引、`NULLS NOT DISTINCT`、deferrable/match/validation 等未结构化语义。MySQL metadata 现在把 functional/prefix/descending key 标记为不可由纯列名恢复，不能再静默弱化。PostgreSQL 保持同事务，MySQL 在行提交后使用 T04 的逐语句部分完成回执。约束 backing index 不重复创建。任意 native SQLite→SQLite 新目标都读取 `sqlite_schema` 原始 table/index DDL，Host 重建目标 schema/table identity 并校验单语句、引号、注释、括号和允许的 table option；改名时只在词法证明的 `REFERENCES` target token 上重写自引用 FK，字符串、注释和外部表引用保持原样，schema-qualified 歧义引用 fail closed。显式索引保留 expression/filter 并在表改名时获得确定性的目标作用域名称，目标 index namespace 冲突会在预览期阻断；CHECK/FK/UNIQUE/generated/collation/STRICT/WITHOUT ROWID 与 expression/partial index 均在一个目标事务中执行。 | 仍需补充 owned sequence/当前值的跨产品映射、cross-product CHECK/trigger、advanced index/cast/function、扩展/自定义类型依赖和更多逐产品 profile；真实产品版本验证已记录到 deferred queue。 |
 
 ## 6. 架构与测试差距
 
@@ -334,7 +336,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
 1. 多表 transfer plan、FK 拓扑排序、cycle policy。
 2. sequence/identity/ownership preview 与 post-verify。
 3. 持久化 transfer report；import reject rows/resume；export backpressure/cancel/cleanup。
-4. SQLite rebuild 的 backup/FK/rollback runtime contract；签名 sidecar semantic migration 协议已完成，随后补逐产品实现与真实 evidence。
+4. SQLite rebuild 的 backup/FK/rollback runtime contract 已完成逻辑闭环；签名 sidecar semantic migration 协议已完成，随后补逐产品实现与真实 evidence。
 
 ### 批次 4：Explorer 与 Admin
 
@@ -820,3 +822,28 @@ Rust 回归覆盖 PostgreSQL→MySQL 的 BTREE/UNIQUE/FK 目标 SQL、源 dialec
 mapping，以及 expression index、CHECK、`NULLS NOT DISTINCT` 的精确阻断；前端纯模型覆盖双向 family
 入口、外置 package/SQLite/改名目标禁用和审阅文案。真实 PostgreSQL/MySQL/MariaDB 多版本、NULL 唯一
 语义、functional/prefix/descending index 和 post-commit failure 仍进入延期验证清单。
+
+## Phase 153 增量：SQLite 既有表的受控重建执行
+
+Oxide 将既有的 SQLite rebuild 审阅产物收紧为可执行闭集，并补齐不能由普通 SQL Console 保证的
+备份、事务和外键边界：
+
+- live snapshot 读取 `sqlite_schema` table definition 作为目录完整性证据。只有 metadata 完整、目标是
+  existing-table modify、所有数据都可从同名源列复制，且不含当前结构化协议无法精确保留的高级表/
+  索引语义的计划进入 Host 执行；目录定义缺失、catalog-only 高级 drift、新增必填且无 default 的列、
+  create/drop、view 和产品对象继续 review-only/blocked。
+- rebuild 作为一个 relation-level change 绑定 target fingerprint、review/destructive approval 与动态确认
+  短语；临时表、复制、drop、rename 和索引语句不包含 renderer 可改变的 PRAGMA 或事务控制。
+- 本地与 SSH SQLite 驱动独占 file-operation 边界，确认没有命名事务后暂停 FK，创建经完整性校验的
+  迁移前备份，再以 `BEGIN IMMEDIATE` 执行全部语句及 `foreign_key_check`。失败请求 rollback，结束后
+  恢复进入操作前的 FK 状态。
+- 内存数据库在取得独占连接且尚未加写锁时备份；文件数据库与 SSH worker 则在写锁保护下从第二个
+  只读连接捕获最后提交快照，既避免同连接 online-backup 的 `database is locked`，也阻止并发写入
+  穿过备份与迁移之间的窗口。
+- verified backup 的路径、大小和 integrity receipt 写入持久 migration journal。异常发生在可能已提交
+  的阶段时只标记 verification failed，要求重新捕获 live target，不声称已自动回滚或允许历史重放。
+  rebuild SQL 不能通过“Open in console”旁路安全执行器。
+
+Rust 回归覆盖 planner/catalog fail-closed、复合 FK 顺序/action metadata、内存成功、FK 失败回滚、本地文件独立 snapshot connection 和 worker
+在 `BEGIN IMMEDIATE` 下的 committed snapshot。真实 WAL、并发进程、磁盘不足、commit/SSH 断连、远程
+下载与多平台恢复按用户要求留在统一延期验证队列。

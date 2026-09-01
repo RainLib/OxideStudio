@@ -169,6 +169,10 @@ export function SchemaDiffView() {
   const normalizedPlanDriver = normalizeDatabaseDriverName(plan.driver);
   const executionOwner = plan.executionOwner || "hostSql";
   const isTargetOwnedPlan = executionOwner === "externalDriver";
+  const isSqliteRebuildPlan =
+    executionOwner === "hostSql" &&
+    normalizedPlanDriver === "sqlite" &&
+    plan.transactional;
   const isNonTransactionalPlan =
     !plan.transactional &&
     (isTargetOwnedPlan || normalizedPlanDriver === "mysql");
@@ -194,6 +198,7 @@ export function SchemaDiffView() {
     (isTargetOwnedPlan ||
       (executionOwner === "hostSql" &&
         ((normalizedPlanDriver === "postgres" && plan.transactional) ||
+          isSqliteRebuildPlan ||
           isNonTransactionalPlan)));
   const currentJournal = execution || recentExecutions[0] || null;
   const requiredConfirmationTarget = [
@@ -219,7 +224,8 @@ export function SchemaDiffView() {
       !previewSql ||
       previewSurface === "run" ||
       isOfflineSource ||
-      isTargetOwnedPlan
+      isTargetOwnedPlan ||
+      isSqliteRebuildPlan
     ) return;
     const surfaceName = previewSurface === "migration"
       ? "migration"
@@ -361,6 +367,8 @@ export function SchemaDiffView() {
                 ? `${offlineSourceLabel} review artifacts cannot open a runnable console.`
                 : isTargetOwnedPlan
                   ? "Target-owned plans never expose or execute sidecar DDL in a Host SQL console."
+                : isSqliteRebuildPlan
+                  ? "SQLite rebuild SQL runs only through its verified backup and atomic driver boundary."
                 : previewSurface === "migration" && plan.summary.blocked > 0
                 ? "Resolve blocked changes before opening a runnable migration console"
                 : undefined
@@ -368,6 +376,7 @@ export function SchemaDiffView() {
             disabled={
               isOfflineSource ||
               isTargetOwnedPlan ||
+              isSqliteRebuildPlan ||
               (previewSurface === "run" || previewSurface === "rollback"
                 ? !previewSql
                 : previewSurface === "migration"
@@ -397,7 +406,7 @@ export function SchemaDiffView() {
                   ? `${offlineSourceLabel} baselines are review-only. Capture a live snapshot before applying a migration.`
                   : executionOwner === "reviewOnly"
                     ? "This external package or server version has no exact semantic migration evidence."
-                    : "Automatic apply is available for verified target-owned plans, PostgreSQL transactions, and explicitly acknowledged MySQL DDL"
+                    : "Automatic apply is available for verified target-owned plans, PostgreSQL transactions, complete SQLite rebuilds, and explicitly acknowledged MySQL DDL"
                 : plan.summary.blocked > 0
                   ? "Resolve blocked changes before applying"
                   : isNonTransactionalPlan
@@ -690,6 +699,8 @@ export function SchemaDiffView() {
                     : "Verified target-owned plan · partial apply possible"
                 : plan.transactional && normalizedPlanDriver === "postgres"
                   ? "PostgreSQL · ROLLBACK guard"
+                  : plan.transactional && normalizedPlanDriver === "sqlite"
+                    ? "SQLite · verified backup + atomic rebuild"
                   : normalizedPlanDriver === "mysql"
                     ? "MySQL family · DDL may auto-commit"
                     : "Metadata comparison · apply is unavailable"}
@@ -984,7 +995,9 @@ function MigrationRunLog({
             <RotateCcw size={11} /> Rollback package
           </div>
           <div className="mt-1 leading-4 wb-muted">
-            {current.rollback.available
+            {current.rollback.available && current.rollback.backupPath
+              ? `Verified SQLite recovery backup: ${current.rollback.backupPath}${current.rollback.backupByteLen != null ? ` · ${current.rollback.backupByteLen} bytes` : ""}${current.rollback.backupIntegrityCheck ? ` · integrity ${current.rollback.backupIntegrityCheck}` : ""}`
+              : current.rollback.available
               ? `${current.rollback.changeCount} reverse change(s) generated${current.rollback.requiresManualReview ? "; manual review is required" : ""}. The artifact remains a ROLLBACK-guarded preview until opened explicitly.`
               : current.rollback.reason || "No rollback package is available."}
           </div>
