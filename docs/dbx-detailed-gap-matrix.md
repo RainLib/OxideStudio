@@ -23,7 +23,7 @@
 | `8f21e7af9` | SQL Server 未命名聚合结果列获得稳定标题 | 属于 D02/D04 的正式 SQL Server package 缺口；Host 不应在无 source ordinal/alias contract 时按表达式猜列名。需进入签名 package 和 conformance fixture。 |
 | `2e8ed4b48` | Database Search 对所有表分批扫描 | **新差距**：Oxide Search Everywhere 只搜索已缓存对象/文件/命令，尚无 DBX 的跨表数据扫描、批次进度、取消与错误隔离。实现必须先绑定连接/database/schema 快照并设置表数、并发、行数和响应字节上限。 |
 | `600af8753` | INSERT 列 inlay hints 扩展到 INSERT ... SELECT projection | **新 LSP/Editor 差距**：Oxide 已覆盖 INSERT VALUES 和完整 INSERT snippet，但尚未证明 SELECT projection、括号 SELECT、DISTINCT ON/TOP 以及 dollar-quoted routine body 内的列 hint。列数不匹配必须 fail closed，不能按位置越界提示。 |
-| `e43e36e7a` | PIT 已创建但 `_shard_doc` 查询失败时回退到 bounded from/size | **明确 Elasticsearch 差距**：Oxide 只在打开 PIT 失败时回退 offset；PIT 成功后首个 `_search` 失败会直接报错。下一阶段需只对确认的 shard-doc/PIT compatibility failure 关闭 PIT 并从第一页 bounded fallback，认证、过滤、mapping 和网络错误不得被吞掉。 |
+| `e43e36e7a` | PIT 已创建但 `_shard_doc` 查询失败时回退到 bounded from/size | 本阶段已对齐并收紧错误边界：PIT 首个 `/_search` 保留结构化 HTTP 状态和 error tree，仅当 HTTP 400 同时明确包含 `_shard_doc` 及 no-mapping/unknown/unsupported 语义时关闭 PIT、从 `from: 0` 进入最多 10,000 行的 offset cursor，并在当前连接内记忆该能力缺失，后续首页不再重复探测。认证、其他字段 mapping、5xx 和传输错误原样失败且不会永久降级；connect/disconnect 会重置探测状态。回退请求不携带 `_shard_doc`，PIT 续页不做不安全的中途模式切换。Rust HTTP fixture 覆盖首次回退、cursor、能力记忆和无关 400 不重试。Oxide 位置：`src-tauri/src/drivers/elasticsearch.rs`。真实 ES 6/7/8、OpenSearch/Easysearch 深分页验证延期。 |
 
 ### 上一增量审计（`d69cf9da7` → `8be503bf4`）
 

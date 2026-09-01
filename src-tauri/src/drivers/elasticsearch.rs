@@ -14,6 +14,7 @@ use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -28,6 +29,7 @@ pub struct ElasticsearchDriver {
     mapping_types: Mutex<HashMap<String, String>>,
     active_index: Mutex<Option<String>>,
     connected: Mutex<bool>,
+    pit_shard_doc_supported: AtomicBool,
     index_grouping: Option<Regex>,
 }
 
@@ -164,7 +166,7 @@ fn build_elasticsearch_document_search_body(
             Value::Array(search_after.to_vec()),
         );
     }
-    if let Some(offset) = offset.filter(|offset| *offset > 0) {
+    if let Some(offset) = offset {
         body.insert("from".to_string(), json!(offset));
     }
     Value::Object(body)
@@ -221,6 +223,7 @@ impl ElasticsearchDriver {
             mapping_types: Mutex::new(HashMap::new()),
             active_index: Mutex::new(None),
             connected: Mutex::new(false),
+            pit_shard_doc_supported: AtomicBool::new(true),
             index_grouping: options.index_grouping,
         })
     }
@@ -455,14 +458,25 @@ impl ElasticsearchDriver {
     }
 
     async fn run_document_search(&self, path: String, body: Value) -> Result<Value> {
+        let (status, response) = self.run_document_search_response(path, body).await?;
+        if !status.is_success() {
+            return Err(elasticsearch_response_error(status, &response));
+        }
+        Ok(response)
+    }
+
+    async fn run_document_search_response(
+        &self,
+        path: String,
+        body: Value,
+    ) -> Result<(StatusCode, Value)> {
+        self.ensure_connected().await?;
         let request = ElasticsearchRequest {
             method: Method::POST,
             path,
             body: Some(body.to_string()),
         };
-        self.send_request(&request)
-            .await
-            .map(|(_, response)| response)
+        self.send_request_response(&request).await
     }
 
     async fn first_document_page(
@@ -472,6 +486,13 @@ impl ElasticsearchDriver {
         filter: Option<Value>,
         requested_sort: Option<&str>,
     ) -> Result<DocumentPage> {
+        if !self.pit_shard_doc_supported.load(Ordering::Relaxed) {
+            let offset_sort = parse_elasticsearch_document_sort(requested_sort, false)?;
+            return self
+                .offset_document_page(index, 0, limit, filter, offset_sort)
+                .await;
+        }
+
         let pit_sort = parse_elasticsearch_document_sort(requested_sort, true)?;
         match self.open_document_pit(index).await {
             Ok(pit_id) => {
@@ -483,8 +504,11 @@ impl ElasticsearchDriver {
                     None,
                     None,
                 );
-                match self.run_document_search("/_search".to_string(), body).await {
-                    Ok(response) => {
+                match self
+                    .run_document_search_response("/_search".to_string(), body)
+                    .await
+                {
+                    Ok((status, response)) if status.is_success() => {
                         let hits = elasticsearch_document_hits(&response);
                         let total = elasticsearch_document_total(&response);
                         let response_pit_id = response
@@ -518,6 +542,22 @@ impl ElasticsearchDriver {
                             next_cursor,
                             total,
                         })
+                    }
+                    Ok((status, response))
+                        if elasticsearch_response_lacks_pit_shard_doc(status, &response) =>
+                    {
+                        let _ = self.close_document_pit(&pit_id).await;
+                        self.pit_shard_doc_supported.store(false, Ordering::Relaxed);
+                        tracing::debug!(
+                            "Elasticsearch PIT does not expose _shard_doc; using bounded offset pagination for this connection"
+                        );
+                        let offset_sort = parse_elasticsearch_document_sort(requested_sort, false)?;
+                        self.offset_document_page(index, 0, limit, filter, offset_sort)
+                            .await
+                    }
+                    Ok((status, response)) => {
+                        let _ = self.close_document_pit(&pit_id).await;
+                        Err(elasticsearch_response_error(status, &response))
                     }
                     Err(error) => {
                         let _ = self.close_document_pit(&pit_id).await;
@@ -602,6 +642,7 @@ impl DatabaseDriver for ElasticsearchDriver {
         *self.connected.lock().await = false;
         *self.server_info.lock().await = None;
         self.mapping_types.lock().await.clear();
+        self.pit_shard_doc_supported.store(true, Ordering::Relaxed);
 
         if self.connectivity_check_disabled {
             *self.connected.lock().await = true;
@@ -645,6 +686,7 @@ impl DatabaseDriver for ElasticsearchDriver {
         *self.active_index.lock().await = None;
         *self.server_info.lock().await = None;
         self.mapping_types.lock().await.clear();
+        self.pit_shard_doc_supported.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1204,6 +1246,49 @@ fn elasticsearch_error_reason(body: &Value) -> Option<String> {
         .or_else(|| body.pointer("/error/reason").and_then(Value::as_str))
         .or_else(|| body.get("error").and_then(Value::as_str))
         .map(ToString::to_string)
+}
+
+fn elasticsearch_response_lacks_pit_shard_doc(status: StatusCode, body: &Value) -> bool {
+    if status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+
+    fn collect_error_strings(value: &Value, output: &mut Vec<String>) {
+        match value {
+            Value::String(value) => output.push(value.to_ascii_lowercase()),
+            Value::Array(values) => {
+                for value in values.iter().take(32) {
+                    collect_error_strings(value, output);
+                }
+            }
+            Value::Object(values) => {
+                for (key, value) in values.iter().take(32) {
+                    if matches!(
+                        key.as_str(),
+                        "error" | "root_cause" | "caused_by" | "reason" | "type"
+                    ) {
+                        collect_error_strings(value, output);
+                    }
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    let Some(error) = body.get("error") else {
+        return false;
+    };
+    let mut values = Vec::new();
+    collect_error_strings(error, &mut values);
+    let mentions_shard_doc = values.iter().any(|value| value.contains("_shard_doc"));
+    let reports_unsupported_sort = values.iter().any(|value| {
+        value.contains("no mapping found")
+            || value.contains("unknown field")
+            || value.contains("unmapped")
+            || value.contains("not supported")
+            || value.contains("unsupported")
+    });
+    mentions_shard_doc && reports_unsupported_sort
 }
 
 fn truncate_error_reason(value: &str) -> String {
@@ -2059,6 +2144,208 @@ fn elasticsearch_mapping_type(mapping: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut expected_length = None;
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let body_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    expected_length = Some(header_end + 4 + body_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn serve_test_http_responses(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, String)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_test_http_request(&mut socket).await);
+                let reason = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    403 => "Forbidden",
+                    503 => "Service Unavailable",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        })
+    }
+
+    fn missing_pit_shard_doc_response() -> Value {
+        json!({
+            "error": {
+                "root_cause": [{
+                    "type": "query_shard_exception",
+                    "reason": "No mapping found for [_shard_doc] in order to sort on"
+                }],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed"
+            },
+            "status": 400
+        })
+    }
+
+    fn test_document_page_response(total: usize) -> String {
+        json!({
+            "hits": {
+                "total": { "value": total, "relation": "eq" },
+                "hits": [{
+                    "_id": "1",
+                    "_source": { "name": "one" }
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn classifies_only_explicit_pit_shard_doc_compatibility_failures() {
+        assert!(elasticsearch_response_lacks_pit_shard_doc(
+            StatusCode::BAD_REQUEST,
+            &missing_pit_shard_doc_response()
+        ));
+        assert!(!elasticsearch_response_lacks_pit_shard_doc(
+            StatusCode::UNAUTHORIZED,
+            &missing_pit_shard_doc_response()
+        ));
+        assert!(!elasticsearch_response_lacks_pit_shard_doc(
+            StatusCode::BAD_REQUEST,
+            &json!({
+                "error": {
+                    "type": "query_shard_exception",
+                    "reason": "No mapping found for [customer_id] in order to sort on"
+                }
+            })
+        ));
+        assert!(!elasticsearch_response_lacks_pit_shard_doc(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({
+                "error": {
+                    "type": "search_phase_execution_exception",
+                    "reason": "_shard_doc temporarily unavailable"
+                }
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_pit_shard_doc_falls_back_and_is_remembered_for_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = serve_test_http_responses(
+            listener,
+            vec![
+                (200, json!({ "id": "pit-1" }).to_string()),
+                (400, missing_pit_shard_doc_response().to_string()),
+                (200, json!({ "succeeded": true }).to_string()),
+                (200, test_document_page_response(2)),
+                (200, test_document_page_response(1)),
+            ],
+        );
+        let driver = ElasticsearchDriver::new(&format!("http://{address}")).unwrap();
+        *driver.connected.lock().await = true;
+
+        let first = driver
+            .first_document_page("products", 1, None, None)
+            .await
+            .unwrap();
+        let cursor =
+            decode_elasticsearch_document_cursor(first.next_cursor.as_deref().unwrap()).unwrap();
+        assert!(matches!(
+            cursor,
+            ElasticsearchDocumentCursor::Offset { offset: 1, .. }
+        ));
+        assert!(!driver.pit_shard_doc_supported.load(Ordering::Relaxed));
+
+        driver
+            .first_document_page("products", 1, None, None)
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "));
+        assert!(requests[1].starts_with("POST /_search "));
+        assert!(requests[1].contains("_shard_doc"));
+        assert!(requests[2].starts_with("DELETE /_pit "));
+        assert!(requests[3].starts_with("POST /products/_search "));
+        assert!(!requests[3].contains("_shard_doc"));
+        assert!(requests[3].contains(r#""from":0"#));
+        assert!(requests[4].starts_with("POST /products/_search "));
+        assert!(!requests[4].contains("_shard_doc"));
+    }
+
+    #[tokio::test]
+    async fn unrelated_pit_search_failure_is_not_retried_or_remembered() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = serve_test_http_responses(
+            listener,
+            vec![
+                (200, json!({ "id": "pit-1" }).to_string()),
+                (
+                    400,
+                    json!({
+                        "error": {
+                            "type": "query_shard_exception",
+                            "reason": "No mapping found for [customer_id] in order to sort on"
+                        },
+                        "status": 400
+                    })
+                    .to_string(),
+                ),
+                (200, json!({ "succeeded": true }).to_string()),
+            ],
+        );
+        let driver = ElasticsearchDriver::new(&format!("http://{address}")).unwrap();
+        *driver.connected.lock().await = true;
+
+        let error = driver
+            .first_document_page("products", 1, None, None)
+            .await
+            .unwrap_err();
+        let requests = server.await.unwrap();
+        assert!(error.to_string().contains("customer_id"));
+        assert_eq!(requests.len(), 3);
+        assert!(driver.pit_shard_doc_supported.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn document_cursor_round_trips_without_exposing_raw_pit_json() {
