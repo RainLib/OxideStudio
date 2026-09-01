@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { sqlCompletionTriggerDecision } from "./sqlCompletionTriggerPolicy";
+import {
+  sqlCompletionIdentifierFragment,
+  sqlCompletionTriggerDecision,
+} from "./sqlCompletionTriggerPolicy";
 
 describe("SQL completion trigger policy", () => {
   it("keeps explicit completion available in every mode", () => {
@@ -63,5 +66,30 @@ describe("SQL completion trigger policy", () => {
         "postgres",
       ).reason,
     ).toBe("suppressed");
+  });
+
+  it("treats a partially quoted identifier as one replacement fragment", () => {
+    expect(sqlCompletionIdentifierFragment('SELECT * FROM "Order D')).toEqual({
+      prefix: "Order D",
+      replacementLength: 8,
+      openingQuote: '"',
+      closingQuote: '"',
+    });
+    expect(sqlCompletionIdentifierFragment("SELECT o.`group``na")).toEqual({
+      prefix: "group`na",
+      replacementLength: 10,
+      openingQuote: "`",
+      closingQuote: "`",
+    });
+    expect(sqlCompletionIdentifierFragment("SELECT o.[Line]]It")).toEqual({
+      prefix: "Line]It",
+      replacementLength: 9,
+      openingQuote: "[",
+      closingQuote: "]",
+    });
+    expect(sqlCompletionIdentifierFragment('SELECT "finished"')).toEqual({
+      prefix: "",
+      replacementLength: 0,
+    });
   });
 });

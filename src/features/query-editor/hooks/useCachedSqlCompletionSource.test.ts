@@ -36,6 +36,7 @@ function textModel(text: string) {
         endColumn: text.length + 1,
       };
     },
+    getLineContent: () => text,
     getValueInRange: () => text,
   };
 }
@@ -89,6 +90,42 @@ describe("cached SQL completion source", () => {
 
     expect(relationSuggestions.map((item) => item.label)).toEqual(["orders"]);
     expect(expressionSuggestions).toEqual([]);
+  });
+
+  it("closes an unfinished quoted relation while replacing its opening quote", () => {
+    const text = 'SELECT * FROM "Order D';
+    const suggestions = cachedRelationCompletionSuggestions(
+      monaco,
+      textModel(text),
+      { lineNumber: 1, column: text.length + 1 },
+      [{ name: "Order Details" }, { name: "Customers" }],
+      text,
+    );
+
+    expect(suggestions.map((item) => item.label)).toEqual(["Order Details"]);
+    expect(suggestions[0]?.insertText).toBe('"Order Details"');
+    expect(suggestions[0]?.range).toMatchObject({
+      startColumn: text.length - '"Order D'.length + 1,
+      endColumn: text.length + 1,
+    });
+  });
+
+  it("consumes an existing closing quote instead of duplicating it", () => {
+    const text = 'SELECT * FROM "Order D"';
+    const cursorColumn = text.length;
+    const suggestions = cachedRelationCompletionSuggestions(
+      monaco,
+      textModel(text),
+      { lineNumber: 1, column: cursorColumn },
+      [{ name: "Order Details" }],
+      text.slice(0, cursorColumn - 1),
+    );
+
+    expect(suggestions[0]?.insertText).toBe('"Order Details"');
+    expect(suggestions[0]?.range).toMatchObject({
+      startColumn: text.indexOf('"') + 1,
+      endColumn: cursorColumn + 1,
+    });
   });
 
   it("bounds large cached relation catalogs in stable metadata order", () => {

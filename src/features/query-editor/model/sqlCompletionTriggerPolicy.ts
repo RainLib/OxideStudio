@@ -15,12 +15,52 @@ export type SqlCompletionTriggerDecision = {
     | "notEligible";
 };
 
+export type SqlCompletionIdentifierFragment = {
+  prefix: string;
+  replacementLength: number;
+  openingQuote?: '"' | "`" | "[";
+  closingQuote?: '"' | "`" | "]";
+};
+
 const IDENTIFIER_PREFIX = /([_\p{ID_Start}][$@#_\u200c\u200d\p{ID_Continue}]*)$/u;
+const QUOTED_IDENTIFIER_PREFIX =
+  /(?:^|[\s.(,=])(?:"((?:""|[^"])*)|`((?:``|[^`])*)|\[((?:\]\]|[^\]])*))$/u;
 const QUALIFIED_PREFIX = /[_\p{ID_Start}][$@#_\u200c\u200d\p{ID_Continue}]*\s*\.\s*(?:[_\p{ID_Start}][$@#_\u200c\u200d\p{ID_Continue}]*)?$/u;
 const POSITIONAL_KEYWORDS = /\b(?:SELECT|DISTINCT|FROM|JOIN|ON|USING|WHERE|AND|OR|HAVING|GROUP\s+BY|ORDER\s+BY|LIMIT|OFFSET|INSERT\s+INTO|VALUES|UPDATE|SET|DELETE\s+FROM|RETURNING|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|REFERENCES|BY)\s*$/iu;
 
+export function sqlCompletionIdentifierFragment(
+  textBeforeCursor: string,
+): SqlCompletionIdentifierFragment {
+  const currentLine = textBeforeCursor.slice(textBeforeCursor.lastIndexOf("\n") + 1);
+  const quoted = currentLine.match(QUOTED_IDENTIFIER_PREFIX);
+  if (quoted) {
+    const raw = quoted[1] ?? quoted[2] ?? quoted[3] ?? "";
+    const escapedDelimiter = quoted[1] !== undefined
+      ? /""/gu
+      : quoted[2] !== undefined
+        ? /``/gu
+        : /\]\]/gu;
+    return {
+      prefix: raw.replace(escapedDelimiter, (value) => value[0]!),
+      replacementLength: raw.length + 1,
+      openingQuote: quoted[1] !== undefined
+        ? '"'
+        : quoted[2] !== undefined
+          ? "`"
+          : "[",
+      closingQuote: quoted[1] !== undefined
+        ? '"'
+        : quoted[2] !== undefined
+          ? "`"
+          : "]",
+    };
+  }
+  const prefix = currentLine.match(IDENTIFIER_PREFIX)?.[1] || "";
+  return { prefix, replacementLength: prefix.length };
+}
+
 export function sqlCompletionIdentifierPrefix(textBeforeCursor: string) {
-  return textBeforeCursor.match(IDENTIFIER_PREFIX)?.[1] || "";
+  return sqlCompletionIdentifierFragment(textBeforeCursor).prefix;
 }
 
 function normalizedCompletionDriver(driver?: string) {

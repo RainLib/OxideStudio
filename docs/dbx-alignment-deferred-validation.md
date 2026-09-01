@@ -1906,3 +1906,14 @@ explicit deferred validation task rather than an implicit release check.
   toggle the wrong object. Phase 148 covers deterministic window calculations,
   selection ownership and production frontend compilation; native interaction
   and live-driver inventory latency remain deferred.
+
+## Quoted SQL completion replacement
+
+- In packaged WebViews, accept table and column suggestions while editing
+  unfinished and paired double-quoted, backtick-quoted and bracket-quoted
+  identifiers. Repeat with delimiter characters inside the real identifier,
+  IME composition, aliases, joins, CTEs and derived tables.
+- Verify that LSP-primary and cached-fallback suggestions apply the same visible
+  edit, keep a single closing delimiter and preserve Monaco undo boundaries.
+  Phase 149 covers the deterministic cached fallback and existing PostgreSQL
+  CTE execution classification; live database/LSP ordering remains deferred.

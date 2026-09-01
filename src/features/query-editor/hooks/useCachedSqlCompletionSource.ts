@@ -25,10 +25,46 @@ import {
   sqlForeignKeyJoinCompletions,
   sqlJoinConstraintsFromRelationshipIndex,
 } from "../model/sqlJoinCompletion";
-import { sqlCompletionIdentifierPrefix } from "../model/sqlCompletionTriggerPolicy";
+import {
+  sqlCompletionIdentifierFragment,
+  sqlCompletionIdentifierPrefix,
+  type SqlCompletionIdentifierFragment,
+} from "../model/sqlCompletionTriggerPolicy";
 
 const SQL_COMPLETION_CONTEXT_MAX_CHARACTERS = 128 * 1024;
 const MAX_CACHED_RELATION_COMPLETION_ITEMS = 512;
+
+function cachedCompletionRange(
+  monaco: any,
+  model: any,
+  position: any,
+  replacement: SqlCompletionIdentifierFragment,
+) {
+  const word = model.getWordUntilPosition(position);
+  const line = model.getLineContent?.(position.lineNumber) || "";
+  const consumesClosingQuote =
+    replacement.closingQuote !== undefined &&
+    line[position.column - 1] === replacement.closingQuote;
+  return new monaco.Range(
+    position.lineNumber,
+    replacement.replacementLength > 0
+      ? position.column - replacement.replacementLength
+      : word.startColumn,
+    position.lineNumber,
+    consumesClosingQuote ? position.column + 1 : word.endColumn,
+  );
+}
+
+function quotedCompletionInsertText(
+  value: string,
+  replacement: SqlCompletionIdentifierFragment,
+) {
+  if (!replacement.openingQuote || !replacement.closingQuote) return value;
+  const escaped = value
+    .split(replacement.closingQuote)
+    .join(replacement.closingQuote + replacement.closingQuote);
+  return `${replacement.openingQuote}${escaped}${replacement.closingQuote}`;
+}
 const RELATION_COMPLETION_CONTEXTS = new Set([
   "from",
   "join",
@@ -158,13 +194,8 @@ export function cachedRelationCompletionSuggestions(
   ) {
     return [];
   }
-  const word = model.getWordUntilPosition(position);
-  const range = new monaco.Range(
-    position.lineNumber,
-    word.startColumn,
-    position.lineNumber,
-    word.endColumn,
-  );
+  const replacement = sqlCompletionIdentifierFragment(textBeforeCursor);
+  const range = cachedCompletionRange(monaco, model, position, replacement);
   const query = relationPrefix ?? "";
   return tables
     .map((table, index) => ({
@@ -182,7 +213,7 @@ export function cachedRelationCompletionSuggestions(
       documentation: table.comment
         ? { value: table.comment }
         : { value: "Available from cached database metadata." },
-      insertText: table.name,
+      insertText: quotedCompletionInsertText(table.name, replacement),
       filterText: completionFilterTextForQuery(table.name, query),
       sortText: `0:${String(9_999 - Math.max(0, score)).padStart(4, "0")}:${table.name.toLocaleLowerCase()}`,
       range,
@@ -293,13 +324,8 @@ export function createCachedSqlCompletionRequest(
     ) {
       await ensurePinyinCompletionSupport();
     }
-    const word = model.getWordUntilPosition(position);
-    const range = new monaco.Range(
-      position.lineNumber,
-      word.startColumn,
-      position.lineNumber,
-      word.endColumn,
-    );
+    const replacement = sqlCompletionIdentifierFragment(textBeforeCursor);
+    const range = cachedCompletionRange(monaco, model, position, replacement);
     return sqlForeignKeyJoinCompletions(
       joinContext,
       sourceRelation,
@@ -332,13 +358,8 @@ export function createCachedSqlCompletionRequest(
     const relation = cachedSqlRelationForFieldCompletion(textBeforeCursor);
     if (!relation) return [];
     const fieldQuery = sqlCompletionIdentifierPrefix(textBeforeCursor);
-    const word = model.getWordUntilPosition(position);
-    const range = new monaco.Range(
-      position.lineNumber,
-      word.startColumn,
-      position.lineNumber,
-      word.endColumn,
-    );
+    const replacement = sqlCompletionIdentifierFragment(textBeforeCursor);
+    const range = cachedCompletionRange(monaco, model, position, replacement);
 
     if (relation.isCte || relation.isDerived) {
       const relationKind = relation.isDerived ? "Derived table" : "CTE";
@@ -358,7 +379,7 @@ export function createCachedSqlCompletionRequest(
           documentation: {
             value: `Column declared by ${relationKind.toLocaleLowerCase()} ${relation.table}.`,
           },
-          insertText: column,
+          insertText: quotedCompletionInsertText(column, replacement),
           filterText: completionFilterTextForQuery(column, fieldQuery),
           sortText: completionSortText(column, fieldQuery),
           range,
@@ -419,7 +440,7 @@ export function createCachedSqlCompletionRequest(
         documentation: column.comment
           ? { value: column.comment }
           : { value: `Column from cached metadata for ${relation.table}.` },
-        insertText: column.name,
+        insertText: quotedCompletionInsertText(column.name, replacement),
         filterText: completionFilterTextForQuery(column.name, fieldQuery),
         sortText: completionSortText(column.name, fieldQuery),
         range,

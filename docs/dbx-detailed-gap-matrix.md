@@ -736,3 +736,23 @@ schema 对象清单一次性创建全部 React 节点：
 
 纯模型回归覆盖 50,000 项窗口上限、overscan、列表缩短后的偏移约束和非法尺寸。真实 WebView 的
 超大对象滚动、键盘/触控选择与不同 DPI 行高记录为延期验证。
+
+## Phase 149 增量：带引号标识符补全与数据库执行路径复核
+
+对照 DBX `9b4f94cbb`、`9c90edabe` 和 `b198dd132`，Oxide 补齐 Monaco 缓存回退路径中最后一个
+带引号标识符边界，并复核数据库侧相关差异：
+
+- 双引号、MySQL 反引号和 SQL Server 方括号内的未完成 table/column 前缀作为一个 replacement
+  fragment；接受建议时从 opening delimiter 开始替换，自动转义名称中的 delimiter 并补齐闭合符。
+- 光标后已经存在闭合符时，replacement range 会一并消费该字符，因此不会生成重复引号；完整闭合
+  标识符不会被误判为新的未完成前缀。relation、CTE/derived column 和物理 column 使用同一逻辑，
+  join 生成器继续使用其驱动感知的完整 SQL 片段。
+- PostgreSQL `WITH ... UPDATE/INSERT/DELETE` 已由 `effective_statement_kind_with_offset` 解析 outer
+  statement；无 `RETURNING` 走 affected-row execute，有 `RETURNING` 才 fetch rows，且已有 Rust 回归。
+  CTE 补全也只暴露声明/推导列，不加载同名物理表，因此 DBX 对应修复在 Oxide 已等价覆盖。
+- DBX 的 Elasticsearch `from + size <= 10000` 修复在 Oxide 的 PIT + `search_after` 主路径及受限 offset
+  fallback 中已覆盖；Oracle 查询执行不做 DBX 曾有的阻塞索引/主键预取，因此一秒 metadata preflight
+  限制不适用于 Oxide 的执行路径。
+
+单元测试覆盖未闭合/已有闭合/已完整闭合标识符、转义前缀和 replacement range。真实数据库标识符、
+输入法组合事件及各驱动 LSP/Monaco 建议合并顺序仍按既定策略延期到逻辑全部完成后验证。
