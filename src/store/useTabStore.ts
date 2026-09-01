@@ -78,6 +78,13 @@ import type { DataCompareSource } from "@/lib/dataCompare";
 import type { AgentFileDiffPreview } from "@/lib/agentFileReview";
 import type { GitFileDiffPreview } from "@/lib/projectGitDiff";
 import {
+  forgetProjectSqlFileTargets,
+  isProjectSqlFile,
+  rememberProjectSqlFileTarget,
+  renameProjectSqlFileTargets,
+  resolveProjectSqlFileTarget,
+} from "@/lib/projectSqlFileTarget";
+import {
   DATA_GRID_MAX_EXPANDABLE_PASTE_CELLS,
   DATA_GRID_MAX_EXPANDABLE_PASTE_ROWS,
   isBlankDataGridDraftValue,
@@ -349,6 +356,35 @@ export interface TabData {
 function fileNameFromPath(relativePath: string) {
   const segments = relativePath.split("/").filter(Boolean);
   return segments[segments.length - 1] || relativePath;
+}
+
+function persistProjectSqlFileTargetForTab(tab: TabData) {
+  if (
+    !tab.fileProjectId ||
+    !tab.fileRelativePath ||
+    !isProjectSqlFile(tab.fileRelativePath) ||
+    tab.filePreview ||
+    tab.agentFileDiffPreview ||
+    tab.gitFileDiffPreview
+  ) {
+    return;
+  }
+  const connectionState = useConnectionStore.getState();
+  const connectionId = tab.connectionId || connectionState.activeConnectionId;
+  if (!connectionId) return;
+  const connection = connectionState.connections.find(
+    (candidate) => candidate.id === connectionId,
+  );
+  rememberProjectSqlFileTarget(tab.fileProjectId, tab.fileRelativePath, {
+    connectionId,
+    databaseName: tab.databaseName || connection?.database,
+    schemaName:
+      tab.targetSchema ??
+      tab.schemaName ??
+      (connectionId === connectionState.activeConnectionId
+        ? useSchemaStore.getState().currentSchema || undefined
+        : undefined),
+  });
 }
 
 export function hasPendingTableChanges(
@@ -828,6 +864,7 @@ interface TabState {
         | "fileRevision"
         | "filePreview"
         | "isDirty"
+        | "targetSchema"
         | "agentFileDiffPreview"
         | "gitFileDiffPreview"
       >
@@ -920,7 +957,11 @@ interface TabState {
     oldRelativePath: string,
     newRelativePath: string,
   ) => void;
-  discardProjectFileTabs: (projectId: string, relativePath: string) => void;
+  discardProjectFileTabs: (
+    projectId: string,
+    relativePath: string,
+    forgetTargets?: boolean,
+  ) => void;
   closeTab: (id: string) => void;
   forceCloseTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
@@ -1702,7 +1743,43 @@ export const useTabStore = create<TabState>((set, get) => ({
       return existing.id;
     }
 
+    const connectionState = useConnectionStore.getState();
+    const sqlFile = isProjectSqlFile(relativePath);
+    const savedTarget = sqlFile
+      ? resolveProjectSqlFileTarget(
+          projectId,
+          relativePath,
+          connectionState.isLoading
+            ? undefined
+            : (connectionId) =>
+                connectionState.connections.some(
+                  (connection) => connection.id === connectionId,
+                ),
+        )
+      : null;
+    const activeConnection = connectionState.connections.find(
+      (connection) => connection.id === connectionState.activeConnectionId,
+    );
+    const initialTarget = sqlFile
+      ? savedTarget ||
+        (activeConnection
+          ? {
+              connectionId: activeConnection.id,
+              databaseName: activeConnection.database,
+              schemaName: useSchemaStore.getState().currentSchema || undefined,
+            }
+          : null)
+      : null;
+
+    if (initialTarget) {
+      rememberProjectSqlFileTarget(projectId, relativePath, initialTarget);
+    }
+
     return get().createTab("query", fileNameFromPath(relativePath), content, {
+      connectionId: initialTarget?.connectionId,
+      databaseName: normalizedDatabaseName(initialTarget?.databaseName),
+      schemaName: initialTarget?.schemaName,
+      targetSchema: initialTarget?.schemaName,
       fileProjectId: projectId,
       fileRootPath: rootPath || undefined,
       fileRelativePath: relativePath,
@@ -1884,6 +1961,7 @@ export const useTabStore = create<TabState>((set, get) => ({
   },
 
   renameProjectFileTabs: (projectId, oldRelativePath, newRelativePath) => {
+    renameProjectSqlFileTargets(projectId, oldRelativePath, newRelativePath);
     set((state) => ({
       tabs: state.tabs.map((tab) => {
         if (
@@ -1902,9 +1980,22 @@ export const useTabStore = create<TabState>((set, get) => ({
         };
       }),
     }));
+    for (const tab of get().tabs) {
+      if (
+        tab.fileProjectId === projectId &&
+        tab.fileRelativePath &&
+        (tab.fileRelativePath === newRelativePath ||
+          tab.fileRelativePath.startsWith(`${newRelativePath}/`))
+      ) {
+        persistProjectSqlFileTargetForTab(tab);
+      }
+    }
   },
 
-  discardProjectFileTabs: (projectId, relativePath) => {
+  discardProjectFileTabs: (projectId, relativePath, forgetTargets = true) => {
+    if (forgetTargets) {
+      forgetProjectSqlFileTargets(projectId, relativePath);
+    }
     set((state) => {
       const shouldDiscard = (tab: TabData) =>
         tab.fileProjectId === projectId &&
@@ -4077,6 +4168,8 @@ export const useTabStore = create<TabState>((set, get) => ({
         t.id === tabId ? { ...t, targetSchema: schema } : t,
       ),
     }));
+    const tab = get().tabs.find((candidate) => candidate.id === tabId);
+    if (tab) persistProjectSqlFileTargetForTab(tab);
   },
 
   setTargetDatabase: (tabId, database) => {
@@ -4087,6 +4180,8 @@ export const useTabStore = create<TabState>((set, get) => ({
           : tab,
       ),
     }));
+    const tab = get().tabs.find((candidate) => candidate.id === tabId);
+    if (tab) persistProjectSqlFileTargetForTab(tab);
   },
 }));
 

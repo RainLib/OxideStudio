@@ -35,6 +35,7 @@ import {
   shouldActivateExplorerObject,
   type ExplorerActivationMode,
 } from "@/features/database-explorer/model/explorerActivation";
+import { explorerObjectIconClass } from "@/features/database-explorer/model/explorerObjectPresentation";
 
 type SchemaLoadStatus = "idle" | "loading" | "success" | "error";
 
@@ -50,7 +51,6 @@ interface PostgresRemoteDatabaseContentsProps {
   connectionId: string;
   database: string;
   schemas: string[];
-  connectionColor: string;
   filterText?: string;
   activationMode: ExplorerActivationMode;
   onTablesLoaded?: (schema: string, tables: TableInfo[]) => void;
@@ -94,7 +94,6 @@ export function PostgresRemoteDatabaseContents({
   connectionId,
   database,
   schemas,
-  connectionColor,
   filterText = "",
   activationMode = "single",
   onTablesLoaded,
@@ -383,8 +382,10 @@ export function PostgresRemoteDatabaseContents({
                   )}
                   <Network
                     size={12}
-                    className="shrink-0"
-                    style={{ color: connectionColor }}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("schema"),
+                    )}
                   />
                   <span className="truncate">{schema}</span>
                 </button>
@@ -532,7 +533,12 @@ export function PostgresRemoteDatabaseContents({
                           >
                             <ObjectIcon
                               size={12}
-                              className="shrink-0 opacity-75"
+                              className={cn(
+                                "shrink-0 opacity-90",
+                                explorerObjectIconClass(
+                                  isView ? "view" : "table",
+                                ),
+                              )}
                             />
                             <span className="truncate">{table.name}</span>
                           </button>

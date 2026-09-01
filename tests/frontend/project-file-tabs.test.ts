@@ -6,10 +6,19 @@ import { saveProjectFileTab } from "@/lib/projectFileTabs";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useSchemaStore } from "@/store/useSchemaStore";
 
 describe("project file tab lifecycle", () => {
   beforeEach(() => {
     useTabStore.setState({ tabs: [], activeTabId: null, closedTabsStack: [] });
+    localStorage.clear();
+    useConnectionStore.setState({
+      connections: [],
+      activeConnectionId: null,
+      isLoading: false,
+    });
+    useSchemaStore.setState({ currentSchema: null });
     useProjectStore.setState({
       projects: [
         {
@@ -111,6 +120,142 @@ describe("project file tab lifecycle", () => {
       .tabs.find((tab) => tab.id === fileId);
     expect(fileTab?.title).toBe("daily.sql");
     expect(fileTab?.agentFileDiffPreview).toBeUndefined();
+  });
+
+  it("binds a SQL file to the active target and restores it after reopening", () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "connection-1",
+          name: "Analytics",
+          driver: "postgres",
+          url: "postgres://localhost/analytics",
+          database: "analytics",
+        },
+      ],
+      activeConnectionId: "connection-1",
+      isLoading: false,
+    });
+    useSchemaStore.setState({ currentSchema: "reporting" });
+
+    const firstId = useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "queries/daily.sql",
+        "SELECT 1;",
+        "revision-1",
+      );
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      connectionId: "connection-1",
+      databaseName: "analytics",
+      schemaName: "reporting",
+      targetSchema: "reporting",
+    });
+
+    useTabStore.getState().setTargetDatabase(firstId, "warehouse");
+    useTabStore.getState().setTargetSchema(firstId, "finance");
+    useTabStore.getState().forceCloseTab(firstId);
+    useConnectionStore.setState({ activeConnectionId: null });
+    useSchemaStore.setState({ currentSchema: null });
+
+    useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "queries/daily.sql",
+        "SELECT 1;",
+        "revision-2",
+      );
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      connectionId: "connection-1",
+      databaseName: "warehouse",
+      schemaName: "finance",
+      targetSchema: "finance",
+    });
+  });
+
+  it("ignores a SQL file target after its connection is deleted", () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "connection-1",
+          name: "Analytics",
+          driver: "postgres",
+          url: "postgres://localhost/analytics",
+        },
+      ],
+      activeConnectionId: "connection-1",
+      isLoading: false,
+    });
+    const firstId = useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "query.sql",
+        "SELECT 1;",
+        "revision-1",
+      );
+    useTabStore.getState().forceCloseTab(firstId);
+    useConnectionStore.setState({ connections: [], activeConnectionId: null });
+
+    useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "query.sql",
+        "SELECT 1;",
+        "revision-2",
+      );
+    expect(useTabStore.getState().tabs[0]?.connectionId).toBeUndefined();
+  });
+
+  it("keeps non-SQL files unbound and binds them only after a SQL rename", () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "connection-1",
+          name: "Analytics",
+          driver: "postgres",
+          url: "postgres://localhost/analytics",
+          database: "analytics",
+        },
+      ],
+      activeConnectionId: "connection-1",
+      isLoading: false,
+    });
+    useSchemaStore.setState({ currentSchema: "reporting" });
+
+    useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "notes.txt",
+        "notes",
+        "revision-1",
+      );
+    expect(useTabStore.getState().tabs[0]?.connectionId).toBeUndefined();
+
+    useTabStore
+      .getState()
+      .renameProjectFileTabs("project-1", "notes.txt", "notes.sql");
+    useTabStore.getState().closeAllTabs();
+    useConnectionStore.setState({ activeConnectionId: null });
+    useSchemaStore.setState({ currentSchema: null });
+    useTabStore
+      .getState()
+      .openProjectFileTab(
+        "project-1",
+        "notes.sql",
+        "notes",
+        "revision-2",
+      );
+
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      connectionId: "connection-1",
+      databaseName: "analytics",
+      targetSchema: "reporting",
+    });
   });
 
   it("opens image previews as reusable read-only project tabs", async () => {

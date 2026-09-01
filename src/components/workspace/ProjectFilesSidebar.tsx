@@ -381,9 +381,10 @@ export function ProjectFilesSidebar() {
           (tab) => tab.fileProjectId === activeProjectId
         );
         const previousActiveTabId = tabState.activeTabId;
-        tabState.discardProjectFileTabs(activeProjectId, "");
+        tabState.discardProjectFileTabs(activeProjectId, "", false);
         try {
           await setRootPath(selected);
+          tabState.discardProjectFileTabs(activeProjectId, "");
         } catch (cause) {
           useTabStore.setState((state) => {
             const tabs = [...state.tabs];

@@ -182,6 +182,7 @@ import {
   explorerActivationLabel,
   shouldActivateExplorerObject,
 } from "@/features/database-explorer/model/explorerActivation";
+import { explorerObjectIconClass } from "@/features/database-explorer/model/explorerObjectPresentation";
 import { searchIndexClearTouched } from "@/features/database-explorer/model/elasticsearchIndexActions";
 import {
   captureLiveSchemaSnapshot,
@@ -4892,7 +4893,10 @@ export function SchemaSidebar() {
                             <Table
                               size={12}
                               className={cn(
-                                "shrink-0 opacity-70",
+                                "shrink-0 opacity-90",
+                                explorerObjectIconClass(
+                                  isView ? "view" : "table",
+                                ),
                                 isSelectedTable && "opacity-100",
                                 isPinned && "text-primary opacity-100",
                               )}
@@ -6444,7 +6448,6 @@ export function SchemaSidebar() {
                                     []
                                   : []
                               }
-                              connectionColor={connectionColor}
                               filterText={
                                 database
                                   .toLocaleLowerCase()
@@ -6664,8 +6667,10 @@ export function SchemaSidebar() {
                                       ) : (
                                         <Network
                                           size={12}
-                                          className="shrink-0"
-                                          style={{ color: connectionColor }}
+                                          className={cn(
+                                            "shrink-0",
+                                            explorerObjectIconClass("schema"),
+                                          )}
                                         />
                                       )}
                                       <span className="truncate">
