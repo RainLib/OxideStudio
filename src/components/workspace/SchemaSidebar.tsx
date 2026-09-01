@@ -645,10 +645,14 @@ export function SchemaSidebar() {
   );
   const [postgresDatabaseRefreshVersion, setPostgresDatabaseRefreshVersion] =
     useState(0);
-  const [postgresRemoteRefreshRequests, setPostgresRemoteRefreshRequests] =
-    useState<
-      Record<string, { version: number; schema?: string }>
-    >({});
+  const postgresRemoteRefreshVersionRef = useRef(0);
+  const [postgresRemoteRefreshRequest, setPostgresRemoteRefreshRequest] =
+    useState<{
+      connectionId: string;
+      database: string;
+      version: number;
+      schema?: string;
+    } | null>(null);
   const [postgresVisibilityKey, setPostgresVisibilityKey] = useState<
     string | null
   >(null);
@@ -2736,14 +2740,13 @@ export function SchemaSidebar() {
     database: string,
     schema?: string,
   ) => {
-    const key = JSON.stringify([connectionId, database]);
-    setPostgresRemoteRefreshRequests((current) => ({
-      ...current,
-      [key]: {
-        version: (current[key]?.version || 0) + 1,
-        ...(schema ? { schema } : {}),
-      },
-    }));
+    postgresRemoteRefreshVersionRef.current += 1;
+    setPostgresRemoteRefreshRequest({
+      connectionId,
+      database,
+      version: postgresRemoteRefreshVersionRef.current,
+      ...(schema ? { schema } : {}),
+    });
   };
 
   const refreshPostgresRemoteDatabase = async (
@@ -6615,9 +6618,12 @@ export function SchemaSidebar() {
                                   : []
                               }
                               refreshRequest={
-                                postgresRemoteRefreshRequests[
-                                  JSON.stringify([connection.id, database])
-                                ]
+                                postgresRemoteRefreshRequest?.connectionId ===
+                                  connection.id &&
+                                postgresRemoteRefreshRequest.database ===
+                                  database
+                                  ? postgresRemoteRefreshRequest
+                                  : undefined
                               }
                               filterText={
                                 database
