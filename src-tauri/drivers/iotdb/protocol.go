@@ -29,7 +29,7 @@ func Handshake() map[string]any {
 		"value": map[string]any{
 			"protocolVersion": ProtocolVersion, "packageId": "oxide.iotdb", "packageVersion": "0.1.0", "driverId": "iotdb",
 			"capabilities": map[string]any{
-				"metadata": true, "query": true, "cancellation": false, "transactions": false,
+				"metadata": true, "query": true, "cancellation": true, "transactions": false,
 				"databaseScopedQueries": true, "databaseCreation": false, "referencingForeignKeys": false,
 				"readOnlyEnforcement": true, "semanticSchemaMigration": false,
 			},

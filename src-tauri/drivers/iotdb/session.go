@@ -90,6 +90,34 @@ func (s *Session) Execute(ctx context.Context, statement string) (*client.Sessio
 	return executeStatement(ctx, s.client, statement)
 }
 
+// ExecuteNonQuery runs one IoTDB native mutation or DDL statement. The caller
+// owns the policy decision; this package only keeps the client lifecycle and
+// result cursor boundary inside the sidecar.
+func (s *Session) ExecuteNonQuery(ctx context.Context, statement string) error {
+	data, err := s.Execute(ctx, statement)
+	if data != nil {
+		closeErr := data.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+// UseDatabase applies a Table-dialect database context before a statement.
+// Tree dialect paths are fully qualified and therefore have no equivalent
+// session-level database selection.
+func (s *Session) UseDatabase(ctx context.Context, database string) error {
+	if s == nil || s.client == nil || s.config.Dialect != TableDialect {
+		return nil
+	}
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return nil
+	}
+	return s.ExecuteNonQuery(ctx, "USE "+quote(database))
+}
+
 func (s *Session) Close() error {
 	if s == nil || s.client == nil {
 		return nil
