@@ -310,7 +310,7 @@ Dameng、Db2 及兼容产品的 Monaco 接受行为与 server-version 语法仍�
 | 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
 | --- | --- | --- | --- |
 | 克隆行被统一追加到底部，脱离源行上下文 | `apps/desktop/src/composables/useDataGridEditor.ts:clonedRowMeta/cloneRow`（`b60f04ea6`） | `src/lib/dataGridRows.ts`、`src/store/useTabStore.ts:cloneRows`、`src/components/workspace/DataGrid.tsx` | 已对齐并增强：关系型表格补回 Clone Row/Rows；克隆草稿以稳定负 row key 锚定源行，排序/过滤时不篡改查询结果；源被过滤或删除时安全降级到底部。自增/生成列不复制，复制、编辑、提交与草稿重排共享同一 visual-row 映射。 |
-| 编辑操作出现后工具栏横向溢出且尾部动作不可见 | `apps/desktop/src/components/grid/DataGrid.vue:updateDataGridTopbarWidth`（`a84cb637b`） | `src/components/workspace/TableDataToolbar.tsx`、`src/lib/toolbarOverflow.ts` | 已对齐：ResizeObserver 与 MutationObserver 同时观测真实 action list；溢出时只折叠 Submit/Revert 文字并保留图标、标题和 aria-label，达到展开所需宽度后自动恢复。 |
+| 编辑操作或查询结果动作出现后工具栏横向溢出且尾部动作不可见 | `apps/desktop/src/components/grid/DataGrid.vue:updateDataGridTopbarWidth`（`a84cb637b`） | `src/components/workspace/TableDataToolbar.tsx`、`DataGrid.tsx`、`src/lib/toolbarOverflow.ts` | 已完整对齐：表数据与普通查询结果工具栏都由 ResizeObserver + MutationObserver 观测真实 action list，并共享带滞回的宽度状态；溢出时只折叠 Submit/Revert 或 Transpose/Copy/Export 文字，图标、title、aria-label 和菜单入口始终保留，达到原展开所需宽度后才自动恢复，避免边界宽度来回闪动。 |
 | 外部 SQL 文件浏览仅固定识别 `.sql` | `apps/desktop/src/components/layout/SqlFilePanel.vue`、`src-tauri/src/commands/list_sql_files.rs`（`f725c50b2`） | `src/components/workspace/ProjectFilesSidebar.tsx`、`src/lib/projectFileFilter.ts` | 按 Oxide 项目工作区架构对齐：文件面板提供持久化的大小写不敏感 glob/正则过滤和错误校验，默认 `*` 保留 SQL、脚本、文档和 AI 项目上下文；目录仍按需加载，因此过滤不会触发全树扫描。LSP 继续只同步受限 SQL 后缀，不因 UI 过滤扩大文档授权。 |
 | Elasticsearch index mapping/settings/stats/clear | `ElasticsearchIndexMetadataDialog.vue`、`elasticsearchIndexActions.ts`、`document_ops.rs`（`8f3134dce`） | `src/features/data-grid/ui/ElasticsearchIndexMetadataDialog.tsx`、`ElasticsearchIndexClearDialog.tsx`、`src-tauri/src/commands/document.rs`、`drivers/elasticsearch.rs` | 已在此前阶段对齐并更严格：metadata kind 为闭集，index path segment 编码；clear 走 preview/token/目标重验，通配目标要求动态确认短语，响应必须包含完整 shard 结果。ES 6 typed mapping 与 ES 7/8 typeless mapping 均有契约测试。 |
 
@@ -364,3 +364,12 @@ widget 接管，从而避免原生 hover 与交互式 hover 重叠，也不重�
 与 CI 相同的 `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
 和完整 Rust lib 测试（747 passed、2 ignored）均通过。真实 macOS removable/APFS volume、Windows
 盘符重用、Linux bind/network mount 的换卷竞态进入延期验证清单。
+
+## Phase 134 增量：查询结果工具栏自适应紧凑模式
+
+DBX `a84cb637b` 的真实溢出测量此前只覆盖 Oxide 的表数据工具栏；普通查询结果仍可能在
+右侧/拆分面板变窄时裁掉 Copy 或 Export。本阶段让 `DataGrid.tsx` 复用
+`resolveToolbarOverflowState`：尺寸与动态文案变化都会重新测量，紧凑状态使用展开态所需宽度
+作为恢复阈值。紧凑时仅隐藏文字，结果数、截断告警图标、Transpose/Copy/Export 图标、菜单和
+可访问名称保持可用。定向 4 个测试和生产前端构建通过；真实 WebView 拆分拖动、缩放与
+系统字体变化记录在延期验证清单。

@@ -71,6 +71,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { dataGridMetrics } from "@/lib/dataGridView";
+import { resolveToolbarOverflowState } from "@/lib/toolbarOverflow";
 import { DataGridBusyIndicator } from "./DataGridBusyIndicator";
 import {
   resultColumnGridId,
@@ -407,9 +408,59 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       useState<DataGridHoverTooltipState | null>(null);
 
     const gridContainerRef = useRef<HTMLDivElement>(null);
+    const queryToolbarRef = useRef<HTMLDivElement>(null);
+    const queryToolbarExpandedWidthRef = useRef(0);
     const dataEditorRef = useRef<DataEditorRef>(null);
     const columnLookupInputRef = useRef<HTMLInputElement>(null);
     const restoredLayoutRef = useRef<string | null>(null);
+    const [queryToolbarCompact, setQueryToolbarCompact] = useState(false);
+    const queryToolbarVisible = activeTab?.type !== "table" && Boolean(result);
+    const queryToolbarStructureKey = [
+      queryToolbarVisible,
+      Boolean(result?.truncated),
+      isTransposed,
+    ].join(":");
+
+    useEffect(() => {
+      const toolbar = queryToolbarRef.current;
+      if (!toolbar || !queryToolbarVisible) return;
+      queryToolbarExpandedWidthRef.current = 0;
+      setQueryToolbarCompact(false);
+
+      const measure = () => {
+        setQueryToolbarCompact((compact) => {
+          const next = resolveToolbarOverflowState(
+            {
+              compact,
+              expandedRequiredWidth: queryToolbarExpandedWidthRef.current,
+            },
+            toolbar.clientWidth,
+            toolbar.scrollWidth,
+          );
+          queryToolbarExpandedWidthRef.current = next.expandedRequiredWidth;
+          return next.compact;
+        });
+      };
+
+      const frame = window.requestAnimationFrame(measure);
+      const resizeObserver =
+        typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+      resizeObserver?.observe(toolbar);
+      const mutationObserver =
+        typeof MutationObserver === "undefined"
+          ? null
+          : new MutationObserver(measure);
+      mutationObserver?.observe(toolbar, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      return () => {
+        window.cancelAnimationFrame(frame);
+        resizeObserver?.disconnect();
+        mutationObserver?.disconnect();
+      };
+    }, [queryToolbarStructureKey, queryToolbarVisible]);
 
     const tableColumns = activeTab?.tableColumns;
     const tableColumnsByName = useMemo(
@@ -2605,8 +2656,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     return (
       <div className="wb-data-grid flex h-full flex-col wb-grid-surface">
         {activeTab?.type !== "table" && result && (
-          <div className="h-9 shrink-0 border-b wb-data-toolbar flex items-center gap-2 px-3">
-            <div className="text-xs text-muted-foreground">
+          <div
+            ref={queryToolbarRef}
+            data-compact={queryToolbarCompact || undefined}
+            className="h-9 shrink-0 overflow-hidden border-b wb-data-toolbar flex items-center gap-2 px-3"
+          >
+            <div className="shrink-0 text-xs text-muted-foreground">
               {isTransposed && sourceResult
                 ? `${sourceResult.columns.length.toLocaleString()} fields × ${sourceResult.rows.length.toLocaleString()} rows`
                 : `${result.truncated ? "First " : ""}${result.rows.length.toLocaleString()} row${result.rows.length === 1 ? "" : "s"}`}
@@ -2618,7 +2673,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 title={`Result limited to ${(result.rowLimit || result.rows.length).toLocaleString()} rows. Add a LIMIT clause or narrow the query to retrieve a smaller, complete result.`}
               >
                 <CircleAlert size={12} className="shrink-0" aria-hidden="true" />
-                <span className="truncate">Result truncated</span>
+                {!queryToolbarCompact && (
+                  <span className="truncate">Result truncated</span>
+                )}
               </div>
             )}
             <div className="flex-1" />
@@ -2634,9 +2691,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   : "Transpose rows and columns"
               }
               aria-pressed={isTransposed}
+              aria-label={isTransposed ? "Show standard result grid" : "Transpose result"}
             >
-              <Rows3 size={14} className="mr-1.5" />
-              {isTransposed ? "Standard" : "Transpose"}
+              <Rows3
+                size={14}
+                className={queryToolbarCompact ? undefined : "mr-1.5"}
+              />
+              {!queryToolbarCompact && (isTransposed ? "Standard" : "Transpose")}
             </Button>
             <Button
               variant="ghost"
@@ -2645,9 +2706,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               disabled={result.rows.length === 0}
               onClick={() => void handleCopyAll()}
               title="Copy result as TSV"
+              aria-label="Copy result as TSV"
             >
-              <Copy size={14} className="mr-1.5" />
-              Copy
+              <Copy
+                size={14}
+                className={queryToolbarCompact ? undefined : "mr-1.5"}
+              />
+              {!queryToolbarCompact && "Copy"}
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -2657,9 +2722,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   className="h-7 px-2 text-xs"
                   disabled={result.rows.length === 0}
                   title="Export query result"
+                  aria-label="Export query result"
                 >
-                  <Download size={14} className="mr-1.5" />
-                  Export
+                  <Download
+                    size={14}
+                    className={queryToolbarCompact ? undefined : "mr-1.5"}
+                  />
+                  {!queryToolbarCompact && "Export"}
                   <ChevronDown size={11} className="ml-1" />
                 </Button>
               </DropdownMenuTrigger>

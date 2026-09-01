@@ -1705,3 +1705,18 @@ explicit deferred validation task rather than an implicit release check.
   artifact. Phase 133 covers pure identity, migration and current-platform
   handle consistency plus the full Rust library suite; it opens no live
   database or removable volume.
+
+## Query result toolbar overflow compaction
+
+- Drag first/second panel splitters while a wide query result is visible. At
+  the first real overflow, Transpose, Copy and Export must retain icon actions
+  and accessible names while their labels collapse; no action may be clipped.
+- Grow the panel through but not yet beyond the expanded toolbar width. The
+  toolbar must remain compact until the full expanded action list fits, then
+  expand once without oscillating at the boundary.
+- Repeat with truncated-result status appearing/disappearing, transpose state,
+  Windows display scaling, macOS/Linux system fonts and application zoom. A
+  hidden second panel must disconnect its observers and must not generate
+  repeated layout work. Phase 134 covers the shared hysteresis contract,
+  structural observer/accessibility assertions and a production frontend
+  build; packaged WebView geometry remains deferred.
