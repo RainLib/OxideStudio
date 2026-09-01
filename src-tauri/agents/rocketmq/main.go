@@ -31,7 +31,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_query_message_by_key", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_query_message_by_key", "mq_query_message_by_time", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -134,6 +134,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.peekMessages(params)
 	case "mq_query_message_by_key":
 		return a.queryMessagesByKey(params)
+	case "mq_query_message_by_time":
+		return a.queryMessagesByTime(params)
 	case "mq_list_consumer_groups":
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
@@ -580,6 +582,44 @@ func (a *rocketMQAgent) queryMessagesByKey(params map[string]any) (any, error) {
 		}
 	}
 	return map[string]any{"topic": topic, "key": key, "messages": rows}, nil
+}
+
+func (a *rocketMQAgent) queryMessagesByTime(params map[string]any) (any, error) {
+	topic, ok := params["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if !ok || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	limit := jsonInt(params["limit"], 32)
+	if limit < 1 {
+		limit = 32
+	}
+	if limit > maxPeekMessages {
+		limit = maxPeekMessages
+	}
+	now := time.Now().UnixMilli()
+	begin := int64(jsonInt(params["beginTimestamp"], int(now-24*time.Hour.Milliseconds())))
+	end := int64(jsonInt(params["endTimestamp"], int(now)))
+	if begin < 0 || end < begin || end-now > time.Hour.Milliseconds() || end-begin > 31*24*time.Hour.Milliseconds() {
+		return nil, fmt.Errorf("message query time range is invalid or exceeds 31 days")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	messages, err := client.QueryMessageByTime(ctx, topic, begin, end, limit)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		if message != nil {
+			rows = append(rows, rocketMqMessageResult(message))
+		}
+	}
+	return map[string]any{"topic": topic, "beginTimestamp": begin, "endTimestamp": end, "messages": rows}, nil
 }
 
 // listConsumerGroups mirrors DBX's cluster-wide group listing. The admin

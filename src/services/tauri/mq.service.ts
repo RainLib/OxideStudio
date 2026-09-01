@@ -151,6 +151,21 @@ export const rocketMqService = {
       key: string;
       messages: RocketMqMessagePreview["messages"];
     }>("query_rocketmq_messages_by_key", { connectionId, topic, key, limit }),
+  queryMessagesByTime: (
+    connectionId: string,
+    topic: string,
+    options: {
+      beginTimestamp?: number;
+      endTimestamp?: number;
+      limit?: number;
+    } = {},
+  ) =>
+    invokeRawCommand<{
+      topic: string;
+      beginTimestamp: number;
+      endTimestamp: number;
+      messages: RocketMqMessagePreview["messages"];
+    }>("query_rocketmq_messages_by_time", { connectionId, topic, ...options }),
   listConsumerGroups: (
     connectionId: string,
     options: { keyword?: string; offset?: number; limit?: number } = {},
