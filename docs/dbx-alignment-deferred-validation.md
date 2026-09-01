@@ -20,8 +20,15 @@
   alone is not implementation evidence.
 - Run disposable MySQL 5.7/8 migrations whose comments/defaults contain the
   words `foreign key`, and verify source-only/required target columns are shown
-  before execution. Oxide does not use DBX's line-strip path, but the complete
-  migration outcome still requires live-server evidence.
+  before execution. Static Rust regression proves source-only columns now fail
+  closed while matching target-generated/hidden columns remain database-owned.
+  Oxide does not use DBX's line-strip path, but the complete migration outcome
+  still requires live-server evidence.
+- Open project `.sql` files against multiple saved connections/databases/schemas,
+  close and reopen them, then rename/delete files and directories and change the
+  project root. Static tests cover persistence, stale connections, path safety,
+  rename/delete scoping and the 2,000-record bound; packaged WebView interaction
+  remains deferred.
 
 Static unit/build/Clippy validation is executed before this queue. These checks
 remain deliberately deferred because the current implementation phase does not
