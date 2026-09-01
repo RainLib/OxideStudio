@@ -119,6 +119,7 @@ import {
 } from "@/lib/databaseDialect";
 import {
   collectionCreateQueryTemplateForCapabilities,
+  collectionDisplayLabelForCapabilities,
   collectionDeleteQueryTemplateForCapabilities,
   databaseObjectPreviewProvider,
   collectionPreviewQueryTemplateForCapabilities,
@@ -1607,9 +1608,15 @@ export function SchemaSidebar() {
       ),
       collections: [...schemaCollections]
         .sort((a, b) => a.name.localeCompare(b.name))
-        .filter((collection) =>
-          collection.name.toLowerCase().includes(filterText.toLowerCase()),
-        ),
+        .filter((collection) => {
+          const normalizedFilter = filterText.toLowerCase();
+          return (
+            collection.name.toLowerCase().includes(normalizedFilter) ||
+            collectionDisplayLabelForCapabilities(activeCapabilities, collection)
+              .toLowerCase()
+              .includes(normalizedFilter)
+          );
+        }),
       functions: schemaFunctions.filter((routine) =>
         routineMatchesFilter(routine, filterText),
       ),
@@ -4150,11 +4157,14 @@ export function SchemaSidebar() {
 
     const renderCollectionItem = (
       collection: CollectionInfo,
-      label = collection.name,
+      label: string | undefined = undefined,
       depth = 0,
     ) => {
       const canDeleteCollection = Boolean(collectionDeleteSql(collection));
       const collectionDriver = driver || activeDriver;
+      const displayLabel =
+        label ??
+        collectionDisplayLabelForCapabilities(activeCapabilities, collection);
       const isElasticsearchIndex =
         normalizeDatabaseDriverName(collectionDriver) === "elasticsearch" &&
         collection.type === "index";
@@ -4228,8 +4238,12 @@ export function SchemaSidebar() {
                     handleCollectionDoubleClick(collection),
                   );
                 }}
-                title={collection.name}
-                aria-label={`${collection.name}. ${explorerActivationLabel(explorerActivationMode)} to open data.`}
+                title={
+                  displayLabel === collection.name
+                    ? collection.name
+                    : `${displayLabel}\n${collection.name}`
+                }
+                aria-label={`${displayLabel}. ${explorerActivationLabel(explorerActivationMode)} to open data.`}
               >
                 {canExpandCollectionMetadata && (
                   <button
@@ -4262,7 +4276,7 @@ export function SchemaSidebar() {
                   )}
                 />
                 <span className="min-w-0 flex-1 truncate">
-                  {highlightMatch(label || "(empty)", filterText)}
+                  {highlightMatch(displayLabel || "(empty)", filterText)}
                 </span>
                 {collection.type && (
                   <span className="shrink-0 text-[9px] uppercase opacity-50">

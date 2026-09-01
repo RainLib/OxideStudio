@@ -90,6 +90,34 @@ export function collectionPreviewTabTitleForCapabilities(
     defaultPreviewTabTitle(provider.objectLabel, collection);
 }
 
+/**
+ * A provider may use an opaque collection id for exact backend routing while
+ * presenting a compact, human-readable label in the explorer. The id itself
+ * remains the only value sent back to the backend.
+ */
+export function collectionDisplayLabelForCapabilities(
+  capabilities: DatabaseCapabilities,
+  collection: CollectionInfo,
+) {
+  if (capabilities.driver !== "nacos") return collection.name;
+  try {
+    const value = JSON.parse(collection.name) as {
+      dataId?: unknown;
+      group?: unknown;
+      tenant?: unknown;
+    };
+    if (typeof value.dataId !== "string" || !value.dataId.trim()) {
+      return collection.name;
+    }
+    const details = [value.group, value.tenant]
+      .filter((part): part is string => typeof part === "string" && Boolean(part))
+      .join(" · ");
+    return details ? `${value.dataId} · ${details}` : value.dataId;
+  } catch {
+    return collection.name;
+  }
+}
+
 export function collectionPreviewQueryTemplate(
   driver: DatabaseDriver,
   namespace: string | null,
@@ -147,6 +175,8 @@ const BUILTIN_PREVIEW_PROVIDERS: DatabaseObjectPreviewProvider[] = [
     matches: (capabilities) => capabilities.driver === "nacos",
     objectLabel: "Configuration",
     objectPluralLabel: "Configurations",
+    tabTitle: ({ capabilities, collection }) =>
+      `Configuration: ${collectionDisplayLabelForCapabilities(capabilities, collection)}`,
     queryTemplate: ({ collection }) => `GET ${collection.name}`,
   },
   {

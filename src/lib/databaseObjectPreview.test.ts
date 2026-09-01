@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { defaultDatabaseCapabilities } from "./databaseDialect";
 import {
   collectionCreateQueryTemplateForCapabilities,
+  collectionDisplayLabelForCapabilities,
   collectionDeleteQueryTemplateForCapabilities,
+  collectionPreviewTabTitleForCapabilities,
   collectionPreviewQueryTemplateForCapabilities,
 } from "./databaseObjectPreview";
 
@@ -61,6 +63,12 @@ describe("Nacos object preview", () => {
 
   it("uses an exact read-only config key and exposes no mutations", () => {
     expect(
+      collectionDisplayLabelForCapabilities(capabilities, collection),
+    ).toBe("app.yaml · DEFAULT_GROUP");
+    expect(
+      collectionPreviewTabTitleForCapabilities(capabilities, collection, "config"),
+    ).toBe("Configuration: app.yaml · DEFAULT_GROUP");
+    expect(
       collectionPreviewQueryTemplateForCapabilities(capabilities, "config", collection),
     ).toBe(`GET ${collection.name}`);
     expect(
@@ -69,5 +77,14 @@ describe("Nacos object preview", () => {
     expect(
       collectionDeleteQueryTemplateForCapabilities(capabilities, "config", collection),
     ).toBeNull();
+  });
+
+  it("falls back to the opaque identity only when the driver data is malformed", () => {
+    expect(
+      collectionDisplayLabelForCapabilities(capabilities, {
+        ...collection,
+        name: "not-json",
+      }),
+    ).toBe("not-json");
   });
 });

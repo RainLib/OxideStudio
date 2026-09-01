@@ -94,7 +94,9 @@ describe("reference database driver catalogue", () => {
       } else {
         expect(plan.lspRoute).toBe("notApplicable");
         expect(plan.runtimeRoute).toBe(
-          candidate.driver === "meilisearch" ? "bundled" : "dedicatedWorkspace",
+          candidate.preferredRuntime === "bundled"
+            ? "bundled"
+            : "dedicatedWorkspace",
         );
       }
     }
