@@ -31,7 +31,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_peek_messages", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -128,6 +128,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.listTopics(params)
 	case "mq_describe_topic":
 		return a.describeTopic(params)
+	case "mq_get_topic_config":
+		return a.getTopicConfig(params)
 	case "mq_peek_messages":
 		return a.peekMessages(params)
 	case "mq_list_consumer_groups":
@@ -376,6 +378,55 @@ func topicRouteResult(topic string, route *admin.TopicRouteData) map[string]any 
 		return fmt.Sprint(brokers[left]["brokerName"]) < fmt.Sprint(brokers[right]["brokerName"])
 	})
 	return map[string]any{"topic": topic, "queueDatas": queues, "brokerDatas": brokers}
+}
+
+// getTopicConfig reads each master independently. Configuration drift is a
+// useful operational signal, so it is never collapsed to an arbitrary broker.
+func (a *rocketMQAgent) getTopicConfig(params map[string]any) (any, error) {
+	topic, ok := params["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if !ok || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	route, err := client.ExamineTopicRouteInfo(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	addresses := topicMasterAddresses(route)
+	names := sortedKeys(addresses)
+	configs := make([]map[string]any, 0, len(names))
+	unavailable := make([]string, 0)
+	for _, brokerName := range names {
+		topicConfig, configErr := client.ExamineTopicConfig(ctx, addresses[brokerName], topic)
+		if configErr != nil {
+			unavailable = append(unavailable, brokerName)
+			continue
+		}
+		configs = append(configs, map[string]any{
+			"brokerName":      brokerName,
+			"topicName":       valueOrDefault(topicConfig.TopicName, topic),
+			"readQueueNums":   topicConfig.ReadQueueNums,
+			"writeQueueNums":  topicConfig.WriteQueueNums,
+			"perm":            topicConfig.Perm,
+			"topicFilterType": topicConfig.TopicFilterType,
+			"topicSysFlag":    topicConfig.TopicSysFlag,
+			"order":           topicConfig.Order,
+		})
+	}
+	if len(configs) == 0 && len(names) > 0 {
+		return nil, fmt.Errorf("topic config is unavailable on all master brokers")
+	}
+	return map[string]any{
+		"topic":              topic,
+		"configs":            configs,
+		"unavailableBrokers": unavailable,
+	}, nil
 }
 
 // peekMessages is deliberately read-only and bounded. It pulls from concrete

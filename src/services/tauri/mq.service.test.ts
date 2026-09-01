@@ -27,6 +27,7 @@ describe("RocketMQ workspace service", () => {
     });
     await rocketMqService.listTopics("rocket-1", "orders");
     await rocketMqService.getTopic("rocket-1", "orders");
+    await rocketMqService.getTopicConfig("rocket-1", "orders");
     await rocketMqService.peekMessages("rocket-1", "orders", {
       partition: 2,
       offset: 8,
@@ -59,6 +60,11 @@ describe("RocketMQ workspace service", () => {
     });
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
       4,
+      "get_rocketmq_topic_config",
+      { connectionId: "rocket-1", topic: "orders" },
+    );
+    expect(invokeRawCommand).toHaveBeenNthCalledWith(
+      5,
       "peek_rocketmq_messages",
       {
         connectionId: "rocket-1",
@@ -69,7 +75,7 @@ describe("RocketMQ workspace service", () => {
       },
     );
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
-      5,
+      6,
       "list_rocketmq_consumer_groups",
       {
         connectionId: "rocket-1",
@@ -78,7 +84,7 @@ describe("RocketMQ workspace service", () => {
       },
     );
     expect(invokeRawCommand).toHaveBeenNthCalledWith(
-      6,
+      7,
       "get_rocketmq_consumer_group",
       {
         connectionId: "rocket-1",

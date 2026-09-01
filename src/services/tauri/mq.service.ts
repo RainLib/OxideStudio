@@ -54,6 +54,21 @@ export type RocketMqMessagePreview = {
   nextOffset: number;
 };
 
+export type RocketMqTopicConfig = {
+  topic: string;
+  configs: Array<{
+    brokerName: string;
+    topicName: string;
+    readQueueNums: number;
+    writeQueueNums: number;
+    perm: number;
+    topicFilterType: string;
+    topicSysFlag: number;
+    order: boolean;
+  }>;
+  unavailableBrokers: string[];
+};
+
 export type RocketMqConsumerGroups = {
   groups: Array<{
     groupId: string;
@@ -107,6 +122,11 @@ export const rocketMqService = {
     }),
   getTopic: (connectionId: string, topic: string) =>
     invokeRawCommand<RocketMqTopicDetail>("get_rocketmq_topic", {
+      connectionId,
+      topic,
+    }),
+  getTopicConfig: (connectionId: string, topic: string) =>
+    invokeRawCommand<RocketMqTopicConfig>("get_rocketmq_topic_config", {
       connectionId,
       topic,
     }),
