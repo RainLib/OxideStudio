@@ -4,7 +4,10 @@ import {
   revealLspDatabaseDefinition,
   revealLspProjectDefinition,
 } from "@/lib/lspNavigation";
-import { sqlInsertValueHints } from "@/lib/sqlInsertValueHints";
+import {
+  findEnclosingDollarQuoteBodyStart,
+  sqlInsertValueHints,
+} from "@/lib/sqlInsertValueHints";
 import {
   flattenLspSelectionRanges,
   lspDocumentationForMonaco,
@@ -499,10 +502,19 @@ export function registerLspCoreProviders({
           endLineNumber: scanEndPosition.lineNumber,
           endColumn: scanEndPosition.column,
         };
-        const insertValueHints = sqlInsertValueHints(
-          model.getValueInRange(scanRange),
-        )
-          .map((hint) => ({ ...hint, offset: hint.offset + scanStart }))
+        const scanText = model.getValueInRange(scanRange);
+        const localRangeStart = Math.max(0, rangeStart - scanStart);
+        const routineBodyStart = findEnclosingDollarQuoteBodyStart(
+          scanText,
+          localRangeStart,
+        );
+        const fallbackText =
+          routineBodyStart === null
+            ? scanText
+            : scanText.slice(routineBodyStart);
+        const fallbackOffset = scanStart + (routineBodyStart ?? 0);
+        const insertValueHints = sqlInsertValueHints(fallbackText)
+          .map((hint) => ({ ...hint, offset: hint.offset + fallbackOffset }))
           .filter((hint) => hint.offset >= rangeStart && hint.offset <= rangeEnd)
           .map((hint) => ({
             position: model.getPositionAt(hint.offset),

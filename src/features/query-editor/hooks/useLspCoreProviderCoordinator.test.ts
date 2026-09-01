@@ -170,6 +170,68 @@ describe("LSP core provider coordinator", () => {
     expect(result.hints[0]?.position.column).toBe(valueOffset + 1);
   });
 
+  it("keeps the local INSERT SELECT fallback active inside a dollar-quoted routine", async () => {
+    const { providers } = coordinatorFixture();
+    const text = [
+      "CREATE FUNCTION copy_rows() RETURNS void AS $oxide$",
+      "BEGIN",
+      "  INSERT INTO users (id, name) SELECT source_id, source_name FROM staging;",
+      "END",
+      "$oxide$ LANGUAGE plpgsql;",
+    ].join("\n");
+    const lines = text.split("\n");
+    const lineOffsets = lines.map((_, index) =>
+      lines.slice(0, index).reduce((sum, line) => sum + line.length + 1, 0),
+    );
+    const getOffsetAt = ({
+      lineNumber,
+      column,
+    }: {
+      lineNumber: number;
+      column: number;
+    }) => (lineOffsets[lineNumber - 1] ?? text.length) + column - 1;
+    const getPositionAt = (offset: number) => {
+      let lineIndex = 0;
+      while (
+        lineIndex + 1 < lineOffsets.length &&
+        (lineOffsets[lineIndex + 1] ?? text.length) <= offset
+      ) {
+        lineIndex += 1;
+      }
+      return {
+        lineNumber: lineIndex + 1,
+        column: offset - (lineOffsets[lineIndex] ?? 0) + 1,
+      };
+    };
+    const model = {
+      uri: { toString: () => "oxide://query/active.postgres.sql" },
+      getOffsetAt,
+      getPositionAt,
+      getValueLength: () => text.length,
+      getValueInRange: (range: any) =>
+        text.slice(
+          getOffsetAt({
+            lineNumber: range.startLineNumber,
+            column: range.startColumn,
+          }),
+          getOffsetAt({
+            lineNumber: range.endLineNumber,
+            column: range.endColumn,
+          }),
+        ),
+    };
+
+    const result = await providers.get("inlayHints").provideInlayHints(model, {
+      startLineNumber: 3,
+      startColumn: 3,
+      endLineNumber: 3,
+      endColumn: lines[2]!.length + 1,
+    });
+
+    expect(result.hints.map((hint: any) => hint.label)).toEqual(["id:", "name:"]);
+    expect(result.hints.map((hint: any) => hint.position.lineNumber)).toEqual([3, 3]);
+  });
+
   it("drops stale signature and inlay responses after the model changes", async () => {
     const { lspClient, providers } = coordinatorFixture();
     let version = 1;
