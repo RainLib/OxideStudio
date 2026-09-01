@@ -74,6 +74,50 @@ pub struct QueryHistoryItem {
     pub finished_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSqlFolder {
+    pub id: String,
+    pub project_id: String,
+    pub connection_id: Option<String>,
+    pub parent_folder_id: Option<String>,
+    pub name: String,
+    pub order_index: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSqlFile {
+    pub id: String,
+    pub project_id: String,
+    pub connection_id: Option<String>,
+    pub folder_id: Option<String>,
+    pub name: String,
+    pub database_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub sql: String,
+    #[serde(default = "default_true")]
+    pub sql_loaded: bool,
+    pub order_index: i64,
+    pub open_count: i64,
+    pub opened_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSqlLibrary {
+    pub folders: Vec<SavedSqlFolder>,
+    pub files: Vec<SavedSqlFile>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantTaskPlanStep {
@@ -158,6 +202,20 @@ fn current_timestamp_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn validate_saved_sql_identity(project_id: &str, id: &str, name: &str) -> Result<()> {
+    if project_id.trim().is_empty() || id.trim().is_empty() {
+        anyhow::bail!("saved SQL project and item ids cannot be empty");
+    }
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 240 {
+        anyhow::bail!("saved SQL name must contain between 1 and 240 characters");
+    }
+    if name.chars().any(|character| character.is_control()) {
+        anyhow::bail!("saved SQL name cannot contain control characters");
+    }
+    Ok(())
 }
 
 pub struct MetaStore {
@@ -404,6 +462,73 @@ impl MetaStore {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_query_history_project_connection ON query_history(project_id, connection_id, started_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS saved_sql_folders (
+                project_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                connection_id TEXT,
+                parent_folder_id TEXT,
+                name TEXT NOT NULL,
+                order_index INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(project_id, id),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_saved_sql_folders_tree ON saved_sql_folders(project_id, connection_id, parent_folder_id, order_index, name)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_sql_folders_location_name ON saved_sql_folders(project_id, COALESCE(connection_id, ''), COALESCE(parent_folder_id, ''), name COLLATE NOCASE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS saved_sql_files (
+                project_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                connection_id TEXT,
+                folder_id TEXT,
+                name TEXT NOT NULL,
+                database_name TEXT,
+                schema_name TEXT,
+                sql TEXT NOT NULL,
+                order_index INTEGER NOT NULL DEFAULT 0,
+                open_count INTEGER NOT NULL DEFAULT 0,
+                opened_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(project_id, id),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_saved_sql_files_tree ON saved_sql_files(project_id, folder_id, order_index, name)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_sql_files_location_name ON saved_sql_files(project_id, COALESCE(connection_id, ''), COALESCE(folder_id, ''), name COLLATE NOCASE)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_saved_sql_files_recent ON saved_sql_files(project_id, updated_at DESC, id DESC)",
         )
         .execute(&self.pool)
         .await?;
@@ -778,6 +903,14 @@ impl MetaStore {
 
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM query_history WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM saved_sql_files WHERE project_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM saved_sql_folders WHERE project_id = ?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -1158,6 +1291,621 @@ impl MetaStore {
             .bind(connection_id)
             .execute(&mut **transaction)
             .await?;
+        }
+        Ok(())
+    }
+
+    // --- Saved SQL Library Operations ---
+
+    pub async fn load_saved_sql_library(&self, project_id: &str) -> Result<SavedSqlLibrary> {
+        if project_id.trim().is_empty() {
+            anyhow::bail!("saved SQL project id cannot be empty");
+        }
+        let folder_rows = sqlx::query(
+            r#"
+            SELECT id, project_id, connection_id, parent_folder_id, name,
+                   order_index, created_at, updated_at
+            FROM saved_sql_folders
+            WHERE project_id = ?
+            ORDER BY order_index, name COLLATE NOCASE, id
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let file_rows = sqlx::query(
+            r#"
+            SELECT id, project_id, connection_id, folder_id, name,
+                   database_name, schema_name, order_index, open_count,
+                   opened_at, created_at, updated_at
+            FROM saved_sql_files
+            WHERE project_id = ?
+            ORDER BY order_index, name COLLATE NOCASE, id
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(SavedSqlLibrary {
+            folders: folder_rows
+                .into_iter()
+                .map(|row| SavedSqlFolder {
+                    id: row.get("id"),
+                    project_id: row.get("project_id"),
+                    connection_id: row.get("connection_id"),
+                    parent_folder_id: row.get("parent_folder_id"),
+                    name: row.get("name"),
+                    order_index: row.get("order_index"),
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                })
+                .collect(),
+            files: file_rows
+                .into_iter()
+                .map(|row| SavedSqlFile {
+                    id: row.get("id"),
+                    project_id: row.get("project_id"),
+                    connection_id: row.get("connection_id"),
+                    folder_id: row.get("folder_id"),
+                    name: row.get("name"),
+                    database_name: row.get("database_name"),
+                    schema_name: row.get("schema_name"),
+                    sql: String::new(),
+                    sql_loaded: false,
+                    order_index: row.get("order_index"),
+                    open_count: row.get("open_count"),
+                    opened_at: row.get("opened_at"),
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn load_saved_sql_file(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<Option<SavedSqlFile>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, project_id, connection_id, folder_id, name,
+                   database_name, schema_name, sql, order_index, open_count,
+                   opened_at, created_at, updated_at
+            FROM saved_sql_files
+            WHERE project_id = ? AND id = ?
+            "#,
+        )
+        .bind(project_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| SavedSqlFile {
+            id: row.get("id"),
+            project_id: row.get("project_id"),
+            connection_id: row.get("connection_id"),
+            folder_id: row.get("folder_id"),
+            name: row.get("name"),
+            database_name: row.get("database_name"),
+            schema_name: row.get("schema_name"),
+            sql: row.get("sql"),
+            sql_loaded: true,
+            order_index: row.get("order_index"),
+            open_count: row.get("open_count"),
+            opened_at: row.get("opened_at"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
+    }
+
+    pub async fn load_saved_sql_files(&self, project_id: &str) -> Result<Vec<SavedSqlFile>> {
+        if project_id.trim().is_empty() {
+            anyhow::bail!("saved SQL project id cannot be empty");
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id, project_id, connection_id, folder_id, name,
+                   database_name, schema_name, sql, order_index, open_count,
+                   opened_at, created_at, updated_at
+            FROM saved_sql_files
+            WHERE project_id = ?
+            ORDER BY order_index, name COLLATE NOCASE, id
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SavedSqlFile {
+                id: row.get("id"),
+                project_id: row.get("project_id"),
+                connection_id: row.get("connection_id"),
+                folder_id: row.get("folder_id"),
+                name: row.get("name"),
+                database_name: row.get("database_name"),
+                schema_name: row.get("schema_name"),
+                sql: row.get("sql"),
+                sql_loaded: true,
+                order_index: row.get("order_index"),
+                open_count: row.get("open_count"),
+                opened_at: row.get("opened_at"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn save_saved_sql_folder(&self, folder: &SavedSqlFolder) -> Result<()> {
+        validate_saved_sql_identity(&folder.project_id, &folder.id, &folder.name)?;
+        if folder.order_index < 0 || folder.updated_at < folder.created_at {
+            anyhow::bail!("saved SQL folder ordering or timing is invalid");
+        }
+        let mut tx = self.pool.begin().await?;
+        let project_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
+                .bind(&folder.project_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !project_exists {
+            anyhow::bail!("saved SQL project not found: {}", folder.project_id);
+        }
+
+        if let Some(parent_id) = folder.parent_folder_id.as_deref() {
+            let mut cursor = Some(parent_id.to_string());
+            let mut depth = 0;
+            while let Some(candidate_id) = cursor {
+                if candidate_id == folder.id {
+                    anyhow::bail!("saved SQL folder cannot contain itself");
+                }
+                let parent = sqlx::query(
+                    "SELECT connection_id, parent_folder_id FROM saved_sql_folders WHERE project_id = ? AND id = ?",
+                )
+                .bind(&folder.project_id)
+                .bind(&candidate_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| anyhow!("saved SQL parent folder not found: {candidate_id}"))?;
+                let parent_connection: Option<String> = parent.get("connection_id");
+                if parent_connection != folder.connection_id {
+                    anyhow::bail!(
+                        "saved SQL child and parent folders must use the same connection scope"
+                    );
+                }
+                cursor = parent.get("parent_folder_id");
+                depth += 1;
+                if depth > 128 {
+                    anyhow::bail!("saved SQL folder hierarchy is too deep");
+                }
+            }
+        }
+
+        let duplicate: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM saved_sql_folders
+                WHERE project_id = ? AND id <> ?
+                  AND COALESCE(connection_id, '') = COALESCE(?, '')
+                  AND COALESCE(parent_folder_id, '') = COALESCE(?, '')
+                  AND name = ? COLLATE NOCASE
+            )
+            "#,
+        )
+        .bind(&folder.project_id)
+        .bind(&folder.id)
+        .bind(&folder.connection_id)
+        .bind(&folder.parent_folder_id)
+        .bind(folder.name.trim())
+        .fetch_one(&mut *tx)
+        .await?;
+        if duplicate {
+            anyhow::bail!(
+                "a saved SQL folder with this name already exists in the target location"
+            );
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO saved_sql_folders (
+                project_id, id, connection_id, parent_folder_id, name,
+                order_index, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, id) DO UPDATE SET
+                connection_id = excluded.connection_id,
+                parent_folder_id = excluded.parent_folder_id,
+                name = excluded.name,
+                order_index = excluded.order_index,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&folder.project_id)
+        .bind(&folder.id)
+        .bind(&folder.connection_id)
+        .bind(&folder.parent_folder_id)
+        .bind(folder.name.trim())
+        .bind(folder.order_index)
+        .bind(folder.created_at)
+        .bind(folder.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_saved_sql_folder(&self, project_id: &str, id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM saved_sql_folders WHERE project_id = ? AND id = ?
+                UNION ALL
+                SELECT child.id FROM saved_sql_folders child
+                JOIN descendants parent ON child.parent_folder_id = parent.id
+                WHERE child.project_id = ?
+            )
+            DELETE FROM saved_sql_files
+            WHERE project_id = ? AND folder_id IN (SELECT id FROM descendants)
+            "#,
+        )
+        .bind(project_id)
+        .bind(id)
+        .bind(project_id)
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM saved_sql_folders WHERE project_id = ? AND id = ?
+                UNION ALL
+                SELECT child.id FROM saved_sql_folders child
+                JOIN descendants parent ON child.parent_folder_id = parent.id
+                WHERE child.project_id = ?
+            )
+            DELETE FROM saved_sql_folders
+            WHERE project_id = ? AND id IN (SELECT id FROM descendants)
+            "#,
+        )
+        .bind(project_id)
+        .bind(id)
+        .bind(project_id)
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn save_saved_sql_file(&self, file: &SavedSqlFile) -> Result<()> {
+        validate_saved_sql_identity(&file.project_id, &file.id, &file.name)?;
+        if file.sql.len() > 16 * 1024 * 1024 {
+            anyhow::bail!("saved SQL content exceeds the 16 MiB limit");
+        }
+        if file.order_index < 0 || file.open_count < 0 || file.updated_at < file.created_at {
+            anyhow::bail!("saved SQL file ordering, usage, or timing is invalid");
+        }
+        let mut tx = self.pool.begin().await?;
+        let project_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
+                .bind(&file.project_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !project_exists {
+            anyhow::bail!("saved SQL project not found: {}", file.project_id);
+        }
+        if let Some(folder_id) = file.folder_id.as_deref() {
+            let folder_connection: Option<Option<String>> = sqlx::query_scalar(
+                "SELECT connection_id FROM saved_sql_folders WHERE project_id = ? AND id = ?",
+            )
+            .bind(&file.project_id)
+            .bind(folder_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let folder_connection = folder_connection
+                .ok_or_else(|| anyhow!("saved SQL target folder not found: {folder_id}"))?;
+            if folder_connection != file.connection_id {
+                anyhow::bail!("saved SQL file and folder must use the same connection scope");
+            }
+        }
+        let duplicate: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM saved_sql_files
+                WHERE project_id = ? AND id <> ?
+                  AND COALESCE(connection_id, '') = COALESCE(?, '')
+                  AND COALESCE(folder_id, '') = COALESCE(?, '')
+                  AND name = ? COLLATE NOCASE
+            )
+            "#,
+        )
+        .bind(&file.project_id)
+        .bind(&file.id)
+        .bind(&file.connection_id)
+        .bind(&file.folder_id)
+        .bind(file.name.trim())
+        .fetch_one(&mut *tx)
+        .await?;
+        if duplicate {
+            anyhow::bail!("a saved SQL file with this name already exists in the target location");
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO saved_sql_files (
+                project_id, id, connection_id, folder_id, name,
+                database_name, schema_name, sql, order_index, open_count,
+                opened_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, id) DO UPDATE SET
+                connection_id = excluded.connection_id,
+                folder_id = excluded.folder_id,
+                name = excluded.name,
+                database_name = excluded.database_name,
+                schema_name = excluded.schema_name,
+                sql = excluded.sql,
+                order_index = excluded.order_index,
+                open_count = excluded.open_count,
+                opened_at = excluded.opened_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&file.project_id)
+        .bind(&file.id)
+        .bind(&file.connection_id)
+        .bind(&file.folder_id)
+        .bind(file.name.trim())
+        .bind(&file.database_name)
+        .bind(&file.schema_name)
+        .bind(&file.sql)
+        .bind(file.order_index)
+        .bind(file.open_count)
+        .bind(file.opened_at)
+        .bind(file.created_at)
+        .bind(file.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Persists an imported SQL library in one transaction. Folders must be
+    /// ordered before their descendants so parent validation can use the rows
+    /// inserted earlier in the same transaction.
+    pub async fn save_saved_sql_batch(
+        &self,
+        folders: &[SavedSqlFolder],
+        files: &[SavedSqlFile],
+    ) -> Result<()> {
+        if folders.is_empty() && files.is_empty() {
+            return Ok(());
+        }
+        if folders.len() > 5_000 || files.len() > 5_000 {
+            anyhow::bail!("saved SQL batch exceeds the 5,000 item limit");
+        }
+        let total_sql_bytes = files.iter().try_fold(0usize, |total, file| {
+            total
+                .checked_add(file.sql.len())
+                .ok_or_else(|| anyhow!("saved SQL batch size overflow"))
+        })?;
+        if total_sql_bytes > 64 * 1024 * 1024 {
+            anyhow::bail!("saved SQL batch exceeds the 64 MiB content limit");
+        }
+
+        let project_id = folders
+            .first()
+            .map(|folder| folder.project_id.as_str())
+            .or_else(|| files.first().map(|file| file.project_id.as_str()))
+            .ok_or_else(|| anyhow!("saved SQL batch has no project"))?;
+        if project_id.trim().is_empty()
+            || folders.iter().any(|folder| folder.project_id != project_id)
+            || files.iter().any(|file| file.project_id != project_id)
+        {
+            anyhow::bail!("saved SQL batch must target one non-empty project");
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let project_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
+                .bind(project_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !project_exists {
+            anyhow::bail!("saved SQL project not found: {project_id}");
+        }
+
+        for folder in folders {
+            validate_saved_sql_identity(&folder.project_id, &folder.id, &folder.name)?;
+            if folder.order_index < 0 || folder.updated_at < folder.created_at {
+                anyhow::bail!("saved SQL folder ordering or timing is invalid");
+            }
+            if let Some(parent_id) = folder.parent_folder_id.as_deref() {
+                let mut cursor = Some(parent_id.to_string());
+                let mut depth = 0;
+                while let Some(candidate_id) = cursor {
+                    if candidate_id == folder.id {
+                        anyhow::bail!("saved SQL folder cannot contain itself");
+                    }
+                    let parent = sqlx::query(
+                        "SELECT connection_id, parent_folder_id FROM saved_sql_folders WHERE project_id = ? AND id = ?",
+                    )
+                    .bind(project_id)
+                    .bind(&candidate_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| anyhow!("saved SQL parent folder not found: {candidate_id}"))?;
+                    let parent_connection: Option<String> = parent.get("connection_id");
+                    if parent_connection != folder.connection_id {
+                        anyhow::bail!(
+                            "saved SQL child and parent folders must use the same connection scope"
+                        );
+                    }
+                    cursor = parent.get("parent_folder_id");
+                    depth += 1;
+                    if depth > 128 {
+                        anyhow::bail!("saved SQL folder hierarchy is too deep");
+                    }
+                }
+            }
+            let duplicate: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM saved_sql_folders
+                    WHERE project_id = ? AND id <> ?
+                      AND COALESCE(connection_id, '') = COALESCE(?, '')
+                      AND COALESCE(parent_folder_id, '') = COALESCE(?, '')
+                      AND name = ? COLLATE NOCASE
+                )
+                "#,
+            )
+            .bind(project_id)
+            .bind(&folder.id)
+            .bind(&folder.connection_id)
+            .bind(&folder.parent_folder_id)
+            .bind(folder.name.trim())
+            .fetch_one(&mut *tx)
+            .await?;
+            if duplicate {
+                anyhow::bail!(
+                    "a saved SQL folder with this name already exists in the target location"
+                );
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO saved_sql_folders (
+                    project_id, id, connection_id, parent_folder_id, name,
+                    order_index, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, id) DO UPDATE SET
+                    connection_id = excluded.connection_id,
+                    parent_folder_id = excluded.parent_folder_id,
+                    name = excluded.name,
+                    order_index = excluded.order_index,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(project_id)
+            .bind(&folder.id)
+            .bind(&folder.connection_id)
+            .bind(&folder.parent_folder_id)
+            .bind(folder.name.trim())
+            .bind(folder.order_index)
+            .bind(folder.created_at)
+            .bind(folder.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for file in files {
+            validate_saved_sql_identity(&file.project_id, &file.id, &file.name)?;
+            if file.sql.len() > 16 * 1024 * 1024 {
+                anyhow::bail!("saved SQL content exceeds the 16 MiB limit");
+            }
+            if file.order_index < 0 || file.open_count < 0 || file.updated_at < file.created_at {
+                anyhow::bail!("saved SQL file ordering, usage, or timing is invalid");
+            }
+            if let Some(folder_id) = file.folder_id.as_deref() {
+                let folder_connection: Option<Option<String>> = sqlx::query_scalar(
+                    "SELECT connection_id FROM saved_sql_folders WHERE project_id = ? AND id = ?",
+                )
+                .bind(project_id)
+                .bind(folder_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let folder_connection = folder_connection
+                    .ok_or_else(|| anyhow!("saved SQL target folder not found: {folder_id}"))?;
+                if folder_connection != file.connection_id {
+                    anyhow::bail!("saved SQL file and folder must use the same connection scope");
+                }
+            }
+            let duplicate: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM saved_sql_files
+                    WHERE project_id = ? AND id <> ?
+                      AND COALESCE(connection_id, '') = COALESCE(?, '')
+                      AND COALESCE(folder_id, '') = COALESCE(?, '')
+                      AND name = ? COLLATE NOCASE
+                )
+                "#,
+            )
+            .bind(project_id)
+            .bind(&file.id)
+            .bind(&file.connection_id)
+            .bind(&file.folder_id)
+            .bind(file.name.trim())
+            .fetch_one(&mut *tx)
+            .await?;
+            if duplicate {
+                anyhow::bail!(
+                    "a saved SQL file with this name already exists in the target location"
+                );
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO saved_sql_files (
+                    project_id, id, connection_id, folder_id, name,
+                    database_name, schema_name, sql, order_index, open_count,
+                    opened_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, id) DO UPDATE SET
+                    connection_id = excluded.connection_id,
+                    folder_id = excluded.folder_id,
+                    name = excluded.name,
+                    database_name = excluded.database_name,
+                    schema_name = excluded.schema_name,
+                    sql = excluded.sql,
+                    order_index = excluded.order_index,
+                    open_count = excluded.open_count,
+                    opened_at = excluded.opened_at,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(project_id)
+            .bind(&file.id)
+            .bind(&file.connection_id)
+            .bind(&file.folder_id)
+            .bind(file.name.trim())
+            .bind(&file.database_name)
+            .bind(&file.schema_name)
+            .bind(&file.sql)
+            .bind(file.order_index)
+            .bind(file.open_count)
+            .bind(file.opened_at)
+            .bind(file.created_at)
+            .bind(file.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_saved_sql_file(&self, project_id: &str, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM saved_sql_files WHERE project_id = ? AND id = ?")
+            .bind(project_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn record_saved_sql_file_opened(
+        &self,
+        project_id: &str,
+        id: &str,
+        opened_at: i64,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE saved_sql_files SET open_count = open_count + 1, opened_at = ? WHERE project_id = ? AND id = ?",
+        )
+        .bind(opened_at)
+        .bind(project_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("saved SQL file not found: {id}");
         }
         Ok(())
     }
@@ -2527,5 +3275,247 @@ mod tests {
 
         task.checkpoint.context.as_mut().unwrap().project_id = "other".to_string();
         assert!(store.save_assistant_task(&task).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn saved_sql_library_is_project_scoped_lazy_and_cascade_safe() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        let project = Project {
+            id: "library-project".into(),
+            name: "Library".into(),
+            root_path: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_project(&project).await.unwrap();
+
+        let root = SavedSqlFolder {
+            id: "reports".into(),
+            project_id: project.id.clone(),
+            connection_id: Some("postgres-1".into()),
+            parent_folder_id: None,
+            name: "Reports".into(),
+            order_index: 0,
+            created_at: 10,
+            updated_at: 10,
+        };
+        store.save_saved_sql_folder(&root).await.unwrap();
+        let child = SavedSqlFolder {
+            id: "daily".into(),
+            parent_folder_id: Some(root.id.clone()),
+            name: "Daily".into(),
+            ..root.clone()
+        };
+        store.save_saved_sql_folder(&child).await.unwrap();
+
+        let file = SavedSqlFile {
+            id: "orders".into(),
+            project_id: project.id.clone(),
+            connection_id: Some("postgres-1".into()),
+            folder_id: Some(child.id.clone()),
+            name: "orders.sql".into(),
+            database_name: Some("app".into()),
+            schema_name: Some("public".into()),
+            sql: "SELECT * FROM orders;".into(),
+            sql_loaded: true,
+            order_index: 0,
+            open_count: 0,
+            opened_at: None,
+            created_at: 11,
+            updated_at: 11,
+        };
+        store.save_saved_sql_file(&file).await.unwrap();
+
+        let summary = store.load_saved_sql_library(&project.id).await.unwrap();
+        assert_eq!(summary.folders.len(), 2);
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.files[0].sql, "");
+        assert!(!summary.files[0].sql_loaded);
+        let loaded = store
+            .load_saved_sql_file(&project.id, &file.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.sql, file.sql);
+        assert!(loaded.sql_loaded);
+
+        store
+            .record_saved_sql_file_opened(&project.id, &file.id, 20)
+            .await
+            .unwrap();
+        let opened = store
+            .load_saved_sql_file(&project.id, &file.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(opened.open_count, 1);
+        assert_eq!(opened.opened_at, Some(20));
+
+        let duplicate = SavedSqlFile {
+            id: "other".into(),
+            name: "ORDERS.SQL".into(),
+            ..file.clone()
+        };
+        assert!(store.save_saved_sql_file(&duplicate).await.is_err());
+        let cyclic = SavedSqlFolder {
+            parent_folder_id: Some(child.id.clone()),
+            ..root.clone()
+        };
+        assert!(store.save_saved_sql_folder(&cyclic).await.is_err());
+
+        store
+            .delete_saved_sql_folder(&project.id, &root.id)
+            .await
+            .unwrap();
+        let empty = store.load_saved_sql_library(&project.id).await.unwrap();
+        assert!(empty.folders.is_empty());
+        assert!(empty.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn saved_sql_batch_is_atomic_and_loads_contents_in_one_query() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        let project = Project {
+            id: "batch-project".into(),
+            name: "Batch".into(),
+            root_path: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_project(&project).await.unwrap();
+        let root = SavedSqlFolder {
+            id: "root".into(),
+            project_id: project.id.clone(),
+            connection_id: None,
+            parent_folder_id: None,
+            name: "Root".into(),
+            order_index: 0,
+            created_at: 2,
+            updated_at: 2,
+        };
+        let child = SavedSqlFolder {
+            id: "child".into(),
+            parent_folder_id: Some(root.id.clone()),
+            name: "Child".into(),
+            ..root.clone()
+        };
+        let file = SavedSqlFile {
+            id: "query".into(),
+            project_id: project.id.clone(),
+            connection_id: None,
+            folder_id: Some(child.id.clone()),
+            name: "query.sql".into(),
+            database_name: None,
+            schema_name: None,
+            sql: "SELECT 1".into(),
+            sql_loaded: true,
+            order_index: 0,
+            open_count: 0,
+            opened_at: None,
+            created_at: 3,
+            updated_at: 3,
+        };
+        store
+            .save_saved_sql_batch(&[root, child], std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        let loaded = store.load_saved_sql_files(&project.id).await.unwrap();
+        assert_eq!(loaded, vec![file]);
+
+        let transient_folder = SavedSqlFolder {
+            id: "transient".into(),
+            project_id: project.id.clone(),
+            connection_id: None,
+            parent_folder_id: None,
+            name: "Transient".into(),
+            order_index: 1,
+            created_at: 4,
+            updated_at: 4,
+        };
+        let duplicate_a = SavedSqlFile {
+            id: "duplicate-a".into(),
+            project_id: project.id.clone(),
+            folder_id: Some(transient_folder.id.clone()),
+            name: "duplicate.sql".into(),
+            created_at: 5,
+            updated_at: 5,
+            ..loaded[0].clone()
+        };
+        let duplicate_b = SavedSqlFile {
+            id: "duplicate-b".into(),
+            ..duplicate_a.clone()
+        };
+        assert!(store
+            .save_saved_sql_batch(&[transient_folder], &[duplicate_a, duplicate_b])
+            .await
+            .is_err());
+        let library = store.load_saved_sql_library(&project.id).await.unwrap();
+        assert_eq!(library.folders.len(), 2);
+        assert_eq!(library.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn saved_sql_root_names_are_scoped_by_connection() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = MetaStore::for_test(pool);
+        store.init().await.unwrap();
+        let project = Project {
+            id: "scope-project".into(),
+            name: "Scope".into(),
+            root_path: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.save_project(&project).await.unwrap();
+        let first = SavedSqlFile {
+            id: "first".into(),
+            project_id: project.id.clone(),
+            connection_id: Some("postgres-1".into()),
+            folder_id: None,
+            name: "daily.sql".into(),
+            database_name: None,
+            schema_name: None,
+            sql: "SELECT 1".into(),
+            sql_loaded: true,
+            order_index: 0,
+            open_count: 0,
+            opened_at: None,
+            created_at: 2,
+            updated_at: 2,
+        };
+        let second = SavedSqlFile {
+            id: "second".into(),
+            connection_id: Some("postgres-2".into()),
+            sql: "SELECT 2".into(),
+            ..first.clone()
+        };
+
+        store.save_saved_sql_file(&first).await.unwrap();
+        store.save_saved_sql_file(&second).await.unwrap();
+        assert_eq!(
+            store
+                .load_saved_sql_library(&project.id)
+                .await
+                .unwrap()
+                .files
+                .len(),
+            2
+        );
     }
 }

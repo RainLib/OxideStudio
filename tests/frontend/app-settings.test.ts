@@ -21,6 +21,7 @@ describe("app settings workbench layout", () => {
     expect(DEFAULT_APP_SETTINGS.workbench.layout.visibility).toEqual({
       databaseExplorer: true,
       projectFiles: false,
+      sqlLibrary: false,
       assistant: false,
       commit: false,
       versionControl: false,
@@ -385,6 +386,7 @@ describe("app settings workbench layout", () => {
     expect(settings.workbench.layout.visibility).toEqual({
       databaseExplorer: false,
       projectFiles: false,
+      sqlLibrary: false,
       assistant: true,
       commit: false,
       versionControl: false,

@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | `8be503bf4` | 应用更新包在关闭对话框后继续后台下载，并在工具栏持续显示状态 | 本阶段已对齐并补充性能/安全边界：下载状态移入全局 Store，点击后立即关闭对话框但不取消请求；标题栏提供可重新打开的 available/downloading/downloaded 状态入口，已知总量显示环形进度，未知总量显示 indeterminate 动画。下载 chunk 只按 100ms 或 total/完成边界发布，避免 AppBar 高频重渲染。安装/重启前前后两层检查 Workbench `running/waiting` 任务，存在查询、迁移、导入导出或 Agent 审批时保持 downloaded，不调用 updater。Tauri 签名校验和 active `Update` handle 仍由既有 service 所有。 |
 | `23f0b1255` | Oracle Data Compare 允许显式选择 schema | Oxide 已由 capability 而非产品 allowlist 覆盖：`TableDataCompareDialog` 对不声明 database catalog 的任意关系驱动读取 `getSchemas` 并显示目标 schema，下游 column/table/compare endpoint 都携带所选 schema；声明 catalog 的驱动则按 database→schema 选择。正式 Oracle package 与真实 schema 权限验证仍延期，不能以候选身份冒充可运行能力。 |
-| `d79d35792` | SQL Library 默认折叠分组并提供 Collapse All | 尚未对齐：Oxide 当前 Project Files/Query History 不是 DBX 的持久 SQL Library，不能只增加装饰性 Collapse All 按钮。需先明确 Library 的项目级持久模型、搜索/重命名/删除/拖入编辑器及与现有 `.sql` 项目文件的去重边界，再迁移折叠状态。 |
+| `d79d35792` | SQL Library 默认折叠分组并提供 Collapse All | 已完成等价边界并强化批量性能：Oxide 新增独立于 Project Files/Query History 的项目级私有 SQL Library，SQLite 保存 folder/file、连接和 database/schema 作用域、打开次数与时间；树节点首次进入项目时默认折叠并提供 Collapse All。支持搜索时临时展开祖先、自然排序/最近使用、创建/重命名/递归删除、同连接作用域移动、拖入 Monaco 光标、Search Everywhere、标签复用和 dirty save。启动只加载摘要，打开文件才加载 SQL；导入使用 Host 有界目录扫描后一次 IPC/单事务写入，导出一次批量加载后由 Host 原子落盘。旧 `saved-queries` 只在默认项目成功批量落库后删除。DBX 位置：`apps/desktop/src/components/layout/SqlLibraryPanel.vue`、`apps/desktop/src/stores/savedSqlStore.ts`、`crates/dbx-core/src/saved_sql.rs`、`src-tauri/src/commands/saved_sql.rs`。Oxide 位置：`src/components/workspace/SqlLibraryPanel.tsx`、`src/store/useSavedQueryStore.ts`、`src-tauri/src/core/store.rs`、`src-tauri/src/commands/saved_sql_io.rs`。Project Files 继续代表用户工作区内真实 `.sql` 文件，不与私有 Library 自动镜像，避免双写和来源歧义。 |
 | `5f9ba5176` | Tab bar 位置、分组和排序可配置 | 已对齐并收紧交互语义：Oxide 持久化 top/bottom/left/right、none/database-type/connection 与 manual/created/title 设置；普通工作区和 Split Editor 共用同一布局，纵向 split 使用紧凑宽度。纯函数先隔离 pinned/regular，再稳定分组和自然排序；旧 tab 缺失创建时间时按原始顺序迁移。只有 manual 模式开放拖动，且禁止跨 pinned 或跨显式分组投放。Close Left/Right 现在接收当前可见顺序生成的精确 ID 集合并一次确认，不会在排序后按 Store 原数组误关标签。DBX 位置：`apps/desktop/src/stores/settingsStore.ts`、`components/layout/AppTabBar.vue`、`composables/useTabDrag.ts`、`App.vue`。Oxide 位置：`src/lib/tabOrganization.ts`、`src/components/workspace/TabBar.tsx`、`SplitEditor.tsx`、`src/pages/workspaceRuntime.tsx`。 |
 
 ### 上一增量审计（`f075caef2` → `d69cf9da7`）
@@ -569,3 +569,32 @@ Oxide 将标签组织从单一组件内的数组遍历拆为可测试的确定�
 单元/组件测试覆盖设置迁移、pinned 边界、两种分组、三种排序、自然标题顺序、旧 tab 时间迁移、
 精确批量关闭、拖动 Store 约束、右侧纵向布局与 DOM 可见顺序。真实 Tauri WebView 下的鼠标拖动、
 不同 DPI、触控滚动和数百 tab 压力交互记录到延期验证清单。
+
+## Phase 144 增量：项目级 SQL Library 与批量导入导出
+
+对照 DBX `d79d35792` 及当前 `SqlLibraryPanel.vue`、`savedSqlStore.ts`、`saved_sql.rs`、
+`commands/saved_sql.rs`，Oxide 不再把旧的扁平 localStorage Saved Queries 当作 SQL Library：
+
+- Rust MetaStore 新增 project-scoped folder/file 表和树索引，文件记录保留 connection、database、schema、
+  order/opened metadata；删除项目会显式清理 Library。启动查询不读取 SQL 正文，单文件打开和完整导出
+  分别使用单条内容查询和一次全量内容查询。
+- Host 校验项目、ID、名称、时间/顺序、16 MiB 单文件、64 MiB 批次、5,000 项、128 层树、父子连接
+  作用域、循环和同目录不区分大小写冲突。目录删除使用递归 CTE；批量导入在一个 SQLite transaction
+  内写入，任一文件失败会整体回滚。
+- SQL Library 作为 First/Second Panel 共用的 tool window 接入标题栏与 Settings，打开同侧其他工具会替换
+  当前工具，关闭后不会露出旧面板。文件夹首次进入项目默认折叠，Collapse All、搜索强制展开命中祖先、
+  folder/recent 排序与长列表 `content-visibility` 保持一致。
+- 文件与文件夹支持创建、重命名、确认删除和同 connection scope 移动；有界版本化 drag payload 不携带
+  SQL 正文，Monaco 在 drop 时才懒加载内容并建立 undo 边界。Command Palette/Search Everywhere 和编辑器
+  快捷入口复用已有 saved-SQL tab；Ctrl+S、Vim `:w` 与工具栏 Save 使用同一保存函数和 dirty 状态。
+- 导入只接受 canonical root 内非 symlink 的 UTF-8 `.sql`，限制 32 层、5,000 文件、16 MiB/文件和
+  64 MiB 总量；renderer 一次构造确定性 folder/file batch，Host 单事务保存。导出拒绝绝对路径、`..`、
+  重复路径与符号链接，先写 sibling staging directory 并同步文件，再原子 rename 为新的唯一目录。
+- 旧 Zustand `saved-queries` 只迁移到默认 `sqls` 项目；批量持久化并重新加载成功后才移除旧键，失败时
+  保留原数据。Project Files 仍是用户选择目录下的真实文件，SQL Library 是应用私有数据，二者不自动
+  双向同步。
+
+单元测试覆盖摘要/懒加载、批量导入单 IPC、批量导出单查询、旧数据安全迁移、跨项目迟到响应、默认
+折叠与搜索祖先、确定性命名、共享 Second Panel 关闭语义、Host 路径边界、symlink 忽略、原子导出、
+事务回滚、层级/连接约束和递归删除。真实 WebView 文件选择器、超大目录压力、Windows/macOS/Linux
+文件权限与可视拖放验证进入延期验证清单。

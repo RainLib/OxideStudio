@@ -11,6 +11,11 @@ const ProjectFilesSidebar = lazy(() =>
     default: module.ProjectFilesSidebar,
   })),
 );
+const SqlLibraryPanel = lazy(() =>
+  import("./SqlLibraryPanel").then((module) => ({
+    default: module.SqlLibraryPanel,
+  })),
+);
 const CommitPanel = lazy(() =>
   import("./git/CommitPanel").then((module) => ({ default: module.CommitPanel })),
 );
@@ -29,6 +34,8 @@ export function ToolWindowPanel({ id }: { id: Exclude<SideToolWindowId, "databas
             <AssistantSidebar />
           ) : id === "projectFiles" ? (
             <ProjectFilesSidebar />
+          ) : id === "sqlLibrary" ? (
+            <SqlLibraryPanel />
           ) : id === "commit" ? (
             <CommitPanel />
           ) : (

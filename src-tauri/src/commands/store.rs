@@ -1,7 +1,10 @@
 use crate::core::{
     config::ConfigManager,
     protocol::CommandError,
-    store::{AssistantTaskRecord, MetaStore, Project, QueryHistoryItem, Resource, SavedConnection},
+    store::{
+        AssistantTaskRecord, MetaStore, Project, QueryHistoryItem, Resource, SavedConnection,
+        SavedSqlFile, SavedSqlFolder, SavedSqlLibrary,
+    },
 };
 use anyhow::Result;
 use tauri::State;
@@ -248,6 +251,111 @@ pub async fn clear_query_history(
 ) -> Result<(), String> {
     meta_store
         .clear_query_history(&project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_library(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+) -> Result<SavedSqlLibrary, String> {
+    meta_store
+        .load_saved_sql_library(&project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_file(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    id: String,
+) -> Result<Option<SavedSqlFile>, String> {
+    meta_store
+        .load_saved_sql_file(&project_id, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_files(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+) -> Result<Vec<SavedSqlFile>, String> {
+    meta_store
+        .load_saved_sql_files(&project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_saved_sql_folder(
+    meta_store: State<'_, MetaStore>,
+    folder: SavedSqlFolder,
+) -> Result<(), String> {
+    meta_store
+        .save_saved_sql_folder(&folder)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_saved_sql_folder(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    meta_store
+        .delete_saved_sql_folder(&project_id, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_saved_sql_file(
+    meta_store: State<'_, MetaStore>,
+    file: SavedSqlFile,
+) -> Result<(), String> {
+    meta_store
+        .save_saved_sql_file(&file)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_saved_sql_batch(
+    meta_store: State<'_, MetaStore>,
+    folders: Vec<SavedSqlFolder>,
+    files: Vec<SavedSqlFile>,
+) -> Result<(), String> {
+    meta_store
+        .save_saved_sql_batch(&folders, &files)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_saved_sql_file(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    meta_store
+        .delete_saved_sql_file(&project_id, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn record_saved_sql_file_opened(
+    meta_store: State<'_, MetaStore>,
+    project_id: String,
+    id: String,
+    opened_at: i64,
+) -> Result<(), String> {
+    meta_store
+        .record_saved_sql_file_opened(&project_id, &id, opened_at)
         .await
         .map_err(|error| error.to_string())
 }

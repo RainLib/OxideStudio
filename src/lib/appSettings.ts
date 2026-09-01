@@ -42,6 +42,7 @@ export type SqlFormattingSettings = {
 export type WorkbenchToolWindowId =
   | "databaseExplorer"
   | "projectFiles"
+  | "sqlLibrary"
   | "assistant"
   | "commit"
   | "versionControl"
@@ -78,6 +79,10 @@ export type WorkbenchToolWindows = {
     side: WorkbenchSide;
   };
   projectFiles: {
+    enabled: boolean;
+    side: WorkbenchSide;
+  };
+  sqlLibrary: {
     enabled: boolean;
     side: WorkbenchSide;
   };
@@ -202,6 +207,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       visibility: {
         databaseExplorer: true,
         projectFiles: false,
+        sqlLibrary: false,
         assistant: false,
         commit: false,
         versionControl: false,
@@ -231,6 +237,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
         side: "right",
       },
       projectFiles: {
+        enabled: true,
+        side: "right",
+      },
+      sqlLibrary: {
         enabled: true,
         side: "right",
       },
@@ -453,6 +463,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
             raw,
             ["workbench", "layout", "visibility", "projectFiles"],
             defaults.workbench.layout.visibility.projectFiles,
+          ),
+          sqlLibrary: boolAt(
+            raw,
+            ["workbench", "layout", "visibility", "sqlLibrary"],
+            defaults.workbench.layout.visibility.sqlLibrary,
           ),
           assistant: boolAt(
             raw,
@@ -945,6 +960,14 @@ function normalizedToolWindows(
       ),
       side: toolWindowSide(raw, defaults, "projectFiles"),
     },
+    sqlLibrary: {
+      enabled: boolAt(
+        raw,
+        ["workbench", "toolWindows", "sqlLibrary", "enabled"],
+        defaults.workbench.toolWindows.sqlLibrary.enabled,
+      ),
+      side: toolWindowSide(raw, defaults, "sqlLibrary"),
+    },
     commit: {
       enabled: boolAt(
         raw,
@@ -988,6 +1011,7 @@ function toolWindowSide(
 const SIDE_TOOL_WINDOW_IDS: SideToolWindowId[] = [
   "databaseExplorer",
   "projectFiles",
+  "sqlLibrary",
   "assistant",
   "commit",
   "versionControl",

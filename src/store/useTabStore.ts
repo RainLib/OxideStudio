@@ -317,6 +317,8 @@ export interface TabData {
   gitFileDiffPreview?: GitFileDiffPreview | null;
   lspDiagnostics?: Diagnostic[];
   fileProjectId?: string;
+  savedSqlProjectId?: string;
+  savedSqlFileId?: string;
   fileRootPath?: string;
   fileRelativePath?: string;
   fileRevision?: string;
@@ -356,16 +358,24 @@ export function hasPendingTableChanges(
 export function hasUnsavedTabChanges(
   tab: Pick<
     TabData,
-    "type" | "fileRelativePath" | "isDirty" | "pendingEdits" | "newRowsCount"
+    | "type"
+    | "fileRelativePath"
+    | "savedSqlFileId"
+    | "isDirty"
+    | "pendingEdits"
+    | "newRowsCount"
   >,
 ) {
   return (
-    Boolean(tab.fileRelativePath && tab.isDirty) || hasPendingTableChanges(tab)
+    Boolean((tab.fileRelativePath || tab.savedSqlFileId) && tab.isDirty) ||
+    hasPendingTableChanges(tab)
   );
 }
 
 function confirmDiscardTabChanges(tabs: TabData[], action: string) {
-  const dirtyFiles = tabs.filter((tab) => tab.fileRelativePath && tab.isDirty);
+  const dirtyFiles = tabs.filter(
+    (tab) => (tab.fileRelativePath || tab.savedSqlFileId) && tab.isDirty,
+  );
   const dirtyTables = tabs.filter(hasPendingTableChanges);
   if (dirtyFiles.length === 0 && dirtyTables.length === 0) return true;
   if (typeof window === "undefined" || typeof window.confirm !== "function") {
@@ -376,11 +386,11 @@ function confirmDiscardTabChanges(tabs: TabData[], action: string) {
   if (dirtyFiles.length > 0) {
     const names = dirtyFiles
       .slice(0, 3)
-      .map((tab) => tab.fileRelativePath)
+      .map((tab) => tab.fileRelativePath || tab.title)
       .join(", ");
     const remaining = dirtyFiles.length - Math.min(3, dirtyFiles.length);
     details.push(
-      `${dirtyFiles.length} project file${dirtyFiles.length === 1 ? "" : "s"}: ${names}${
+      `${dirtyFiles.length} editor file${dirtyFiles.length === 1 ? "" : "s"}: ${names}${
         remaining > 0 ? ` and ${remaining} more` : ""
       }`,
     );
@@ -806,6 +816,8 @@ interface TabState {
         | "elasticsearchVariables"
         | "filters"
         | "fileProjectId"
+        | "savedSqlProjectId"
+        | "savedSqlFileId"
         | "fileRootPath"
         | "fileRelativePath"
         | "fileRevision"
@@ -2145,10 +2157,13 @@ export const useTabStore = create<TabState>((set, get) => ({
                 tab.sql === sql || !tab.explainPlan
                   ? tab.queryOutputView
                   : "results",
-              isDirty: tab.fileRelativePath
+              isDirty: tab.fileRelativePath || tab.savedSqlFileId
                 ? tab.isDirty || tab.sql !== sql
                 : tab.isDirty,
-              fileError: tab.fileRelativePath ? null : tab.fileError,
+              fileError:
+                tab.fileRelativePath || tab.savedSqlFileId
+                  ? null
+                  : tab.fileError,
             }
           : tab,
       ),

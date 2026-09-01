@@ -4,7 +4,7 @@ import { settingsService } from "@/services/tauri/settings.service";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
-import { saveProjectFileTab } from "@/lib/projectFileTabs";
+import { saveEditorFileTab } from "@/lib/editorFileSave";
 import { requestProjectFilesPanel } from "@/lib/projectFilesNavigation";
 import {
   useEditorGroupStore,
@@ -48,6 +48,7 @@ export type WorkbenchActionId =
   | "file.save"
   | "workbench.toggleDatabaseExplorer"
   | "workbench.openProjectFiles"
+  | "workbench.toggleSqlLibrary"
   | "workbench.toggleAssistant"
   | "workbench.toggleCommit"
   | "workbench.toggleVersionControl"
@@ -55,6 +56,7 @@ export type WorkbenchActionId =
   | "workbench.focusEditor"
   | "workbench.focusDatabaseExplorer"
   | "workbench.focusAssistant"
+  | "workbench.focusSqlLibrary"
   | "workbench.focusCommit"
   | "workbench.focusVersionControl"
   | "workbench.focusResults"
@@ -161,10 +163,10 @@ export function workbenchActions(): WorkbenchAction[] {
     },
     {
       id: "file.save",
-      title: "Save Project File",
+      title: "Save Editor File",
       group: "File",
       run: async () => {
-        await saveProjectFileTab();
+        await saveEditorFileTab();
       },
     },
     ...(
@@ -257,6 +259,13 @@ export function workbenchActions(): WorkbenchAction[] {
         useWorkbenchLayoutStore.getState().toggleToolWindow("assistant"),
     },
     {
+      id: "workbench.toggleSqlLibrary",
+      title: "Toggle SQL Library",
+      group: "Workbench",
+      run: () =>
+        useWorkbenchLayoutStore.getState().toggleToolWindow("sqlLibrary"),
+    },
+    {
       id: "workbench.toggleCommit",
       title: "Toggle Commit",
       group: "Workbench",
@@ -297,6 +306,13 @@ export function workbenchActions(): WorkbenchAction[] {
       group: "Workbench",
       run: () =>
         useWorkbenchLayoutStore.getState().setActiveToolWindow("assistant"),
+    },
+    {
+      id: "workbench.focusSqlLibrary",
+      title: "Focus SQL Library",
+      group: "Workbench",
+      run: () =>
+        useWorkbenchLayoutStore.getState().setActiveToolWindow("sqlLibrary"),
     },
     {
       id: "workbench.focusCommit",

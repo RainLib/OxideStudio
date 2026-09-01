@@ -82,6 +82,27 @@ describe("Database Explorer settings", () => {
   });
 });
 
+describe("SQL Library tool window settings", () => {
+  it("defaults to a closed right-side shared panel and preserves explicit moves", () => {
+    const defaults = normalizeAppSettings({}).workbench;
+    expect(defaults.toolWindows.sqlLibrary).toEqual({ enabled: true, side: "right" });
+    expect(defaults.layout.visibility.sqlLibrary).toBe(false);
+
+    const moved = normalizeAppSettings({
+      workbench: {
+        layout: {
+          visibility: { sqlLibrary: true, databaseExplorer: true },
+          activeSideToolWindows: { left: "sqlLibrary", right: null },
+        },
+        toolWindows: { sqlLibrary: { enabled: true, side: "left" } },
+      },
+    }).workbench;
+    expect(moved.toolWindows.sqlLibrary.side).toBe("left");
+    expect(moved.layout.activeSideToolWindows.left).toBe("sqlLibrary");
+    expect(moved.layout.visibility.databaseExplorer).toBe(false);
+  });
+});
+
 describe("driver runtime settings", () => {
   it("migrates old settings and accepts only credential-free HTTPS worker roots", () => {
     expect(normalizeAppSettings({}).drivers.sqliteWorkerBaseUrl).toBe("");

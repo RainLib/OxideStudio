@@ -1312,7 +1312,7 @@ function WorkbenchSettings({
       },
     });
   const updateSideToolOpen = (
-    id: "databaseExplorer" | "projectFiles" | "assistant" | "commit" | "versionControl",
+    id: "databaseExplorer" | "projectFiles" | "sqlLibrary" | "assistant" | "commit" | "versionControl",
     visible: boolean,
   ) => onUpdate({
     workbench: visible
@@ -1326,7 +1326,7 @@ function WorkbenchSettings({
     visibility: { ...layout.visibility, [id]: visible },
   });
   const updateSide = (
-    id: "databaseExplorer" | "projectFiles" | "assistant" | "commit" | "versionControl",
+    id: "databaseExplorer" | "projectFiles" | "sqlLibrary" | "assistant" | "commit" | "versionControl",
     side: WorkbenchSide
   ) => onUpdate({ workbench: moveSideToolWindow(settings.workbench, id, side) });
 
@@ -1337,6 +1337,7 @@ function WorkbenchSettings({
         [
           ["databaseExplorer", "Database Explorer"],
           ["projectFiles", "Project Files"],
+          ["sqlLibrary", "SQL Library"],
           ["assistant", "AI Assistant"],
           ["commit", "Commit"],
           ["versionControl", "Version Control"],
@@ -1402,7 +1403,7 @@ function WorkbenchSettings({
           max={640}
           onChange={(rightWidth) => updateLayout({ rightWidth })}
         />
-        <span className="settings-hint">Assistant and Files</span>
+        <span className="settings-hint">Assistant, SQL Library and Files</span>
       </SettingRow>
       <SettingRow label="Bottom height:">
         <NumberInput

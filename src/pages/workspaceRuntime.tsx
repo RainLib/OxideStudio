@@ -19,6 +19,7 @@ import { useEditorGroupStore } from "@/store/useEditorGroupStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useSqliteBackupScheduler } from "@/features/database-admin/model/useSqliteBackupScheduler";
 import { useProjectStore } from "@/store/useProjectStore";
+import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
@@ -168,6 +169,8 @@ export function WorkspaceRuntime() {
     (state) => state.activeConnectionId,
   );
   const appSettings = useSettingsStore((state) => state.settings);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const loadSavedSqlProject = useSavedQueryStore((state) => state.loadProject);
   const workbenchSettings = appSettings.workbench;
   const layout = workbenchSettings.layout;
   const toolWindows = workbenchSettings.toolWindows;
@@ -232,6 +235,7 @@ export function WorkspaceRuntime() {
   const isDatabaseExplorerOpen = leftToolWindow === "databaseExplorer" || rightToolWindow === "databaseExplorer";
   const isAssistantOpen = leftToolWindow === "assistant" || rightToolWindow === "assistant";
   const isProjectFilesOpen = leftToolWindow === "projectFiles" || rightToolWindow === "projectFiles";
+  const isSqlLibraryOpen = leftToolWindow === "sqlLibrary" || rightToolWindow === "sqlLibrary";
   const isCommitOpen = leftToolWindow === "commit" || rightToolWindow === "commit";
   const isVersionControlOpen = leftToolWindow === "versionControl" || rightToolWindow === "versionControl";
   const showQueryResultPanel =
@@ -243,6 +247,10 @@ export function WorkspaceRuntime() {
     hasQueryResultSurface &&
     !layout.visibility.results;
   const activePanelClass = "wb-panel-active";
+
+  useEffect(() => {
+    void loadSavedSqlProject(activeProjectId);
+  }, [activeProjectId, loadSavedSqlProject]);
 
   useEffect(() => {
     if (!queryTabSignature && splitDirection) {
@@ -618,6 +626,8 @@ export function WorkspaceRuntime() {
             assistantSide={toolWindows.assistant.side}
             projectFilesOpen={isProjectFilesOpen}
             projectFilesSide={toolWindows.projectFiles.side}
+            sqlLibraryOpen={isSqlLibraryOpen}
+            sqlLibrarySide={toolWindows.sqlLibrary.side}
             commitOpen={isCommitOpen}
             commitPinned={
               toolWindows.commit.enabled &&
@@ -632,6 +642,7 @@ export function WorkspaceRuntime() {
             }
             onToggleAssistant={() => toggleToolWindow("assistant")}
             onToggleFiles={() => toggleToolWindow("projectFiles")}
+            onToggleSqlLibrary={() => toggleToolWindow("sqlLibrary")}
             onToggleCommit={() => toggleToolWindow("commit")}
             onToggleVersionControl={() => toggleToolWindow("versionControl")}
             onSetCommitPinned={(pinned) =>

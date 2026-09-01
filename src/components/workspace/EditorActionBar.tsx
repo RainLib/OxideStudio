@@ -85,10 +85,16 @@ interface EditorActionBarProps {
   isExecuting: boolean;
   isConnected: boolean;
   supportsExplainPlan: boolean;
-  savedQueries: Array<{ id: string; name: string; sql: string }>;
+  savedQueries: Array<{
+    id: string;
+    name: string;
+    sql: string;
+    sqlLoaded?: boolean;
+    databaseName?: string | null;
+  }>;
   onOpenHistory: (item: QueryHistoryItem) => void;
   onRerunHistory: (item: QueryHistoryItem) => Promise<boolean>;
-  onLoadQuery: (sql: string) => void;
+  onLoadQuery: (item: { id: string; name: string }) => void | Promise<void>;
   onSaveQuery: (name: string, sql: string) => void;
   onDeleteQuery: (id: string) => void;
   supportsTransactions: boolean;
@@ -498,7 +504,7 @@ export function EditorActionBar({
               isFileDirty && "text-[hsl(var(--wb-accent))]",
             )}
             title={
-              isFileDirty ? "Save Project File (Ctrl+S)" : "Project File Saved"
+              isFileDirty ? "Save editor file (Ctrl+S)" : "Editor file saved"
             }
             onClick={onSaveFile}
             disabled={!isFileDirty}
@@ -511,14 +517,14 @@ export function EditorActionBar({
             <button
               type="button"
               className="wb-editor-library-action wb-icon-button"
-              title="Saved Queries"
+                  title="SQL Library"
             >
               <Star size={13} />
             </button>
           </DialogTrigger>
           <DialogContent className={dialogClass}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
-              <DialogTitle className="text-[13px]">Saved Queries</DialogTitle>
+              <DialogTitle className="text-[13px]">SQL Library</DialogTitle>
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
               {savedQueries.length === 0 ? (
@@ -534,13 +540,15 @@ export function EditorActionBar({
                     <button
                       type="button"
                       className="min-w-0 flex-1 text-left"
-                      onClick={() => onLoadQuery(item.sql)}
+                      onClick={() => void onLoadQuery(item)}
                     >
                       <div className="truncate text-[12px] font-medium">
                         {item.name}
                       </div>
                       <div className="max-h-12 overflow-hidden whitespace-pre-wrap font-mono text-[10px] wb-muted">
-                        {item.sql}
+                        {item.sqlLoaded
+                          ? item.sql
+                          : item.databaseName || "Load saved SQL into this editor"}
                       </div>
                     </button>
                     <button

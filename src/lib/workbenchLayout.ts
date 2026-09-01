@@ -9,6 +9,7 @@ export type { SideToolWindowId } from "@/lib/appSettings";
 export const SIDE_TOOL_WINDOW_IDS: readonly SideToolWindowId[] = [
   "databaseExplorer",
   "projectFiles",
+  "sqlLibrary",
   "assistant",
   "commit",
   "versionControl",

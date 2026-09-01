@@ -28,6 +28,7 @@ export * from "./project-git.service";
 export * from "./schema.service";
 export * from "./settings.service";
 export * from "./store.service";
+export * from "./saved-sql.service";
 export * from "./table.service";
 export * from "./transaction.service";
 

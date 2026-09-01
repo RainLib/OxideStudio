@@ -10,6 +10,7 @@ import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
+import { useSavedQueryStore } from "@/store/useSavedQueryStore";
 import { workbenchActions } from "@/lib/actions";
 import { APP_EVENT_OPEN_COMMAND_PALETTE } from "@/lib/actionEvents";
 import { formatKeybinding } from "@/lib/keybindings";
@@ -18,6 +19,7 @@ import {
   Database,
   FileCode2,
   Layers3,
+  Library,
   Search,
   Table2,
   Terminal,
@@ -51,6 +53,8 @@ export function CommandPalette({
     (state) => state.entriesByDirectory,
   );
   const projectRootPath = useProjectFilesStore((state) => state.rootPath);
+  const savedSqlFiles = useSavedQueryStore((state) => state.files);
+  const openSavedSqlFile = useSavedQueryStore((state) => state.openFile);
   const keymap = useSettingsStore((state) => state.settings.keymap);
   const actions = useMemo(() => workbenchActions(), []);
   const databaseObjects = useMemo(
@@ -112,6 +116,21 @@ export function CommandPalette({
         { limit: 40, emptyLimit: 12, primaryText: (tab) => tab.title },
       ),
     [deferredSearchQuery, tabs],
+  );
+  const visibleSavedSqlFiles = useMemo(
+    () =>
+      rankSearchEverywhereItems(
+        savedSqlFiles,
+        deferredSearchQuery,
+        (file) =>
+          `${file.name} ${file.databaseName || ""} ${file.schemaName || ""}`,
+        {
+          limit: 40,
+          emptyLimit: 8,
+          primaryText: (file) => file.name,
+        },
+      ),
+    [deferredSearchQuery, savedSqlFiles],
   );
   const visibleConnections = useMemo(
     () =>
@@ -190,6 +209,38 @@ export function CommandPalette({
     setOpen(false);
   };
 
+  const openLibraryFile = async (fileId: string) => {
+    setCommandError(null);
+    try {
+      const summary = savedSqlFiles.find((file) => file.id === fileId);
+      if (!summary) return;
+      const existing = useTabStore
+        .getState()
+        .tabs.find(
+          (tab) =>
+            tab.savedSqlProjectId === summary.projectId &&
+            tab.savedSqlFileId === summary.id,
+        );
+      if (existing) {
+        useTabStore.getState().setActiveTab(existing.id);
+        setOpen(false);
+        return;
+      }
+      const file = await openSavedSqlFile(fileId);
+      if (!file) throw new Error("The SQL Library file no longer exists.");
+      useTabStore.getState().createTab("query", file.name.replace(/\.sql$/iu, ""), file.sql, {
+        connectionId: file.connectionId || undefined,
+        databaseName: file.databaseName || undefined,
+        schemaName: file.schemaName || undefined,
+        savedSqlProjectId: file.projectId,
+        savedSqlFileId: file.id,
+      });
+      setOpen(false);
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   if (!open) return null;
 
   return (
@@ -212,7 +263,7 @@ export function CommandPalette({
           <Command.Input
             value={searchQuery}
             onValueChange={setSearchQuery}
-            placeholder="Search actions, objects, files, tabs, or data sources"
+            placeholder="Search actions, objects, SQL Library, files, tabs, or data sources"
             className="h-full min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[hsl(var(--wb-text-muted))]"
           />
           <kbd className="ml-2 rounded-[3px] border border-[hsl(var(--wb-border))] px-1.5 py-0.5 font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
@@ -295,6 +346,25 @@ export function CommandPalette({
                   </span>
                   <span className="max-w-56 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
                     {relativePath}
+                  </span>
+                </Command.Item>
+              ))}
+            </Command.Group>
+          )}
+
+          {visibleSavedSqlFiles.length > 0 && (
+            <Command.Group heading={<GroupHeading>SQL Library</GroupHeading>}>
+              {visibleSavedSqlFiles.map((file) => (
+                <Command.Item
+                  key={`saved-sql:${file.id}`}
+                  value={`sql library ${file.name} ${file.databaseName || ""}`}
+                  onSelect={() => void openLibraryFile(file.id)}
+                  className="flex h-8 cursor-default items-center gap-2 rounded-[4px] px-2 aria-selected:bg-[hsl(var(--wb-active-strong))]"
+                >
+                  <Library size={13} className="shrink-0 text-sky-400" />
+                  <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                  <span className="max-w-56 truncate text-[10px] text-[hsl(var(--wb-text-muted))]">
+                    {file.databaseName || "unassociated"}
                   </span>
                 </Command.Item>
               ))}

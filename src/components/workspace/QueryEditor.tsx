@@ -19,6 +19,7 @@ import {
   useState,
   useContext,
   useMemo,
+  type DragEvent as ReactDragEvent,
 } from "react";
 import {
   connectionService,
@@ -85,7 +86,7 @@ import {
   type VimModeController,
   type VimWindowNavigation,
 } from "@/lib/vimMode";
-import { saveProjectFileTab } from "@/lib/projectFileTabs";
+import { saveEditorFileTab } from "@/lib/editorFileSave";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
@@ -117,6 +118,8 @@ import {
   type EditorRangeNavigationDetail,
 } from "@/lib/editorNavigation";
 import { documentTextRevision } from "@/lib/documentRevision";
+import { hasSavedSqlDrag, readSavedSqlDrag } from "@/lib/savedSqlDrag";
+import { stripSqlExtension } from "@/lib/savedSqlLibrary";
 import { applyEditorTextPatch } from "@/lib/editorPatch";
 import {
   explorerTableReferenceInsertText,
@@ -420,7 +423,11 @@ export function QueryEditor({
   const bumpMetadataVersion = useSchemaStore(
     (state) => state.bumpMetadataVersion,
   );
-  const { savedQueries, saveQuery, deleteQuery } = useSavedQueryStore();
+  const savedQueries = useSavedQueryStore((state) => state.savedQueries);
+  const saveQuery = useSavedQueryStore((state) => state.saveQuery);
+  const deleteQuery = useSavedQueryStore((state) => state.deleteQuery);
+  const openSavedSqlFile = useSavedQueryStore((state) => state.openFile);
+  const updateSavedSqlFile = useSavedQueryStore((state) => state.updateQuery);
   const editorSettings = useSettingsStore((state) => state.settings.editor);
   const keymap = useSettingsStore((state) => state.settings.keymap);
   const inlineProviderConfig = useAiSettingsStore(
@@ -439,6 +446,7 @@ export function QueryEditor({
   // const [isSaveOpen, setIsSaveOpen] = useState(false);
   // const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+
   const [executionNotice, setExecutionNotice] = useState<string | null>(null);
   const [batchColumnSession, setBatchColumnSession] =
     useState<SqlBatchColumnRuntimeSession | null>(null);
@@ -1016,14 +1024,14 @@ export function QueryEditor({
         vimModeRef.current = mode;
         inlineKeysContextRef.current?.set(mode === "INSERT");
       },
-      onWrite: () => saveProjectFileTab(activeTabIdRef.current || undefined),
+      onWrite: () => saveEditorFileTab(activeTabIdRef.current || undefined),
       onQuit: () => {
         const activeId = activeTabIdRef.current;
         if (activeId) useTabStore.getState().closeTab(activeId);
       },
       onWriteQuit: async () => {
         const tabId = activeTabIdRef.current;
-        if (!tabId || !(await saveProjectFileTab(tabId))) return;
+        if (!tabId || !(await saveEditorFileTab(tabId))) return;
         useTabStore.getState().closeTab(tabId);
       },
       onEdit: async (relativePath) => {
@@ -3852,6 +3860,48 @@ export function QueryEditor({
       );
     };
   }, [canAcceptExplorerTableDrop, mountedEditor]);
+  const handleSavedSqlDragOver = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!canAcceptExplorerTableDrop || !hasSavedSqlDrag(event.dataTransfer)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    [canAcceptExplorerTableDrop],
+  );
+  const handleSavedSqlDrop = useCallback(
+    async (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!canAcceptExplorerTableDrop || !mountedEditor) return;
+      const payload = readSavedSqlDrag(event.dataTransfer);
+      if (!payload || payload.projectId !== activeProjectId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const position =
+        mountedEditor.getTargetAtClientPoint?.(event.clientX, event.clientY)?.position ??
+        mountedEditor.getPosition?.();
+      const model = mountedEditor.getModel?.();
+      if (!position || !model) return;
+      const file = await openSavedSqlFile(payload.fileId);
+      if (!file || !file.sql) return;
+      const startOffset = model.getOffsetAt(position);
+      mountedEditor.pushUndoStop?.();
+      mountedEditor.executeEdits("oxide.saved-sql-drop", [
+        {
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+          text: file.sql,
+          forceMoveMarkers: true,
+        },
+      ]);
+      mountedEditor.pushUndoStop?.();
+      mountedEditor.setPosition(model.getPositionAt(startOffset + file.sql.length));
+      mountedEditor.focus();
+    },
+    [activeProjectId, canAcceptExplorerTableDrop, mountedEditor, openSavedSqlFile],
+  );
   if (!activeTab) return null;
 
   return (
@@ -3860,6 +3910,8 @@ export function QueryEditor({
       data-editor-group-id={editorGroupId}
       onFocusCapture={onActivate}
       onPointerDown={onActivate}
+      onDragOverCapture={handleSavedSqlDragOver}
+      onDropCapture={(event) => void handleSavedSqlDrop(event)}
     >
       <SqlScriptImportDialog
         open={Boolean(pendingSqlScriptImport)}
@@ -3908,7 +3960,7 @@ export function QueryEditor({
               "wb-text-button h-6 shrink-0 gap-1.5 px-2 text-[10px]",
               activeTab.isDirty && "text-[hsl(var(--wb-accent))]",
             )}
-            onClick={() => void saveProjectFileTab(activeTab.id)}
+            onClick={() => void saveEditorFileTab(activeTab.id)}
             disabled={!activeTab.isDirty}
             title={
               activeTab.isDirty
@@ -3979,15 +4031,85 @@ export function QueryEditor({
           savedQueries={savedQueries}
           onOpenHistory={openHistoryInEditor}
           onRerunHistory={rerunHistory}
-          onLoadQuery={(sql: string) => updateTabSql(activeTab.id, sql)}
-          onSaveQuery={(_name: string, _sql: string) =>
-            saveQuery(_name, activeTab.sql)
-          }
+          onLoadQuery={async (item) => {
+            const existing = useTabStore
+              .getState()
+              .tabs.find(
+                (tab) =>
+                  tab.savedSqlProjectId === activeProjectId &&
+                  tab.savedSqlFileId === item.id,
+              );
+            if (existing) {
+              useTabStore.getState().setActiveTab(existing.id);
+              return;
+            }
+            const file = await openSavedSqlFile(item.id);
+            if (!file) return;
+            useTabStore.getState().createTab(
+              "query",
+              stripSqlExtension(file.name),
+              file.sql,
+              {
+                connectionId: file.connectionId || undefined,
+                databaseName: file.databaseName || undefined,
+                schemaName: file.schemaName || undefined,
+                savedSqlProjectId: file.projectId,
+                savedSqlFileId: file.id,
+              },
+            );
+          }}
+          onSaveQuery={async (name: string) => {
+            if (activeTab.savedSqlFileId) {
+              const saved = await updateSavedSqlFile(
+                activeTab.savedSqlFileId,
+                name,
+                activeTab.sql,
+                {
+                  connectionId: effectiveConnectionId || null,
+                  databaseName: activeTab.databaseName || null,
+                  schemaName: activeTab.schemaName || currentSchema || null,
+                },
+              );
+              if (saved) {
+                useTabStore.setState((state) => ({
+                  tabs: state.tabs.map((tab) =>
+                    tab.id === activeTab.id
+                      ? {
+                          ...tab,
+                          title: stripSqlExtension(name),
+                          isDirty: false,
+                          fileError: null,
+                        }
+                      : tab,
+                  ),
+                }));
+              }
+              return;
+            }
+            const file = await saveQuery(name, activeTab.sql, {
+              connectionId: effectiveConnectionId || null,
+              databaseName: activeTab.databaseName || null,
+              schemaName: activeTab.schemaName || currentSchema || null,
+            });
+            useTabStore.setState((state) => ({
+              tabs: state.tabs.map((tab) =>
+                tab.id === activeTab.id
+                  ? {
+                      ...tab,
+                      title: stripSqlExtension(file.name),
+                      savedSqlProjectId: file.projectId,
+                      savedSqlFileId: file.id,
+                      isDirty: false,
+                    }
+                  : tab,
+              ),
+            }));
+          }}
           onDeleteQuery={deleteQuery}
           supportsTransactions={supportsTransactions && canExecuteDocument}
-          isProjectFile={Boolean(activeTab.fileRelativePath)}
+          isProjectFile={Boolean(activeTab.fileRelativePath || activeTab.savedSqlFileId)}
           isFileDirty={Boolean(activeTab.isDirty)}
-          onSaveFile={() => void saveProjectFileTab(activeTab.id)}
+          onSaveFile={() => void saveEditorFileTab(activeTab.id)}
           parameterCount={canExecuteDocument ? parameterCount : 0}
           onConfigureParameters={handleConfigureParameters}
           queryLanguage={

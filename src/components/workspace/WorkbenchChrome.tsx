@@ -23,6 +23,7 @@ import {
   ChevronRight,
   Database,
   FolderTree,
+  Library,
   GitBranch,
   GitCommitHorizontal,
   MoreHorizontal,
@@ -59,6 +60,8 @@ interface WorkbenchTitleToolsProps {
   assistantSide: WorkbenchSide;
   projectFilesOpen: boolean;
   projectFilesSide: WorkbenchSide;
+  sqlLibraryOpen: boolean;
+  sqlLibrarySide: WorkbenchSide;
   commitOpen: boolean;
   commitPinned: boolean;
   versionControlOpen: boolean;
@@ -66,6 +69,7 @@ interface WorkbenchTitleToolsProps {
   onToggleDatabaseExplorer: () => void;
   onToggleAssistant: () => void;
   onToggleFiles: () => void;
+  onToggleSqlLibrary: () => void;
   onToggleCommit: () => void;
   onToggleVersionControl: () => void;
   onSetCommitPinned: (pinned: boolean) => void;
@@ -79,6 +83,8 @@ export function WorkbenchTitleTools({
   assistantSide,
   projectFilesOpen,
   projectFilesSide,
+  sqlLibraryOpen,
+  sqlLibrarySide,
   commitOpen,
   commitPinned,
   versionControlOpen,
@@ -86,6 +92,7 @@ export function WorkbenchTitleTools({
   onToggleDatabaseExplorer,
   onToggleAssistant,
   onToggleFiles,
+  onToggleSqlLibrary,
   onToggleCommit,
   onToggleVersionControl,
   onSetCommitPinned,
@@ -161,6 +168,21 @@ export function WorkbenchTitleTools({
             onClick={onToggleFiles}
           >
             <FolderTree size={15} />
+          </button>
+        </WorkbenchToolTooltip>
+        <WorkbenchToolTooltip
+          label="SQL Library"
+          detail={`${sideLabel(sqlLibrarySide)} tool window`}
+        >
+          <button
+            type="button"
+            className="wb-title-tool-button"
+            data-active={sqlLibraryOpen}
+            aria-pressed={sqlLibraryOpen}
+            aria-label="Toggle SQL Library"
+            onClick={onToggleSqlLibrary}
+          >
+            <Library size={15} />
           </button>
         </WorkbenchToolTooltip>
         {commitPinned && (
