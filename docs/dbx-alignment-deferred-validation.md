@@ -1628,3 +1628,18 @@ explicit deferred validation task rather than an implicit release check.
   This phase has 304 green frontend files / 1,608 tests, 3 MongoDB and 6
   Elasticsearch bundled-LSP dialect tests, and a production frontend build; no
   live database was opened.
+
+## Desktop first-click, press feedback and macOS close lifecycle
+
+- On a packaged macOS build, leave OxideStudio unfocused and click each shared
+  button family once. The first click must both focus the window and perform the
+  intended action; disabled controls must remain inert.
+- Verify pointer-down feedback for default, destructive, outline, secondary,
+  ghost, link, icon, toolbar and inactive-tab buttons. Feedback must not move or
+  resize the target, and keyboard focus/activation must remain visible.
+- Close the main and an additional window on macOS 12 through the custom close
+  button. The window must hide before WKWebView teardown, without a red/white
+  frame, while Windows and Linux keep immediate close behavior.
+- Repeat native menu quit, updater restart and OS shutdown after those lifecycle
+  exits exist in Oxide; the current implementation only has the guarded custom
+  window-close command. Phase 129 performs no live database validation.

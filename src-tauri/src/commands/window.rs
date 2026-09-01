@@ -98,20 +98,41 @@ pub async fn create_new_window(app: AppHandle) -> Result<String, String> {
     Ok(window_label)
 }
 
+const MACOS_WINDOW_CLOSE_HIDE_GRACE_MS: u64 = 250;
+
+fn should_hide_window_before_close(target_os: &str) -> bool {
+    target_os == "macos"
+}
+
 #[tauri::command]
-pub fn close_current_window(window: WebviewWindow) -> Result<(), String> {
+pub async fn close_current_window(window: WebviewWindow) -> Result<(), String> {
+    if should_hide_window_before_close(std::env::consts::OS) {
+        window.hide().map_err(|error| error.to_string())?;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            MACOS_WINDOW_CLOSE_HIDE_GRACE_MS,
+        ))
+        .await;
+    }
+
     window.close().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::new_window_title;
+    use super::{new_window_title, should_hide_window_before_close};
 
     #[test]
     fn macos_overlay_window_has_no_native_title() {
         assert_eq!(new_window_title("macos"), "");
         assert_eq!(new_window_title("linux"), "OxideStudio");
         assert_eq!(new_window_title("windows"), "OxideStudio");
+    }
+
+    #[test]
+    fn hides_window_before_close_only_on_macos() {
+        assert!(should_hide_window_before_close("macos"));
+        assert!(!should_hide_window_before_close("windows"));
+        assert!(!should_hide_window_before_close("linux"));
     }
 
     #[test]

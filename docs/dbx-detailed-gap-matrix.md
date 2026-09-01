@@ -314,3 +314,16 @@ Dameng、Db2 及兼容产品的 Monaco 接受行为与 server-version 语法仍�
 | Elasticsearch index mapping/settings/stats/clear | `ElasticsearchIndexMetadataDialog.vue`、`elasticsearchIndexActions.ts`、`document_ops.rs`（`8f3134dce`） | `src/features/data-grid/ui/ElasticsearchIndexMetadataDialog.tsx`、`ElasticsearchIndexClearDialog.tsx`、`src-tauri/src/commands/document.rs`、`drivers/elasticsearch.rs` | 已在此前阶段对齐并更严格：metadata kind 为闭集，index path segment 编码；clear 走 preview/token/目标重验，通配目标要求动态确认短语，响应必须包含完整 shard 结果。ES 6 typed mapping 与 ES 7/8 typeless mapping 均有契约测试。 |
 
 本阶段不引入 DBX 的 S3 sccache 或 Kafka/Dameng package 版本号：前者属于其 CI/对象存储基础设施，后者属于 DBX 发布目录，不是 Oxide 产品能力差距。
+
+## Phase 129 增量：DBX 桌面窗口与按压反馈
+
+| 差距 | DBX 实现位置 | OxideStudio 对齐位置 | 状态 |
+| --- | --- | --- | --- |
+| 鼠标从非活动窗口首次点击按钮只激活窗口，不传递到 WebView | `src-tauri/tauri.conf.json`（`554be11ae`） | `src-tauri/tauri.conf.json` | 已对齐：主窗口启用 Tauri `acceptFirstMouse`；配置由 `tauri info` 成功解析。 |
+| macOS 关闭时 WKWebView teardown 可能短暂闪屏 | `src-tauri/src/commands/app_settings.rs`、`src-tauri/src/lib.rs`（`554be11ae`） | `src-tauri/src/commands/window.rs` | 主关闭入口已对齐：macOS 先隐藏当前窗口，等待 250ms 后再关闭；Windows/Linux 保持原行为。Oxide 当前没有 DBX 的托盘/关闭确认/restart 多出口，因此未复制其应用级状态机。 |
+| 共用按钮只有 hover，无 pointer-down 即时反馈 | `apps/desktop/src/components/ui/button/index.ts` 与 `buttonPressFeedback.spec.ts`（`554be11ae`） | `src/components/ui/button.tsx`、`src/styles/variants/button.ts`、`src/components/ui/button.test.ts` | 已对齐并覆盖普通、图标、工具栏、页签按钮；只改变颜色/透明度，不使用 scale/translate，避免目标跳动。 |
+| DBX 最新产品提交包含 Oracle、SQL Server、Xugu、ArgoDB、Kafka 等专用运行时行为 | `8cc04f3af`、`c7c420bbd`、`afe3b3f3c`、`351a8b699`、`2fe26052a` 等 | Oxide signed driver package catalog/conformance | 未伪造为已完成：这些能力必须随精确签名 package、entrypoint、server-version evidence 交付；Host 目录占位或 generic compatibility 不能计为对齐。 |
+| Redis 未知命令提示、portable user-data 导入属于 DBX 特有写入/启动路径 | `9a5aae49c`、`2779a435c` | Oxide Redis 目前只读；Oxide 无 DBX portable 数据库导入入口 | 当前不适用。未来若增加 Redis hash-field mutation 或 portable profile import，需重新纳入差距，而不能复用本次结论。 |
+
+本阶段运行了 7 个前端按压反馈测试、3 个 Rust 窗口命令测试、前端生产构建和
+Tauri 配置解析；macOS 真实首击、关闭动画和多窗口行为仍进入统一的系统验证清单。

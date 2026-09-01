@@ -10,11 +10,13 @@ export const iconButtonVariants = cva(
     variants: {
       variant: {
         ghost:
-          "text-muted-foreground hover:text-foreground hover:bg-background-elevated",
+          "text-muted-foreground hover:text-foreground hover:bg-background-elevated active:bg-background-elevated/75 active:text-foreground",
         danger:
-          "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
-        active: "text-foreground bg-background-elevated",
-        orange: "text-primary hover:text-primary/90 hover:bg-primary/10",
+          "text-muted-foreground hover:text-destructive hover:bg-destructive/10 active:bg-destructive/20 active:text-destructive",
+        active:
+          "text-foreground bg-background-elevated active:bg-background-elevated/75",
+        orange:
+          "text-primary hover:text-primary/90 hover:bg-primary/10 active:bg-primary/20",
       },
       size: {
         xs: "h-5 w-5 text-[10px]", // 20px - 超小按钮
@@ -43,11 +45,14 @@ export const toolbarButtonVariants = cva(
   {
     variants: {
       variant: {
-        default: "text-foreground hover:bg-background-elevated",
-        primary: "bg-primary text-primary-foreground hover:bg-primary/90",
-        secondary: "bg-background-elevated text-foreground hover:bg-border",
+        default:
+          "text-foreground hover:bg-background-elevated active:bg-background-elevated/75",
+        primary:
+          "bg-primary text-primary-foreground hover:bg-primary/90 active:bg-primary/80",
+        secondary:
+          "bg-background-elevated text-foreground hover:bg-border active:bg-border/75",
         outline:
-          "border border-border text-foreground hover:bg-background-elevated",
+          "border border-border text-foreground hover:bg-background-elevated active:bg-background-elevated/75",
       },
       size: {
         sm: "px-2 py-1 text-xs",
@@ -77,7 +82,7 @@ export const tabButtonVariants = cva(
       active: {
         true: "border-primary text-foreground bg-background-tertiary",
         false:
-          "border-transparent text-muted-foreground hover:text-foreground hover:bg-background-elevated",
+          "border-transparent text-muted-foreground hover:text-foreground hover:bg-background-elevated active:bg-background-elevated/75 active:text-foreground",
       },
       closable: {
         true: "",
