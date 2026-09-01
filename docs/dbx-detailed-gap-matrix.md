@@ -51,6 +51,8 @@
 
 > RocketMQ 状态修正（`d4d12a4e`）：Topic route/config/partition offsets、消息预览、按 key/时间查询、ACL 只读清单和按订阅 Topic 的 consumer lag 已经完成并进入工作区。ACL 结果保留 source broker 并报告不可用 master，避免掩盖配置漂移；lag 与 stats 都有明确分区上限。仍未开放 topic/consumer/ACL 变更、offset reset 与发消息：这些操作必须先具备独立的桌面审批、一次性回执、取消/未知结果恢复和生产/未分类连接保护，不能以直连 Agent 命令替代。真实集群 conformance 仍在 deferred validation queue。
 
+> DBX HEAD `d4d3995be` 审计（相对 `e43e36e7a`）：相关路径 `apps/desktop/src/lib/{mongo,elasticsearch}`、`components/editor` 与 `crates/dbx-core/src/lsp` 之后仅有 AI preset 与 danger-dialog focus 两项提交，没有新增 MongoDB/Elasticsearch LSP 契约。Oxide 的现有 `3ea234f1`/`3d139c68` 已覆盖 Elasticsearch JSON key replacement、REST path range 与 Mongo shell-qualified completion；本轮全量 Vitest、Rust library tests 与定向补全测试均通过。真实 MongoDB/Elasticsearch/Monaco 验证仍保留在 deferred queue，不能由静态测试替代。
+
 ### 最新增量审计（`8be503bf4` → `e43e36e7a`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
