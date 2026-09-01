@@ -17,19 +17,19 @@ describe("reference database driver catalogue", () => {
     );
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(75);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(85);
     expect(DBX_REFERENCE_DRIVER_IDS).toEqual([
       "mysql", "postgres", "sqlite", "rqlite", "redis", "duckdb",
-      "clickhouse", "sqlserver", "mongodb", "oracle", "elasticsearch",
-      "easysearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb",
+      "clickhouse", "sqlserver", "mongodb", "dynamodb", "oracle", "elasticsearch",
+      "easysearch", "meilisearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb",
       "doris", "starrocks", "manticoresearch", "databend", "redshift",
       "dameng", "kingbase", "highgo", "uxdb", "vastbase", "goldendb",
       "gaussdb", "kwdb", "yashandb", "databricks", "saphana", "teradata",
       "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle",
       "gbase", "access", "h2", "snowflake", "trino", "prestosql", "hive",
-      "argo", "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "kylin",
-      "sundb", "oscar", "tdengine", "xugu", "iotdb", "etcd", "zookeeper",
-      "nacos", "iris", "turso", "cloudflare-d1", "influxdb", "influxdb3", "questdb", "jdbc",
+      "kyuubi", "argo", "impala", "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "spanner", "kylin",
+      "ignite", "ignite3", "sundb", "oscar", "tdengine", "xugu", "iotdb", "etcd", "zookeeper",
+      "nacos", "consul", "mqtt", "iris", "turso", "cloudflare-d1", "influxdb", "influxdb3", "victoriametrics", "questdb", "jdbc",
       "mq",
     ]);
     expect(ids).toEqual(

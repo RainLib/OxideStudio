@@ -14,7 +14,7 @@
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
 | `d4d3995be`、`053f5f6dc` | release asset 同步并发化、按 module path 归属 agent release note | 只修改 DBX 自身 GitHub Actions，没有桌面、driver、LSP 或迁移运行时变化；Oxide 的 release/driver packaging workflow 有独立的矩阵、磁盘清理和 OSS 上传契约，不复制仓库专属发布脚本。 |
-| `7e3db73de` | 支持数据库文档补列 ArgoDB 与 InfluxDB 3 | 产品目录已对齐：Oxide 已将 ArgoDB 作为需要签名 JDBC package/evidence 的候选，并已实现 bundled InfluxDB 3 SQL HTTP runtime、metadata、LSP 方言路由与静态回归。此次 DBX 提交只改文档数组，没有新运行逻辑。 |
+| `7e3db73de` | 支持数据库文档补列 ArgoDB 与 InfluxDB 3 | 产品目录已对齐：Oxide 将 DBX 当前公开 `DatabaseType` 的 80 项全部登记为候选，其中 ArgoDB 需要签名 JDBC package/evidence；bundled InfluxDB 3 已实现 SQL HTTP runtime、metadata、LSP 方言路由与静态回归。此次 DBX 提交只改文档数组，没有新运行逻辑。 |
 | `fac018f16`、`b31b6845f`、`0d75456f8` | 发布 v0.6.0 与 packages 0.4.77 | 上游强制更新后的三个提交只调整 DBX 自身版本、lockfile 和发布元数据；最新产品功能提交仍为下列已审计的 `c4cdcbc48`，没有新的运行逻辑需要迁移。Oxide 不跟随 DBX 产品版本号。 |
 | `8187ef9ba`（历史性能缺口复核） | MySQL routine 编辑时增量复用 lexer/block 状态，避免每个内部分号重新扫描完整语句前缀造成 O(n²) | 已完成等价并减少中间状态：Oxide 的 Rust authoritative statement scanner 在既有单次 quote/comment-aware 遍历中直接识别 routine 的有界 16-word `CREATE` 前缀，并增量维护 `BEGIN`/`CASE`/`END IF|LOOP|REPEAT|WHILE` 块栈；不为 routine 另存持续增长的 token 数组。无 `DELIMITER` 的 compound procedure/function/trigger/event 保持一个 statement，显式 custom delimiter 与普通 `CREATE TABLE` 边界不变。20,000 条内部 `SET` 的回归覆盖线性扫描路径。DBX 位置：`apps/desktop/src/lib/sql/sqlStatementRanges.ts:mysqlRoutineTokensUpTo/advanceMysqlRoutineBlockCompleteness`。Oxide 位置：`src-tauri/src/core/statement.rs:MysqlRoutineScan/split_sql_statement_spans`。真实 MySQL/MariaDB routine 执行仍归统一数据库验证阶段。 |
 | `19f8736b6`（历史诊断缺口复核） | MySQL procedure/function 使用专用 syntax diagnostics，避免通用 SQL 语义分析误报 routine body | 已对齐并增加明确资源边界：Native/custom MySQL 编辑器使用 delimiter、quote、comment aware 的 O(n)/O(depth) 单次扫描，报告参数尾逗号、procedure 中非法 `RETURN`、function 中缺少表达式的 `RETURN`；`DELIMITER $$` 紧贴 `END`/`RETURN`、嵌套 `BEGIN`/`CASE`、多 routine 与普通 SQL 隔离均有回归。编辑输入按 180ms 合并，分析结果按 model/version 复用；仅 routine 精确范围内来自 `tree-sitter-sql` 的 `SYNTAX_ERROR/PARSE_ERROR` 被隐藏，OXIDE 安全/结构 inspection 继续显示。同步扫描上限为 4 MiB，超限 fail quiet；20,000 条内部语句验证不保留增长 token 列表。DBX 位置：`apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.vue:refreshSemanticDiagnostics`。Oxide 位置：`src/features/query-editor/model/mysqlRoutineSyntaxDiagnostics.ts`、`QueryEditor.tsx`。真实 MySQL 版本诊断与执行验证延期。 |
@@ -206,12 +206,12 @@
 
 状态定义：`已对齐`、`部分对齐`、`未对齐`、`Oxide 加强项`。
 
-## 2. Driver、连接与 70+ 数据库
+## 2. Driver、连接与 80 项 DBX 产品目录
 
 | ID | 状态 / 差距 | DBX 实现位置 | Oxide 当前落点 | 对齐验收 |
 | --- | --- | --- | --- | --- |
-| D01 | 部分对齐：产品 capability 与运行时分层 | `crates/dbx-core/assets/database-drivers.manifest.json`；`apps/desktop/src/lib/database/databaseDriverManifest.ts` | `src/features/database-drivers/model/referenceDriverCatalog.ts`；`src-tauri/src/core/dialect.rs` | 每个公开产品由安装状态和 capability 决定入口；候选项不能显示为可连接。 |
-| D02 | 部分对齐：实际 driver 数量 | `agents/drivers/*` 45 个独立工程；`crates/dbx-core/src/db/*_driver.rs` | bundled 6 个；DuckDB 侧车已在 Windows x64/DuckDB v1.5.5 通过真实 package conformance；RQLite/ClickHouse 已有 release payload，但仍缺真实 server evidence | 每个产品通过 `connect/ping/version/metadata/query/cancel/error-map` 后才从候选变为 ready。 |
+| D01 | 部分对齐：产品 capability 与运行时分层 | `crates/dbx-core/assets/database-drivers.manifest.json`；`apps/desktop/src/lib/database/databaseDriverManifest.ts` | `src/features/database-drivers/model/referenceDriverCatalog.ts`；`src-tauri/src/core/dialect.rs` | 当前 DBX 的 80 个公开产品均有候选记录；每项由安装状态和 capability 决定入口，候选项不能显示为可连接。 |
+| D02 | 部分对齐：实际 driver 数量 | `agents/drivers/*` 45 个独立工程；`crates/dbx-core/src/db/*_driver.rs` | bundled 7 个；DuckDB 侧车已在 Windows x64/DuckDB v1.5.5 通过真实 package conformance；RQLite/ClickHouse 已有 release payload，但仍缺真实 server evidence | 每个产品通过 `connect/ping/version/metadata/query/cancel/error-map` 后才从候选变为 ready。 |
 | D03 | 部分对齐：外置 driver 安装、激活、回滚 | `src-tauri/src/commands/agents.rs`；`crates/dbx-core/src/agent_manager.rs`；`components/config/DriverStoreDialog.vue` | `src-tauri/src/core/driver_package.rs`；Settings Driver Manager | 保留 Oxide 的 Minisign、SHA-256、原子激活和 connection pin；补真实发布包。 |
 | D04 | 部分对齐：托管 Java/JAR 产品交付宽度 | `agents/common/*`；每个 `agents/drivers/<product>/build.gradle`；schema/catalog 切换参考 `agents/common/src/main/java/com/dbx/agent/JdbcSchemaSwitcher.java` 与 `plugins/jdbc/.../DbxJdbcPlugin.java:applyExecutionContext` | managed Java/runtime、generic JDBC agent、H2 内存 conformance fixture 已具备。profile 现在显式区分 catalog 与 schema，Oracle/Hive/Argo/generic 不再产生虚假 catalog 层；SQL Server/PostgreSQL/MySQL/H2 的 query context 会在单连接串行执行边界内应用并读回 `setCatalog/setSchema`，结束后恢复，无法证明应用或恢复时关闭连接。Host 同时要求签名 manifest 与 runtime handshake 两方声明 database scope。尚无 SQL Server/Oracle 等正式签名包 | vendor JAR、Java 版本、URL 模板、server range 与 conformance 同时进入签名 catalog。 |
 | D05 | 逻辑已对齐并收紧：签名 Maven/JDBC 依赖获取 | DBX `crates/dbx-core/src/jdbc.rs`、`src-tauri/src/commands/plugins.rs` 与 `DriverStoreDialog.vue` 支持 resolver、Maven Central/自定义仓库、bundle 清单及离线包 | 签名 catalog 可为 Java package 声明固定 Maven 坐标、classpath 路径、精确大小/SHA-256、SPDX 许可证和 HTTPS 许可证链接；仅允许 Maven Central 固定路径，坐标/URL/manifest classpath 必须一致。依赖使用摘要命名断点缓存，安装 staging 注入后再次校验，Driver Manager 展示数量、体积、坐标和许可证 | Oxide 不接受 renderer 提交任意坐标或仓库，避免未审依赖直接进入数据库 sidecar。真实 Maven Central 代理、断点和供应商 JDBC 发布验证延期。 |
@@ -357,7 +357,7 @@ DBX 这一领域的核心不是独立 LSP，而是 CodeMirror + TypeScript seman
    额外通过对应 semantic conformance。
 6. 连接凭据、SQL 正文和结果值不进入 driver 日志、遥测或迁移报告。
 
-因此，74 个 catalog candidate 只有在逐项产生上述证据后，才能转换为“70+ 数据库可用”。
+因此，85 个 catalog candidate（80 项 DBX 产品 + 5 项明确标注的兼容产品）只有在逐项产生上述证据后，才能转换为“70+ 数据库可用”。
 
 ## Phase 114 增量：函数大小写与全方言补全偏好
 

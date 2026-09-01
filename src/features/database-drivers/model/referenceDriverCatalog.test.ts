@@ -7,9 +7,41 @@ import {
 } from "./referenceDriverCatalog";
 
 describe("DBX reference driver catalogue", () => {
-  it("tracks the complete 70-product DBX baseline without duplicate ids", () => {
-    expect(DBX_REFERENCE_DRIVER_IDS).toHaveLength(70);
-    expect(new Set(DBX_REFERENCE_DRIVER_IDS).size).toBe(70);
+  it("tracks the complete 80-product DBX baseline without duplicate ids", () => {
+    expect(DBX_REFERENCE_DRIVER_IDS).toHaveLength(80);
+    expect(new Set(DBX_REFERENCE_DRIVER_IDS).size).toBe(80);
+  });
+
+  it("keeps the latest DBX products unavailable until their own package is ready", () => {
+    const nativeWorkspaceProducts = [
+      "dynamodb",
+      "meilisearch",
+      "consul",
+      "mqtt",
+      "victoriametrics",
+    ];
+    const jdbcProducts = ["kyuubi", "impala", "spanner", "ignite", "ignite3"];
+
+    for (const driver of [...nativeWorkspaceProducts, ...jdbcProducts]) {
+      const candidate = referenceDriverCandidate(driver);
+      expect(candidate).toBeDefined();
+      expect(driverCandidateAvailability(candidate!, [])).toBe("requiresPackage");
+    }
+
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("kyuubi")!)).toMatchObject({
+      runtimeRoute: "signedJdbc",
+      lspRoute: "compatibleSql",
+      lspParserBaseline: "hive",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("impala")!)).toMatchObject({
+      runtimeRoute: "signedJdbc",
+      lspRoute: "compatibleSql",
+      lspParserBaseline: "hive",
+    });
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
+      runtimeRoute: "dedicatedWorkspace",
+      lspRoute: "notApplicable",
+    });
   });
 
   it("routes InfluxDB 3 through the bundled SQL runtime", () => {

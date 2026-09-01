@@ -95,6 +95,22 @@ open real database endpoints.
   editing and transfer conformance remain deferred; the catalogue entry must not
   be counted as a usable database until those signed release fixtures exist.
 
+## Phase 157 -- DBX 80-product catalogue completion
+
+- The planning catalogue now records all current DBX public `DatabaseType`
+  products. The additions are DynamoDB, Meilisearch, Kyuubi, Impala, Cloud
+  Spanner, Ignite, Ignite 3, Consul, MQTT and VictoriaMetrics. They remain
+  unavailable until a product-owned signed package reports a ready runtime and
+  carries matching conformance evidence.
+- Kyuubi and Impala may use the bounded Hive parser baseline only for a signed
+  JDBC package's SQL documents. DynamoDB, Meilisearch, Consul, MQTT and
+  VictoriaMetrics require dedicated provider/workspace contracts; the generic
+  SQL LSP must not be used to pretend their native APIs or MetricsQL are SQL.
+- Validate the exact DBX-default endpoint/auth form and each claimed
+  capability against real product versions before activating an entry. Include
+  cancellation, error redaction, metadata scope and, where DBX exposes writes,
+  the existing mutation/approval and migration conformance boundaries.
+
 ## Phase 137 -- locale-aware grid input and interaction feedback
 
 - In packaged Tauri WebViews with `en-US`, `de-DE`, `fr-FR` and a locale whose

@@ -52,7 +52,7 @@ const candidate = (
   source,
 });
 
-// The 70 DBX reference types, plus five widely used compatible SQL products.
+// The 80 DBX reference types, plus five widely used compatible SQL products.
 // The latter are intentionally labelled compatibility instead of pretending
 // that DBX itself ships a profile for them.
 export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
@@ -65,9 +65,13 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("clickhouse", "ClickHouse", "relational", "native"),
   candidate("sqlserver", "Microsoft SQL Server", "relational", "jdbc"),
   candidate("mongodb", "MongoDB", "document", "bundled", "mongodb"),
+  // DBX implements DynamoDB as a native document workspace. Do not offer a
+  // generic SQL editor merely because its table data can be edited.
+  candidate("dynamodb", "Amazon DynamoDB", "document", "native"),
   candidate("oracle", "Oracle Database", "relational", "jdbc"),
   candidate("elasticsearch", "Elasticsearch", "search", "bundled", "elasticsearch-dsl"),
   candidate("easysearch", "Easysearch", "search", "http", "elasticsearch-dsl"),
+  candidate("meilisearch", "Meilisearch", "search", "native"),
   candidate("hbase", "Apache HBase", "wideColumn", "jdbc"),
   candidate("qdrant", "Qdrant", "search", "http"),
   candidate("milvus", "Milvus", "search", "http"),
@@ -105,14 +109,19 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("trino", "Trino", "relational", "jdbc"),
   candidate("prestosql", "PrestoSQL", "relational", "jdbc"),
   candidate("hive", "Apache Hive", "relational", "jdbc"),
+  candidate("kyuubi", "Apache Kyuubi", "relational", "jdbc"),
   candidate("argo", "ArgoDB (Transwarp)", "relational", "jdbc"),
+  candidate("impala", "Apache Impala", "relational", "jdbc"),
   candidate("spark", "Apache Spark SQL", "relational", "jdbc"),
   candidate("db2", "IBM Db2", "relational", "jdbc"),
   candidate("informix", "IBM Informix", "relational", "jdbc"),
   candidate("neo4j", "Neo4j", "graph", "jdbc"),
   candidate("cassandra", "Apache Cassandra", "wideColumn", "jdbc"),
   candidate("bigquery", "Google BigQuery", "relational", "jdbc"),
+  candidate("spanner", "Google Cloud Spanner", "relational", "jdbc"),
   candidate("kylin", "Apache Kylin", "relational", "jdbc"),
+  candidate("ignite", "Apache Ignite", "relational", "jdbc"),
+  candidate("ignite3", "Apache Ignite 3", "relational", "jdbc"),
   candidate("sundb", "SunDB", "relational", "jdbc"),
   candidate("oscar", "OscarDB", "relational", "jdbc"),
   candidate("tdengine", "TDengine", "timeSeries", "jdbc"),
@@ -121,11 +130,17 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("etcd", "etcd", "coordination", "http"),
   candidate("zookeeper", "Apache ZooKeeper", "coordination", "jdbc"),
   candidate("nacos", "Nacos", "coordination", "http"),
+  candidate("consul", "Consul", "coordination", "native"),
+  candidate("mqtt", "MQTT", "queue", "native"),
   candidate("iris", "InterSystems IRIS", "relational", "jdbc"),
   candidate("turso", "Turso", "relational", "http"),
   candidate("cloudflare-d1", "Cloudflare D1", "relational", "http"),
   candidate("influxdb", "InfluxDB", "timeSeries", "http"),
   candidate("influxdb3", "InfluxDB 3", "timeSeries", "bundled", "sql"),
+  // DBX exposes VictoriaMetrics through its own MetricsQL workspace. Its
+  // SQL-file capability is not evidence that the bundled SQL LSP can parse
+  // MetricsQL, so a future package must provide a dedicated editor/provider.
+  candidate("victoriametrics", "VictoriaMetrics", "timeSeries", "native"),
   // QuestDB's DBX dialect is SQL-shaped. This is editor-only guidance: it
   // does not turn a time-series package into a relational grid driver.
   candidate("questdb", "QuestDB", "timeSeries", "http", "sql"),
@@ -296,8 +311,10 @@ export const SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER: Readonly<
   h2: "postgres",
   highgo: "postgres",
   informix: "postgres",
+  impala: "hive",
   iris: "postgres",
   kingbase: "postgres",
+  kyuubi: "hive",
   kwdb: "postgres",
   manticoresearch: "mysql",
   "oceanbase-oracle": "postgres",
