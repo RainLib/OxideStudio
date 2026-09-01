@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -72,35 +73,57 @@ type queryResult struct {
 type agent struct {
 	mu          sync.Mutex
 	connections map[string]*sql.DB
+	active      map[string]context.CancelFunc
 }
 
 func main() {
-	a := &agent{connections: map[string]*sql.DB{}}
+	a := &agent{connections: map[string]*sql.DB{}, active: map[string]context.CancelFunc{}}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	encoder := json.NewEncoder(os.Stdout)
+	var encoderMu sync.Mutex
+	var requests sync.WaitGroup
 	for scanner.Scan() {
 		var request envelope
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			encoderMu.Lock()
 			_ = encoder.Encode(response{Status: "error", Result: fail("INVALID_REQUEST", err.Error())})
+			encoderMu.Unlock()
 			continue
 		}
-		result, err := a.dispatch(request)
-		if err != nil {
-			_ = encoder.Encode(response{ID: request.ID, Status: "error", Result: err})
-			continue
-		}
-		if err := encoder.Encode(response{ID: request.ID, Status: "ok", Result: result}); err != nil {
+		if request.Method == "shutdown" {
+			requests.Wait()
+			result, err := a.dispatch(request)
+			encoderMu.Lock()
+			if err != nil {
+				_ = encoder.Encode(response{ID: request.ID, Status: "error", Result: err})
+			} else {
+				_ = encoder.Encode(response{ID: request.ID, Status: "ok", Result: result})
+			}
+			encoderMu.Unlock()
 			return
 		}
+		requests.Add(1)
+		go func(request envelope) {
+			defer requests.Done()
+			result, err := a.dispatch(request)
+			encoderMu.Lock()
+			defer encoderMu.Unlock()
+			if err != nil {
+				_ = encoder.Encode(response{ID: request.ID, Status: "error", Result: err})
+				return
+			}
+			_ = encoder.Encode(response{ID: request.ID, Status: "ok", Result: result})
+		}(request)
 	}
+	requests.Wait()
 	a.closeAll()
 }
 
 func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	switch request.Method {
 	case "handshake":
-		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": false, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
+		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
 	case "connect":
 		var p struct {
 			ConnectionID string       `json:"connection_id"`
@@ -128,7 +151,7 @@ func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	case "metadata":
 		return a.metadata(request.Params)
 	case "cancel":
-		return map[string]any{"kind": "boolean", "value": false}, nil
+		return a.cancel(request.Params)
 	case "shutdown":
 		a.closeAll()
 		return map[string]any{"kind": "empty"}, nil
@@ -180,6 +203,12 @@ func (a *agent) disconnect(id string) {
 	a.mu.Lock()
 	db := a.connections[id]
 	delete(a.connections, id)
+	for key, cancel := range a.active {
+		if strings.HasPrefix(key, id+"\x00") {
+			cancel()
+			delete(a.active, key)
+		}
+	}
 	a.mu.Unlock()
 	if db != nil {
 		_ = db.Close()
@@ -189,6 +218,10 @@ func (a *agent) closeAll() {
 	a.mu.Lock()
 	all := a.connections
 	a.connections = map[string]*sql.DB{}
+	for _, cancel := range a.active {
+		cancel()
+	}
+	a.active = map[string]context.CancelFunc{}
 	a.mu.Unlock()
 	for _, db := range all {
 		_ = db.Close()
@@ -235,6 +268,7 @@ func (a *agent) query(raw json.RawMessage) (any, *protocolError) {
 		Statement    string       `json:"statement"`
 		Parameters   []queryParam `json:"parameters"`
 		Context      queryContext `json:"context"`
+		QueryID      string       `json:"query_id"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fail("INVALID_REQUEST", err.Error())
@@ -253,9 +287,19 @@ func (a *agent) query(raw json.RawMessage) (any, *protocolError) {
 	for i, v := range p.Parameters {
 		args[i] = v.Value
 	}
+	queryID := p.QueryID
+	if queryID == "" {
+		queryID = "__default__"
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.setActive(p.ConnectionID, queryID, cancel)
+	defer a.clearActive(p.ConnectionID, queryID, cancel)
 	typ := statementType(p.Statement)
 	if !rowReturning(typ) {
-		n, err := db.Exec(p.Statement, args...)
+		n, err := db.ExecContext(ctx, p.Statement, args...)
+		if ctx.Err() != nil {
+			return nil, fail("QUERY_CANCELED", "Kingbase query was canceled")
+		}
 		if err != nil {
 			return nil, fail("QUERY_FAILED", err.Error())
 		}
@@ -263,7 +307,10 @@ func (a *agent) query(raw json.RawMessage) (any, *protocolError) {
 		u := uint64(affected)
 		return map[string]any{"kind": "query", "value": []queryResult{{Rows: [][]any{}, Columns: []column{}, RowsAffected: &u, StatementType: typ}}}, nil
 	}
-	rows, err := db.Query(p.Statement, args...)
+	rows, err := db.QueryContext(ctx, p.Statement, args...)
+	if ctx.Err() != nil {
+		return nil, fail("QUERY_CANCELED", "Kingbase query was canceled")
+	}
 	if err != nil {
 		return nil, fail("QUERY_FAILED", err.Error())
 	}
@@ -281,6 +328,9 @@ func (a *agent) query(raw json.RawMessage) (any, *protocolError) {
 	values := make([][]any, 0)
 	truncated := false
 	for rows.Next() {
+		if ctx.Err() != nil {
+			return nil, fail("QUERY_CANCELED", "Kingbase query was canceled")
+		}
 		if len(values) >= maxRows {
 			truncated = true
 			break
@@ -304,6 +354,46 @@ func (a *agent) query(raw json.RawMessage) (any, *protocolError) {
 	}
 	limit := uint64(maxRows)
 	return map[string]any{"kind": "query", "value": []queryResult{{Columns: columns, Rows: values, Truncated: truncated, RowLimit: &limit, StatementType: typ}}}, nil
+}
+
+func (a *agent) cancel(raw json.RawMessage) (any, *protocolError) {
+	var p struct {
+		ConnectionID string `json:"connection_id"`
+		QueryID      string `json:"query_id"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fail("INVALID_REQUEST", err.Error())
+	}
+	if p.QueryID == "" {
+		p.QueryID = "__default__"
+	}
+	return map[string]any{"kind": "boolean", "value": a.cancelActive(p.ConnectionID, p.QueryID)}, nil
+}
+
+func activeQueryKey(connectionID, queryID string) string { return connectionID + "\x00" + queryID }
+
+func (a *agent) setActive(connectionID, queryID string, cancel context.CancelFunc) {
+	a.mu.Lock()
+	a.active[activeQueryKey(connectionID, queryID)] = cancel
+	a.mu.Unlock()
+}
+
+func (a *agent) clearActive(connectionID, queryID string, cancel context.CancelFunc) {
+	a.mu.Lock()
+	delete(a.active, activeQueryKey(connectionID, queryID))
+	a.mu.Unlock()
+	cancel()
+}
+
+func (a *agent) cancelActive(connectionID, queryID string) bool {
+	a.mu.Lock()
+	cancel := a.active[activeQueryKey(connectionID, queryID)]
+	a.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {

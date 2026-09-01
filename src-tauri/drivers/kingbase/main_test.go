@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -56,5 +58,17 @@ func TestKingbaseMetadataQueriesUseBoundScope(t *testing.T) {
 		if !strings.Contains(query, "$1") || strings.Contains(query, "%s") {
 			t.Fatalf("metadata query must bind its scope: %s", query)
 		}
+	}
+}
+
+func TestCancelOnlySignalsTheMatchingKingbaseQuery(t *testing.T) {
+	canceled := false
+	a := &agent{connections: map[string]*sql.DB{}, active: map[string]context.CancelFunc{}}
+	a.setActive("connection", "active", func() { canceled = true })
+	if a.cancelActive("connection", "missing") || canceled {
+		t.Fatal("unregistered query must not be canceled")
+	}
+	if !a.cancelActive("connection", "active") || !canceled {
+		t.Fatal("active query was not canceled")
 	}
 }
