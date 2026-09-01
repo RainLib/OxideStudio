@@ -12,7 +12,10 @@ describe("data source driver choices", () => {
     for (const driver of [
       "cockroachdb",
       "easysearch",
+      "gaussdb",
       "greenplum",
+      "opengauss",
+      "redshift",
       "tidb",
       "timescaledb",
       "yugabytedb",

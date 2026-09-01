@@ -153,6 +153,30 @@ describe("DBX protocol-compatible connection profiles", () => {
 
     expect(normalizeDatabaseDriverName("tidb")).toBe("mysql");
     expect(normalizeDatabaseDriverName("cockroachdb")).toBe("postgres");
+    expect(defaultDatabasePort("redshift")).toBe(5439);
+    expect(connectionUrlScheme("redshift")).toBe("postgres");
+    expect(defaultDatabaseCapabilities("redshift")).toMatchObject({
+      driver: "redshift",
+      displayName: "Amazon Redshift",
+      lspLanguageId: "postgres",
+      supportsSqlQuery: true,
+    });
+
+    for (const [driver, displayName] of [
+      ["gaussdb", "GaussDB"],
+      ["opengauss", "openGauss"],
+    ] as const) {
+      expect(defaultDatabasePort(driver)).toBe(5432);
+      expect(connectionUrlScheme(driver)).toBe("postgres");
+      expect(defaultDatabaseCapabilities(driver)).toMatchObject({
+        driver,
+        displayName,
+        lspLanguageId: "postgres",
+        supportsSqlQuery: true,
+      });
+      expect(normalizeDatabaseDriverName(driver)).toBe("postgres");
+    }
+
     expect(defaultDatabasePort("easysearch")).toBe(9200);
     expect(connectionUrlScheme("easysearch")).toBe("http");
     expect(defaultDatabaseCapabilities("easysearch")).toMatchObject({

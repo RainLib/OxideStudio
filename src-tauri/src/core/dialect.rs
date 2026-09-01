@@ -358,6 +358,9 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
         "cockroach",
         "cockroachdb",
         "greenplum",
+        "redshift",
+        "gaussdb",
+        "opengauss",
         "timescaledb",
         "yugabyte",
         "yugabytedb",
@@ -1026,8 +1029,11 @@ pub fn database_display_name_for_driver(driver: &str) -> String {
     match requested.to_ascii_lowercase().as_str() {
         "cockroach" | "cockroachdb" => "CockroachDB".to_string(),
         "easysearch" => "Easysearch".to_string(),
+        "gaussdb" => "GaussDB".to_string(),
         "greenplum" => "Greenplum".to_string(),
         "mariadb" => "MariaDB".to_string(),
+        "opengauss" => "openGauss".to_string(),
+        "redshift" => "Amazon Redshift".to_string(),
         "tidb" => "TiDB".to_string(),
         "timescaledb" => "TimescaleDB".to_string(),
         "yugabyte" | "yugabytedb" => "YugabyteDB".to_string(),
@@ -2546,6 +2552,9 @@ WITH NO DATA;"#
         assert_eq!(canonical_driver_name("yugabytedb"), Some("postgres"));
         assert_eq!(canonical_driver_name("timescaledb"), Some("postgres"));
         assert_eq!(canonical_driver_name("greenplum"), Some("postgres"));
+        assert_eq!(canonical_driver_name("redshift"), Some("postgres"));
+        assert_eq!(canonical_driver_name("gaussdb"), Some("postgres"));
+        assert_eq!(canonical_driver_name("opengauss"), Some("postgres"));
         assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
         assert_eq!(canonical_driver_name("tidb"), Some("mysql"));
         assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
@@ -2573,6 +2582,12 @@ WITH NO DATA;"#
 
         assert_eq!(database_display_name_for_driver("tidb"), "TiDB");
         assert_eq!(database_display_name_for_driver("easysearch"), "Easysearch");
+        assert_eq!(
+            database_display_name_for_driver("redshift"),
+            "Amazon Redshift"
+        );
+        assert_eq!(database_display_name_for_driver("gaussdb"), "GaussDB");
+        assert_eq!(database_display_name_for_driver("opengauss"), "openGauss");
         assert_eq!(
             database_display_name_for_driver("cockroachdb"),
             "CockroachDB"

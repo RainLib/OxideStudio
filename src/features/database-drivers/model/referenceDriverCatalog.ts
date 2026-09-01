@@ -280,6 +280,9 @@ const BUNDLED_DRIVER_IDS = new Set([
   // standalone client runtimes. They use the reviewed bundled wire driver;
   // their LSP route below remains a conservative compatibility baseline.
   "cockroachdb",
+  "redshift",
+  "gaussdb",
+  "opengauss",
   "greenplum",
   "tidb",
   "timescaledb",

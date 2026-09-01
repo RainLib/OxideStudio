@@ -1917,7 +1917,9 @@ async fn resolve_transfer_target_column_quoting(
         return Ok(true);
     }
 
-    let driver = normalized_transfer_driver_id(&endpoint.driver);
+    // This is a product-specific opt-out, so keep the selected product id
+    // instead of canonicalizing it to the bundled PostgreSQL transport.
+    let driver = endpoint.driver.trim().to_ascii_lowercase();
     if !matches!(driver.as_str(), "gaussdb" | "opengauss") {
         return Err(
             "Unquoted transfer target columns are available only for GaussDB/openGauss targets."

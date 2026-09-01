@@ -95,7 +95,10 @@ describe("DBX reference driver catalogue", () => {
   it("uses bundled wire-compatible runtimes for DBX profile products", () => {
     for (const driver of [
       "cockroachdb",
+      "gaussdb",
       "greenplum",
+      "opengauss",
+      "redshift",
       "tidb",
       "timescaledb",
       "yugabytedb",
