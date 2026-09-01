@@ -47,7 +47,7 @@ H2 的内存 JDBC fixture 已进入同一 runner；它在 managed Java 21 和经
 | MySQL 协议族 | Doris、StarRocks、OceanBase、GBase、GoldenDB | 复用 MySQL LSP/quote 的候选 | 先只读 metadata/query；事务和 Grid 编辑分别验收。 |
 | Warehouse | Snowflake、Trino、Presto、Hive、Spark、Databricks、BigQuery | sidecar contract 可表达只读 | 以只读 query + catalog + 分页为第一阶段。 |
 | 文档/搜索 | MongoDB、Elasticsearch、Neo4j、Cassandra、InfluxDB、Milvus、Qdrant | Mongo/ES 原生；其他待包 | 声明 document/search，而非强制 SQL 表格模型。 |
-| KV/协调/消息 | Redis、Etcd、ZooKeeper、Nacos、Kafka/Pulsar | Redis 原生；其他待 admin provider | 独立 workspace/provider，不进入关系型表编辑器。 |
+| KV/协调/消息 | Redis、Consul、Etcd、ZooKeeper、Nacos、Kafka/Pulsar | Redis、Consul 原生；其他待 admin provider | 独立 workspace/provider，不进入关系型表编辑器。 |
 
 ## 外置包约束
 

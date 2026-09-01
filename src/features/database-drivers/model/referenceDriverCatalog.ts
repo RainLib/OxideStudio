@@ -130,7 +130,7 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("etcd", "etcd", "coordination", "http"),
   candidate("zookeeper", "Apache ZooKeeper", "coordination", "jdbc"),
   candidate("nacos", "Nacos", "coordination", "http"),
-  candidate("consul", "Consul", "coordination", "bundled"),
+  candidate("consul", "Consul", "keyValue", "bundled"),
   candidate("mqtt", "MQTT", "queue", "native"),
   candidate("iris", "InterSystems IRIS", "relational", "jdbc"),
   candidate("turso", "Turso", "relational", "http"),

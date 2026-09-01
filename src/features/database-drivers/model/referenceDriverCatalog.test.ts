@@ -40,6 +40,7 @@ describe("DBX reference driver catalogue", () => {
       lspRoute: "notApplicable",
     });
     const consul = referenceDriverCandidate("consul");
+    expect(consul?.dataModel).toBe("keyValue");
     expect(driverCandidateAvailability(consul!, [])).toBe("bundled");
     expect(referenceDriverDeliveryPlan(consul!)).toMatchObject({
       runtimeRoute: "bundled",
