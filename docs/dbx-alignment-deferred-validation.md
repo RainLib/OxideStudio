@@ -68,6 +68,15 @@ open real database endpoints.
   lookback affects metadata discovery only and arbitrary URL parameters remain
   intact after form editing.
 
+## Phase 161 -- Consul read-only KV browser
+
+- Start Consul behind direct and path-prefixed HTTP/HTTPS endpoints. Verify
+  Token header authentication, agent/leader health, prefix/key pagination,
+  URL redaction, malformed JSON and 401/403/404 error mapping.
+- Confirm all KV mutation, transaction, ACL, Agent, Operator and arbitrary
+  REST-console surfaces stay unavailable until their independently reviewed
+  approval and conflict contracts are implemented.
+
 ## Phase 140 -- physical query-column formatter inheritance
 
 - In PostgreSQL, MySQL, SQL Server and SQLite query tabs, configure a physical

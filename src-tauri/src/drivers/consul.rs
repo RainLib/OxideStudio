@@ -1,0 +1,314 @@
+use crate::core::{
+    driver::DatabaseDriver,
+    protocol::{CollectionInfo, CollectionPage, QueryResult},
+};
+use anyhow::{anyhow, bail, Context, Result};
+use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use reqwest::{Client, Response, StatusCode, Url};
+use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+const CONSUL_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const CONSUL_ERROR_MAX_BYTES: usize = 64 * 1024;
+const CONSUL_PAGE_LIMIT: usize = 1_000;
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']');
+
+/// A deliberately read-only Consul KV browser. The DBX Consul workspace has
+/// many operational/write endpoints; exposing an arbitrary REST console here
+/// would bypass the desktop's approval model, so this driver only owns the
+/// fixed health and KV-key listing endpoints.
+pub struct ConsulDriver {
+    client: Client,
+    base_url: Url,
+    token: Option<String>,
+    connected: AtomicBool,
+}
+
+impl ConsulDriver {
+    pub fn new(connection_url: &str) -> Result<Self> {
+        let (base_url, token) = parse_consul_connection_url(connection_url)?;
+        let client_builder = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30));
+        #[cfg(test)]
+        let client_builder = client_builder.no_proxy();
+        Ok(Self {
+            client: client_builder
+                .build()
+                .context("Failed to configure Consul HTTP client")?,
+            base_url,
+            token,
+            connected: AtomicBool::new(false),
+        })
+    }
+
+    fn ensure_connected(&self) -> Result<()> {
+        if self.connected.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            bail!("Consul connection is not established")
+        }
+    }
+
+    fn endpoint(&self, suffix: &str) -> Result<Url> {
+        self.base_url
+            .join(suffix.trim_start_matches('/'))
+            .context("Invalid Consul endpoint")
+    }
+
+    fn request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.token.as_deref().filter(|token| !token.is_empty()) {
+            Some(token) => request.header("X-Consul-Token", token),
+            None => request,
+        }
+    }
+
+    async fn read_json(&self, url: Url, operation: &str) -> Result<Value> {
+        let response = self
+            .request(self.client.get(url))
+            .send()
+            .await
+            .with_context(|| format!("Consul {operation} request failed"))?;
+        parse_consul_response(response, operation).await
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        validate_prefix(prefix)?;
+        let encoded = prefix
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        let suffix = if encoded.is_empty() {
+            "v1/kv/".to_string()
+        } else {
+            format!("v1/kv/{encoded}")
+        };
+        let mut url = self.endpoint(&suffix)?;
+        url.query_pairs_mut()
+            .append_pair("keys", "")
+            .append_pair("separator", "/");
+        let data = self.read_json(url, "KV key listing").await?;
+        let mut keys = data
+            .as_array()
+            .ok_or_else(|| anyhow!("Consul returned invalid KV key list JSON"))?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|key| valid_key(key))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.len() > CONSUL_PAGE_LIMIT * 10 {
+            bail!("Consul KV prefix contains too many keys to browse safely")
+        }
+        Ok(keys)
+    }
+}
+
+#[async_trait]
+impl DatabaseDriver for ConsulDriver {
+    async fn connect(&mut self) -> Result<()> {
+        let value = self
+            .read_json(self.endpoint("v1/agent/self")?, "agent health")
+            .await?;
+        if !value.is_object() {
+            bail!("Consul agent health response is invalid")
+        }
+        self.connected.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn disconnect(&self) -> Result<()> {
+        self.connected.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    async fn ping(&self) -> Result<()> {
+        self.ensure_connected()?;
+        let value = self
+            .read_json(self.endpoint("v1/status/leader")?, "leader health")
+            .await?;
+        if value.as_str().is_none() {
+            bail!("Consul leader health response is invalid")
+        }
+        Ok(())
+    }
+
+    async fn query(&self, _: &str) -> Result<Vec<QueryResult>> {
+        Err(anyhow!(
+            "Consul has no SQL/console execution surface; browse KV keys from Explorer"
+        ))
+    }
+
+    async fn get_schemas(&self) -> Result<Vec<String>> {
+        self.ensure_connected()?;
+        Ok(vec!["kv".to_string()])
+    }
+
+    async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
+        Ok(self
+            .get_collections_page(namespace, None, 100, None)
+            .await?
+            .items)
+    }
+
+    async fn get_collections_page(
+        &self,
+        namespace: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        filter: Option<&str>,
+    ) -> Result<CollectionPage> {
+        self.ensure_connected()?;
+        if !namespace.trim().is_empty() && namespace != "kv" {
+            return Ok(CollectionPage {
+                items: Vec::new(),
+                next_cursor: None,
+                total: Some(0),
+            });
+        }
+        let filter = filter.unwrap_or("").trim();
+        if filter.len() > 512 || filter.contains('\0') {
+            bail!("Consul KV filter is invalid")
+        }
+        let start = cursor
+            .map(str::trim)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_string);
+        let keys = self.list_prefix("").await?;
+        let filtered = keys
+            .into_iter()
+            .filter(|key| filter.is_empty() || key.contains(filter))
+            .filter(|key| start.as_deref().is_none_or(|after| key.as_str() > after))
+            .collect::<Vec<_>>();
+        let limit = limit.clamp(1, CONSUL_PAGE_LIMIT);
+        let more = filtered.len() > limit;
+        let items = filtered
+            .into_iter()
+            .take(limit)
+            .map(|name| CollectionInfo {
+                name,
+                namespace: Some("kv".to_string()),
+                collection_type: Some("KEY_OR_PREFIX".to_string()),
+                document_count: None,
+            })
+            .collect::<Vec<_>>();
+        Ok(CollectionPage {
+            next_cursor: more
+                .then(|| items.last().map(|item| item.name.clone()))
+                .flatten(),
+            total: None,
+            items,
+        })
+    }
+}
+
+fn parse_consul_connection_url(value: &str) -> Result<(Url, Option<String>)> {
+    let mut url = Url::parse(value.trim()).context("Invalid Consul connection URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("Consul connection URL must use HTTP or HTTPS and contain a host")
+    }
+    let token = url
+        .password()
+        .map(str::to_string)
+        .filter(|token| !token.is_empty());
+    url.set_username("")
+        .map_err(|_| anyhow!("Invalid Consul username"))?;
+    url.set_password(None)
+        .map_err(|_| anyhow!("Invalid Consul token"))?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = url.path().trim_end_matches('/').to_string();
+    let normalized_path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{path}/")
+    };
+    url.set_path(&normalized_path);
+    Ok((url, token))
+}
+
+fn validate_prefix(value: &str) -> Result<()> {
+    if value.len() > 1_024 || value.contains('\0') || value.contains("..") {
+        bail!("Consul KV prefix is invalid")
+    }
+    Ok(())
+}
+
+fn valid_key(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4_096 && !value.contains('\0')
+}
+
+async fn parse_consul_response(response: Response, operation: &str) -> Result<Value> {
+    let status = response.status();
+    let limit = if status.is_success() {
+        CONSUL_RESPONSE_MAX_BYTES
+    } else {
+        CONSUL_ERROR_MAX_BYTES
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        bail!("Consul {operation} response exceeds the safety limit")
+    }
+    let body = response
+        .bytes()
+        .await
+        .with_context(|| format!("Failed to read Consul {operation} response"))?;
+    if body.len() > limit {
+        bail!("Consul {operation} response exceeds the safety limit")
+    }
+    if !status.is_success() {
+        let hint = match status {
+            StatusCode::UNAUTHORIZED => "Unauthorized; check the Consul token",
+            StatusCode::FORBIDDEN => "Access denied",
+            StatusCode::NOT_FOUND => "Endpoint not found",
+            _ => "Request failed",
+        };
+        bail!(
+            "Consul {operation} returned HTTP {}: {hint}",
+            status.as_u16()
+        )
+    }
+    serde_json::from_slice(&body)
+        .with_context(|| format!("Consul {operation} returned invalid JSON"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_redacts_token_and_preserves_base_path() {
+        let (url, token) = parse_consul_connection_url(
+            "https://:secret@consul.example.test:8501/edge/consul?dc=ignored",
+        )
+        .unwrap();
+        assert_eq!(token.as_deref(), Some("secret"));
+        assert_eq!(
+            url.as_str(),
+            "https://consul.example.test:8501/edge/consul/"
+        );
+    }
+
+    #[test]
+    fn prefix_and_key_validation_reject_transport_escapes() {
+        assert!(validate_prefix("services/api").is_ok());
+        assert!(validate_prefix("../admin").is_err());
+        assert!(!valid_key(""));
+        assert!(!valid_key("a\0b"));
+    }
+}

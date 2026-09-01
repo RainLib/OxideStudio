@@ -15,7 +15,6 @@ describe("DBX reference driver catalogue", () => {
   it("keeps the latest DBX products unavailable until their own package is ready", () => {
     const nativeWorkspaceProducts = [
       "dynamodb",
-      "consul",
       "mqtt",
     ];
     const jdbcProducts = ["kyuubi", "impala", "spanner", "ignite", "ignite3"];
@@ -37,6 +36,12 @@ describe("DBX reference driver catalogue", () => {
       lspParserBaseline: "hive",
     });
     expect(referenceDriverDeliveryPlan(referenceDriverCandidate("victoriametrics")!)).toMatchObject({
+      runtimeRoute: "bundled",
+      lspRoute: "notApplicable",
+    });
+    const consul = referenceDriverCandidate("consul");
+    expect(driverCandidateAvailability(consul!, [])).toBe("bundled");
+    expect(referenceDriverDeliveryPlan(consul!)).toMatchObject({
       runtimeRoute: "bundled",
       lspRoute: "notApplicable",
     });

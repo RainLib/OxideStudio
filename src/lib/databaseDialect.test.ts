@@ -39,6 +39,23 @@ describe("VictoriaMetrics dialect profile", () => {
   });
 });
 
+describe("Consul dialect profile", () => {
+  it("exposes only the native read-only KV browse surface", () => {
+    expect(connectionUrlScheme("consul")).toBe("http");
+    expect(defaultDatabasePort("consul")).toBe(8500);
+    expect(defaultDatabaseCapabilities("consul")).toMatchObject({
+      dataModel: "coordination",
+      lspLanguageId: "consul",
+      supportsSqlQuery: false,
+      supportsKeyValueBrowsing: true,
+      supportsConnectionDatabase: false,
+      supportsTableRowMutation: false,
+      supportsTableDdl: false,
+      supportsTransactions: false,
+    });
+  });
+});
+
 describe("InfluxDB 1.x / 2.x dialect profile", () => {
   it("uses the time-series workspace without claiming SQL LSP support", () => {
     expect(connectionUrlScheme("influxdb")).toBe("http");
