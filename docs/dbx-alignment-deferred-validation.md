@@ -1894,3 +1894,15 @@ explicit deferred validation task rather than an implicit release check.
   into the closed-tab history. Phase 147 covers the pure store lifecycle, LRU
   generation safety, full frontend tests and production bundle; native GC and
   real-driver cancellation timing remain deferred.
+
+## Large migration object inventories
+
+- In packaged Windows, macOS and Linux WebViews, load database/schema transfer
+  previews containing 50,000 or more tables and dependent objects. Verify that
+  scrolling keeps a bounded DOM, does not show blank windows after filtering or
+  target changes, and preserves every selected object outside the visible range.
+- Repeat with keyboard navigation, mouse wheel, trackpad, touch scrolling and
+  non-default DPI/font scaling. The fixed-row viewport must not clip labels or
+  toggle the wrong object. Phase 148 covers deterministic window calculations,
+  selection ownership and production frontend compilation; native interaction
+  and live-driver inventory latency remain deferred.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   ArrowRightLeft,
@@ -27,6 +27,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { resolveInitialTransferTableSelection } from "@/features/database-explorer/model/tableTransferSelection";
+import {
+  TRANSFER_LIST_ROW_HEIGHT,
+  TRANSFER_LIST_VIRTUALIZATION_THRESHOLD,
+  transferVirtualListWindow,
+} from "@/features/database-explorer/model/transferListVirtualization";
 import { canConfigureUnquotedTransferTargetColumns } from "@/lib/tableDataTransferPolicy";
 import { ensureConnectionReady, type ConnectionConfig } from "@/store/useConnectionStore";
 import { databaseService, schemaService, tableService } from "@/services/tauri";
@@ -68,6 +73,75 @@ const settingsRowClass =
   "grid gap-1 sm:grid-cols-[132px_minmax(0,1fr)] sm:items-center";
 
 type TransferDialogSection = "setup" | "review";
+
+interface FixedTransferListProps<T> {
+  items: readonly T[];
+  scopeKey: string;
+  viewportHeight: number;
+  className?: string;
+  itemKey: (item: T) => string;
+  renderItem: (item: T) => ReactNode;
+}
+
+function FixedTransferList<T>({
+  items,
+  scopeKey,
+  viewportHeight,
+  className,
+  itemKey,
+  renderItem,
+}: FixedTransferListProps<T>) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const virtualized = items.length > TRANSFER_LIST_VIRTUALIZATION_THRESHOLD;
+  const window = useMemo(
+    () =>
+      transferVirtualListWindow({
+        itemCount: items.length,
+        scrollTop,
+        viewportHeight,
+      }),
+    [items.length, scrollTop, viewportHeight],
+  );
+
+  useEffect(() => setScrollTop(0), [scopeKey]);
+
+  if (!virtualized) {
+    return (
+      <div className={className}>
+        {items.map((item) => (
+          <div key={itemKey(item)}>{renderItem(item)}</div>
+        ))}
+      </div>
+    );
+  }
+
+  const visibleItems = items.slice(window.startIndex, window.endIndex);
+  return (
+    <div
+      className={className}
+      data-transfer-list-virtualized="true"
+      style={{ height: Math.min(viewportHeight, window.totalHeight), overflowY: "auto" }}
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+    >
+      <div style={{ height: window.totalHeight, position: "relative" }}>
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: window.offsetTop,
+          }}
+        >
+          {visibleItems.map((item) => (
+            <div key={itemKey(item)} style={{ height: TRANSFER_LIST_ROW_HEIGHT }}>
+              {renderItem(item)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function displayEndpoint(endpoint: TableDataTransferEndpoint) {
   return [endpoint.database, endpoint.schema, endpoint.table]
@@ -1439,9 +1513,14 @@ export function TableDataTransferDialog({
                     {selectedSourceTables.size} selected
                   </span>
                 </div>
-                <div className="max-h-24 space-y-1 overflow-auto pr-1 text-[10px]">
-                  {sourceTables.map((table) => (
-                    <label key={table} className="flex cursor-pointer items-center gap-1.5">
+                <FixedTransferList
+                  items={sourceTables}
+                  scopeKey={`${activeSourceSchema}:tables:${sourceTables.length}`}
+                  viewportHeight={96}
+                  className="custom-scrollbar space-y-0 overflow-auto pr-1 text-[10px]"
+                  itemKey={(table) => table}
+                  renderItem={(table) => (
+                    <label className="flex h-6 cursor-pointer items-center gap-1.5">
                       <Checkbox
                         checked={selectedSourceTables.has(table)}
                         onCheckedChange={(checked) =>
@@ -1456,8 +1535,8 @@ export function TableDataTransferDialog({
                       />
                       <span className="truncate" title={table}>{table}</span>
                     </label>
-                  ))}
-                </div>
+                  )}
+                />
               </div>
             )}
             {(isSourceObjectsLoading || sourceTransferObjectGroups.length > 0) && (
@@ -1489,37 +1568,41 @@ export function TableDataTransferDialog({
                         <div className="text-[9px] font-medium tracking-wide wb-muted">
                           {group.kind.replace(/_/g, " ")}
                         </div>
-                        {group.objects.map((object) => {
-                          const key = transferObjectKey(object);
-                          const checked = selectedTransferObjectKeys.has(key);
-                          return (
-                            <label
-                              key={key}
-                              className="flex cursor-pointer items-center gap-1.5 text-[10px]"
-                            >
-                              <Checkbox
-                                checked={checked}
-                                onCheckedChange={(nextChecked) =>
-                                  toggleTransferObject(
-                                    object,
-                                    nextChecked === true,
-                                  )
-                                }
-                                disabled={
-                                  isSubmitting ||
-                                  (checked &&
-                                    selectedTransferObjects.length === 1 &&
-                                    selectedSourceTables.size === 0)
-                                }
-                              />
-                              <span className="min-w-0 truncate" title={key}>
-                                {object.parentName
-                                  ? `${object.parentName}.${object.name}`
-                                  : object.name}
-                              </span>
-                            </label>
-                          );
-                        })}
+                        <FixedTransferList
+                          items={group.objects}
+                          scopeKey={`${activeSourceSchema}:${group.kind}:${group.objects.length}`}
+                          viewportHeight={160}
+                          className="custom-scrollbar overflow-auto"
+                          itemKey={transferObjectKey}
+                          renderItem={(object) => {
+                            const key = transferObjectKey(object);
+                            const checked = selectedTransferObjectKeys.has(key);
+                            return (
+                              <label className="flex h-6 cursor-pointer items-center gap-1.5 text-[10px]">
+                                <Checkbox
+                                  checked={checked}
+                                  onCheckedChange={(nextChecked) =>
+                                    toggleTransferObject(
+                                      object,
+                                      nextChecked === true,
+                                    )
+                                  }
+                                  disabled={
+                                    isSubmitting ||
+                                    (checked &&
+                                      selectedTransferObjects.length === 1 &&
+                                      selectedSourceTables.size === 0)
+                                  }
+                                />
+                                <span className="min-w-0 truncate" title={key}>
+                                  {object.parentName
+                                    ? `${object.parentName}.${object.name}`
+                                    : object.name}
+                                </span>
+                              </label>
+                            );
+                          }}
+                        />
                       </div>
                     ))}
                   </div>
