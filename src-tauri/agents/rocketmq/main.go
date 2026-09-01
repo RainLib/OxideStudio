@@ -31,7 +31,7 @@ const (
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_get_topic_config", "mq_peek_messages", "mq_query_message_by_key", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -132,6 +132,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.getTopicConfig(params)
 	case "mq_peek_messages":
 		return a.peekMessages(params)
+	case "mq_query_message_by_key":
+		return a.queryMessagesByKey(params)
 	case "mq_list_consumer_groups":
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
@@ -540,6 +542,44 @@ func rocketMqMessageResult(message *admin.MessageExt) map[string]any {
 		result["payloadText"] = string(body)
 	}
 	return result
+}
+
+func (a *rocketMQAgent) queryMessagesByKey(params map[string]any) (any, error) {
+	topic, topicOK := params["topic"].(string)
+	key, keyOK := params["key"].(string)
+	topic, key = strings.TrimSpace(topic), strings.TrimSpace(key)
+	if !topicOK || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	if !keyOK || key == "" {
+		return nil, fmt.Errorf("key is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	limit := jsonInt(params["limit"], 32)
+	if limit < 1 {
+		limit = 32
+	}
+	if limit > maxPeekMessages {
+		limit = maxPeekMessages
+	}
+	begin := int64(jsonInt(params["beginTimestamp"], 0))
+	end := int64(jsonInt(params["endTimestamp"], int(time.Now().UnixMilli())))
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	messages, err := client.QueryMessage(ctx, topic, key, limit, begin, end)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		if message != nil {
+			rows = append(rows, rocketMqMessageResult(message))
+		}
+	}
+	return map[string]any{"topic": topic, "key": key, "messages": rows}, nil
 }
 
 // listConsumerGroups mirrors DBX's cluster-wide group listing. The admin
