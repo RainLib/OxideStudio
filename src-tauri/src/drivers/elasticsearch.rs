@@ -2,7 +2,7 @@ use crate::core::{
     driver::{DatabaseDriver, DocumentPageRequest},
     protocol::{
         CollectionInfo, ColumnDef, ColumnInfo, DocumentPage, QueryResponseMeta, QueryResult,
-        SearchIndexClearResult, SearchIndexMetadataKind,
+        SearchIndexClearResult, SearchIndexMetadataKind, DEFAULT_QUERY_RESULT_ROW_LIMIT,
     },
 };
 use anyhow::{anyhow, Context, Result};
@@ -268,11 +268,9 @@ impl ElasticsearchDriver {
                 raw_response: body.clone(),
             };
             let normalized = normalize_elasticsearch_response(body);
-            let mut result = if let Some(result) = elasticsearch_table_result(&normalized) {
-                result
-            } else {
-                elasticsearch_request_result(&request, status, normalized)
-            };
+            let mut result = elasticsearch_table_result(&normalized)
+                .or_else(|| elasticsearch_aggregation_table_result(&normalized))
+                .unwrap_or_else(|| elasticsearch_request_result(&request, status, normalized));
             result.response_meta = Some(response_meta);
             results.push(result);
         }
@@ -1743,6 +1741,14 @@ fn normalize_elasticsearch_response(value: Value) -> Value {
         return value;
     };
 
+    // A `size: 0` aggregation response still has the `hits.hits` envelope,
+    // but its empty array must not erase the sibling `aggregations` payload.
+    // Keep that response intact so the execution path can render aggregation
+    // buckets and metric values as a bounded table instead of an empty grid.
+    if hits.is_empty() && (value.get("aggregations").is_some() || value.get("aggs").is_some()) {
+        return value;
+    }
+
     Value::Array(
         hits.into_iter()
             .map(|hit| {
@@ -1881,6 +1887,135 @@ fn elasticsearch_table_result(value: &Value) -> Option<QueryResult> {
         .collect::<Vec<_>>();
 
     Some(QueryResult::rows(columns, rows))
+}
+
+/// Converts Elasticsearch aggregations to grid rows without treating the raw
+/// response as a string blob. Bucket rows preserve `key`/`doc_count`, direct
+/// metric sub-aggregations become columns, and standalone scalar metrics share
+/// one row. The common result row limit still applies because a terms or range
+/// aggregation can otherwise materialize an unbounded response in the desktop
+/// process.
+fn elasticsearch_aggregation_table_result(value: &Value) -> Option<QueryResult> {
+    let aggregations = value
+        .get("aggregations")
+        .or_else(|| value.get("aggs"))
+        .and_then(Value::as_object)?;
+
+    let mut aggregation_names = aggregations.keys().cloned().collect::<Vec<_>>();
+    aggregation_names.sort();
+
+    let bucket_aggregation_count = aggregation_names
+        .iter()
+        .filter(|name| elasticsearch_aggregation_buckets(&aggregations[*name]).is_some())
+        .count();
+    let mut scalar_metrics = BTreeMap::<String, Value>::new();
+    let mut row_maps = Vec::<BTreeMap<String, Value>>::new();
+
+    for name in aggregation_names {
+        let aggregation = &aggregations[&name];
+        if let Some(buckets) = elasticsearch_aggregation_buckets(aggregation) {
+            for (fallback_key, bucket) in buckets {
+                let Some(bucket) = bucket.as_object() else {
+                    continue;
+                };
+                let mut row = elasticsearch_aggregation_bucket_row(bucket);
+                if let Some(fallback_key) = fallback_key {
+                    row.entry("key".to_string())
+                        .or_insert_with(|| Value::String(fallback_key.to_string()));
+                }
+                if bucket_aggregation_count > 1 {
+                    row.insert("aggregation".to_string(), Value::String(name.clone()));
+                }
+                row_maps.push(row);
+            }
+        } else if let Some(metric) = aggregation.get("value") {
+            scalar_metrics.insert(name, metric.clone());
+        }
+    }
+
+    if row_maps.is_empty() {
+        if scalar_metrics.is_empty() {
+            return None;
+        }
+        row_maps.push(scalar_metrics);
+    } else if !scalar_metrics.is_empty() {
+        for row in &mut row_maps {
+            for (name, metric) in &scalar_metrics {
+                row.entry(name.clone()).or_insert_with(|| metric.clone());
+            }
+        }
+    }
+
+    let mut column_names = Vec::<String>::new();
+    for preferred in ["aggregation", "key", "key_as_string", "doc_count"] {
+        if row_maps.iter().any(|row| row.contains_key(preferred)) {
+            column_names.push(preferred.to_string());
+        }
+    }
+    for row in &row_maps {
+        for name in row.keys() {
+            if !column_names.contains(name) {
+                column_names.push(name.clone());
+            }
+        }
+    }
+    if column_names.is_empty() {
+        return None;
+    }
+
+    let columns = column_names
+        .iter()
+        .map(|name| ColumnDef {
+            name: name.clone(),
+            data_type: "json".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let rows = row_maps
+        .into_iter()
+        .map(|row| {
+            column_names
+                .iter()
+                .map(|name| row.get(name).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    Some(QueryResult::rows_limited(
+        columns,
+        rows,
+        DEFAULT_QUERY_RESULT_ROW_LIMIT,
+    ))
+}
+
+/// Returns array buckets as `(None, value)` and keyed/filter buckets as
+/// `(Some(key), value)`. This covers terms/date/range/composite and filters
+/// aggregations without guessing server-specific response shapes.
+fn elasticsearch_aggregation_buckets(value: &Value) -> Option<Vec<(Option<&str>, &Value)>> {
+    let buckets = value.get("buckets")?;
+    match buckets {
+        Value::Array(items) => Some(items.iter().map(|item| (None, item)).collect()),
+        Value::Object(items) => Some(
+            items
+                .iter()
+                .map(|(key, item)| (Some(key.as_str()), item))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn elasticsearch_aggregation_bucket_row(
+    bucket: &serde_json::Map<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut row = BTreeMap::new();
+    for (name, value) in bucket {
+        if let Some(metric) = value.get("value") {
+            row.insert(name.clone(), metric.clone());
+        } else {
+            row.insert(name.clone(), value.clone());
+        }
+    }
+    row
 }
 
 fn elasticsearch_indices_to_collections(value: Value) -> Vec<CollectionInfo> {
@@ -2996,6 +3131,173 @@ mod tests {
         assert_eq!(result.rows[0][0], json!("users"));
         assert_eq!(result.rows[1][3], json!("Grace"));
         assert!(result.response_meta.is_none());
+    }
+
+    #[test]
+    fn preserves_size_zero_aggregations_and_converts_buckets_to_rows() {
+        let response = json!({
+            "hits": { "hits": [] },
+            "aggregations": {
+                "by_category": {
+                    "buckets": [
+                        {
+                            "key": "books",
+                            "doc_count": 2,
+                            "average_price": { "value": 12.5 }
+                        },
+                        {
+                            "key": "music",
+                            "doc_count": 1,
+                            "average_price": { "value": null }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let normalized = normalize_elasticsearch_response(response.clone());
+        assert_eq!(normalized, response);
+        let result = elasticsearch_aggregation_table_result(&normalized).unwrap();
+
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key", "doc_count", "average_price"]
+        );
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![json!("books"), json!(2), json!(12.5)],
+                vec![json!("music"), json!(1), Value::Null],
+            ]
+        );
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn executes_size_zero_aggregation_as_a_tabular_query_result() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = json!({
+            "hits": { "hits": [] },
+            "aggregations": {
+                "by_status": {
+                    "buckets": [{ "key": "open", "doc_count": 4 }]
+                }
+            }
+        });
+        let server = serve_test_http_responses(listener, vec![(200, response.to_string())]);
+        let driver = ElasticsearchDriver::new(&format!("http://{address}")).unwrap();
+        *driver.connected.lock().await = true;
+
+        let results = driver
+            .execute_requests(
+                vec![ElasticsearchRequest {
+                    method: Method::POST,
+                    path: "/tickets/_search".to_string(),
+                    body: Some(r#"{ "size": 0 }"#.to_string()),
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rows, vec![vec![json!("open"), json!(4)]]);
+        assert_eq!(
+            results[0]
+                .response_meta
+                .as_ref()
+                .map(|meta| meta.raw_response.clone()),
+            Some(response)
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /tickets/_search "));
+    }
+
+    #[test]
+    fn converts_scalar_and_keyed_aggregation_results_without_raw_json_fallback() {
+        let scalar = elasticsearch_aggregation_table_result(&json!({
+            "aggs": {
+                "average_price": { "value": 18.25 },
+                "max_price": { "value": 50 }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            scalar
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["average_price", "max_price"]
+        );
+        assert_eq!(scalar.rows, vec![vec![json!(18.25), json!(50)]]);
+
+        let keyed = elasticsearch_aggregation_table_result(&json!({
+            "aggregations": {
+                "price_ranges": {
+                    "buckets": {
+                        "cheap": { "doc_count": 3 },
+                        "premium": { "doc_count": 1 }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            keyed.rows,
+            vec![
+                vec![json!("cheap"), json!(3)],
+                vec![json!("premium"), json!(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_the_source_name_when_multiple_bucket_aggregations_share_columns() {
+        let result = elasticsearch_aggregation_table_result(&json!({
+            "aggregations": {
+                "by_priority": { "buckets": [{ "key": "high", "doc_count": 2 }] },
+                "by_status": { "buckets": [{ "key": "open", "doc_count": 4 }] }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aggregation", "key", "doc_count"]
+        );
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![json!("by_priority"), json!("high"), json!(2)],
+                vec![json!("by_status"), json!("open"), json!(4)],
+            ]
+        );
+    }
+
+    #[test]
+    fn bounds_large_aggregation_results_at_the_standard_query_limit() {
+        let buckets = (0..=DEFAULT_QUERY_RESULT_ROW_LIMIT)
+            .map(|index| json!({ "key": index, "doc_count": 1 }))
+            .collect::<Vec<_>>();
+        let result = elasticsearch_aggregation_table_result(&json!({
+            "aggregations": { "by_key": { "buckets": buckets } }
+        }))
+        .unwrap();
+
+        assert!(result.truncated);
+        assert_eq!(result.row_limit, Some(DEFAULT_QUERY_RESULT_ROW_LIMIT));
+        assert_eq!(result.rows.len(), DEFAULT_QUERY_RESULT_ROW_LIMIT);
     }
 
     #[test]

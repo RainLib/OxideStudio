@@ -1627,6 +1627,14 @@ explicit deferred validation task rather than an implicit release check.
 - Re-run the focused Rust test executable after repairing the Windows incremental
   target/DLL entry-point environment. Phase 120 source checks and frontend URL
   contract tests pass; no live Elasticsearch cluster was opened.
+- Execute `size: 0` terms, date-histogram, range/filter (keyed buckets), nested
+  metric, and scalar-only aggregation requests against Elasticsearch 6.8, 7.17,
+  8.x, OpenSearch and EasySearch. Confirm empty `hits.hits` retains aggregation
+  rows, metric `value` objects become cells, source names distinguish multiple
+  bucket aggregations, and more than 1,000 buckets report a truncated result
+  rather than materializing every row. Phase 156 covers the parser and local
+  HTTP execution contract only; no live Elasticsearch-compatible service was
+  opened.
 
 ## Object-browser table tab reuse policy
 
