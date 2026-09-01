@@ -29,6 +29,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { resolveInitialTransferTableSelection } from "@/features/database-explorer/model/tableTransferSelection";
 import { canRetryTableDataTransferReport } from "@/features/database-explorer/model/tableDataTransferRetry";
 import {
+  canRestoreTransferSchemaObjects,
+  transferSchemaRestoreDescription,
+  transferSchemaRestoreFamily,
+} from "@/features/database-explorer/model/tableDataTransferSchemaObjects";
+import {
   TRANSFER_LIST_ROW_HEIGHT,
   TRANSFER_LIST_VIRTUALIZATION_THRESHOLD,
   transferVirtualListWindow,
@@ -224,15 +229,6 @@ function supportsPostgresIdentityReseed(driver: string | undefined) {
   return new Set(["postgres", "postgresql", "pgsql"]).has(
     driver?.trim().toLocaleLowerCase() || "",
   );
-}
-
-function transferSchemaRestoreFamily(driver: string | undefined) {
-  const normalized = driver?.trim().toLocaleLowerCase() || "";
-  if (new Set(["postgres", "postgresql", "pgsql"]).has(normalized)) {
-    return "postgres";
-  }
-  if (new Set(["mysql", "mariadb"]).has(normalized)) return "mysql";
-  return null;
 }
 
 const transferObjectKindOrder: TableDataTransferObjectKind[] = [
@@ -431,12 +427,15 @@ export function TableDataTransferDialog({
   const canRestoreSourceSchemaObjects = Boolean(
     sourceConnection &&
       targetConnection &&
-      !sourceConnection.driverPackageVersion &&
-      !targetConnection.driverPackageVersion &&
-      transferSchemaRestoreFamily(effectiveSource.driver) &&
-      transferSchemaRestoreFamily(effectiveSource.driver) ===
-        transferSchemaRestoreFamily(targetConnection.driver) &&
-      (isBatchTransfer || effectiveSource.table === targetTable),
+      canRestoreTransferSchemaObjects({
+        sourceDriver: effectiveSource.driver,
+        targetDriver: targetConnection.driver,
+        sourceIsExternal: Boolean(sourceConnection.driverPackageVersion),
+        targetIsExternal: Boolean(targetConnection.driverPackageVersion),
+        sourceTable: effectiveSource.table,
+        targetTable,
+        isBatchTransfer,
+      }),
   );
   const sourceTransferObjectGroups = useMemo(
     () => transferObjectKindOrder
@@ -1807,7 +1806,10 @@ export function TableDataTransferDialog({
                     <span>
                       Restore source indexes and constraints after the row copy
                       <span className="mt-0.5 block wb-muted">
-                        Same-product catalog metadata only. The exact DDL is reviewed first,
+                        {transferSchemaRestoreDescription(
+                          effectiveSource.driver,
+                          targetConnection?.driver,
+                        )}{" "}The resulting DDL is reviewed first,
                         {transferSchemaRestoreFamily(targetConnection?.driver || "") === "mysql"
                           ? " runs after the row transaction commits, and returns a manual-review receipt if any statement fails. Foreign keys run last."
                           : " runs inside the target transaction, and restores foreign keys last."}

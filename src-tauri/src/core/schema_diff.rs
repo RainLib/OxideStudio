@@ -3701,7 +3701,10 @@ pub(crate) fn create_index_sql(
         (DatabaseKind::Mysql, None) => true,
         (DatabaseKind::Mysql, Some(value)) => value.eq_ignore_ascii_case("BTREE"),
     };
-    if !supported_type || index.columns.is_empty() {
+    let has_unrepresented_key_semantics = !index.key_is_expression.is_empty()
+        && (index.key_is_expression.len() != index.columns.len()
+            || index.key_is_expression.iter().any(|value| *value));
+    if !supported_type || index.columns.is_empty() || has_unrepresented_key_semantics {
         return Err(format!(
             "Index {}.{} uses an expression or unsupported index type and requires its exact source definition.",
             relation_name, index.name
@@ -7291,6 +7294,21 @@ mod tests {
         assert_eq!(index_changes[1].kind, SchemaChangeKind::IndexAdd);
         assert!(index_changes[1].sql[0].contains("INCLUDE (email)"));
         assert!(index_changes[1].sql[0].contains("WHERE id > 0"));
+    }
+
+    #[test]
+    fn mysql_index_generation_rejects_unrepresented_key_semantics() {
+        let mut source_index = index("users_lookup_idx", &["email"], "btree");
+        source_index.definition = None;
+        source_index.key_is_expression = vec![true];
+        let error = create_index_sql(DatabaseKind::Mysql, "app", "app", "users", &source_index)
+            .unwrap_err();
+        assert!(error.contains("requires its exact source definition"));
+
+        source_index.key_is_expression = vec![false, true];
+        assert!(
+            create_index_sql(DatabaseKind::Mysql, "app", "app", "users", &source_index,).is_err()
+        );
     }
 
     #[test]

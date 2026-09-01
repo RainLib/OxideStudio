@@ -1052,7 +1052,14 @@ impl DatabaseDriver for MysqlDriver {
                 MAX(non_unique) AS non_unique,
                 MAX(index_type) AS index_type,
                 MAX(index_comment) AS index_comment,
-                GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
+                GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns,
+                GROUP_CONCAT(
+                    CASE
+                        WHEN column_name IS NULL OR sub_part IS NOT NULL OR collation = 'D' THEN '1'
+                        ELSE '0'
+                    END
+                    ORDER BY seq_in_index SEPARATOR ','
+                ) AS nonportable_keys
             FROM information_schema.statistics
             WHERE table_schema = ? AND table_name = ?
             GROUP BY index_name
@@ -1076,6 +1083,12 @@ impl DatabaseDriver for MysqlDriver {
                     .filter(|column| !column.is_empty())
                     .map(ToString::to_string)
                     .collect();
+                let key_is_expression = mysql_string_by_index(row, 5)
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value == "1")
+                    .collect();
 
                 IndexInfo {
                     is_primary: name == "PRIMARY",
@@ -1088,7 +1101,12 @@ impl DatabaseDriver for MysqlDriver {
                     definition: None,
                     comment: mysql_string_by_index(row, 3)
                         .filter(|comment| !comment.trim().is_empty()),
-                    key_is_expression: Vec::new(),
+                    // The shared protocol uses this vector as the conservative
+                    // "raw key semantics" marker. MySQL functional keys,
+                    // prefix lengths and descending order cannot be recreated
+                    // from the plain column list, so mark each of them as
+                    // non-portable rather than silently weakening the index.
+                    key_is_expression,
                 }
             })
             .collect())

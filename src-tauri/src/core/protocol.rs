@@ -355,9 +355,10 @@ pub struct IndexInfo {
     pub definition: Option<String>,
     #[serde(default)]
     pub comment: Option<String>,
-    /// Parallel to `columns`: true means the entry is a catalog-provided raw
-    /// expression rather than an identifier. An empty vector means that the
-    /// metadata provider did not prove expression provenance.
+    /// Parallel to `columns`: true means the key contains catalog-provided raw
+    /// semantics that cannot be recreated from the identifier alone (for
+    /// example an expression, prefix length, or descending key). An empty
+    /// vector means that the metadata provider did not prove key provenance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_is_expression: Vec<bool>,
 }
