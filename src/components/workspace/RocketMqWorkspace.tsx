@@ -13,6 +13,7 @@ import {
   type RocketMqCluster,
   type RocketMqConsumerGroupDetail,
   type RocketMqConsumerGroups,
+  type RocketMqMessagePreview,
   type RocketMqTopicDetail,
   type RocketMqTopics,
 } from "@/services/tauri/mq.service";
@@ -52,12 +53,15 @@ export function RocketMqWorkspace() {
   const [topicDetail, setTopicDetail] = useState<RocketMqTopicDetail | null>(
     null,
   );
+  const [messagePreview, setMessagePreview] =
+    useState<RocketMqMessagePreview | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [groupDetail, setGroupDetail] =
     useState<RocketMqConsumerGroupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [topicDetailLoading, setTopicDetailLoading] = useState(false);
+  const [messagePreviewLoading, setMessagePreviewLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -88,6 +92,7 @@ export function RocketMqWorkspace() {
     setGroupDetail(null);
     setSelectedTopic(null);
     setTopicDetail(null);
+    setMessagePreview(null);
     void refresh();
   }, [connection?.id, refresh]);
 
@@ -114,6 +119,7 @@ export function RocketMqWorkspace() {
     async (topic: string) => {
       if (!connection) return;
       setSelectedTopic(topic);
+      setMessagePreview(null);
       setTopicDetailLoading(true);
       try {
         setTopicDetail(await rocketMqService.getTopic(connection.id, topic));
@@ -122,6 +128,26 @@ export function RocketMqWorkspace() {
         setError(failureMessage(cause));
       } finally {
         setTopicDetailLoading(false);
+      }
+    },
+    [connection],
+  );
+
+  const peekTopicMessages = useCallback(
+    async (topic: string) => {
+      if (!connection) return;
+      setMessagePreviewLoading(true);
+      try {
+        setMessagePreview(
+          await rocketMqService.peekMessages(connection.id, topic, {
+            limit: 20,
+          }),
+        );
+      } catch (cause) {
+        setMessagePreview(null);
+        setError(failureMessage(cause));
+      } finally {
+        setMessagePreviewLoading(false);
       }
     },
     [connection],
@@ -214,6 +240,9 @@ export function RocketMqWorkspace() {
                   detail={topicDetail}
                   loading={topicDetailLoading}
                   onSelect={loadTopic}
+                  messagePreview={messagePreview}
+                  messagePreviewLoading={messagePreviewLoading}
+                  onPeekMessages={peekTopicMessages}
                 />
               )}
               {section === "groups" && (
@@ -279,12 +308,18 @@ function TopicList({
   detail,
   loading,
   onSelect,
+  messagePreview,
+  messagePreviewLoading,
+  onPeekMessages,
 }: {
   topics: string[];
   selectedTopic: string | null;
   detail: RocketMqTopicDetail | null;
   loading: boolean;
   onSelect: (topic: string) => void;
+  messagePreview: RocketMqMessagePreview | null;
+  messagePreviewLoading: boolean;
+  onPeekMessages: (topic: string) => void;
 }) {
   return (
     <div className="grid min-h-[300px] grid-cols-[minmax(220px,0.8fr)_minmax(320px,1.2fr)] gap-4">
@@ -317,7 +352,12 @@ function TopicList({
             <Loader2 size={14} className="animate-spin" /> Loading topic route…
           </div>
         ) : detail ? (
-          <TopicDetail detail={detail} />
+          <TopicDetail
+            detail={detail}
+            messagePreview={messagePreview}
+            messagePreviewLoading={messagePreviewLoading}
+            onPeekMessages={onPeekMessages}
+          />
         ) : (
           <div className="flex h-full items-center justify-center text-xs wb-muted">
             <Boxes size={14} className="mr-2" /> Select a topic for live route
@@ -329,7 +369,17 @@ function TopicList({
   );
 }
 
-function TopicDetail({ detail }: { detail: RocketMqTopicDetail }) {
+function TopicDetail({
+  detail,
+  messagePreview,
+  messagePreviewLoading,
+  onPeekMessages,
+}: {
+  detail: RocketMqTopicDetail;
+  messagePreview: RocketMqMessagePreview | null;
+  messagePreviewLoading: boolean;
+  onPeekMessages: (topic: string) => void;
+}) {
   return (
     <div className="space-y-4">
       <div>
@@ -366,6 +416,39 @@ function TopicDetail({ detail }: { detail: RocketMqTopicDetail }) {
           ])}
           empty="No broker routes reported."
         />
+      </div>
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-xs font-medium">Message preview</h3>
+          <button
+            type="button"
+            disabled={messagePreviewLoading}
+            onClick={() => void onPeekMessages(detail.topic)}
+            className="flex h-7 items-center gap-1 rounded-[4px] border border-[hsl(var(--wb-border))] px-2 text-[11px] hover:bg-[hsl(var(--wb-hover))] disabled:opacity-50"
+          >
+            {messagePreviewLoading && (
+              <Loader2 size={12} className="animate-spin" />
+            )}
+            Preview earliest 20
+          </button>
+        </div>
+        {messagePreview ? (
+          <ResourceTable
+            headers={["Partition", "Offset", "Key", "Payload"]}
+            rows={messagePreview.messages.map((message) => [
+              String(message.partition),
+              String(message.offset),
+              message.key || "—",
+              message.payloadText || "Binary payload",
+            ])}
+            empty="No messages available at the selected queue offsets."
+          />
+        ) : (
+          <div className="rounded-[5px] border border-dashed border-[hsl(var(--wb-border-subtle))] p-3 text-xs wb-muted">
+            Reads are bounded to 20 messages and 64 KiB per message; no consumer
+            group is created and no offset is committed.
+          </div>
+        )}
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,5 +96,20 @@ func TestTopicRouteResultPreservesPerBrokerQueueCounts(t *testing.T) {
 	queues := result["queueDatas"].([]map[string]any)
 	if queues[0]["brokerName"] != "broker-a" || queues[1]["writeQueueNums"] != 6 {
 		t.Fatalf("route result = %#v", result)
+	}
+}
+
+func TestMessagePreviewBoundsAndEncodesPayload(t *testing.T) {
+	message := &admin.MessageExt{
+		Topic: "orders", QueueId: 2, QueueOffset: 8, MsgId: "id-1",
+		Body:       []byte(strings.Repeat("x", maxMessageBodyBytes+1)),
+		Properties: map[string]string{"KEYS": "order-1", "TAGS": "paid"},
+	}
+	result := rocketMqMessageResult(message)
+	if result["payloadTruncated"] != true || result["key"] != "order-1" || result["tag"] != "paid" {
+		t.Fatalf("message result = %#v", result)
+	}
+	if len(result["payloadText"].(string)) != maxMessageBodyBytes {
+		t.Fatalf("payload was not bounded")
 	}
 }

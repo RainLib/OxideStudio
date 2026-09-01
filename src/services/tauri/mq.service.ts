@@ -34,6 +34,26 @@ export type RocketMqTopicDetail = {
   }>;
 };
 
+export type RocketMqMessagePreview = {
+  topic: string;
+  messages: Array<{
+    messageId: string;
+    offsetMessageId: string;
+    brokerName: string;
+    topic: string;
+    partition: number;
+    offset: number;
+    timestamp: number;
+    key: string;
+    tag: string;
+    headers: Record<string, string>;
+    payloadBase64: string;
+    payloadText?: string;
+    payloadTruncated: boolean;
+  }>;
+  nextOffset: number;
+};
+
 export type RocketMqConsumerGroups = {
   groups: Array<{
     groupId: string;
@@ -89,6 +109,16 @@ export const rocketMqService = {
     invokeRawCommand<RocketMqTopicDetail>("get_rocketmq_topic", {
       connectionId,
       topic,
+    }),
+  peekMessages: (
+    connectionId: string,
+    topic: string,
+    options: { partition?: number; offset?: number; limit?: number } = {},
+  ) =>
+    invokeRawCommand<RocketMqMessagePreview>("peek_rocketmq_messages", {
+      connectionId,
+      topic,
+      ...options,
     }),
   listConsumerGroups: (
     connectionId: string,

@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,18 +16,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	admin "github.com/amigoer/rocketmq-admin-go"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
 )
 
 const (
-	maxRPCMessageBytes = 32 * 1024 * 1024
-	maxNameServers     = 16
-	defaultTimeout     = 10 * time.Second
+	maxRPCMessageBytes  = 32 * 1024 * 1024
+	maxNameServers      = 16
+	defaultTimeout      = 10 * time.Second
+	maxPeekMessages     = 100
+	maxMessageBodyBytes = 64 * 1024
 )
 
 var capabilities = []string{
-	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_consumer_groups", "mq_describe_consumer_group",
+	"mq_connect", "mq_test_connection", "mq_describe_cluster", "mq_list_topics", "mq_describe_topic", "mq_peek_messages", "mq_consumer_groups", "mq_describe_consumer_group",
 }
 
 type rpcRequest struct {
@@ -123,6 +128,8 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 		return a.listTopics(params)
 	case "mq_describe_topic":
 		return a.describeTopic(params)
+	case "mq_peek_messages":
+		return a.peekMessages(params)
 	case "mq_list_consumer_groups":
 		return a.listConsumerGroups(params)
 	case "mq_describe_consumer_group":
@@ -369,6 +376,119 @@ func topicRouteResult(topic string, route *admin.TopicRouteData) map[string]any 
 		return fmt.Sprint(brokers[left]["brokerName"]) < fmt.Sprint(brokers[right]["brokerName"])
 	})
 	return map[string]any{"topic": topic, "queueDatas": queues, "brokerDatas": brokers}
+}
+
+// peekMessages is deliberately read-only and bounded. It pulls from concrete
+// queues without registering a consumer or committing offsets.
+func (a *rocketMQAgent) peekMessages(params map[string]any) (any, error) {
+	topic, ok := params["topic"].(string)
+	topic = strings.TrimSpace(topic)
+	if !ok || topic == "" {
+		return nil, fmt.Errorf("topic is required")
+	}
+	client, config, err := a.connected()
+	if err != nil {
+		return nil, err
+	}
+	limit := jsonInt(params["limit"], 20)
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > maxPeekMessages {
+		limit = maxPeekMessages
+	}
+	partition, hasPartition := params["partition"]
+	partitionID := jsonInt(partition, 0)
+	offset := int64(jsonInt(params["offset"], 0))
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	route, err := client.ExamineTopicRouteInfo(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	addresses := topicMasterAddresses(route)
+	messages := make([]map[string]any, 0, limit)
+	var nextOffset int64
+	for _, queue := range route.QueueDatas {
+		if queue == nil || (hasPartition && queue.ReadQueueNums <= partitionID) {
+			continue
+		}
+		address := addresses[queue.BrokerName]
+		if address == "" {
+			continue
+		}
+		first, last := 0, queue.ReadQueueNums
+		if hasPartition {
+			first, last = partitionID, partitionID+1
+		}
+		for queueID := first; queueID < last && len(messages) < limit; queueID++ {
+			result, pullErr := client.PullMessage(ctx, address, topic, queueID, offset, limit-len(messages))
+			if pullErr != nil {
+				continue
+			}
+			if result.NextBeginOffset > nextOffset {
+				nextOffset = result.NextBeginOffset
+			}
+			for _, message := range result.Messages {
+				if message == nil {
+					continue
+				}
+				message.BrokerName = queue.BrokerName
+				messages = append(messages, rocketMqMessageResult(message))
+			}
+		}
+	}
+	sort.Slice(messages, func(left, right int) bool {
+		leftPartition, rightPartition := messages[left]["partition"].(int), messages[right]["partition"].(int)
+		if leftPartition != rightPartition {
+			return leftPartition < rightPartition
+		}
+		return messages[left]["offset"].(int64) < messages[right]["offset"].(int64)
+	})
+	return map[string]any{"topic": topic, "messages": messages, "nextOffset": nextOffset}, nil
+}
+
+func topicMasterAddresses(route *admin.TopicRouteData) map[string]string {
+	addresses := map[string]string{}
+	if route == nil {
+		return addresses
+	}
+	for _, broker := range route.BrokerDatas {
+		if broker != nil && broker.BrokerAddrs["0"] != "" {
+			addresses[broker.BrokerName] = broker.BrokerAddrs["0"]
+		}
+	}
+	return addresses
+}
+
+func rocketMqMessageResult(message *admin.MessageExt) map[string]any {
+	body := message.Body
+	truncated := len(body) > maxMessageBodyBytes
+	if truncated {
+		body = body[:maxMessageBodyBytes]
+	}
+	headers := make(map[string]string, len(message.Properties))
+	for key, value := range message.Properties {
+		headers[key] = value
+	}
+	result := map[string]any{
+		"messageId":        message.MsgId,
+		"offsetMessageId":  message.OffsetMsgId,
+		"brokerName":       message.BrokerName,
+		"topic":            message.Topic,
+		"partition":        message.QueueId,
+		"offset":           message.QueueOffset,
+		"timestamp":        message.StoreTimestamp,
+		"key":              message.Properties[primitive.PropertyKeys],
+		"tag":              message.Properties[primitive.PropertyTags],
+		"headers":          headers,
+		"payloadBase64":    base64.StdEncoding.EncodeToString(body),
+		"payloadTruncated": truncated,
+	}
+	if utf8.Valid(body) {
+		result["payloadText"] = string(body)
+	}
+	return result
 }
 
 // listConsumerGroups mirrors DBX's cluster-wide group listing. The admin

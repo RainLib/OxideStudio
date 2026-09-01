@@ -128,6 +128,30 @@ pub async fn get_rocketmq_topic(
 }
 
 #[tauri::command]
+pub async fn peek_rocketmq_messages(
+    manager: State<'_, RocketMqAgentManager>,
+    connection_id: String,
+    topic: String,
+    partition: Option<u32>,
+    offset: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    manager
+        .request(
+            &connection_id,
+            "mq_peek_messages",
+            serde_json::json!({
+                "topic": topic,
+                "partition": partition,
+                "offset": offset.unwrap_or(0),
+                "limit": limit.unwrap_or(20),
+            }),
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn list_rocketmq_consumer_groups(
     manager: State<'_, RocketMqAgentManager>,
     connection_id: String,
