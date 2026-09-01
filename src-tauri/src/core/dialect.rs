@@ -349,7 +349,19 @@ const VICTORIAMETRICS_COMMON_DATA_TYPES: &[&str] =
 
 const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "postgres",
-    aliases: &["postgresql", "pgsql"],
+    // DBX exposes these as PostgreSQL-wire compatible connection profiles.
+    // They deliberately retain the conservative PostgreSQL capability surface
+    // in Oxide; vendor-only syntax is not silently enabled here.
+    aliases: &[
+        "postgresql",
+        "pgsql",
+        "cockroach",
+        "cockroachdb",
+        "greenplum",
+        "timescaledb",
+        "yugabyte",
+        "yugabytedb",
+    ],
     display_name: "PostgreSQL",
     data_model: DatabaseDataModel::Relational,
     connection_mode: DatabaseConnectionMode::Network,
@@ -394,7 +406,11 @@ const POSTGRES_SPEC: DatabaseSpec = DatabaseSpec {
 
 const MYSQL_SPEC: DatabaseSpec = DatabaseSpec {
     driver: "mysql",
-    aliases: &["mariadb"],
+    // TiDB uses the MySQL wire protocol and is a MySQL profile in DBX. Keep
+    // the identifier distinct at the connection boundary while routing it to
+    // the reviewed bundled MySQL driver instead of requiring an unrelated
+    // JDBC package.
+    aliases: &["mariadb", "tidb"],
     display_name: "MySQL",
     data_model: DatabaseDataModel::Relational,
     connection_mode: DatabaseConnectionMode::Network,
@@ -2503,7 +2519,12 @@ WITH NO DATA;"#
     fn driver_specs_centralize_aliases_and_capability_listing() {
         assert_eq!(canonical_driver_name("postgresql"), Some("postgres"));
         assert_eq!(canonical_driver_name("pgsql"), Some("postgres"));
+        assert_eq!(canonical_driver_name("cockroachdb"), Some("postgres"));
+        assert_eq!(canonical_driver_name("yugabytedb"), Some("postgres"));
+        assert_eq!(canonical_driver_name("timescaledb"), Some("postgres"));
+        assert_eq!(canonical_driver_name("greenplum"), Some("postgres"));
         assert_eq!(canonical_driver_name("mariadb"), Some("mysql"));
+        assert_eq!(canonical_driver_name("tidb"), Some("mysql"));
         assert_eq!(canonical_driver_name("elastic"), Some("elasticsearch"));
         assert_eq!(canonical_driver_name("mongo"), Some("mongodb"));
         assert_eq!(canonical_driver_name("influxdb2"), Some("influxdb"));

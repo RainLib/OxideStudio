@@ -3,6 +3,7 @@ import {
   connectionUrlScheme,
   defaultDatabaseCapabilities,
   defaultDatabasePort,
+  normalizeDatabaseDriverName,
 } from "./databaseDialect";
 
 describe("InfluxDB 3 dialect profile", () => {
@@ -121,5 +122,36 @@ describe("Meilisearch dialect profile", () => {
       supportsTableDdl: false,
       supportsTransactions: false,
     });
+  });
+});
+
+describe("DBX protocol-compatible connection profiles", () => {
+  it("reuses bundled transport defaults without losing the selected product", () => {
+    expect(defaultDatabasePort("tidb")).toBe(3306);
+    expect(connectionUrlScheme("tidb")).toBe("mysql");
+    expect(defaultDatabaseCapabilities("tidb")).toMatchObject({
+      driver: "tidb",
+      lspLanguageId: "mysql",
+      supportsSqlQuery: true,
+      supportsTableBrowsing: true,
+    });
+
+    for (const driver of [
+      "cockroachdb",
+      "greenplum",
+      "timescaledb",
+      "yugabytedb",
+    ]) {
+      expect(defaultDatabasePort(driver)).toBe(5432);
+      expect(connectionUrlScheme(driver)).toBe("postgres");
+      expect(defaultDatabaseCapabilities(driver)).toMatchObject({
+        driver,
+        lspLanguageId: "postgres",
+        supportsSqlQuery: true,
+      });
+    }
+
+    expect(normalizeDatabaseDriverName("tidb")).toBe("mysql");
+    expect(normalizeDatabaseDriverName("cockroachdb")).toBe("postgres");
   });
 });

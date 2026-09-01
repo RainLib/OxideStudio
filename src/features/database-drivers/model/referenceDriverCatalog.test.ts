@@ -76,4 +76,22 @@ describe("DBX reference driver catalogue", () => {
       lspLanguageId: null,
     });
   });
+
+  it("uses bundled wire-compatible runtimes for DBX profile products", () => {
+    for (const driver of [
+      "cockroachdb",
+      "greenplum",
+      "tidb",
+      "timescaledb",
+      "yugabytedb",
+    ]) {
+      const candidate = referenceDriverCandidate(driver);
+      expect(candidate).toBeDefined();
+      expect(driverCandidateAvailability(candidate!, [])).toBe("bundled");
+      expect(referenceDriverDeliveryPlan(candidate!)).toMatchObject({
+        runtimeRoute: "bundled",
+        lspRoute: "compatibleSql",
+      });
+    }
+  });
 });

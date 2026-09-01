@@ -103,7 +103,17 @@ const DATABASE_DRIVER_PROFILES: Record<
     menuLabel: "PostgreSQL",
     defaultDatabase: "postgres",
     urlScheme: "postgres",
-    protocolAliases: ["postgres", "postgresql", "pgsql"],
+    protocolAliases: [
+      "postgres",
+      "postgresql",
+      "pgsql",
+      "cockroach",
+      "cockroachdb",
+      "greenplum",
+      "timescaledb",
+      "yugabyte",
+      "yugabytedb",
+    ],
     sslModeParamName: "sslmode",
     sslModeParamAliases: ["sslmode", "ssl"],
     defaultIcon: "Database",
@@ -174,7 +184,7 @@ const DATABASE_DRIVER_PROFILES: Record<
     menuLabel: "MySQL / MariaDB",
     defaultDatabase: "",
     urlScheme: "mysql",
-    protocolAliases: ["mysql", "mariadb"],
+    protocolAliases: ["mysql", "mariadb", "tidb"],
     sslModeParamName: "ssl-mode",
     sslModeParamAliases: ["ssl-mode", "sslMode", "sslmode", "ssl"],
     defaultIcon: "Monitor",
@@ -1146,9 +1156,21 @@ function fallbackDatabaseDriverProfile(
 
 export function databaseDriverProfile(driver: DatabaseDriver) {
   const key = capabilitiesKey(driver);
+  // Some DBX products are protocol-compatible profiles backed by a bundled
+  // base runtime (for example TiDB/MySQL and CockroachDB/PostgreSQL). Resolve
+  // their form defaults before falling back to the deliberately inert generic
+  // profile. The connection keeps its selected product id; only the reviewed
+  // transport/capability baseline is shared.
+  const bundledProtocolProfile = Object.values(DATABASE_DRIVER_PROFILES).find(
+    (candidate) =>
+      candidate.protocolAliases.some(
+        (alias) => capabilitiesKey(alias) === key,
+      ),
+  );
   const profile =
     runtimeDriverProfiles.get(key) ??
     DATABASE_DRIVER_PROFILES[key as KnownDatabaseDriver] ??
+    bundledProtocolProfile ??
     fallbackDatabaseDriverProfile(driver);
   return withRuntimeCapabilities(profile, runtimeCapabilities.get(key));
 }

@@ -275,6 +275,14 @@ const BUNDLED_DRIVER_IDS = new Set([
   "influxdb3",
   "victoriametrics",
   "meilisearch",
+  // DBX models these as protocol-compatible connection profiles, rather than
+  // standalone client runtimes. They use the reviewed bundled wire driver;
+  // their LSP route below remains a conservative compatibility baseline.
+  "cockroachdb",
+  "greenplum",
+  "tidb",
+  "timescaledb",
+  "yugabytedb",
 ]);
 
 const SIDECAR_SOURCE_DRIVER_IDS = new Set(["duckdb", "rqlite", "clickhouse"]);
