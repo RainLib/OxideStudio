@@ -34,6 +34,8 @@
 
 > `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `55a21f8e9`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
 
+> 本轮本地验证：指定 JDK 25 和经 SHA-256 校验的 H2 `2.3.232` 临时 fixture 后，`npm run test:release` 为 **54 passed / 0 skipped**；其中通用 JDBC Agent 的 H2 protocol、Oracle SDE/source、package manifest 与 release binding 均真实运行。临时 vendor jar 不进入工作区或发布产物。
+
 ### 前一增量审计（`5d6f66777` → `d4d3995be`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
