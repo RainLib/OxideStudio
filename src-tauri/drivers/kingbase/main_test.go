@@ -81,6 +81,14 @@ func TestKingbaseSchemaObjectQueriesUseBoundScope(t *testing.T) {
 	}
 }
 
+func TestKingbaseTypeMemberQueriesUseBoundIdentifiers(t *testing.T) {
+	for _, query := range []string{kingbaseCompositeTypeMembersQuery(), kingbaseEnumTypeMembersQuery()} {
+		if !strings.Contains(query, "$1") || !strings.Contains(query, "$2") || strings.Contains(query, "%s") {
+			t.Fatalf("type-member query must bind schema and type: %s", query)
+		}
+	}
+}
+
 func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
 	query := kingbaseReferencingForeignKeysQuery()
 	if !strings.Contains(query, "pk.table_schema = $1 AND pk.table_name = $2") {

@@ -123,7 +123,7 @@ func main() {
 func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	switch request.Method {
 	case "handshake":
-		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": true, "schemaObjects": true, "schemaObjectMembers": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
+		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": true, "schemaObjects": true, "schemaObjectMembers": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
 	case "connect":
 		var p struct {
 			ConnectionID string       `json:"connection_id"`
@@ -445,6 +445,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 	}
 	if p.Request.Kind == "schemaObjects" {
 		out, err := listKingbaseSchemaObjects(db, p.Request.Namespace)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
+	if p.Request.Kind == "schemaObjectMembers" {
+		out, err := listKingbaseSchemaObjectMembers(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType)
 		if err != nil {
 			return nil, fail("METADATA_FAILED", err.Error())
 		}
@@ -865,10 +872,80 @@ FROM information_schema.user_defined_types WHERE user_defined_type_schema = $1 O
 		}
 		out = append(out, map[string]any{
 			"name": name, "schema": schema, "object_type": "TYPE", "parent_name": nil,
-			"comment": nil, "members_expandable": false,
+			// Only composite and enum types yield members. Marking type nodes as
+			// expandable keeps the v1 descriptor contract useful without
+			// guessing a type's catalog kind from its name; domains/ranges simply
+			// return an empty child list.
+			"comment": nil, "members_expandable": true,
 		})
 	}
 	return out, typeRows.Err()
+}
+
+// listKingbaseSchemaObjectMembers exposes the read-only, tree-safe portions
+// of DBX's custom-type inspection through the v1 descriptor-member contract.
+// Composite attributes are resolved through information_schema first; when a
+// type has no attributes we attempt the standard PostgreSQL enum catalog.
+// Both queries bind names rather than interpolating Explorer input.
+func listKingbaseSchemaObjectMembers(db *sql.DB, schema, name, objectType string) ([]any, error) {
+	if !strings.EqualFold(strings.TrimSpace(objectType), "TYPE") || strings.TrimSpace(schema) == "" || strings.TrimSpace(name) == "" {
+		return []any{}, nil
+	}
+	attributeRows, err := db.Query(kingbaseCompositeTypeMembersQuery(), schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer attributeRows.Close()
+	out := []any{}
+	for attributeRows.Next() {
+		var attributeName, dataType string
+		if err := attributeRows.Scan(&attributeName, &dataType); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"name": attributeName, "schema": schema, "object_type": dataType,
+			"parent_name": name, "comment": nil, "members_expandable": false,
+		})
+	}
+	if err := attributeRows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	enumRows, err := db.Query(kingbaseEnumTypeMembersQuery(), schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer enumRows.Close()
+	for enumRows.Next() {
+		var label string
+		if err := enumRows.Scan(&label); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"name": label, "schema": schema, "object_type": "ENUM VALUE",
+			"parent_name": name, "comment": nil, "members_expandable": false,
+		})
+	}
+	return out, enumRows.Err()
+}
+
+func kingbaseCompositeTypeMembersQuery() string {
+	return `SELECT a.attribute_name,
+  CASE WHEN a.data_type = 'USER-DEFINED' THEN a.attribute_udt_name ELSE a.data_type END
+FROM information_schema.attributes a
+WHERE a.udt_schema = $1 AND a.udt_name = $2
+ORDER BY a.ordinal_position`
+}
+
+func kingbaseEnumTypeMembersQuery() string {
+	return `SELECT e.enumlabel
+FROM pg_catalog.pg_enum e
+JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = $1 AND t.typname = $2
+ORDER BY e.enumsortorder`
 }
 
 func optionalText(value string) any {
