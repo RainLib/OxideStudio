@@ -7732,6 +7732,31 @@ struct TableDataTransferProgressRelay {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// The transfer commands do substantial catalog work before they can begin a
+/// target transaction. Keep that nested driver/metadata future off the Tauri
+/// command task stack, and make sure a dropped command never leaves its plan
+/// task behind to keep querying a connection the caller has abandoned.
+struct AbortTableDataTransferTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTableDataTransferTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn resolve_table_data_transfer_plan_isolated(
+    manager: &ConnectionManager,
+    request: &TableDataTransferRequest,
+) -> Result<ResolvedTableDataTransferPlan, String> {
+    let manager = manager.clone();
+    let request = request.clone();
+    let task =
+        tokio::spawn(async move { resolve_table_data_transfer_plan(&manager, &request).await });
+    let _abort_on_drop = AbortTableDataTransferTaskOnDrop(task.abort_handle());
+    task.await
+        .map_err(|error| format!("Table transfer planning task failed: {error}"))?
+}
+
 impl TableDataTransferProgressRelay {
     fn new(app: AppHandle) -> Self {
         let (sender, mut receiver) = mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
@@ -12214,7 +12239,7 @@ pub async fn preview_table_data_transfer(
     request: TableDataTransferRequest,
 ) -> Result<Response<TableDataTransferPreview>, String> {
     let result: Result<TableDataTransferPreview, String> = async {
-        let plan = resolve_table_data_transfer_plan(&manager, &request).await?;
+        let plan = resolve_table_data_transfer_plan_isolated(&manager, &request).await?;
         let preview_limit = plan.max_rows.min(100);
         let order = build_table_order_by(plan.source_kind, &plan.source_columns, None)?;
         let sql = plan.source_kind.paged_table_query_with_order(
@@ -12964,7 +12989,7 @@ pub async fn execute_table_data_transfer_batch(
                 quote_target_column_names: request.plan.quote_target_column_names,
                 restore_source_schema_objects: request.plan.restore_source_schema_objects,
             };
-            let table_plan = resolve_table_data_transfer_plan(&manager, &table_request).await?;
+            let table_plan = resolve_table_data_transfer_plan_isolated(&manager, &table_request).await?;
             let expected_digest = batch_plan
                 .table_preflights
                 .iter()
@@ -20603,10 +20628,11 @@ mod tests {
         validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
         validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
-        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
-        CreateTableColumn, FrozenTableDataCompareSyncPlan, ImportInferredType,
-        PostCommitSchemaStatement, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
-        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        AbortTableDataTransferTaskOnDrop, AlterColumnValueMode, AlterTableColumn,
+        AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
+        FrozenTableDataCompareSyncPlan, ImportInferredType, PostCommitSchemaStatement,
+        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
+        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
         TableDataCompareCancellationState, TableDataCompareDegradationLevel,
         TableDataCompareDegradationThreshold, TableDataCompareEndpoint, TableDataCompareResult,
         TableDataCompareSamplingStrategy, TableDataCompareSyncPlanState,
@@ -20696,6 +20722,19 @@ mod tests {
         let mut empty = None;
         assert!(should_emit_table_data_transfer_progress(&mut empty, 1));
         assert_eq!(empty, Some(1));
+    }
+
+    #[tokio::test]
+    async fn dropped_transfer_task_guard_aborts_the_isolated_worker() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let guard = AbortTableDataTransferTaskOnDrop(task.abort_handle());
+
+        drop(guard);
+
+        assert!(task
+            .await
+            .expect_err("guard should abort task")
+            .is_cancelled());
     }
 
     #[test]
