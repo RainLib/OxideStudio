@@ -2012,6 +2012,22 @@ const ELASTICSEARCH_MAPPING_FIELD_VALUE_KEYS = new Set([
   "default_field",
 ]);
 
+/**
+ * JSON permits only quoted object keys, but Console completion deliberately
+ * activates while a user is still typing the bare key.  The scanner's
+ * `previous` character is then the final letter of that key, so it cannot by
+ * itself distinguish a key from a scalar value.  Its preceding non-space
+ * token is authoritative for this incomplete editing state.
+ */
+function isBareElasticsearchJsonKey(
+  bodyBeforeCursor: string,
+  typed: string,
+) {
+  if (!/^[A-Za-z_$][\w.$-]*$/u.test(typed)) return false;
+  const beforeTyped = bodyBeforeCursor.slice(0, -typed.length).trimEnd();
+  return beforeTyped.endsWith("{") || beforeTyped.endsWith(",");
+}
+
 export function elasticsearchCompletionExpectsMappingField(
   context: ElasticsearchConsoleCompletionContext,
 ) {
@@ -2150,7 +2166,8 @@ export function elasticsearchConsoleCompletionContext(
     scan.previous === "{" ||
     scan.previous === "," ||
     (scan.inString && scan.stringIsKey) ||
-    (!scan.inString && scan.previous === '"' && scan.lastClosedStringWasKey);
+    (!scan.inString && scan.previous === '"' && scan.lastClosedStringWasKey) ||
+    isBareElasticsearchJsonKey(bodyBeforeCursor, scan.typed);
   const typed =
     !scan.inString && scan.previous === '"' && scan.lastClosedStringWasKey
       ? currentObject?.lastKey || scan.typed
@@ -2201,11 +2218,45 @@ export function elasticsearchConsoleCompletions(
   version?: ElasticsearchVersionInput,
 ): ElasticsearchConsoleCompletion[] {
   const context = elasticsearchConsoleCompletionContext(source, cursorOffset);
-  return elasticsearchConsoleCompletionsForContext(
+  return indentElasticsearchJsonCompletionItems(
+    elasticsearchConsoleCompletionsForContext(
+      source,
+      cursorOffset,
+      context,
+      version,
+    ),
     source,
     cursorOffset,
     context,
-    version,
+  );
+}
+
+/**
+ * Console snippets are authored relative to the JSON key being replaced.  A
+ * provider must add the current line indentation to every later line; Monaco
+ * only replaces the key range and otherwise has no knowledge of a snippet's
+ * JSON nesting.  Keep request-line and fresh-body snippets untouched because
+ * those start a document/request rather than continue an existing object.
+ */
+function indentElasticsearchJsonCompletionItems(
+  items: readonly ElasticsearchConsoleCompletion[],
+  source: string,
+  cursorOffset: number,
+  context: ElasticsearchConsoleCompletionContext,
+): ElasticsearchConsoleCompletion[] {
+  if (
+    ["method", "path", "operation", "body-start"].includes(context.area)
+  ) {
+    return [...items];
+  }
+  const cursor = Math.max(0, Math.min(cursorOffset, source.length));
+  const lineStart = source.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
+  const baseIndent = source.slice(lineStart, cursor).match(/^[\t ]*/u)?.[0] ?? "";
+  if (!baseIndent) return [...items];
+  return items.map((item) =>
+    item.insertText.includes("\n")
+      ? { ...item, insertText: item.insertText.replace(/\n/g, `\n${baseIndent}`) }
+      : item,
   );
 }
 
@@ -2433,6 +2484,9 @@ export function elasticsearchConsoleInlineSuggestion(
     context,
     version,
   );
+  // Inline ghost text is relative to the existing cursor position. Monaco
+  // renders it after the active line rather than replacing a key range, so
+  // adding the current line indent here would duplicate that indentation.
   const candidate = completions.find((item) =>
     item.label.toLowerCase().startsWith(context.typed.toLowerCase()),
   );

@@ -179,6 +179,26 @@ describe("Elasticsearch Console completion contract", () => {
     );
   });
 
+  it("keeps an unquoted DSL key inside a JSON body out of method mode", () => {
+    const source = 'POST /orders/_search\n{"query": { term';
+    expect(
+      elasticsearchConsoleCompletionContext(source, source.length),
+    ).toMatchObject({ area: "query-clause", typed: "term" });
+    expect(labels(source)).toContain("term");
+  });
+
+  it("indents nested Query DSL snippets relative to the current key", () => {
+    const source = 'POST /orders/_search\n{\n    "query": {\n        "ma"\n    }\n}';
+    const cursor = source.indexOf('"ma"') + 3;
+    const completion = elasticsearchConsoleCompletions(source, cursor).find(
+      (item) => item.label === "match",
+    );
+
+    expect(completion?.insertText).toBe(
+      '"match": {\n          "${1:field}": "${2:value}"\n        }',
+    );
+  });
+
   it("continues method and endpoint completion after comments and prior requests", () => {
     const afterComment = "# inspect indices\npo";
     expect(
