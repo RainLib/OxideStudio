@@ -45,8 +45,8 @@ func TestAdaptMetadataReturnsTreeColumnsRelativeToTheSelectedDevice(t *testing.T
 
 func TestAdaptMetadataTableColumnsPreserveTimeAndTagKeys(t *testing.T) {
 	value, err := AdaptMetadata("columns", "metrics", "cpu", QueryResult{
-		Columns: []string{"ColumnName", "DataType", "Category"},
-		Rows:    [][]any{{"time", "TIMESTAMP", "TIME"}, {"host", "STRING", "TAG"}, {"usage", "DOUBLE", "FIELD"}},
+		Columns: []string{"ColumnName", "DataType", "Category", "Comment"},
+		Rows:    [][]any{{"time", "TIMESTAMP", "TIME", nil}, {"host", "STRING", "TAG", "node identity"}, {"usage", "DOUBLE", "FIELD", nil}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,5 +54,8 @@ func TestAdaptMetadataTableColumnsPreserveTimeAndTagKeys(t *testing.T) {
 	items := value.([]map[string]any)
 	if !items[0]["is_primary_key"].(bool) || !items[1]["is_primary_key"].(bool) || items[2]["is_primary_key"].(bool) {
 		t.Fatalf("unexpected IoTDB table keys: %#v", items)
+	}
+	if items[1]["comment"] != "node identity" {
+		t.Fatalf("table comment was not preserved: %#v", items[1])
 	}
 }
