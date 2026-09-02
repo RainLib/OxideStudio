@@ -7771,6 +7771,70 @@ async fn resolve_table_data_transfer_batch_plan_isolated(
         .map_err(|error| format!("Batch transfer planning task failed: {error}"))?
 }
 
+/// Execute the row-copy loop on its own Tokio task.  The Tauri command keeps
+/// ownership of the target transaction and terminal receipt, while the large
+/// source-read / target-write future and nested driver calls use a separate
+/// worker stack.  Progress crosses a bounded channel so a slow renderer never
+/// makes database work retain an unbounded event backlog.
+async fn execute_resolved_table_data_transfer_isolated(
+    manager: &ConnectionManager,
+    request: &TableDataTransferRequest,
+    plan: &ResolvedTableDataTransferPlan,
+    transaction_id: &str,
+    query_transfer_id: &str,
+    cancel_rx: watch::Receiver<bool>,
+    on_progress: &mut impl FnMut(u64, u64),
+) -> Result<(u64, u64, bool), String> {
+    let manager = manager.clone();
+    let request = request.clone();
+    let plan = plan.clone();
+    let transaction_id = transaction_id.to_string();
+    let query_transfer_id = query_transfer_id.to_string();
+    let (progress_sender, mut progress_receiver) =
+        mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
+    let mut task = tokio::spawn(async move {
+        let mut cancel_rx = cancel_rx;
+        let mut relay_progress = |rows_transferred, batches| {
+            try_send_table_data_transfer_progress(
+                &progress_sender,
+                TableDataTransferProgress {
+                    transfer_id: query_transfer_id.clone(),
+                    rows_transferred,
+                    max_rows: plan.max_rows,
+                    batches,
+                    status: TableDataTransferProgressStatus::Running,
+                    terminal: false,
+                    message: None,
+                },
+            );
+        };
+        execute_resolved_table_data_transfer_in_transaction(
+            &manager,
+            &request,
+            &plan,
+            &transaction_id,
+            &query_transfer_id,
+            &mut cancel_rx,
+            &mut relay_progress,
+        )
+        .await
+    });
+    let _abort_on_drop = AbortTableDataTransferTaskOnDrop(task.abort_handle());
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(progress) = progress_receiver.recv() => {
+                on_progress(progress.rows_transferred, progress.batches);
+            }
+            result = &mut task => {
+                return result
+                    .map_err(|error| format!("Table transfer execution task failed: {error}"))?;
+            }
+        }
+    }
+}
+
 impl TableDataTransferProgressRelay {
     fn new(app: AppHandle) -> Self {
         let (sender, mut receiver) = mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
@@ -12618,7 +12682,7 @@ pub async fn execute_table_data_transfer(
 ) -> Result<Response<TableDataTransferResult>, String> {
     let transfer_id = request.transfer_id.trim().to_string();
     let started_at = current_table_timestamp_millis();
-    let mut cancel_rx = match cancellation
+    let cancel_rx = match cancellation
         .register(&transfer_id, &request.source.connection_id)
         .await
     {
@@ -12702,13 +12766,13 @@ pub async fn execute_table_data_transfer(
                 );
             }
         };
-        let transfer_result = execute_resolved_table_data_transfer_in_transaction(
+        let transfer_result = execute_resolved_table_data_transfer_isolated(
             &manager,
             &request,
             &plan,
             &transaction_id,
             &transfer_id,
-            &mut cancel_rx,
+            cancel_rx.clone(),
             &mut on_progress,
         )
         .await;
@@ -12943,7 +13007,7 @@ pub async fn execute_table_data_transfer_batch(
 ) -> Result<Response<TableDataTransferBatchResult>, String> {
     let transfer_id = request.transfer_id.trim().to_string();
     let started_at = current_table_timestamp_millis();
-    let mut cancel_rx = match cancellation
+    let cancel_rx = match cancellation
         .register(&transfer_id, &request.plan.source_connection_id)
         .await
     {
@@ -13093,8 +13157,8 @@ pub async fn execute_table_data_transfer_batch(
                             });
                         }
                     };
-                    execute_resolved_table_data_transfer_in_transaction(
-                        &manager, table_request, table_plan, &transaction_id, &transfer_id, &mut cancel_rx, &mut on_progress,
+                    execute_resolved_table_data_transfer_isolated(
+                        &manager, table_request, table_plan, &transaction_id, &transfer_id, cancel_rx.clone(), &mut on_progress,
                     ).await?
                 };
                 if !mysql_post_commit {
