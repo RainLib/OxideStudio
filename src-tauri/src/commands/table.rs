@@ -19962,8 +19962,8 @@ pub async fn get_view_definition(
 /// Reads PostgreSQL routine source through the server's own definition
 /// renderer. FunctionInfo does not yet carry an OID/identity-arguments token,
 /// so overloads are deliberately returned as a bounded list instead of
-/// guessing a single one. External packages are excluded: host catalog SQL is
-/// not a substitute for an explicit sidecar source-definition protocol.
+/// guessing a single one. External packages use their own explicit
+/// sidecar source-definition protocol and never inherit Host catalog SQL.
 #[tauri::command]
 pub async fn get_postgres_routine_definitions(
     manager: State<'_, ConnectionManager>,
