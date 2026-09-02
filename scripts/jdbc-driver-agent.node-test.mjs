@@ -229,3 +229,165 @@ public final class CatalogDriver implements Driver {
     result: { kind: "metadata", value: ["second_schema"] },
   });
 });
+
+test("JDBC Agent keeps Oracle SDE geometry rows readable when vendor object decoding fails", async (t) => {
+  if (!(await requireJdk(t))) return;
+  const temporary = await mkdtemp(join(tmpdir(), "oxide-jdbc-oracle-sde-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const build = spawn(process.execPath, ["scripts/build-jdbc-driver-agent.mjs", temporary], {
+    cwd: root,
+    stdio: "pipe",
+  });
+  const [buildCode] = await once(build, "close");
+  assert.equal(buildCode, 0, "JDBC Agent should compile");
+
+  const sourceDirectory = join(temporary, "fixture");
+  const classesDirectory = join(temporary, "classes");
+  await mkdir(sourceDirectory, { recursive: true });
+  await writeFile(
+    join(sourceDirectory, "OracleSdeDriver.java"),
+    `package fixture;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.Driver;
+import java.sql.DriverManager;
+import java.sql.DriverPropertyInfo;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.util.Properties;
+import java.util.logging.Logger;
+
+public final class OracleSdeDriver implements Driver {
+  static { try { DriverManager.registerDriver(new OracleSdeDriver()); } catch (SQLException error) { throw new RuntimeException(error); } }
+  public boolean acceptsURL(String url) { return url != null && url.startsWith("jdbc:oxide-oracle-sde:"); }
+  public Connection connect(String url, Properties properties) {
+    if (!acceptsURL(url)) return null;
+    return (Connection) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { Connection.class }, (proxy, method, args) -> {
+      if ("prepareStatement".equals(method.getName())) return statement();
+      if ("isValid".equals(method.getName())) return true;
+      if ("isClosed".equals(method.getName())) return false;
+      if ("close".equals(method.getName())) return null;
+      return defaultValue(method.getReturnType());
+    });
+  }
+  public int getMajorVersion() { return 1; }
+  public int getMinorVersion() { return 0; }
+  public boolean jdbcCompliant() { return false; }
+  public Logger getParentLogger() { return Logger.getGlobal(); }
+  public DriverPropertyInfo[] getPropertyInfo(String url, Properties properties) { return new DriverPropertyInfo[0]; }
+
+  private static PreparedStatement statement() {
+    return (PreparedStatement) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
+      if ("execute".equals(method.getName())) return true;
+      if ("getResultSet".equals(method.getName())) return resultSet();
+      if ("close".equals(method.getName()) || "setQueryTimeout".equals(method.getName()) || "setFetchSize".equals(method.getName())) return null;
+      return defaultValue(method.getReturnType());
+    });
+  }
+
+  private static ResultSet resultSet() {
+    final int[] row = new int[] { -1 };
+    return (ResultSet) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
+      if ("next".equals(method.getName())) return ++row[0] < 2;
+      if ("getMetaData".equals(method.getName())) return metadata();
+      if ("getObject".equals(method.getName())) {
+        if (((Integer) args[0]) == 2) throw new SQLException("SDE object decoding is unavailable");
+        return row[0] + 41;
+      }
+      if ("getString".equals(method.getName())) {
+        if (((Integer) args[0]) == 2 && row[0] == 1) throw new SQLException("SDE text conversion is unavailable");
+        return ((Integer) args[0]) == 2 ? "POINT (1 2)" : String.valueOf(row[0] + 41);
+      }
+      if ("wasNull".equals(method.getName())) return false;
+      if ("close".equals(method.getName())) return null;
+      return defaultValue(method.getReturnType());
+    });
+  }
+
+  private static ResultSetMetaData metadata() {
+    return (ResultSetMetaData) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSetMetaData.class }, (proxy, method, args) -> {
+      if ("getColumnCount".equals(method.getName())) return 2;
+      if ("getColumnLabel".equals(method.getName())) return ((Integer) args[0]) == 1 ? "ID" : "SHAPE";
+      if ("getColumnTypeName".equals(method.getName())) return ((Integer) args[0]) == 1 ? "NUMBER" : "SDE.ST_GEOMETRY";
+      return defaultValue(method.getReturnType());
+    });
+  }
+
+  private static Object defaultValue(Class<?> type) {
+    if (!type.isPrimitive()) return null;
+    if (type == boolean.class) return false;
+    if (type == byte.class) return (byte) 0;
+    if (type == short.class) return (short) 0;
+    if (type == int.class) return 0;
+    if (type == long.class) return 0L;
+    if (type == float.class) return 0f;
+    if (type == double.class) return 0d;
+    if (type == char.class) return (char) 0;
+    return null;
+  }
+}
+`,
+  );
+  const compileFixture = spawn(javaTool("javac"), ["-d", classesDirectory, join(sourceDirectory, "OracleSdeDriver.java")], {
+    cwd: root,
+    stdio: "pipe",
+  });
+  const [compileCode] = await once(compileFixture, "close");
+  assert.equal(compileCode, 0, "Oracle SDE fixture should compile");
+
+  const agent = spawn(
+    javaTool("java"),
+    [
+      "-Djdbc.drivers=fixture.OracleSdeDriver",
+      "-cp",
+      `${join(temporary, "oxide-jdbc-agent.jar")}${delimiter}${classesDirectory}`,
+      "studio.oxide.jdbc.DriverMain",
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        OXIDE_DRIVER_PACKAGE_ID: "oxide.jdbc.oracle.fixture",
+        OXIDE_DRIVER_PACKAGE_VERSION: "1.0.0",
+        OXIDE_DRIVER_ID: "oracle",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  let responseBuffer = "";
+  let resolveQuery;
+  const queryResponse = new Promise((resolveResponse) => {
+    resolveQuery = resolveResponse;
+  });
+  agent.stdout.setEncoding("utf8");
+  agent.stdout.on("data", (chunk) => {
+    responseBuffer += chunk;
+    const lines = responseBuffer.split("\n");
+    responseBuffer = lines.pop() || "";
+    for (const line of lines.filter(Boolean)) {
+      const response = JSON.parse(line);
+      if (response.id === 2) resolveQuery(response);
+    }
+  });
+  agent.stdin.write(`${JSON.stringify({
+    id: 1,
+    method: "connect",
+    params: { connection_id: "oracle", config: { url: "jdbc:oxide-oracle-sde:test" } },
+  })}\n`);
+  agent.stdin.write(`${JSON.stringify({
+    id: 2,
+    method: "query",
+    params: { connection_id: "oracle", statement: "SELECT id, shape FROM parcels", parameters: [], context: {} },
+  })}\n`);
+  const response = await queryResponse;
+  agent.stdin.end();
+  const [code] = await once(agent, "close");
+  assert.equal(code, 0);
+  assert.deepEqual(response?.result?.value?.[0]?.rows, [
+    [41, "POINT (1 2)"],
+    [42, "<SDE.ST_GEOMETRY unavailable in generic JDBC Agent>"],
+  ]);
+});
