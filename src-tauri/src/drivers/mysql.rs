@@ -50,6 +50,33 @@ const MYSQL_SCHEMA_OBJECTS_SQL: &str = r#"
     ) objects
     ORDER BY object_type, parent_name, object_name
 "#;
+const MYSQL_INDEX_METADATA_SQL_WITH_EXPRESSIONS: &str = r#"
+    SELECT
+        index_name,
+        non_unique,
+        index_type,
+        index_comment,
+        column_name,
+        expression,
+        sub_part,
+        collation
+    FROM information_schema.statistics
+    WHERE table_schema = ? AND table_name = ?
+    ORDER BY index_name = 'PRIMARY' DESC, non_unique ASC, index_name, seq_in_index
+"#;
+const MYSQL_INDEX_METADATA_SQL_LEGACY: &str = r#"
+    SELECT
+        index_name,
+        non_unique,
+        index_type,
+        index_comment,
+        column_name,
+        sub_part,
+        collation
+    FROM information_schema.statistics
+    WHERE table_schema = ? AND table_name = ?
+    ORDER BY index_name = 'PRIMARY' DESC, non_unique ASC, index_name, seq_in_index
+"#;
 
 #[derive(Debug, PartialEq, Eq)]
 struct MysqlAddColumnIfNotExists {
@@ -274,6 +301,27 @@ fn mysql_is_syntax_error(error: &sqlx::Error) -> bool {
         .as_database_error()
         .and_then(|database| database.code())
         .is_some_and(|code| code == "1064")
+}
+
+/// MySQL 5.7-era servers omit `STATISTICS.EXPRESSION`. PolarDB-X/DRDS may
+/// report that same missing column as optimizer errors 3009 or 4518. Keep this
+/// narrow: permissions, connectivity and unrelated metadata errors must not
+/// silently downgrade the index description.
+fn mysql_statistics_expression_is_unsupported(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    mysql_statistics_expression_error_is_unsupported(database.code().as_deref(), database.message())
+}
+
+fn mysql_statistics_expression_error_is_unsupported(code: Option<&str>, message: &str) -> bool {
+    if !matches!(code, Some("1054" | "3009" | "4518")) {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    message.contains("expression")
+        && message.contains("column")
+        && (message.contains("unknown") || message.contains("not found"))
 }
 
 impl MysqlDriver {
@@ -1303,71 +1351,84 @@ impl DatabaseDriver for MysqlDriver {
 
     async fn get_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
         let pool = self.get_pool(None).await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                index_name,
-                MAX(non_unique) AS non_unique,
-                MAX(index_type) AS index_type,
-                MAX(index_comment) AS index_comment,
-                GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns,
-                GROUP_CONCAT(
-                    CASE
-                        WHEN column_name IS NULL OR sub_part IS NOT NULL OR collation = 'D' THEN '1'
-                        ELSE '0'
-                    END
-                    ORDER BY seq_in_index SEPARATOR ','
-                ) AS nonportable_keys
-            FROM information_schema.statistics
-            WHERE table_schema = ? AND table_name = ?
-            GROUP BY index_name
-            ORDER BY index_name = 'PRIMARY' DESC, non_unique ASC, index_name
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .persistent(false)
-        .fetch_all(&pool)
-        .await?;
+        let (rows, includes_expression) =
+            match sqlx::query(MYSQL_INDEX_METADATA_SQL_WITH_EXPRESSIONS)
+                .bind(schema)
+                .bind(table)
+                .persistent(false)
+                .fetch_all(&pool)
+                .await
+            {
+                Ok(rows) => (rows, true),
+                Err(error) if mysql_statistics_expression_is_unsupported(&error) => (
+                    sqlx::query(MYSQL_INDEX_METADATA_SQL_LEGACY)
+                        .bind(schema)
+                        .bind(table)
+                        .persistent(false)
+                        .fetch_all(&pool)
+                        .await?,
+                    false,
+                ),
+                Err(error) => return Err(error.into()),
+            };
 
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let name = mysql_string_by_index(row, 0).unwrap_or_default();
-                let non_unique: i64 = row.try_get(1).unwrap_or(1);
-                let columns = mysql_string_by_index(row, 4)
-                    .unwrap_or_default()
-                    .split(',')
-                    .filter(|column| !column.is_empty())
-                    .map(ToString::to_string)
-                    .collect();
-                let key_is_expression = mysql_string_by_index(row, 5)
-                    .unwrap_or_default()
-                    .split(',')
-                    .filter(|value| !value.is_empty())
-                    .map(|value| value == "1")
-                    .collect();
-
-                IndexInfo {
+        let mut indexes = Vec::<IndexInfo>::new();
+        let mut positions = HashMap::<String, usize>::new();
+        for row in &rows {
+            let name = mysql_string_by_index(row, 0).unwrap_or_default();
+            let position = if let Some(position) = positions.get(&name) {
+                *position
+            } else {
+                let position = indexes.len();
+                positions.insert(name.clone(), position);
+                indexes.push(IndexInfo {
                     is_primary: name == "PRIMARY",
-                    is_unique: non_unique == 0,
+                    is_unique: row.try_get::<i64, _>(1).unwrap_or(1) == 0,
                     name,
-                    columns,
+                    columns: Vec::new(),
                     filter: None,
                     index_type: mysql_string_by_index(row, 2),
                     included_columns: None,
                     definition: None,
                     comment: mysql_string_by_index(row, 3)
                         .filter(|comment| !comment.trim().is_empty()),
-                    // The shared protocol uses this vector as the conservative
-                    // "raw key semantics" marker. MySQL functional keys,
-                    // prefix lengths and descending order cannot be recreated
-                    // from the plain column list, so mark each of them as
-                    // non-portable rather than silently weakening the index.
-                    key_is_expression,
-                }
-            })
-            .collect())
+                    key_is_expression: Vec::new(),
+                });
+                position
+            };
+
+            let (column_index, expression_index, sub_part_index, collation_index) =
+                if includes_expression {
+                    (4, Some(5), 6, 7)
+                } else {
+                    (4, None, 5, 6)
+                };
+            let expression = expression_index
+                .and_then(|index| mysql_string_by_index(row, index))
+                .filter(|value| !value.trim().is_empty());
+            let column =
+                mysql_string_by_index(row, column_index).filter(|value| !value.trim().is_empty());
+            let key_is_expression = expression.is_some()
+                || column.is_none()
+                || row
+                    .try_get::<Option<i64>, _>(sub_part_index)
+                    .unwrap_or(None)
+                    .is_some()
+                || mysql_string_by_index(row, collation_index)
+                    .is_some_and(|collation| collation.eq_ignore_ascii_case("D"));
+            if let Some(column) = expression
+                .map(|value| format!("({})", value.trim()))
+                .or(column)
+            {
+                indexes[position].columns.push(column);
+                // Functional keys, prefix lengths and descending order cannot
+                // be recreated from the plain column list. Preserve the raw
+                // expression for display and block unsafe transfer rewrites.
+                indexes[position].key_is_expression.push(key_is_expression);
+            }
+        }
+
+        Ok(indexes)
     }
 
     async fn get_constraints(&self, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>> {
@@ -1944,6 +2005,43 @@ mod tests {
             (true, true)
         );
         assert_eq!(mysql_column_ownership("INVISIBLE"), (false, true));
+    }
+
+    #[test]
+    fn mysql_index_expression_metadata_fallback_is_limited_to_known_servers() {
+        assert!(mysql_statistics_expression_error_is_unsupported(
+            Some("1054"),
+            "Unknown column 'EXPRESSION' in 'field list'",
+        ));
+        assert!(mysql_statistics_expression_error_is_unsupported(
+            Some("3009"),
+            "[TDDL-3009] Column 'EXPRESSION' not found in any table",
+        ));
+        assert!(mysql_statistics_expression_error_is_unsupported(
+            Some("4518"),
+            "[PXC-4518][ERR_VALIDATE] : Column 'EXPRESSION' not found in any table",
+        ));
+
+        assert!(!mysql_statistics_expression_error_is_unsupported(
+            Some("4518"),
+            "[PXC-4518] Column 'INDEX_NAME' not found in any table",
+        ));
+        assert!(!mysql_statistics_expression_error_is_unsupported(
+            Some("1044"),
+            "Access denied for metadata",
+        ));
+        assert!(!mysql_statistics_expression_error_is_unsupported(
+            None,
+            "Column 'EXPRESSION' not found in any table",
+        ));
+    }
+
+    #[test]
+    fn mysql_index_metadata_sql_keeps_expression_and_legacy_paths_separate() {
+        assert!(MYSQL_INDEX_METADATA_SQL_WITH_EXPRESSIONS.contains("expression"));
+        assert!(!MYSQL_INDEX_METADATA_SQL_LEGACY.contains("expression"));
+        assert!(MYSQL_INDEX_METADATA_SQL_WITH_EXPRESSIONS.contains("seq_in_index"));
+        assert!(MYSQL_INDEX_METADATA_SQL_LEGACY.contains("seq_in_index"));
     }
 
     #[test]

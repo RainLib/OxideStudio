@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-02
-> DBX 参考提交：`84669b0d1`（最新已审计提交）
+> DBX 参考提交：`032c05d6c`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -18,7 +18,13 @@
 
 - 本轮分页协议验证：`go test ./...`（IoTDB package 与 sidecar）通过；`cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features` 为 **883 passed / 0 failed / 2 ignored**；`npm run build` 通过。真实 IoTDB、签名 package 和编辑器 cursor UI 仍未执行。
 
-### 最新增量审计（`55a21f8e9` → `84669b0d1`）
+### 最新增量审计（`84669b0d1` → `032c05d6c`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `032c05d6c` | PolarDB-X/DRDS 对 `information_schema.statistics.EXPRESSION` 的缺失以 4518/3009 optimizer error 返回时，索引元数据回退到旧投影 | 已对齐并补足 functional index 展示：MySQL 元数据逐 key 读取 `EXPRESSION`，不使用会破坏表达式内逗号的 `GROUP_CONCAT`；有表达式时以 `(expression)` 保留在 index key 列表并标记为不可安全迁移。仅对明确包含 `EXPRESSION` 缺列语义的 MySQL 1054、DRDS 3009 或 PolarDB-X 4518 回退旧投影；权限、网络及无关 metadata 错误保持原样。位置：`src-tauri/src/drivers/mysql.rs`；单元测试覆盖三种允许回退和无关错误拒绝回退。真实 MySQL 5.7/8、MariaDB、DRDS/PolarDB-X 仍在 deferred validation queue。 |
+
+### 前一增量审计（`55a21f8e9` → `84669b0d1`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
