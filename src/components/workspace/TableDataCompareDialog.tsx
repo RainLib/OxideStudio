@@ -8,6 +8,7 @@ import {
   Table2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConnectionSelect } from "@/components/connection/ConnectionSelect";
 import {
   Dialog,
   DialogContent,
@@ -478,18 +479,13 @@ export function TableDataCompareDialog({
             </div>
             <label className="mt-2 block text-[9px] wb-muted">
               Connection
-              <Select value={targetConnectionId} onValueChange={setTargetConnectionId}>
-                <SelectTrigger className={cn(fieldClass, "mt-1")}>
-                  <SelectValue placeholder="Choose connection" />
-                </SelectTrigger>
-                <SelectContent>
-                  {connections.map((connection) => (
-                    <SelectItem key={connection.id} value={connection.id}>
-                      {connection.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="mt-1">
+                <ConnectionSelect
+                  connections={connections}
+                  value={targetConnectionId}
+                  onValueChange={setTargetConnectionId}
+                />
+              </div>
             </label>
             {targetCapabilities?.supportsDatabaseCatalogs && (
               <label className="mt-3 block text-[9px] wb-muted">
