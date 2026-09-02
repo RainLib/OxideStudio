@@ -240,7 +240,11 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
 ### 7.4 P3：工作台体验
 
 - [x] Explorer 已提供连接打开绿点、失败红点、metadata loading/stale/error 状态，以及 cache-first 对象树与显式刷新；表节点可展开 columns/indexes/constraints。后续对象类型覆盖（trigger、sequence、权限等）仍按驱动能力逐族补齐。
-- [ ] Grid hover/右键菜单以统一 action metadata 提供简洁说明和快捷键。
+- [x] Grid hover/右键菜单以统一 action metadata 提供简洁说明和快捷键：
+  `DataGridContextMenuItem` 统一承载 label、description、shortcut、danger、disabled 和子菜单；
+  菜单将描述/快捷键同时用于可见提示、hover title 与 aria-label，支持 Escape、方向键、Home/End
+  焦点导航。header/cell、过滤、FK 跳转、native document 与 staged mutation 均复用该契约，
+  `data-grid-context-menu.test.ts` 覆盖提示和键盘边界。
 - [ ] Vim 跨区域导航由 focus router 管理，并覆盖 editor/grid/sidebar/tool-window。
 - [ ] 主题、字体和高级外观设置由 token 层驱动，不向功能组件散落颜色值。
 
