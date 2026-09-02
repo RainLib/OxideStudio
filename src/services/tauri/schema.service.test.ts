@@ -13,6 +13,8 @@ import {
   previewMongoDocumentClone,
   previewMongoDocumentDelete,
   previewMongoDocumentEdit,
+  previewMongoCollectionTransfer,
+  executeMongoCollectionTransfer,
 } from "./schema.service";
 
 describe("MongoDB document clone service", () => {
@@ -132,6 +134,45 @@ describe("MongoDB reviewed document mutation service", () => {
           delete: request,
           confirmationToken: "delete-1",
           confirmationPhrase: "DELETE users",
+        },
+      },
+    );
+  });
+});
+
+describe("MongoDB collection transfer service", () => {
+  beforeEach(() => invokeWithInterceptors.mockReset());
+
+  it("uses the dedicated BSON-preserving preview and execution commands", async () => {
+    const transfer = {
+      sourceConnectionId: "source-1",
+      sourceDatabase: "app",
+      sourceCollection: "users",
+      targetConnectionId: "target-1",
+      targetDatabase: "archive",
+      targetCollection: "users_copy",
+      mode: "overwrite" as const,
+    };
+    await previewMongoCollectionTransfer(transfer);
+    await executeMongoCollectionTransfer(
+      transfer,
+      "plan-1",
+      "OVERWRITE archive.users_copy",
+    );
+
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      1,
+      "preview_mongodb_collection_transfer",
+      { request: transfer },
+    );
+    expect(invokeWithInterceptors).toHaveBeenNthCalledWith(
+      2,
+      "execute_mongodb_collection_transfer",
+      {
+        request: {
+          transfer,
+          confirmationToken: "plan-1",
+          confirmationPhrase: "OVERWRITE archive.users_copy",
         },
       },
     );

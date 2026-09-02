@@ -288,6 +288,11 @@ const TableDataTransferDialog = lazy(() =>
     default: module.TableDataTransferDialog,
   })),
 );
+const MongoCollectionTransferDialog = lazy(() =>
+  import("./MongoCollectionTransferDialog").then((module) => ({
+    default: module.MongoCollectionTransferDialog,
+  })),
+);
 const TableDataCompareDialog = lazy(() =>
   import("./TableDataCompareDialog").then((module) => ({
     default: module.TableDataCompareDialog,
@@ -319,6 +324,13 @@ interface ExplorerDataCompareRequest {
   source: TableDataTransferEndpoint;
   sourceTables: string[];
   sourceCapabilities: DatabaseCapabilities;
+}
+
+interface ExplorerMongoCollectionTransferRequest {
+  sourceConnectionId: string;
+  sourceConnectionName: string;
+  sourceDatabase: string;
+  sourceCollection: string;
 }
 
 interface ExplorerNacosConfigTransferRequest {
@@ -791,6 +803,8 @@ export function SchemaSidebar() {
   >(null);
   const [dataTransferRequest, setDataTransferRequest] =
     useState<ExplorerDataTransferRequest | null>(null);
+  const [mongoCollectionTransferRequest, setMongoCollectionTransferRequest] =
+    useState<ExplorerMongoCollectionTransferRequest | null>(null);
   const [dataCompareRequest, setDataCompareRequest] =
     useState<ExplorerDataCompareRequest | null>(null);
   const [nacosConfigTransferRequest, setNacosConfigTransferRequest] =
@@ -4418,6 +4432,9 @@ export function SchemaSidebar() {
       const isElasticsearchIndex =
         normalizeDatabaseDriverName(collectionDriver) === "elasticsearch" &&
         collection.type === "index";
+      const isMongoCollection =
+        normalizeDatabaseDriverName(collectionDriver) === "mongodb" &&
+        activeCapabilities.dataModel === "document";
       const nacosLocation =
         normalizeDatabaseDriverName(collectionDriver) === "nacos"
           ? nacosLocationFromCollection(collection)
@@ -4624,6 +4641,24 @@ export function SchemaSidebar() {
                 >
                   <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
                   Transfer Configuration…
+                </ContextMenuItem>
+              )}
+              {isMongoCollection && (
+                <ContextMenuItem
+                  onClick={() =>
+                    setMongoCollectionTransferRequest({
+                      sourceConnectionId: connectionId,
+                      sourceConnectionName:
+                        connections.find(
+                          (candidate) => candidate.id === connectionId,
+                        )?.name || "MongoDB connection",
+                      sourceDatabase: navigationDatabaseName || schema,
+                      sourceCollection: collection.name,
+                    })
+                  }
+                >
+                  <ArrowRightLeft className="mr-2 h-3.5 w-3.5" />
+                  Transfer Collection…
                 </ContextMenuItem>
               )}
               <ContextMenuSeparator />
@@ -7569,6 +7604,22 @@ export function SchemaSidebar() {
             onTransferred={() => {
               const { connectionId, schema } = dataTransferRequest.source;
               void handleRefreshSchema(connectionId, schema);
+            }}
+          />
+        )}
+        {mongoCollectionTransferRequest !== null && (
+          <MongoCollectionTransferDialog
+            open
+            sourceConnectionId={mongoCollectionTransferRequest.sourceConnectionId}
+            sourceConnectionName={mongoCollectionTransferRequest.sourceConnectionName}
+            sourceDatabase={mongoCollectionTransferRequest.sourceDatabase}
+            sourceCollection={mongoCollectionTransferRequest.sourceCollection}
+            connections={connections}
+            onClose={() => setMongoCollectionTransferRequest(null)}
+            onTransferred={(targetConnectionId) => {
+              if (targetConnectionId === activeConnectionId) {
+                void refreshCollectionObjects();
+              }
             }}
           />
         )}

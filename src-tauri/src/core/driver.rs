@@ -31,6 +31,51 @@ pub struct DocumentPageRequest<'a> {
     pub sort: Option<&'a str>,
 }
 
+/// A bounded, stable-order source batch used exclusively for native document
+/// collection transfers. Documents cross the desktop boundary as canonical
+/// Extended JSON so MongoDB values such as ObjectId, Date, Decimal128 and
+/// binary data can be restored by a compatible native driver without a lossy
+/// JSON conversion.
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentTransferReadRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub offset: u64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentTransferBatch {
+    pub documents: Vec<serde_json::Value>,
+    pub total: u64,
+}
+
+/// Target-side write for one reviewed document-transfer batch. Drivers must
+/// parse the canonical representation into their own native value model;
+/// generic JSON query execution is deliberately not a fallback.
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentTransferWriteRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+    pub documents: &'a [serde_json::Value],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentTransferWriteReceipt {
+    pub inserted_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentTransferClearRequest<'a> {
+    pub namespace: &'a str,
+    pub collection: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentTransferClearReceipt {
+    pub deleted_count: u64,
+}
+
 /// One reviewed clone of a native document. `source_id` is the stable
 /// database identity selected by the user; `draft_document` is omitted for
 /// the initial source load and supplied after the editor has a JSON draft.
@@ -646,6 +691,42 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> Result<crate::core::protocol::DocumentPage> {
         Err(anyhow::anyhow!(
             "Native document pagination is not supported by this driver"
+        ))
+    }
+
+    /// Read a bounded batch for a cross-connection document collection
+    /// transfer. The transfer protocol is intentionally opt-in: a driver that
+    /// cannot preserve its native values must remain read-only here.
+    async fn read_document_transfer_batch(
+        &self,
+        _request: DocumentTransferReadRequest<'_>,
+    ) -> Result<DocumentTransferBatch> {
+        Err(unsupported_driver_feature(
+            "Native document collection transfer",
+        ))
+    }
+
+    /// Insert a bounded batch previously read through the native collection
+    /// transfer protocol. This is not exposed as arbitrary desktop JSON
+    /// mutation and is only reachable after a reviewed transfer plan.
+    async fn write_document_transfer_batch(
+        &self,
+        _request: DocumentTransferWriteRequest<'_>,
+    ) -> Result<DocumentTransferWriteReceipt> {
+        Err(unsupported_driver_feature(
+            "Native document collection transfer",
+        ))
+    }
+
+    /// Clear a target collection as the destructive first step of an
+    /// explicitly confirmed overwrite transfer. Drivers must not emulate this
+    /// through arbitrary text execution.
+    async fn clear_document_transfer_collection(
+        &self,
+        _request: DocumentTransferClearRequest<'_>,
+    ) -> Result<DocumentTransferClearReceipt> {
+        Err(unsupported_driver_feature(
+            "Native document collection transfer",
         ))
     }
 

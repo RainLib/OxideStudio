@@ -6,7 +6,10 @@
 //! token before the clone can be inserted.
 
 use crate::core::{
-    driver::{DocumentCloneRequest, DocumentDeleteRequest, DocumentEditRequest},
+    driver::{
+        DocumentCloneRequest, DocumentDeleteRequest, DocumentEditRequest,
+        DocumentTransferClearRequest, DocumentTransferReadRequest, DocumentTransferWriteRequest,
+    },
     manager::ConnectionManager,
     protocol::{Response, SearchIndexClearResult, SearchIndexMetadataKind},
 };
@@ -125,6 +128,67 @@ pub struct MongoDocumentDeletePlan {
 #[serde(rename_all = "camelCase")]
 pub struct MongoDocumentDeleteReceipt {
     pub deleted_count: u64,
+    pub message: String,
+}
+
+/// MongoDB collection transfer is intentionally a dedicated protocol rather
+/// than a variant of relational TableDataTransfer. Its payload remains
+/// canonical Extended JSON from source read through target insertion.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCollectionTransferRequest {
+    pub source_connection_id: String,
+    pub source_database: String,
+    pub source_collection: String,
+    pub target_connection_id: String,
+    pub target_database: String,
+    pub target_collection: String,
+    #[serde(default)]
+    pub mode: MongoCollectionTransferMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MongoCollectionTransferMode {
+    #[default]
+    Append,
+    Overwrite,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteMongoCollectionTransferRequest {
+    pub transfer: MongoCollectionTransferRequest,
+    pub confirmation_token: String,
+    #[serde(default)]
+    pub confirmation_phrase: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCollectionTransferPlan {
+    pub source_database: String,
+    pub source_collection: String,
+    pub target_database: String,
+    pub target_collection: String,
+    pub mode: MongoCollectionTransferMode,
+    pub source_document_count: u64,
+    pub target_document_count: u64,
+    pub batch_size: usize,
+    pub preserves_bson_types: bool,
+    pub is_snapshot_consistent: bool,
+    pub confirmation_phrase: Option<String>,
+    pub confirmation_token: String,
+    pub source_server_version: Option<String>,
+    pub target_server_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCollectionTransferReceipt {
+    pub inserted_count: u64,
+    pub deleted_count: u64,
+    pub source_document_count: u64,
     pub message: String,
 }
 
@@ -528,6 +592,129 @@ async fn build_delete_plan(
     })
 }
 
+const MONGODB_COLLECTION_TRANSFER_BATCH_SIZE: usize = 500;
+
+fn collection_transfer_plan_token(
+    transfer: &MongoCollectionTransferRequest,
+    source_server_version: Option<&str>,
+    target_server_version: Option<&str>,
+    source_document_count: u64,
+    target_document_count: u64,
+    confirmation_phrase: Option<&str>,
+) -> String {
+    let mut digest = Sha256::new();
+    let source_count = source_document_count.to_string();
+    let target_count = target_document_count.to_string();
+    for value in [
+        b"oxide-mongodb-collection-transfer-v1".as_slice(),
+        transfer.source_connection_id.as_bytes(),
+        transfer.source_database.as_bytes(),
+        transfer.source_collection.as_bytes(),
+        transfer.target_connection_id.as_bytes(),
+        transfer.target_database.as_bytes(),
+        transfer.target_collection.as_bytes(),
+        match transfer.mode {
+            MongoCollectionTransferMode::Append => b"append".as_slice(),
+            MongoCollectionTransferMode::Overwrite => b"overwrite".as_slice(),
+        },
+        source_server_version.unwrap_or("unknown").as_bytes(),
+        target_server_version.unwrap_or("unknown").as_bytes(),
+        source_count.as_bytes(),
+        target_count.as_bytes(),
+        confirmation_phrase.unwrap_or("").as_bytes(),
+    ] {
+        digest.update(value);
+        digest.update([0]);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+async fn build_mongodb_collection_transfer_plan(
+    manager: &ConnectionManager,
+    request: &MongoCollectionTransferRequest,
+) -> Result<MongoCollectionTransferPlan, String> {
+    let source_database = validate_scope(&request.source_database, "source database")?;
+    let source_collection = validate_scope(&request.source_collection, "source collection")?;
+    let target_database = validate_scope(&request.target_database, "target database")?;
+    let target_collection = validate_scope(&request.target_collection, "target collection")?;
+    if request.source_connection_id.trim().is_empty()
+        || request.target_connection_id.trim().is_empty()
+    {
+        return Err("MongoDB source and target connections are required".to_string());
+    }
+    if request.source_connection_id == request.target_connection_id
+        && source_database == target_database
+        && source_collection == target_collection
+    {
+        return Err("MongoDB collection transfer source and target must differ".to_string());
+    }
+    let source_server_version =
+        confirm_bundled_mongodb(manager, &request.source_connection_id, "mongodb").await?;
+    let target_server_version =
+        confirm_bundled_mongodb(manager, &request.target_connection_id, "mongodb").await?;
+    let source = manager
+        .read_document_transfer_batch(
+            &request.source_connection_id,
+            DocumentTransferReadRequest {
+                namespace: &source_database,
+                collection: &source_collection,
+                offset: 0,
+                limit: 1,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let target = manager
+        .read_document_transfer_batch(
+            &request.target_connection_id,
+            DocumentTransferReadRequest {
+                namespace: &target_database,
+                collection: &target_collection,
+                offset: 0,
+                limit: 1,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let normalized = MongoCollectionTransferRequest {
+        source_connection_id: request.source_connection_id.trim().to_string(),
+        source_database: source_database.clone(),
+        source_collection: source_collection.clone(),
+        target_connection_id: request.target_connection_id.trim().to_string(),
+        target_database: target_database.clone(),
+        target_collection: target_collection.clone(),
+        mode: request.mode,
+    };
+    let confirmation_phrase = matches!(normalized.mode, MongoCollectionTransferMode::Overwrite)
+        .then(|| format!("OVERWRITE {target_database}.{target_collection}"));
+    let confirmation_token = collection_transfer_plan_token(
+        &normalized,
+        source_server_version.as_deref(),
+        target_server_version.as_deref(),
+        source.total,
+        target.total,
+        confirmation_phrase.as_deref(),
+    );
+    Ok(MongoCollectionTransferPlan {
+        source_database,
+        source_collection,
+        target_database,
+        target_collection,
+        mode: normalized.mode,
+        source_document_count: source.total,
+        target_document_count: target.total,
+        batch_size: MONGODB_COLLECTION_TRANSFER_BATCH_SIZE,
+        preserves_bson_types: true,
+        // MongoDB read+insert across connections cannot promise a shared
+        // snapshot without deployment-specific transaction support.
+        is_snapshot_consistent: false,
+        confirmation_phrase,
+        confirmation_token,
+        source_server_version,
+        target_server_version,
+    })
+}
+
 fn document_error<T>(code: &str, error: &str) -> Response<T> {
     let retryable = ["connection", "timed out", "temporarily unavailable"]
         .iter()
@@ -715,6 +902,105 @@ pub async fn execute_mongodb_document_delete(
     Ok(match result {
         Ok(receipt) => Response::ok(receipt),
         Err(error) => document_error("MONGODB_DOCUMENT_DELETE_EXECUTE_ERROR", &error),
+    })
+}
+
+#[tauri::command]
+pub async fn preview_mongodb_collection_transfer(
+    manager: State<'_, ConnectionManager>,
+    request: MongoCollectionTransferRequest,
+) -> Result<Response<MongoCollectionTransferPlan>, String> {
+    Ok(
+        match build_mongodb_collection_transfer_plan(&manager, &request).await {
+            Ok(plan) => Response::ok(plan),
+            Err(error) => document_error("MONGODB_COLLECTION_TRANSFER_PREVIEW_ERROR", &error),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn execute_mongodb_collection_transfer(
+    manager: State<'_, ConnectionManager>,
+    request: ExecuteMongoCollectionTransferRequest,
+) -> Result<Response<MongoCollectionTransferReceipt>, String> {
+    let result: Result<MongoCollectionTransferReceipt, String> = async {
+        let plan = build_mongodb_collection_transfer_plan(&manager, &request.transfer).await?;
+        if request.confirmation_token.trim() != plan.confirmation_token {
+            return Err(
+                "MongoDB collection source or target changed after preview; review the transfer again"
+                    .to_string(),
+            );
+        }
+        if let Some(phrase) = plan.confirmation_phrase.as_deref() {
+            if request.confirmation_phrase.trim() != phrase {
+                return Err(format!("Type {phrase} exactly to overwrite this MongoDB collection"));
+            }
+        }
+        let deleted_count = if matches!(plan.mode, MongoCollectionTransferMode::Overwrite) {
+            manager
+                .clear_document_transfer_collection(
+                    &request.transfer.target_connection_id,
+                    DocumentTransferClearRequest {
+                        namespace: &plan.target_database,
+                        collection: &plan.target_collection,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .deleted_count
+        } else {
+            0
+        };
+        let mut inserted_count = 0_u64;
+        let mut offset = 0_u64;
+        loop {
+            let batch = manager
+                .read_document_transfer_batch(
+                    &request.transfer.source_connection_id,
+                    DocumentTransferReadRequest {
+                        namespace: &plan.source_database,
+                        collection: &plan.source_collection,
+                        offset,
+                        limit: plan.batch_size,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if batch.documents.is_empty() {
+                break;
+            }
+            let batch_len = batch.documents.len() as u64;
+            let receipt = manager
+                .write_document_transfer_batch(
+                    &request.transfer.target_connection_id,
+                    DocumentTransferWriteRequest {
+                        namespace: &plan.target_database,
+                        collection: &plan.target_collection,
+                        documents: &batch.documents,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            inserted_count = inserted_count.saturating_add(receipt.inserted_count);
+            offset = offset.saturating_add(batch_len);
+        }
+        Ok(MongoCollectionTransferReceipt {
+            inserted_count,
+            deleted_count,
+            source_document_count: plan.source_document_count,
+            message: format!(
+                "Transferred {inserted_count} BSON-preserving documents from {}.{} to {}.{}",
+                plan.source_database,
+                plan.source_collection,
+                plan.target_database,
+                plan.target_collection,
+            ),
+        })
+    }
+    .await;
+    Ok(match result {
+        Ok(receipt) => Response::ok(receipt),
+        Err(error) => document_error("MONGODB_COLLECTION_TRANSFER_EXECUTE_ERROR", &error),
     })
 }
 
@@ -974,5 +1260,61 @@ mod tests {
             (exact.contains('*') || exact.contains('?')).then(|| format!("CLEAR {exact}")),
             None
         );
+    }
+
+    #[test]
+    fn collection_transfer_token_binds_both_scopes_mode_counts_and_overwrite_phrase() {
+        let append = MongoCollectionTransferRequest {
+            source_connection_id: "source-1".to_string(),
+            source_database: "app".to_string(),
+            source_collection: "users".to_string(),
+            target_connection_id: "target-1".to_string(),
+            target_database: "archive".to_string(),
+            target_collection: "users_copy".to_string(),
+            mode: MongoCollectionTransferMode::Append,
+        };
+        let base =
+            collection_transfer_plan_token(&append, Some("8.0.1"), Some("8.0.2"), 12, 3, None);
+        let overwrite = MongoCollectionTransferRequest {
+            mode: MongoCollectionTransferMode::Overwrite,
+            ..append.clone()
+        };
+        assert_ne!(
+            base,
+            collection_transfer_plan_token(
+                &overwrite,
+                Some("8.0.1"),
+                Some("8.0.2"),
+                12,
+                3,
+                Some("OVERWRITE archive.users_copy"),
+            )
+        );
+        assert_ne!(
+            base,
+            collection_transfer_plan_token(&append, Some("8.0.1"), Some("8.0.2"), 13, 3, None)
+        );
+        assert_ne!(
+            base,
+            collection_transfer_plan_token(&append, Some("8.0.1"), Some("8.0.2"), 12, 4, None)
+        );
+    }
+
+    #[test]
+    fn collection_transfer_request_uses_camel_case_wire_fields() {
+        let value = serde_json::to_value(MongoCollectionTransferRequest {
+            source_connection_id: "source-1".to_string(),
+            source_database: "app".to_string(),
+            source_collection: "users".to_string(),
+            target_connection_id: "target-1".to_string(),
+            target_database: "archive".to_string(),
+            target_collection: "users_copy".to_string(),
+            mode: MongoCollectionTransferMode::Append,
+        })
+        .unwrap();
+        assert!(value.get("sourceConnectionId").is_some());
+        assert!(value.get("targetCollection").is_some());
+        assert!(value.get("source_connection_id").is_none());
+        assert_eq!(value.get("mode"), Some(&serde_json::json!("append")));
     }
 }

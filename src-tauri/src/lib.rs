@@ -341,6 +341,8 @@ pub fn run() {
             commands::document::execute_mongodb_document_edit,
             commands::document::preview_mongodb_document_delete,
             commands::document::execute_mongodb_document_delete,
+            commands::document::preview_mongodb_collection_transfer,
+            commands::document::execute_mongodb_collection_transfer,
             commands::document::get_elasticsearch_index_metadata,
             commands::document::preview_elasticsearch_index_clear,
             commands::document::execute_elasticsearch_index_clear,

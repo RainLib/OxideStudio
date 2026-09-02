@@ -1941,6 +1941,44 @@ export interface MongoDocumentDeleteReceipt {
   message: string;
 }
 
+/** BSON-preserving collection migration; kept separate from relational table transfer. */
+export type MongoCollectionTransferMode = "append" | "overwrite";
+
+export interface MongoCollectionTransferRequest {
+  sourceConnectionId: string;
+  sourceDatabase: string;
+  sourceCollection: string;
+  targetConnectionId: string;
+  targetDatabase: string;
+  targetCollection: string;
+  mode?: MongoCollectionTransferMode;
+}
+
+export interface MongoCollectionTransferPlan {
+  sourceDatabase: string;
+  sourceCollection: string;
+  targetDatabase: string;
+  targetCollection: string;
+  mode: MongoCollectionTransferMode;
+  sourceDocumentCount: number;
+  targetDocumentCount: number;
+  batchSize: number;
+  preservesBsonTypes: boolean;
+  /** False for cross-connection reads: source changes must be reviewed/retried. */
+  isSnapshotConsistent: boolean;
+  confirmationPhrase?: string | null;
+  confirmationToken: string;
+  sourceServerVersion?: string | null;
+  targetServerVersion?: string | null;
+}
+
+export interface MongoCollectionTransferReceipt {
+  insertedCount: number;
+  deletedCount: number;
+  sourceDocumentCount: number;
+  message: string;
+}
+
 export interface ConstraintInfo {
   name: string;
   constraint_type: string;

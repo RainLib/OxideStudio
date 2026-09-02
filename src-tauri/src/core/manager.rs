@@ -1253,6 +1253,33 @@ impl ConnectionManager {
         driver.get_document_page(request).await
     }
 
+    pub async fn read_document_transfer_batch(
+        &self,
+        id: &str,
+        request: super::driver::DocumentTransferReadRequest<'_>,
+    ) -> Result<super::driver::DocumentTransferBatch> {
+        let driver = self.get_driver(id).await?;
+        driver.read_document_transfer_batch(request).await
+    }
+
+    pub async fn write_document_transfer_batch(
+        &self,
+        id: &str,
+        request: super::driver::DocumentTransferWriteRequest<'_>,
+    ) -> Result<super::driver::DocumentTransferWriteReceipt> {
+        let driver = self.get_driver(id).await?;
+        driver.write_document_transfer_batch(request).await
+    }
+
+    pub async fn clear_document_transfer_collection(
+        &self,
+        id: &str,
+        request: super::driver::DocumentTransferClearRequest<'_>,
+    ) -> Result<super::driver::DocumentTransferClearReceipt> {
+        let driver = self.get_driver(id).await?;
+        driver.clear_document_transfer_collection(request).await
+    }
+
     pub async fn prepare_document_clone(
         &self,
         id: &str,

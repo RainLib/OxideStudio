@@ -17,6 +17,9 @@ import type {
   MongoDocumentEditPlan,
   MongoDocumentEditReceipt,
   MongoDocumentEditRequest,
+  MongoCollectionTransferPlan,
+  MongoCollectionTransferReceipt,
+  MongoCollectionTransferRequest,
   ColumnInfo,
   ConstraintInfo,
   ForeignKeyReferenceInfo,
@@ -372,6 +375,30 @@ export async function executeMongoDocumentDelete(
   );
 }
 
+/** Preview a MongoDB-only collection migration. Canonical Extended JSON keeps
+ * BSON values intact; the backend will reject unsupported external drivers. */
+export async function previewMongoCollectionTransfer(
+  request: MongoCollectionTransferRequest,
+): Promise<MongoCollectionTransferPlan> {
+  return invokeWithInterceptors<MongoCollectionTransferPlan>(
+    "preview_mongodb_collection_transfer",
+    { request },
+  );
+}
+
+export async function executeMongoCollectionTransfer(
+  transfer: MongoCollectionTransferRequest,
+  confirmationToken: string,
+  confirmationPhrase = "",
+): Promise<MongoCollectionTransferReceipt> {
+  return invokeWithInterceptors<MongoCollectionTransferReceipt>(
+    "execute_mongodb_collection_transfer",
+    {
+      request: { transfer, confirmationToken, confirmationPhrase },
+    },
+  );
+}
+
 export async function getGeneratedColumns(
   connectionId: string,
   schema: string,
@@ -662,6 +689,8 @@ export const schemaService = {
   executeMongoDocumentEdit,
   previewMongoDocumentDelete,
   executeMongoDocumentDelete,
+  previewMongoCollectionTransfer,
+  executeMongoCollectionTransfer,
   getColumns,
   getGeneratedColumns,
   getDatabaseColumns,

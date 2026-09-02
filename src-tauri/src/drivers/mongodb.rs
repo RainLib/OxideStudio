@@ -1,7 +1,9 @@
 use crate::core::{
     driver::{
         DatabaseDriver, DocumentCloneReceipt, DocumentCloneRequest, DocumentDeleteReceipt,
-        DocumentDeleteRequest, DocumentEditReceipt, DocumentEditRequest, PreparedDocumentClone,
+        DocumentDeleteRequest, DocumentEditReceipt, DocumentEditRequest, DocumentTransferBatch,
+        DocumentTransferClearReceipt, DocumentTransferClearRequest, DocumentTransferReadRequest,
+        DocumentTransferWriteReceipt, DocumentTransferWriteRequest, PreparedDocumentClone,
         PreparedDocumentDelete, PreparedDocumentEdit,
     },
     protocol::{
@@ -368,6 +370,98 @@ impl DatabaseDriver for MongoDbDriver {
             }
         }
         self.execute_commands(commands).await
+    }
+
+    async fn read_document_transfer_batch(
+        &self,
+        request: DocumentTransferReadRequest<'_>,
+    ) -> Result<DocumentTransferBatch> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let limit = request.limit.clamp(1, 1_000) as i64;
+        let offset = i64::try_from(request.offset)
+            .map_err(|_| anyhow!("MongoDB transfer offset is too large"))?;
+        let database = self.client().await?.database(&database_name);
+        // Sorting by _id gives a deterministic batch order and mirrors DBX's
+        // transfer reader. This is still a non-snapshot read: the desktop
+        // command makes that explicit in its transfer receipt.
+        let result = database
+            .run_command(doc! {
+                "find": &collection_name,
+                "filter": {},
+                "sort": { "_id": 1 },
+                "skip": offset,
+                "limit": limit,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read MongoDB transfer batch for {database_name}.{collection_name}"
+                )
+            })?;
+        let documents = extract_cursor_batch(result)?
+            .into_iter()
+            .map(|document| Bson::Document(document).into_canonical_extjson())
+            .collect();
+        let total = database
+            .collection::<Document>(&collection_name)
+            .count_documents(doc! {})
+            .await
+            .with_context(|| {
+                format!("Failed to count MongoDB collection {database_name}.{collection_name}")
+            })?;
+        Ok(DocumentTransferBatch { documents, total })
+    }
+
+    async fn write_document_transfer_batch(
+        &self,
+        request: DocumentTransferWriteRequest<'_>,
+    ) -> Result<DocumentTransferWriteReceipt> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        if request.documents.is_empty() {
+            return Ok(DocumentTransferWriteReceipt { inserted_count: 0 });
+        }
+        let documents = request
+            .documents
+            .iter()
+            .map(|document| json_to_document(document, "MongoDB transfer document"))
+            .collect::<Result<Vec<_>>>()?;
+        let inserted_count = documents.len() as u64;
+        self.client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name)
+            .insert_many(documents)
+            .ordered(true)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write MongoDB transfer batch for {database_name}.{collection_name}"
+                )
+            })?;
+        Ok(DocumentTransferWriteReceipt { inserted_count })
+    }
+
+    async fn clear_document_transfer_collection(
+        &self,
+        request: DocumentTransferClearRequest<'_>,
+    ) -> Result<DocumentTransferClearReceipt> {
+        let database_name = validate_mongodb_database_name(request.namespace)?;
+        let collection_name = validate_mongodb_collection_name(request.collection)?;
+        let result = self
+            .client()
+            .await?
+            .database(&database_name)
+            .collection::<Document>(&collection_name)
+            .delete_many(doc! {})
+            .await
+            .with_context(|| {
+                format!("Failed to clear MongoDB collection {database_name}.{collection_name}")
+            })?;
+        Ok(DocumentTransferClearReceipt {
+            deleted_count: result.deleted_count,
+        })
     }
 
     async fn prepare_document_clone(
