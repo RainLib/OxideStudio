@@ -43,6 +43,7 @@ import {
   type SchemaDiagramEdge,
   type SchemaDiagramNode,
 } from "@/lib/schemaDiagram";
+import { reuseFullSchemaDiagramLayout } from "@/lib/schemaDiagramLayoutMode";
 import {
   rasterizeSchemaDiagramSvg,
   schemaDiagramSvgSize,
@@ -232,24 +233,32 @@ export function SchemaDiagramView() {
     selectedAreaId,
     snapshot,
   ]);
-  const baseLayout = useMemo(
-    () =>
-      snapshot
-        ? buildSchemaDiagram(snapshot, {
-            query,
-            keysOnly,
-            maxColumns: 18,
-            relationNames: scopedRelationNames,
-          })
-        : null,
-    [keysOnly, query, scopedRelationNames, snapshot],
-  );
   const fullBaseLayout = useMemo(
     // Keep coordinates identical to the visible unfiltered layout. A second
     // 50-column layout made related-table focus scroll to the wrong location
     // and inflated work for wide schemas.
     () => (snapshot ? buildSchemaDiagram(snapshot, { maxColumns: 18 }) : null),
     [snapshot],
+  );
+  const baseLayout = useMemo(
+    () => {
+      // The default canvas previously constructed the same unfiltered layout
+      // twice: once here and once above for related-table navigation. Reuse
+      // the full layout until a view-specific filter actually changes it.
+      if (!snapshot) return null;
+      if (reuseFullSchemaDiagramLayout({
+        query,
+        keysOnly,
+        hasRelationScope: Boolean(scopedRelationNames),
+      })) return fullBaseLayout;
+      return buildSchemaDiagram(snapshot, {
+        query,
+        keysOnly,
+        maxColumns: 18,
+        relationNames: scopedRelationNames,
+      });
+    },
+    [fullBaseLayout, keysOnly, query, scopedRelationNames, snapshot],
   );
   const areaLayout = useMemo(
     () =>

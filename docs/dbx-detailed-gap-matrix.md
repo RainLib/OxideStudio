@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
-> 审计基线：2026-09-01
-> DBX 参考提交：`d4d3995be`（v0.6.0 后续 CI/文档提交；最新产品功能提交仍为 `c4cdcbc48`）
+> 审计基线：2026-09-02
+> DBX 参考提交：`55a21f8e9`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -37,6 +37,8 @@
 > 本轮本地验证：指定 JDK 25 和经 SHA-256 校验的 H2 `2.3.232` 临时 fixture 后，`npm run test:release` 为 **54 passed / 0 skipped**；其中通用 JDBC Agent 的 H2 protocol、Oracle SDE/source、package manifest 与 release binding 均真实运行。临时 vendor jar 不进入工作区或发布产物。
 
 > LSP/Console 回归：`npm test -- --run --reporter=dot` 为 **343 files / 1819 tests passed**，覆盖 MongoDB shell/JSON completion、Elasticsearch REST/JSON completion、Monaco LSP adapter、session lifecycle 和 schema sync。真实 MongoDB、Elasticsearch 与 WebView 版本矩阵仍按统一 deferred validation 执行。
+
+> 性能收尾：Schema Diagram 默认无筛选画布过去会同步构建两份坐标完全相同的完整 layout（可见画布和 related-table navigation 各一份）。现在默认路径复用 full layout；只有搜索、keys-only 或 related-table scope 实际改变投影时才构建第二份布局。10,000 relations 的基准中单次 `buildSchemaDiagram` 约 63 ms，因此初始默认画布避免了一次同等主线程工作；该底层单次基准本身不因 React 层复用而变化。`schemaDiagramLayoutMode.test.ts` 锁定该选择，Schema Diagram 视图回归和 production build 均通过。
 
 ### 前一增量审计（`5d6f66777` → `d4d3995be`）
 
