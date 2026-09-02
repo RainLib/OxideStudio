@@ -433,20 +433,29 @@ public final class DriverMain {
   }
 
   /**
-   * Oracle exposes table and materialized-view DDL through DBMS_METADATA
-   * rather than portable JDBC metadata. Keep this narrow, identity-gated
-   * adapter in the signed JDBC process: the Host never synthesizes vendor
-   * catalog SQL and every other JDBC product continues to return no source.
+   * Oracle exposes object definitions through DBMS_METADATA and the ALL_*
+   * catalog views rather than portable JDBC metadata. Keep this identity-gated
+   * and type-whitelisted in the signed JDBC process: the Host never
+   * synthesizes vendor catalog SQL and every other JDBC product continues to
+   * return no source.
    */
   private static List<Object> objectSource(Connection connection, Map<String, Object> request) throws SQLException {
-    String metadataType = oracleMetadataObjectType(text(request.get("object_type")));
-    if (!isOracleDriver() || metadataType == null) return List.of();
+    if (!isOracleDriver()) return List.of();
+    String normalizedType = oracleObjectType(text(request.get("object_type")));
     String schema = metadataIdentifier(request.get("namespace"), "schema");
     String name = metadataIdentifier(request.get("object_name"), "object name");
+    if ("VIEW".equals(normalizedType)) return oracleViewSource(connection, schema, name);
+    String metadataType = oracleMetadataObjectType(normalizedType);
+    if (metadataType != null) return oracleMetadataSource(connection, metadataType, schema, name);
+    String sourceType = oracleStoredSourceType(normalizedType);
+    return sourceType == null ? List.of() : oracleStoredSource(connection, sourceType, schema, name);
+  }
+
+  private static List<Object> oracleMetadataSource(Connection connection, String objectType, String schema, String name) throws SQLException {
     String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
     try (PreparedStatement statement = connection.prepareStatement(sql)) {
       configureQueryStatement(statement);
-      statement.setString(1, metadataType);
+      statement.setString(1, objectType);
       statement.setString(2, name);
       statement.setString(3, schema);
       try (ResultSet rows = statement.executeQuery()) {
@@ -457,13 +466,66 @@ public final class DriverMain {
     }
   }
 
+  private static List<Object> oracleViewSource(Connection connection, String schema, String name) throws SQLException {
+    SQLException metadataError = null;
+    try {
+      List<Object> source = oracleMetadataSource(connection, "VIEW", schema, name);
+      if (!source.isEmpty()) return source;
+    } catch (SQLException error) {
+      metadataError = error;
+    }
+    try (PreparedStatement statement = connection.prepareStatement("SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?")) {
+      configureQueryStatement(statement);
+      statement.setString(1, schema);
+      statement.setString(2, name);
+      try (ResultSet rows = statement.executeQuery()) {
+        if (!rows.next()) return List.of();
+        String source = boundedObjectSource(rows, 1);
+        return source == null || source.isBlank() ? List.of() : List.of(source);
+      }
+    } catch (SQLException fallbackError) {
+      if (metadataError != null) fallbackError.addSuppressed(metadataError);
+      throw fallbackError;
+    }
+  }
+
+  private static List<Object> oracleStoredSource(Connection connection, String objectType, String schema, String name) throws SQLException {
+    String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
+    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+      configureQueryStatement(statement);
+      statement.setString(1, schema);
+      statement.setString(2, name);
+      statement.setString(3, objectType);
+      try (ResultSet rows = statement.executeQuery()) {
+        StringBuilder source = new StringBuilder();
+        while (rows.next()) {
+          String line = boundedObjectSource(rows, 1, MAX_OBJECT_SOURCE_CHARACTERS - source.length());
+          if (line != null) source.append(line);
+        }
+        return source.length() == 0 ? List.of() : List.of(source.toString());
+      }
+    }
+  }
+
   private static boolean isOracleDriver() { return "oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")); }
 
-  private static String oracleMetadataObjectType(String objectType) {
+  private static String oracleObjectType(String objectType) {
     if (objectType == null) return null;
-    String normalized = objectType.trim().toUpperCase(java.util.Locale.ROOT).replace(' ', '_');
-    return switch (normalized) {
-      case "TABLE", "MATERIALIZED_VIEW", "SEQUENCE", "SYNONYM" -> normalized;
+    return objectType.trim().toUpperCase(java.util.Locale.ROOT).replace(' ', '_');
+  }
+
+  private static String oracleMetadataObjectType(String normalizedType) {
+    if (normalizedType == null) return null;
+    return switch (normalizedType) {
+      case "TABLE", "MATERIALIZED_VIEW", "SEQUENCE", "SYNONYM" -> normalizedType;
+      default -> null;
+    };
+  }
+
+  private static String oracleStoredSourceType(String normalizedType) {
+    if (normalizedType == null) return null;
+    return switch (normalizedType) {
+      case "FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> normalizedType.replace('_', ' ');
       default -> null;
     };
   }
@@ -477,12 +539,17 @@ public final class DriverMain {
   }
 
   private static String boundedObjectSource(ResultSet rows, int index) throws SQLException {
+    return boundedObjectSource(rows, index, MAX_OBJECT_SOURCE_CHARACTERS);
+  }
+
+  private static String boundedObjectSource(ResultSet rows, int index, int maximumCharacters) throws SQLException {
+    if (maximumCharacters < 0) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
     try (Reader reader = rows.getCharacterStream(index)) {
       if (reader == null) return null;
       StringBuilder source = new StringBuilder(); char[] chunk = new char[8_192]; int read;
       try {
         while ((read = reader.read(chunk)) >= 0) {
-          if (source.length() + read > MAX_OBJECT_SOURCE_CHARACTERS) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
+          if (source.length() + read > maximumCharacters) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
           source.append(chunk, 0, read);
         }
       } catch (IOException error) {
@@ -491,7 +558,7 @@ public final class DriverMain {
       return source.toString();
     } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
       String source = rows.getString(index);
-      if (source != null && source.length() > MAX_OBJECT_SOURCE_CHARACTERS) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
+      if (source != null && source.length() > maximumCharacters) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
       return source;
     }
   }

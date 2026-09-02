@@ -294,12 +294,14 @@ public final class OracleSdeDriver implements Driver {
 
   private static ResultSet objectSourceResultSet(String sql, String[] parameters) {
     final boolean metadataQuery = sql.contains("DBMS_METADATA.GET_DDL");
-    final String ddl = "TABLE".equals(parameters[0]) ? "CREATE TABLE \\\"HR\\\".\\\"SALES\\\" (ID NUMBER)" : "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
+    final boolean storedSourceQuery = sql.contains("ALL_SOURCE");
+    final String ddl = "TABLE".equals(parameters[0]) ? "CREATE TABLE \\\"HR\\\".\\\"SALES\\\" (ID NUMBER)" : "VIEW".equals(parameters[0]) ? "CREATE VIEW \\\"HR\\\".\\\"ACTIVE_SALES\\\" AS SELECT 1" : "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
     final int[] row = new int[] { -1 };
     return (ResultSet) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
       if ("next".equals(method.getName())) return metadataQuery && ++row[0] == 0;
-      if ("getCharacterStream".equals(method.getName())) return new StringReader(ddl);
-      if ("getString".equals(method.getName())) return ddl;
+      if ("next".equals(method.getName())) return storedSourceQuery && ++row[0] < 2;
+      if ("getCharacterStream".equals(method.getName())) return new StringReader(storedSourceQuery ? row[0] == 0 ? "CREATE PROCEDURE P AS\\n" : "BEGIN NULL; END;" : ddl);
+      if ("getString".equals(method.getName())) return storedSourceQuery ? row[0] == 0 ? "CREATE PROCEDURE P AS\\n" : "BEGIN NULL; END;" : ddl;
       if ("close".equals(method.getName())) return null;
       return defaultValue(method.getReturnType());
     });
@@ -378,12 +380,17 @@ public final class OracleSdeDriver implements Driver {
   let resolveQuery;
   let resolveMetadata;
   let resolveTableMetadata;
+  let resolveViewMetadata;
+  let resolveRoutineMetadata;
   const queryResponse = new Promise((resolveResponse) => {
     resolveQuery = resolveResponse;
   });
   const metadataResponse = new Promise((resolveResponse) => {
     resolveMetadata = resolveResponse;
   });
+  const tableMetadataResponse = new Promise((resolve) => { resolveTableMetadata = resolve; });
+  const viewMetadataResponse = new Promise((resolve) => { resolveViewMetadata = resolve; });
+  const routineMetadataResponse = new Promise((resolve) => { resolveRoutineMetadata = resolve; });
   agent.stdout.setEncoding("utf8");
   agent.stdout.on("data", (chunk) => {
     responseBuffer += chunk;
@@ -392,8 +399,10 @@ public final class OracleSdeDriver implements Driver {
     for (const line of lines.filter(Boolean)) {
       const response = JSON.parse(line);
       if (response.id === 2) resolveQuery(response);
-    if (response.id === 3) resolveMetadata(response);
-    if (response.id === 4) resolveTableMetadata(response);
+      if (response.id === 3) resolveMetadata(response);
+      if (response.id === 4) resolveTableMetadata(response);
+      if (response.id === 5) resolveViewMetadata(response);
+      if (response.id === 6) resolveRoutineMetadata(response);
     }
   });
   agent.stdin.write(`${JSON.stringify({
@@ -414,7 +423,6 @@ public final class OracleSdeDriver implements Driver {
       request: { kind: "objectSource", namespace: "HR", object_name: "SALES_MV", object_type: "MATERIALIZED_VIEW" },
     },
   })}\n`);
-  const tableMetadataResponse = new Promise((resolve) => { resolveTableMetadata = resolve; });
   agent.stdin.write(`${JSON.stringify({
     id: 4,
     method: "metadata",
@@ -423,7 +431,23 @@ public final class OracleSdeDriver implements Driver {
       request: { kind: "objectSource", namespace: "HR", object_name: "SALES", object_type: "TABLE" },
     },
   })}\n`);
-  const [response, sourceResponse, tableSourceResponse] = await Promise.all([queryResponse, metadataResponse, tableMetadataResponse]);
+  agent.stdin.write(`${JSON.stringify({
+    id: 5,
+    method: "metadata",
+    params: {
+      connection_id: "oracle",
+      request: { kind: "objectSource", namespace: "HR", object_name: "ACTIVE_SALES", object_type: "VIEW" },
+    },
+  })}\n`);
+  agent.stdin.write(`${JSON.stringify({
+    id: 6,
+    method: "metadata",
+    params: {
+      connection_id: "oracle",
+      request: { kind: "objectSource", namespace: "HR", object_name: "P", object_type: "PROCEDURE" },
+    },
+  })}\n`);
+  const [response, sourceResponse, tableSourceResponse, viewSourceResponse, routineSourceResponse] = await Promise.all([queryResponse, metadataResponse, tableMetadataResponse, viewMetadataResponse, routineMetadataResponse]);
   agent.stdin.end();
   const [code] = await once(agent, "close");
   assert.equal(code, 0);
@@ -436,5 +460,11 @@ public final class OracleSdeDriver implements Driver {
   ]);
   assert.deepEqual(tableSourceResponse?.result?.value, [
     'CREATE TABLE "HR"."SALES" (ID NUMBER)',
+  ]);
+  assert.deepEqual(viewSourceResponse?.result?.value, [
+    'CREATE VIEW "HR"."ACTIVE_SALES" AS SELECT 1',
+  ]);
+  assert.deepEqual(routineSourceResponse?.result?.value, [
+    "CREATE PROCEDURE P AS\nBEGIN NULL; END;",
   ]);
 });
