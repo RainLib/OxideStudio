@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-02
-> DBX 参考提交：`d4d3995be`（最新已审计提交）
+> DBX 参考提交：`069b84daf`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,9 +9,9 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新 HEAD 审计（`d4d3995be`）
+### 最新 HEAD 审计（`069b84daf`）
 
-- DBX 当前 HEAD 是一次上游历史重写后的 CI 性能提交；MongoDB、Elasticsearch 与 LSP 运行时路径相对既有已审计功能提交没有新的协议或执行契约。历史中唯一仍未落地的 MongoDB 用户可见运行时功能是 `2c75a6535` 的 `MONGODB-OIDC` browser authentication，本轮已按下文 MongoDB 行的最小安全边界接入。
+- DBX 最新增量包含设置页 Markdown 渲染、SQL Server 旧 probe 截断、PostgreSQL legacy `prokind`、MongoDB TTL index MCP 与 SQLite 文件权限修复。PostgreSQL routine metadata 的 `prokind` fallback 已落地；MongoDB TTL 已由完整 raw index definition 和专用 UI 表示保留。SQL Server probe 是 DBX native TDS 私有调用链，Oxide 不重写外置 package SQL；SQLite metadata DB 位于私有应用目录并由 credential-key 创建路径固定为 owner-private。MongoDB、Elasticsearch 与 LSP 运行时路径没有新增协议或执行契约。
 - 不把 DBX 的 CI 脚本、版本发布提交或删除的历史测试文件当作产品能力迁移；后续继续按提交对应的运行时/编辑器/驱动路径审计。
 
 ### Phase 171 增量：IoTDB / Kingbase 外置 Agent 执行边界
