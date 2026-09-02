@@ -547,7 +547,7 @@ public final class DriverMain {
       if (rows.size() >= MAX_RESULT_ROWS) { truncated = true; break; }
       List<Object> row = new ArrayList<>(); int rowCharacters = 0;
       for (int index = 1; index <= metadata.getColumnCount(); index++) {
-        Object value = normalize(result.getObject(index));
+        Object value = normalizeResultValue(result, index, metadata.getColumnTypeName(index));
         row.add(value); rowCharacters += estimatedCharacters(value);
       }
       if (usedCharacters + rowCharacters > MAX_RESULT_CHARACTERS) { truncated = true; break; }
@@ -555,6 +555,32 @@ public final class DriverMain {
     }
     Map<String, Object> output = emptyQuery(sql); output.put("columns", columns); output.put("rows", rows);
     output.put("truncated", truncated); output.put("rowLimit", MAX_RESULT_ROWS); return output;
+  }
+  /**
+   * Oracle's Esri SDE.ST_GEOMETRY is a vendor object which some JDBC driver
+   * versions cannot materialize through getObject(). A generic JDBC package
+   * cannot safely rewrite arbitrary SELECT lists to SDE.ST_AsText, but it can
+   * keep the rest of the result set available and make this limitation
+   * explicit. Dedicated Oracle packages may replace this with a proven WKT
+   * adapter later.
+   */
+  private static Object normalizeResultValue(ResultSet result, int index, String typeName) throws SQLException {
+    if (!isOracleSdeGeometry(typeName)) return normalize(result.getObject(index));
+    try {
+      String value = result.getString(index);
+      return value == null ? null : boundedVendorValue(value);
+    } catch (SQLException ignored) {
+      return "<SDE.ST_GEOMETRY unavailable in generic JDBC Agent>";
+    }
+  }
+  private static boolean isOracleSdeGeometry(String typeName) {
+    if (!"oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")) || typeName == null) return false;
+    String normalized = typeName.trim().toUpperCase(java.util.Locale.ROOT);
+    return "SDE.ST_GEOMETRY".equals(normalized) || "ST_GEOMETRY".equals(normalized);
+  }
+  private static String boundedVendorValue(String value) {
+    if (value.length() <= MAX_CELL_CHARACTERS) return value;
+    return value.substring(0, MAX_CELL_CHARACTERS) + "… [value truncated]";
   }
   private static int estimatedCharacters(Object value) { return value == null ? 4 : String.valueOf(value).length() + 8; }
   private static Map<String, Object> emptyQuery(String sql) { Map<String, Object> result = new LinkedHashMap<>(); result.put("columns", List.of()); result.put("rows", List.of()); result.put("truncated", false); result.put("rowLimit", MAX_RESULT_ROWS); result.put("rowsAffected", null); result.put("statementType", sql.trim().split("\\s+", 2)[0].toUpperCase()); result.put("message", null); return result; }
@@ -575,9 +601,7 @@ public final class DriverMain {
       String encoded = Base64.getEncoder().encodeToString(java.util.Arrays.copyOf(bytes, maxBytes));
       return maxBytes == bytes.length ? encoded : encoded + "… [binary value truncated]";
     }
-    String normalized = String.valueOf(value);
-    if (normalized.length() <= MAX_CELL_CHARACTERS) return normalized;
-    return normalized.substring(0, MAX_CELL_CHARACTERS) + "… [value truncated]";
+    return boundedVendorValue(String.valueOf(value));
   }
   private static Map<String, Object> value(String kind, Object value) { Map<String, Object> result = new LinkedHashMap<>(); result.put("kind", kind); result.put("value", value); return result; }
   private static Map<String, Object> ok(long id, Map<String, Object> result) { Map<String, Object> response = new LinkedHashMap<>(); response.put("id", id); response.put("status", "ok"); response.put("result", result); return response; }
