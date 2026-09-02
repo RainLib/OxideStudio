@@ -19941,6 +19941,27 @@ pub async fn get_postgres_routine_definitions(
     routine: String,
 ) -> Result<Response<Vec<String>>, String> {
     let result: Result<Vec<String>, String> = async {
+        if manager
+            .is_external_driver_connection(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            let routine = routine.trim();
+            if routine.is_empty() {
+                return Err("Routine name is required".to_string());
+            }
+            let definitions = manager
+                .get_object_source(&connection_id, &schema, routine, "FUNCTION", None)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|source| !source.trim().is_empty())
+                .collect::<Vec<_>>();
+            if definitions.is_empty() {
+                return Err("External driver did not provide this routine definition".to_string());
+            }
+            return Ok(definitions);
+        }
         ensure_host_table_ddl_allowed(&manager, &connection_id, "routine definition introspection")
             .await?;
         let routine = routine.trim();
@@ -20089,6 +20110,45 @@ pub async fn get_table_ddl(
                 .await
                 .map_err(|error| error.to_string());
         }
+        let table_name = table.trim();
+        if table_name.is_empty() {
+            return Err("Object name is required".to_string());
+        }
+        if manager
+            .is_external_driver_connection(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+            && object_type_is_view(object_type.as_deref())
+        {
+            let source = manager
+                .get_object_source(
+                    &connection_id,
+                    &schema,
+                    table_name,
+                    object_type.as_deref().unwrap_or("VIEW"),
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|source| !source.trim().is_empty())
+                .ok_or_else(|| "External driver did not provide this view definition".to_string())?;
+            return if object_type_is_materialized_view(object_type.as_deref()) {
+                Ok(generate_postgres_materialized_view_ddl(
+                    DatabaseKind::Postgres,
+                    &schema,
+                    table_name,
+                    &source,
+                ))
+            } else {
+                Ok(generate_postgres_view_ddl(
+                    DatabaseKind::Postgres,
+                    &schema,
+                    table_name,
+                    &source,
+                ))
+            };
+        }
         // This command falls back to Host-generated SHOW CREATE and
         // reconstruction queries. An external package can deliberately reuse
         // a built-in driver id while having different catalog or DDL grammar,
@@ -20096,10 +20156,6 @@ pub async fn get_table_ddl(
         // definition protocol.
         ensure_host_table_ddl_allowed(&manager, &connection_id, "definition introspection").await?;
         let kind = DatabaseKind::from_str(&driver).map_err(|e| e.to_string())?;
-        let table_name = table.trim();
-        if table_name.is_empty() {
-            return Err("Object name is required".to_string());
-        }
         let database = database.as_deref();
         let object_type = if let Some(explicit_type) = object_type
             .map(|value| value.trim().to_string())
