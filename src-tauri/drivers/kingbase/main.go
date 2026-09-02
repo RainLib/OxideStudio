@@ -400,12 +400,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 	var p struct {
 		ConnectionID string `json:"connection_id"`
 		Request      struct {
-			Kind       string  `json:"kind"`
-			Database   *string `json:"database"`
-			Namespace  string  `json:"namespace"`
-			Relation   string  `json:"relation"`
-			ObjectName string  `json:"object_name"`
-			ObjectType string  `json:"object_type"`
+			Kind         string  `json:"kind"`
+			Database     *string `json:"database"`
+			Namespace    string  `json:"namespace"`
+			Relation     string  `json:"relation"`
+			ObjectName   string  `json:"object_name"`
+			ObjectType   string  `json:"object_type"`
+			RelationName *string `json:"relation_name"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -458,7 +459,7 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		return map[string]any{"kind": "metadata", "value": out}, nil
 	}
 	if p.Request.Kind == "objectSource" {
-		out, err := kingbaseObjectSources(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType)
+		out, err := kingbaseObjectSources(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType, p.Request.RelationName)
 		if err != nil {
 			return nil, fail("METADATA_FAILED", err.Error())
 		}
@@ -955,10 +956,11 @@ WHERE n.nspname = $1 AND t.typname = $2
 ORDER BY e.enumsortorder`
 }
 
-// kingbaseObjectSource returns source only for object kinds whose server
-// catalog renderer has an unambiguous read-only result. Table reconstruction,
-// trigger lookup and mutations remain outside the v1 package contract.
-func kingbaseObjectSources(db *sql.DB, schema, name, objectType string) ([]any, error) {
+// kingbaseObjectSources returns source only for object kinds whose server
+// catalog renderer has an unambiguous read-only result. Trigger lookup needs
+// its owning relation, while table reconstruction and mutations remain outside
+// the v1 package contract.
+func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relationName *string) ([]any, error) {
 	if strings.TrimSpace(schema) == "" || strings.TrimSpace(name) == "" {
 		return []any{}, nil
 	}
@@ -969,6 +971,11 @@ func kingbaseObjectSources(db *sql.DB, schema, name, objectType string) ([]any, 
 		rows, err = db.Query(kingbaseViewSourceQuery(), schema, name)
 	case "FUNCTION", "PROCEDURE":
 		rows, err = db.Query(kingbaseRoutineSourceQuery(), schema, name)
+	case "TRIGGER":
+		if relationName == nil || strings.TrimSpace(*relationName) == "" {
+			return []any{}, nil
+		}
+		rows, err = db.Query(kingbaseTriggerSourceQuery(), schema, *relationName, name)
 	default:
 		return []any{}, nil
 	}
@@ -1007,6 +1014,15 @@ JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind IN ('f', 'p')
 ORDER BY pg_catalog.pg_get_function_identity_arguments(p.oid)
 LIMIT 20`
+}
+
+func kingbaseTriggerSourceQuery() string {
+	return `SELECT pg_catalog.pg_get_triggerdef(tg.oid)
+FROM pg_catalog.pg_trigger tg
+JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND tg.tgname = $3 AND NOT tg.tgisinternal
+LIMIT 1`
 }
 
 func optionalText(value string) any {

@@ -90,10 +90,13 @@ func TestKingbaseTypeMemberQueriesUseBoundIdentifiers(t *testing.T) {
 }
 
 func TestKingbaseObjectSourceQueriesUseBoundIdentifiers(t *testing.T) {
-	for _, query := range []string{kingbaseViewSourceQuery(), kingbaseRoutineSourceQuery()} {
+	for _, query := range []string{kingbaseViewSourceQuery(), kingbaseRoutineSourceQuery(), kingbaseTriggerSourceQuery()} {
 		if !strings.Contains(query, "$1") || !strings.Contains(query, "$2") || strings.Contains(query, "%s") {
 			t.Fatalf("object-source query must bind schema and object name: %s", query)
 		}
+	}
+	if !strings.Contains(kingbaseTriggerSourceQuery(), "$3") {
+		t.Fatalf("trigger source query must bind the trigger name: %s", kingbaseTriggerSourceQuery())
 	}
 	if !strings.Contains(kingbaseRoutineSourceQuery(), "LIMIT 20") {
 		t.Fatalf("routine source query must bound overload results: %s", kingbaseRoutineSourceQuery())
