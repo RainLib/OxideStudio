@@ -1,13 +1,18 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-02
-> DBX 参考提交：`032c05d6c`（最新已审计提交）
+> DBX 参考提交：`d4d3995be`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
 `apps/desktop/src/lib/...`，`components/...` 表示
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
+
+### 最新 HEAD 审计（`d4d3995be`）
+
+- DBX 当前 HEAD 是一次上游历史重写后的 CI 性能提交；MongoDB、Elasticsearch 与 LSP 运行时路径相对既有已审计功能提交没有新的协议或执行契约。历史中唯一仍未落地的 MongoDB 用户可见运行时功能是 `2c75a6535` 的 `MONGODB-OIDC` browser authentication，本轮已按下文 MongoDB 行的最小安全边界接入。
+- 不把 DBX 的 CI 脚本、版本发布提交或删除的历史测试文件当作产品能力迁移；后续继续按提交对应的运行时/编辑器/驱动路径审计。
 
 ### Phase 171 增量：IoTDB / Kingbase 外置 Agent 执行边界
 
@@ -151,7 +156,7 @@
 | 差距 | 本轮补齐 | 验证状态 |
 | --- | --- | --- |
 | PostgreSQL sequence `is_called` 与 ownership 状态 | DBX 与旧 Oxide 都只读取 `last_value` 并生成 `setval(..., true)`。Oxide 现在在具备 `SELECT`/`USAGE` 权限时同时捕获 state value 与 `is_called`；从未调用的 sequence 使用 start value + `false` 恢复。Schema Diff 将同名 sequence 的结构变化与状态变化分离，可审阅地恢复 `OWNED BY <table.column>`、`OWNED BY NONE` 和精确 `setval`，不会再把纯状态差异误判为不可执行的对象定义变更。旧快照未包含 `sequenceIsCalled` 时继续按历史 `true` 语义读取。SQL 备份也保留相同状态，权限不足时不猜测。 | 新增/更新 Rust 单元测试覆盖 never-called export、同名 sequence 状态恢复、owner 解除、只读 catalog 查询和旧快照 fallback；真实 PostgreSQL 版本/权限 fixture 仍按统一数据库验证阶段执行。此记录取代下文 T05/M01 中“仍缺 `is_called` 逻辑”的旧残差描述。 |
-| MongoDB shell 编辑器与 Host 执行契约 | DBX 的 `lib/mongo/mongoCompletion.ts` 与 `crates/dbx-core/src/mongo_shell.rs` 使用 shell 风格；旧 Oxide 只有原生 JSON completion/execution。Oxide 保留 JSON 契约，同时新增专用 Monaco `mongodb-console` 语言、实时 collection/method/chain/字段/操作符/stage/options 补全、多行及顶层分号命令范围，以及 Host 结构化 parser。可执行 shell 面现覆盖 DBX 主 collection surface：有界 `find/findOne/count/countDocuments/aggregate/distinct/getIndexes/stats/dataSize/storageSize/totalIndexSize`，`insertOne/insertMany/insert`、`updateOne/updateMany/update`、`deleteOne/deleteMany`、`findOneAnd*`、index create/drop、collection drop、`show databases`、`db.version/runCommand/createUser`，以及 `sort/skip/limit/collation/explain`。常用 options 经白名单进入 Host-owned find/aggregate 或精确 native command；未知 options fail closed。构造器覆盖 `ObjectId/ISODate/NumberLong/NumberInt/NumberDecimal/Timestamp/BinData`，字符串中的相似文本不会被改写。Shell delete/drop、`runCommand` 和 `$out/$merge` 会与 JSON 形式一样进入破坏性确认。Run Current 与 Run All 使用相同范围/解析边界。本阶段继续对齐 DBX 的 completion 状态机：`db.audit.` 可在同一结果中优先解析 `audit.logs` 与直接 collection method，统一替换 `db.` 后的完整 qualified prefix；`find().count()` 只在 Host 真正接受的单链位置出现，已有 sort/skip/limit 链不误提示；`//`、`--`、块注释和 method-shaped string 均不会触发幽灵候选。 | Rust/前端单元测试覆盖 native JSON 回归、shell→native contract、dotted collection、Extended JSON、字段级 argument routing、options、写方法、破坏性分类、链式分页、多命令/注释/字符串分号和补全范围。现支持受限的 `use <database>`：仅接受单个 bare database token，经 Host Mongo 名称校验后更新驱动 active database；同一批后续 shell command 按顺序继承新库，Query tab 也同步固定新 target schema，再由既有 `USE` 元数据刷新链更新 Explorer，避免 UI/执行目标漂移。真实 MongoDB 版本、权限、write concern/index options 和并发 mutation 验证仍按统一数据库阶段执行。 |
+| MongoDB shell 编辑器与 Host 执行契约 | DBX 的 `lib/mongo/mongoCompletion.ts`、`crates/dbx-core/src/mongo_shell.rs` 与 `mongo_oidc.rs` 使用 shell 风格并提供 OIDC browser callback；旧 Oxide 只有原生 JSON completion/execution。Oxide 保留 JSON 契约，同时新增专用 Monaco `mongodb-console` 语言、实时 collection/method/chain/字段/操作符/stage/options 补全、多行及顶层分号命令范围，以及 Host 结构化 parser。可执行 shell 面现覆盖 DBX 主 collection surface：有界 `find/findOne/count/countDocuments/aggregate/distinct/getIndexes/stats/dataSize/storageSize/totalIndexSize`，`insertOne/insertMany/insert`、`updateOne/updateMany/update`、`deleteOne/deleteMany`、`findOneAnd*`、index create/drop、collection drop、`show databases`、`db.version/runCommand/createUser`，以及 `sort/skip/limit/collation/explain`。常用 options 经白名单进入 Host-owned find/aggregate 或精确 native command；未知 options fail closed。构造器覆盖 `ObjectId/ISODate/NumberLong/NumberInt/NumberDecimal/Timestamp/BinData`，字符串中的相似文本不会被改写。Shell delete/drop、`runCommand` 和 `$out/$merge` 会与 JSON 形式一样进入破坏性确认。MongoDB connection form 现支持 `MONGODB-OIDC`：切换时清除 username/password、固定 `$external`、强制 bundled driver；Rust callback 使用系统浏览器、loopback redirect、PKCE/state、HTTPS discovery/token endpoint、全局单飞和五分钟超时，driver 内部持有 token/refresh state，外部 package 与 headless Agent 不会冒充支持该人机流。Run Current 与 Run All 使用相同范围/解析边界。本阶段继续对齐 DBX 的 completion 状态机：`db.audit.` 可在同一结果中优先解析 `audit.logs` 与直接 collection method，统一替换 `db.` 后的完整 qualified prefix；`find().count()` 只在 Host 真正接受的单链位置出现，已有 sort/skip/limit 链不误提示；`//`、`--`、块注释和 method-shaped string 均不会触发幽灵候选。 | Rust/前端单元测试覆盖 native JSON 回归、shell→native contract、dotted collection、Extended JSON、字段级 argument routing、options、写方法、破坏性分类、链式分页、多命令/注释/字符串分号和补全范围，并覆盖 OIDC URL canonicalization、HTTPS IdP gate、scope 去重与 native-route gate。现支持受限的 `use <database>`：仅接受单个 bare database token，经 Host Mongo 名称校验后更新驱动 active database；同一批后续 shell command 按顺序继承新库，Query tab 也同步固定新 target schema，再由既有 `USE` 元数据刷新链更新 Explorer，避免 UI/执行目标漂移。真实 MongoDB OIDC provider、MongoDB 版本/权限、write concern/index options 和并发 mutation 验证仍按统一数据库阶段执行。 |
 | Elasticsearch Console 传输与最小权限探活 | 对齐 DBX `crates/dbx-core/src/db/elasticsearch_driver.rs` 和 `lib/connection/elasticsearchKibanaProxy.ts`：`_bulk`、`_msearch`、`_msearch/template` 逐行验证 JSON、补终止换行并使用 `application/x-ndjson`。连接可选择直连或 Kibana/OpenSearch Dashboards Console Proxy；代理固定 POST `/api/console/proxy`，保留原始 method/path，发送 `kbn-xsrf`/`osd-xsrf`，并读取 `x-console-proxy-status-code` 作为真实 ES 状态。连接表单提供链路示意、部署 base path、受限 GET 探活路径和显式跳过探活；配置进入 Rust 持久化模型，内部参数在驱动解析后从真实请求 base URL 删除。自定义探活成功后仅 best-effort 读取根版本，不因 `/` 权限不足推翻成功；跳过探活时 server version 保持未知，不伪造版本。 | Rust 定向测试覆盖选项解析/剥离、路径越界拒绝、代理 URL/method/XSRF、代理状态码、NDJSON、禁用探活与旧连接迁移；前端测试覆盖 URL 序列化、大小写兼容、旧参数清除和粘贴 GET 规范化。真实 Kibana/OpenSearch Dashboards base path、反向代理认证、ES 6/7/8/OpenSearch 最小权限账号仍按统一真实产品阶段验证。 |
 
 ### 最新增量审计（`1d98eca99` → `f075caef2`）

@@ -14,6 +14,7 @@ pub mod influxdb;
 pub mod influxdb3;
 pub mod meilisearch;
 pub mod mongodb;
+pub(crate) mod mongodb_oidc;
 mod mongodb_shell;
 pub mod mysql;
 pub mod nacos;
@@ -199,6 +200,11 @@ pub async fn connect_agent_read_only_preferred_driver(
             requested_driver
         ));
     }
+    if canonical_driver == "mongodb" && mongodb::mongodb_url_uses_oidc(url) {
+        return Err(anyhow::anyhow!(
+            "MongoDB OIDC browser authentication is unavailable to headless agents"
+        ));
+    }
     let active_external = registry.list_installed().into_iter().any(|package| {
         package.active
             && package
@@ -252,6 +258,12 @@ pub async fn connect_preferred_driver(
             "Unsupported database driver: {}",
             requested_driver
         ));
+    }
+    // Interactive OIDC requires the bundled driver's browser callback.  Do
+    // not route it through an active/pinned external package that cannot
+    // prove the same callback and token-isolation contract.
+    if canonical_driver == "mongodb" && mongodb::mongodb_url_uses_oidc(url) {
+        return connect_driver(canonical_driver, url).await;
     }
     let active_external = registry.list_installed().into_iter().any(|package| {
         package.active

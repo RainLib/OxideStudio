@@ -31,6 +31,7 @@ use core::parser::SqlParser;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -48,6 +49,13 @@ pub fn run() {
         .manage(manager)
         .manage(lsp_state)
         .setup(|app| {
+            let oidc_app_handle = app.handle().clone();
+            drivers::mongodb_oidc::set_browser_opener(Arc::new(move |url| {
+                oidc_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|error| format!("Failed to open the system browser: {error}"))
+            }));
             #[cfg(desktop)]
             {
                 let mut updater = tauri_plugin_updater::Builder::new();

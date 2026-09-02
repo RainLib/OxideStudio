@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Bson, Document},
+    options::ClientOptions,
     results::CollectionType,
     Client,
 };
@@ -280,13 +281,28 @@ impl MongoDbDriver {
     }
 }
 
+/// OIDC is an interactive native-driver flow.  It must never be delegated to
+/// an arbitrary external package just because that package happens to be the
+/// active MongoDB implementation for regular connections.
+pub(crate) fn mongodb_url_uses_oidc(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    url.query_pairs().any(|(key, candidate)| {
+        key.eq_ignore_ascii_case("authMechanism") && candidate.eq_ignore_ascii_case("MONGODB-OIDC")
+    })
+}
+
 #[async_trait]
 impl DatabaseDriver for MongoDbDriver {
     async fn connect(&mut self) -> Result<()> {
         let default_database = self.default_database.clone();
-        let client = Client::with_uri_str(&self.url)
+        let mut options = ClientOptions::parse(&self.url)
             .await
             .with_context(|| format!("Failed to connect to MongoDB at {}", self.url))?;
+        super::mongodb_oidc::configure_client_options(&mut options)
+            .context("Failed to configure MongoDB OIDC authentication")?;
+        let client = Client::with_options(options).context("Failed to create MongoDB client")?;
         client
             .database("admin")
             .run_command(doc! { "ping": 1 })
@@ -1614,6 +1630,22 @@ mod tests {
             Value::String("reporting".to_string())
         );
         assert_eq!(results[0].rows[0][1], Value::String("use".to_string()));
+    }
+
+    #[test]
+    fn detects_oidc_authentication_without_accepting_lookalike_parameters() {
+        assert!(mongodb_url_uses_oidc(
+            "mongodb://localhost/app?authSource=%24external&authMechanism=MONGODB-OIDC"
+        ));
+        assert!(mongodb_url_uses_oidc(
+            "mongodb://localhost/app?AUTHMECHANISM=mongodb-oidc"
+        ));
+        assert!(!mongodb_url_uses_oidc(
+            "mongodb://localhost/app?authMechanism=SCRAM-SHA-256"
+        ));
+        assert!(!mongodb_url_uses_oidc(
+            "mongodb://localhost/app?notAuthMechanism=MONGODB-OIDC"
+        ));
     }
 
     #[test]

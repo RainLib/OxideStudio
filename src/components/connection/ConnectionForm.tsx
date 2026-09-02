@@ -70,6 +70,7 @@ import {
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { shouldShowConnectionUrl } from "@/features/database-drivers/model/connectionFormVisibility";
+import { mongoConnectionUsesOidc, setMongoConnectionOidc } from "@/lib/mongodbOidcConnection";
 
 const CONNECTION_COLORS = [
   "#d9904f",
@@ -486,6 +487,7 @@ export function ConnectionForm({
   const isInfluxDb = fileDriver === "influxdb";
   const influxDbVersion = selectedConnection.influxDbVersion || "1";
   const isInfluxDb2 = isInfluxDb && influxDbVersion === "2";
+  const isMongoDb = fileDriver === "mongodb";
   const isVictoriaMetrics = fileDriver === "victoriametrics";
   const isRocketMq = fileDriver === "rocketmq";
   const fileExtension =
@@ -558,6 +560,7 @@ export function ConnectionForm({
           })
       : baseGeneratedUrl;
   const displayedUrl = selectedConnection.connectionUrl?.trim() || generatedUrl;
+  const mongoOidcEnabled = isMongoDb && mongoConnectionUsesOidc(displayedUrl);
   const sshTunnel = {
     enabled: false,
     host: "",
@@ -611,6 +614,15 @@ export function ConnectionForm({
             }
           : {}),
       },
+    });
+    setStatus(null);
+  };
+
+  const setMongoOidcEnabled = (enabled: boolean) => {
+    const nextUrl = setMongoConnectionOidc(displayedUrl, enabled);
+    updateConnectionConfig({
+      connectionUrl: nextUrl,
+      ...(enabled ? { user: "", password: "", driverPackageVersion: undefined } : {}),
     });
     setStatus(null);
   };
@@ -1437,7 +1449,7 @@ export function ConnectionForm({
 
               {!isFileBased && (
               <>
-              {!isInfluxDb3 && !isInfluxDb2 && (
+              {!isInfluxDb3 && !isInfluxDb2 && !mongoOidcEnabled && (
                 <>
                   <label className={labelClass} htmlFor="connection-user">
                     User
@@ -1454,10 +1466,10 @@ export function ConnectionForm({
                 </>
               )}
 
-              <label className={labelClass} htmlFor="connection-password">
+              {!mongoOidcEnabled && <label className={labelClass} htmlFor="connection-password">
                 {isInfluxDb3 || isInfluxDb2 ? "API token" : "Password"}
-              </label>
-              <div className="relative">
+              </label>}
+              {!mongoOidcEnabled && <div className="relative">
                 <input
                   id="connection-password"
                   type={showPassword ? "text" : "password"}
@@ -1483,7 +1495,25 @@ export function ConnectionForm({
                 >
                   {showPassword ? <EyeOff size={12} /> : <Eye size={12} />}
                 </button>
-              </div>
+              </div>}
+              {isMongoDb && (
+                <>
+                  <label className={labelClass} htmlFor="connection-mongodb-oidc">
+                    Authentication
+                  </label>
+                  <div className="flex min-h-7 items-center gap-2">
+                    <Switch
+                      id="connection-mongodb-oidc"
+                      checked={mongoOidcEnabled}
+                      onCheckedChange={setMongoOidcEnabled}
+                    />
+                    <div>
+                      <span className="text-[11px] text-[hsl(var(--wb-text))]">Sign in with browser (MongoDB OIDC)</span>
+                      {mongoOidcEnabled && <p className="text-[10px] wb-muted">The system browser opens during test or connect. Tokens remain in the MongoDB driver and are never saved by OxideStudio.</p>}
+                    </div>
+                  </div>
+                </>
+              )}
               {isInfluxDb3 && (
                 <>
                   <span />
