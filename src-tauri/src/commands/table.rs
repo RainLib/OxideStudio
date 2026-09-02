@@ -7757,6 +7757,20 @@ async fn resolve_table_data_transfer_plan_isolated(
         .map_err(|error| format!("Table transfer planning task failed: {error}"))?
 }
 
+async fn resolve_table_data_transfer_batch_plan_isolated(
+    manager: &ConnectionManager,
+    request: TableDataTransferBatchPlanRequest,
+) -> Result<ResolvedTableDataTransferBatchPlan, String> {
+    let manager = manager.clone();
+    let task =
+        tokio::spawn(
+            async move { resolve_table_data_transfer_batch_plan(&manager, request).await },
+        );
+    let _abort_on_drop = AbortTableDataTransferTaskOnDrop(task.abort_handle());
+    task.await
+        .map_err(|error| format!("Batch transfer planning task failed: {error}"))?
+}
+
 impl TableDataTransferProgressRelay {
     fn new(app: AppHandle) -> Self {
         let (sender, mut receiver) = mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
@@ -12224,7 +12238,7 @@ pub async fn preview_table_data_transfer_batch_plan(
     manager: State<'_, ConnectionManager>,
     request: TableDataTransferBatchPlanRequest,
 ) -> Result<Response<TableDataTransferBatchPlan>, String> {
-    match resolve_table_data_transfer_batch_plan(&manager, request).await {
+    match resolve_table_data_transfer_batch_plan_isolated(&manager, request).await {
         Ok(resolved) => Ok(Response::ok(resolved.plan)),
         Err(error) => Ok(Response::err(
             "PREVIEW_TABLE_DATA_TRANSFER_BATCH_PLAN_ERROR",
@@ -12952,7 +12966,7 @@ pub async fn execute_table_data_transfer_batch(
     let mut expected_objects = Vec::<TableDataTransferObjectResult>::new();
     let result: Result<TableDataTransferBatchResult, String> = async {
         let resolved_batch_plan =
-            resolve_table_data_transfer_batch_plan(&manager, request.plan.clone()).await?;
+            resolve_table_data_transfer_batch_plan_isolated(&manager, request.plan.clone()).await?;
         let batch_plan = resolved_batch_plan.plan;
         let object_plan = resolved_batch_plan.object_plan;
         expected_objects = object_plan.results.clone();
