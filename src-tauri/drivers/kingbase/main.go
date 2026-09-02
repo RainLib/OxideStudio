@@ -123,7 +123,7 @@ func main() {
 func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	switch request.Method {
 	case "handshake":
-		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": false, "schemaObjects": true, "schemaObjectMembers": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
+		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": true, "schemaObjects": true, "schemaObjectMembers": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
 	case "connect":
 		var p struct {
 			ConnectionID string       `json:"connection_id"`
@@ -436,6 +436,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		}
 		return map[string]any{"kind": "metadata", "value": out}, nil
 	}
+	if p.Request.Kind == "referencingForeignKeys" {
+		out, err := listKingbaseReferencingForeignKeys(db, p.Request.Namespace, p.Request.Relation)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
 	if p.Request.Kind == "schemaObjects" {
 		out, err := listKingbaseSchemaObjects(db, p.Request.Namespace)
 		if err != nil {
@@ -645,6 +652,66 @@ LEFT JOIN information_schema.check_constraints cc
   ON cc.constraint_catalog = tc.constraint_catalog AND cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
 WHERE tc.table_schema = $1 AND tc.table_name = $2
 ORDER BY tc.constraint_name, kcu.ordinal_position`
+}
+
+func listKingbaseReferencingForeignKeys(db *sql.DB, schema, table string) ([]any, error) {
+	if strings.TrimSpace(schema) == "" || strings.TrimSpace(table) == "" {
+		return []any{}, nil
+	}
+	rows, err := db.Query(kingbaseReferencingForeignKeysQuery(), schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type foreignKeyEntry struct {
+		name, sourceSchema, sourceTable, referencedSchema, referencedTable string
+		columns, referencedColumns                                         []string
+	}
+	byKey := map[string]*foreignKeyEntry{}
+	order := []string{}
+	for rows.Next() {
+		var name, sourceSchema, sourceTable, column, referencedSchema, referencedTable, referencedColumn string
+		if err := rows.Scan(&name, &sourceSchema, &sourceTable, &column, &referencedSchema, &referencedTable, &referencedColumn); err != nil {
+			return nil, err
+		}
+		key := sourceSchema + "\x00" + sourceTable + "\x00" + name
+		item := byKey[key]
+		if item == nil {
+			item = &foreignKeyEntry{name: name, sourceSchema: sourceSchema, sourceTable: sourceTable, referencedSchema: referencedSchema, referencedTable: referencedTable, columns: []string{}, referencedColumns: []string{}}
+			byKey[key] = item
+			order = append(order, key)
+		}
+		item.columns = append(item.columns, column)
+		item.referencedColumns = append(item.referencedColumns, referencedColumn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(order))
+	for _, key := range order {
+		item := byKey[key]
+		out = append(out, map[string]any{
+			"name": item.name, "schema": item.sourceSchema, "table": item.sourceTable, "columns": item.columns,
+			"referenced_schema": item.referencedSchema, "referenced_table": item.referencedTable, "referenced_columns": item.referencedColumns,
+		})
+	}
+	return out, nil
+}
+
+func kingbaseReferencingForeignKeysQuery() string {
+	return `SELECT fk.constraint_name, fk.table_schema, fk.table_name, fk.column_name,
+  pk.table_schema, pk.table_name, pk.column_name
+FROM information_schema.table_constraints tc
+JOIN information_schema.key_column_usage fk
+  ON fk.constraint_catalog = tc.constraint_catalog AND fk.constraint_schema = tc.constraint_schema
+  AND fk.constraint_name = tc.constraint_name AND fk.table_schema = tc.table_schema AND fk.table_name = tc.table_name
+JOIN information_schema.referential_constraints rc
+  ON rc.constraint_catalog = tc.constraint_catalog AND rc.constraint_schema = tc.constraint_schema AND rc.constraint_name = tc.constraint_name
+JOIN information_schema.key_column_usage pk
+  ON pk.constraint_catalog = rc.unique_constraint_catalog AND pk.constraint_schema = rc.unique_constraint_schema
+  AND pk.constraint_name = rc.unique_constraint_name AND pk.ordinal_position = fk.position_in_unique_constraint
+WHERE tc.constraint_type = 'FOREIGN KEY' AND pk.table_schema = $1 AND pk.table_name = $2
+ORDER BY fk.table_schema, fk.table_name, fk.constraint_name, fk.ordinal_position`
 }
 
 func listKingbaseRoutines(db *sql.DB, schema string) ([]any, error) {

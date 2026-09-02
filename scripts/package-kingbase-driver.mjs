@@ -17,7 +17,7 @@ const CAPABILITIES = {
   supportsKeyValueBrowsing: false, supportsSchemas: true, supportsDatabaseCatalogs: true, supportsConnectionDatabase: true,
   supportsCreateDatabase: false, supportsCreateDatabaseOwner: false, supportsCreateDatabaseCharset: false, supportsCreateDatabaseCollation: false,
   supportsColumnComments: false, supportsInlineColumnComments: false, supportsRenameDatabase: false, supportsViews: true, supportsReplaceView: false,
-  supportsMaterializedViews: false, supportsTableIndexes: true, supportsTableConstraints: true, supportsForeignKeys: false, supportsCheckConstraints: true,
+  supportsMaterializedViews: false, supportsTableIndexes: true, supportsTableConstraints: true, supportsForeignKeys: true, supportsCheckConstraints: true,
   supportsFunctions: true, supportsTransactions: false, supportsQueryCancellation: true, autoIncrementKeyword: null, defaultPrimaryKeyType: "",
 };
 function option(name) { const i = process.argv.indexOf(name); if (i < 0) return null; const v = process.argv[i + 1]; if (!v || v.startsWith("--")) throw new Error(`${name} requires a value`); return v; }

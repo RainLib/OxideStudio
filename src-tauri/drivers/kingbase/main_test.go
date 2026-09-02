@@ -72,6 +72,13 @@ func TestKingbaseSchemaObjectQueriesUseBoundScope(t *testing.T) {
 	}
 }
 
+func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
+	query := kingbaseReferencingForeignKeysQuery()
+	if !strings.Contains(query, "pk.table_schema = $1 AND pk.table_name = $2") {
+		t.Fatalf("referencing foreign-key query must bind the target: %s", query)
+	}
+}
+
 func TestCancelOnlySignalsTheMatchingKingbaseQuery(t *testing.T) {
 	canceled := false
 	a := &agent{connections: map[string]*sql.DB{}, active: map[string]context.CancelFunc{}}
