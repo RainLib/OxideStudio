@@ -643,6 +643,26 @@ fn safe_run_file(run: &SqliteBackupRun) -> Option<PathBuf> {
     (parent == destination).then_some(path)
 }
 
+/// Deletes only a history entry's verified backup artifact. Keeping this
+/// separate from the command makes compressed-file behavior testable without
+/// opening the persisted schedule store, and preserves the same symlink/type
+/// protections for `.sqlite` and `.sqlite.gz` artifacts.
+fn delete_safe_run_file(run: &SqliteBackupRun) -> Result<(), String> {
+    let Some(path) = safe_run_file(run) else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("Backup history points to an unsafe file type".to_string())
+        }
+        Ok(_) => {
+            std::fs::remove_file(path).map_err(|_| "Cannot delete the backup file".to_string())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Cannot inspect the backup file".to_string()),
+    }
+}
+
 fn safe_run_error(error: &str, cancelled: bool) -> String {
     let normalized = error.to_ascii_lowercase();
     if cancelled || normalized.contains("cancelled") {
@@ -1164,17 +1184,7 @@ pub async fn delete_sqlite_backup_run(
         if run.status == SqliteBackupRunStatus::Running {
             return Err("A running backup cannot be deleted".to_string());
         }
-        if let Some(path) = safe_run_file(&run) {
-            match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err("Backup history points to an unsafe file type".to_string());
-                }
-                Ok(_) => std::fs::remove_file(path)
-                    .map_err(|_| "Cannot delete the backup file".to_string())?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err("Cannot inspect the backup file".to_string()),
-            }
-        }
+        delete_safe_run_file(&run)?;
         data.runs.retain(|run| run.id != run_id);
         state.persist(&data)?;
         Ok(true)
@@ -1416,7 +1426,9 @@ mod tests {
             progress_percent: 100,
             error: None,
         };
-        assert_eq!(safe_run_file(&run), Some(compressed));
+        assert_eq!(safe_run_file(&run), Some(compressed.clone()));
+        delete_safe_run_file(&run).unwrap();
+        assert!(!compressed.exists());
     }
 
     #[test]
