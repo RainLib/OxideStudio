@@ -8,7 +8,7 @@ use crate::core::{
     explain::{build_explain_statement, parse_explain_results},
     manager::ConnectionManager,
     parser::{CompletionContext, SqlParser},
-    protocol::{ExplainPlan, ExplainPlanMode, QueryResult, Response},
+    protocol::{ExplainPlan, ExplainPlanMode, NativeQueryPage, QueryResult, Response},
     statement::{
         split_sql_statement_spans_with_soft_boundaries, split_sql_statements,
         validate_read_only_sql, SqlStatementSpan, StatementScanDialect,
@@ -40,6 +40,8 @@ const MAX_DATABASE_ERROR_IDENTIFIER_CHARS: usize = 512;
 const MAX_SQL_SYNTAX_VALIDATION_CHARS: usize = 500_000;
 const MAX_SQL_SYNTAX_DIAGNOSTIC_CHARS: usize = 1_000;
 const MAX_CACHED_STATEMENT_RANGES: usize = 10_000;
+const MAX_NATIVE_QUERY_PAGE_SIZE: u32 = 10_000;
+const MAX_NATIVE_QUERY_CURSOR_CHARS: usize = 128;
 
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -563,6 +565,132 @@ pub async fn execute_query(
         database,
     )
     .await
+}
+
+/// Start a bounded external-driver result cursor. The cursor is opaque to the
+/// WebView: only the backend may pass it back to the connection that issued
+/// it, and it is released by an explicit close, disconnect, cancellation, or
+/// sidecar restart.
+#[tauri::command]
+pub async fn execute_native_query_page(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    sql: String,
+    page_size: u32,
+    max_rows: Option<u32>,
+    query_id: Option<String>,
+) -> Result<Response<NativeQueryPage>, String> {
+    if let Err(error) = validate_native_query_page_size(page_size, max_rows) {
+        return Ok(Response::err("NATIVE_QUERY_PAGE_INVALID", &error));
+    }
+    let context = serde_json::json!({
+        "connectionId": connection_id,
+        "pageSize": page_size,
+        "maxRows": max_rows,
+        "queryId": query_id,
+    });
+    match manager
+        .query_native_page(
+            &connection_id,
+            query_id.as_deref(),
+            &sql,
+            page_size,
+            max_rows,
+        )
+        .await
+    {
+        Ok(page) => Ok(Response::ok(page)),
+        Err(error) => Ok(Response::err_with_details(
+            "NATIVE_QUERY_PAGE_ERROR",
+            &error.to_string(),
+            true,
+            Some(context),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_native_query_page(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    cursor: String,
+    page_size: u32,
+    query_id: Option<String>,
+) -> Result<Response<NativeQueryPage>, String> {
+    if let Err(error) = validate_native_query_page_size(page_size, None)
+        .and_then(|_| validate_native_query_cursor(&cursor))
+    {
+        return Ok(Response::err("NATIVE_QUERY_PAGE_INVALID", &error));
+    }
+    let context = serde_json::json!({
+        "connectionId": connection_id,
+        "pageSize": page_size,
+        "queryId": query_id,
+    });
+    match manager
+        .fetch_native_query_page(&connection_id, query_id.as_deref(), &cursor, page_size)
+        .await
+    {
+        Ok(page) => Ok(Response::ok(page)),
+        Err(error) => Ok(Response::err_with_details(
+            "NATIVE_QUERY_PAGE_ERROR",
+            &error.to_string(),
+            true,
+            Some(context),
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn close_native_query_page(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    cursor: String,
+) -> Result<Response<()>, String> {
+    if let Err(error) = validate_native_query_cursor(&cursor) {
+        return Ok(Response::err("NATIVE_QUERY_PAGE_INVALID", &error));
+    }
+    match manager
+        .close_native_query_page(&connection_id, &cursor)
+        .await
+    {
+        Ok(()) => Ok(Response::ok(())),
+        Err(error) => Ok(Response::err_with_details(
+            "NATIVE_QUERY_PAGE_CLOSE_ERROR",
+            &error.to_string(),
+            true,
+            Some(serde_json::json!({ "connectionId": connection_id })),
+        )),
+    }
+}
+
+fn validate_native_query_page_size(page_size: u32, max_rows: Option<u32>) -> Result<(), String> {
+    if page_size == 0 || page_size > MAX_NATIVE_QUERY_PAGE_SIZE {
+        return Err(format!(
+            "page_size must be between 1 and {MAX_NATIVE_QUERY_PAGE_SIZE}"
+        ));
+    }
+    if let Some(max_rows) = max_rows {
+        if max_rows == 0 || max_rows > MAX_NATIVE_QUERY_PAGE_SIZE {
+            return Err(format!(
+                "max_rows must be between 1 and {MAX_NATIVE_QUERY_PAGE_SIZE}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_native_query_cursor(cursor: &str) -> Result<(), String> {
+    let cursor = cursor.trim();
+    if cursor.is_empty()
+        || cursor.len() > MAX_NATIVE_QUERY_CURSOR_CHARS
+        || !cursor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Native query cursor is invalid".to_string());
+    }
+    Ok(())
 }
 
 /// Resolve the SQL statement under the Monaco cursor using the same
@@ -1945,6 +2073,22 @@ mod tests {
                 .chars()
                 .count(),
             MAX_DATABASE_ERROR_IDENTIFIER_CHARS
+        );
+    }
+
+    #[test]
+    fn native_query_paging_inputs_are_bounded_and_cursor_safe() {
+        assert!(validate_native_query_page_size(1, None).is_ok());
+        assert!(validate_native_query_page_size(MAX_NATIVE_QUERY_PAGE_SIZE, Some(10)).is_ok());
+        assert!(validate_native_query_page_size(0, None).is_err());
+        assert!(validate_native_query_page_size(MAX_NATIVE_QUERY_PAGE_SIZE + 1, None).is_err());
+        assert!(validate_native_query_page_size(100, Some(0)).is_err());
+
+        assert!(validate_native_query_cursor("aB09_-cursor").is_ok());
+        assert!(validate_native_query_cursor("cursor with spaces").is_err());
+        assert!(validate_native_query_cursor("../../cursor").is_err());
+        assert!(
+            validate_native_query_cursor(&"a".repeat(MAX_NATIVE_QUERY_CURSOR_CHARS + 1)).is_err()
         );
     }
 }

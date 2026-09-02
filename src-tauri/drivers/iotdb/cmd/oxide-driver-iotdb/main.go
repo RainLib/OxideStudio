@@ -3,7 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +28,16 @@ type sessionState struct {
 	activeMu sync.Mutex
 	session  *iotdb.Session
 	active   map[string]context.CancelFunc
+	queries  map[string]*querySession
+}
+
+// querySession keeps the native result set inside the sidecar. Its ID is
+// opaque and scoped to one connected IoTDB session.
+type querySession struct {
+	cursor        *iotdb.QueryCursor
+	queryID       string
+	statementType string
+	remaining     uint32
 }
 
 func main() {
@@ -94,7 +107,7 @@ func (s *sidecar) dispatch(request iotdb.RequestEnvelope) (any, *iotdb.ProtocolE
 		if err != nil {
 			return nil, iotdb.Fail("CONNECT_FAILED", err.Error())
 		}
-		state := &sessionState{session: session, active: map[string]context.CancelFunc{}}
+		state := &sessionState{session: session, active: map[string]context.CancelFunc{}, queries: map[string]*querySession{}}
 		s.mu.Lock()
 		previous := s.sessions[value.ConnectionID]
 		s.sessions[value.ConnectionID] = state
@@ -118,6 +131,12 @@ func (s *sidecar) dispatch(request iotdb.RequestEnvelope) (any, *iotdb.ProtocolE
 		return s.serverVersion(request.Params)
 	case "query":
 		return s.query(request.Params)
+	case "queryPage":
+		return s.queryPage(request.Params)
+	case "fetchQueryPage":
+		return s.fetchQueryPage(request.Params)
+	case "closeQuerySession":
+		return s.closeQuerySession(request.Params)
 	case "metadata":
 		return s.metadata(request.Params)
 	case "cancel":
@@ -209,6 +228,9 @@ func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	if state.session == nil {
 		return nil, iotdb.Fail("CONNECTION_NOT_FOUND", "Connection is closed")
 	}
+	if len(state.queries) != 0 {
+		return nil, iotdb.Fail("QUERY_SESSION_ACTIVE", "Close or finish the active paged query before issuing another statement")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	queryID := value.QueryID
 	if queryID == "" {
@@ -240,6 +262,217 @@ func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
 	}
 	return map[string]any{"kind": "query", "value": []any{map[string]any{"columns": protocolColumns(result), "rows": result.Rows, "truncated": result.Truncated, "rowLimit": iotdb.MaxQueryRows, "rowsAffected": result.RowsAffected}}}, nil
+}
+
+// queryPage begins a native paged query. It intentionally permits only
+// read-only result statements; mutations continue through the ordinary query
+// route and cannot create a cursor.
+func (s *sidecar) queryPage(raw json.RawMessage) (any, *iotdb.ProtocolError) {
+	var value struct {
+		ConnectionID string            `json:"connection_id"`
+		Statement    string            `json:"statement"`
+		Parameters   []json.RawMessage `json:"parameters"`
+		PageSize     uint32            `json:"page_size"`
+		MaxRows      *uint32           `json:"max_rows"`
+		QueryID      string            `json:"query_id"`
+		Context      struct {
+			Database string `json:"database"`
+			ReadOnly bool   `json:"read_only"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, iotdb.Fail("INVALID_REQUEST", err.Error())
+	}
+	if len(value.Parameters) != 0 {
+		return nil, iotdb.Fail("PARAMETERS_UNSUPPORTED", "IoTDB native package does not support bound query parameters")
+	}
+	pageSize, failure := boundedPageSize(value.PageSize)
+	if failure != nil {
+		return nil, failure
+	}
+	maxRows := uint32(iotdb.MaxQueryRows)
+	if value.MaxRows != nil {
+		if *value.MaxRows == 0 || *value.MaxRows > uint32(iotdb.MaxQueryRows) {
+			return nil, iotdb.Fail("INVALID_PAGE_LIMIT", fmt.Sprintf("max_rows must be between 1 and %d", iotdb.MaxQueryRows))
+		}
+		maxRows = *value.MaxRows
+	}
+	state, failure := s.session(value.ConnectionID)
+	if failure != nil {
+		return nil, failure
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.session == nil {
+		return nil, iotdb.Fail("CONNECTION_NOT_FOUND", "Connection is closed")
+	}
+	if len(state.queries) != 0 {
+		return nil, iotdb.Fail("QUERY_SESSION_ACTIVE", "Only one native paged query may be active per IoTDB connection")
+	}
+	if !iotdb.IsQueryStatement(value.Statement) || value.Context.ReadOnly && !iotdb.IsReadOnlyStatement(value.Statement) {
+		return nil, iotdb.Fail("READ_ONLY_REJECTED", "Paged queries require one read-only IoTDB statement")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	queryID := value.QueryID
+	if queryID == "" {
+		queryID = "__default__"
+	}
+	state.setActive(queryID, cancel)
+	defer state.clearActive(queryID, cancel)
+	if err := state.session.UseDatabase(ctx, value.Context.Database); err != nil {
+		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
+	}
+	cursor, err := state.session.OpenQueryCursor(ctx, value.Statement, state.session.TimestampPrecision())
+	if ctx.Err() != nil {
+		s.invalidate(value.ConnectionID, state)
+	}
+	if err != nil {
+		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
+	}
+	querySessionID, err := nextQuerySessionID()
+	if err != nil {
+		_ = cursor.Close()
+		return nil, iotdb.Fail("QUERY_SESSION_FAILED", err.Error())
+	}
+	query := &querySession{cursor: cursor, queryID: queryID, statementType: statementType(value.Statement), remaining: maxRows}
+	state.queries[querySessionID] = query
+	result, hasMore, err := readQueryPage(ctx, query, pageSize)
+	if ctx.Err() != nil {
+		s.invalidate(value.ConnectionID, state)
+	}
+	if err != nil {
+		delete(state.queries, querySessionID)
+		_ = query.cursor.Close()
+		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
+	}
+	if !hasMore {
+		delete(state.queries, querySessionID)
+		_ = query.cursor.Close()
+		return queryPageResult(result, "", false, query.statementType), nil
+	}
+	return queryPageResult(result, querySessionID, true, query.statementType), nil
+}
+
+func (s *sidecar) fetchQueryPage(raw json.RawMessage) (any, *iotdb.ProtocolError) {
+	var value struct {
+		ConnectionID string `json:"connection_id"`
+		SessionID    string `json:"session_id"`
+		PageSize     uint32 `json:"page_size"`
+		QueryID      string `json:"query_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, iotdb.Fail("INVALID_REQUEST", err.Error())
+	}
+	pageSize, failure := boundedPageSize(value.PageSize)
+	if failure != nil {
+		return nil, failure
+	}
+	state, failure := s.session(value.ConnectionID)
+	if failure != nil {
+		return nil, failure
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	query := state.queries[value.SessionID]
+	if state.session == nil || query == nil {
+		return nil, iotdb.Fail("QUERY_SESSION_NOT_FOUND", "Paged query session is no longer available")
+	}
+	if value.QueryID != "" && value.QueryID != query.queryID {
+		return nil, iotdb.Fail("QUERY_SESSION_SCOPE_MISMATCH", "Paged query belongs to a different request")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	state.setActive(query.queryID, cancel)
+	defer state.clearActive(query.queryID, cancel)
+	result, hasMore, err := readQueryPage(ctx, query, pageSize)
+	if ctx.Err() != nil {
+		s.invalidate(value.ConnectionID, state)
+	}
+	if err != nil {
+		delete(state.queries, value.SessionID)
+		_ = query.cursor.Close()
+		return nil, iotdb.Fail("QUERY_FAILED", err.Error())
+	}
+	if !hasMore {
+		delete(state.queries, value.SessionID)
+		_ = query.cursor.Close()
+		return queryPageResult(result, "", false, query.statementType), nil
+	}
+	return queryPageResult(result, value.SessionID, true, query.statementType), nil
+}
+
+func (s *sidecar) closeQuerySession(raw json.RawMessage) (any, *iotdb.ProtocolError) {
+	var value struct {
+		ConnectionID string `json:"connection_id"`
+		SessionID    string `json:"session_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, iotdb.Fail("INVALID_REQUEST", err.Error())
+	}
+	state, failure := s.session(value.ConnectionID)
+	if failure != nil {
+		return nil, failure
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	query := state.queries[value.SessionID]
+	if query == nil {
+		return map[string]any{"kind": "empty"}, nil
+	}
+	delete(state.queries, value.SessionID)
+	if err := query.cursor.Close(); err != nil {
+		return nil, iotdb.Fail("QUERY_CLOSE_FAILED", err.Error())
+	}
+	return map[string]any{"kind": "empty"}, nil
+}
+
+func boundedPageSize(value uint32) (uint32, *iotdb.ProtocolError) {
+	if value == 0 || value > uint32(iotdb.MaxQueryRows) {
+		return 0, iotdb.Fail("INVALID_PAGE_SIZE", fmt.Sprintf("page_size must be between 1 and %d", iotdb.MaxQueryRows))
+	}
+	return value, nil
+}
+
+func readQueryPage(ctx context.Context, query *querySession, pageSize uint32) (iotdb.QueryResult, bool, error) {
+	if query.remaining == 0 {
+		return iotdb.QueryResult{}, false, nil
+	}
+	if pageSize > query.remaining {
+		pageSize = query.remaining
+	}
+	result, hasMore, err := query.cursor.ReadPage(ctx, int(pageSize))
+	if err != nil {
+		return iotdb.QueryResult{}, false, err
+	}
+	if uint32(len(result.Rows)) >= query.remaining {
+		query.remaining = 0
+		result.Truncated = hasMore
+		return result, false, nil
+	}
+	query.remaining -= uint32(len(result.Rows))
+	return result, hasMore && query.remaining > 0, nil
+}
+
+func queryPageResult(result iotdb.QueryResult, sessionID string, hasMore bool, queryType string) map[string]any {
+	return map[string]any{
+		"kind": "queryPage",
+		"value": map[string]any{
+			"result": map[string]any{
+				"columns": protocolColumns(result), "rows": result.Rows, "truncated": false,
+				"rowLimit": len(result.Rows), "rowsAffected": result.RowsAffected,
+				"statementType": queryType,
+			},
+			"sessionId": sessionID,
+			"hasMore":   hasMore,
+		},
+	}
+}
+
+func nextQuerySessionID() (string, error) {
+	bytes := make([]byte, 18)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate paged query session ID: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 func (s *sidecar) serverVersion(raw json.RawMessage) (any, *iotdb.ProtocolError) {
@@ -412,12 +645,23 @@ func (s *sessionState) clearActive(queryID string, cancel context.CancelFunc) {
 
 func (s *sessionState) cancel(queryID string) bool {
 	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
 	if queryID == "" {
 		queryID = "__default__"
 	}
 	if cancel := s.active[queryID]; cancel != nil {
 		cancel()
+		s.activeMu.Unlock()
+		return true
+	}
+	s.activeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sessionID, query := range s.queries {
+		if query.queryID != queryID {
+			continue
+		}
+		delete(s.queries, sessionID)
+		_ = query.cursor.Close()
 		return true
 	}
 	return false
@@ -431,6 +675,10 @@ func (s *sessionState) close() {
 	s.active = map[string]context.CancelFunc{}
 	s.activeMu.Unlock()
 	s.mu.Lock()
+	for sessionID, query := range s.queries {
+		delete(s.queries, sessionID)
+		_ = query.cursor.Close()
+	}
 	if s.session != nil {
 		_ = s.session.Close()
 		s.session = nil

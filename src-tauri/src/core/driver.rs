@@ -4,8 +4,8 @@ use super::{
     protocol::{
         CollectionInfo, ColumnInfo, ConstraintInfo, DatabaseCreateRequest, DatabaseInfo,
         ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, NacosConfigPublishReceipt,
-        NacosConfigPublishRequest, NacosConfigSnapshot, ParameterizedStatement, QueryParameter,
-        QueryResult, SchemaObjectInfo, TableInfo,
+        NacosConfigPublishRequest, NacosConfigSnapshot, NativeQueryPage, ParameterizedStatement,
+        QueryParameter, QueryResult, SchemaObjectInfo, TableInfo,
     },
 };
 use anyhow::{anyhow, Result};
@@ -259,6 +259,35 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Execute a query and return generic result set
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>>;
+
+    /// Start a bounded, driver-owned native cursor. SQL drivers which only
+    /// support materialized result sets retain the default unsupported result;
+    /// callers must not emulate this with generated LIMIT/OFFSET SQL.
+    async fn query_native_page(
+        &self,
+        _query_id: Option<&str>,
+        _sql: &str,
+        _page_size: u32,
+        _max_rows: Option<u32>,
+    ) -> Result<NativeQueryPage> {
+        Err(unsupported_driver_feature("Native query pagination"))
+    }
+
+    /// Continue a page from the same native driver cursor.
+    async fn fetch_native_query_page(
+        &self,
+        _query_id: Option<&str>,
+        _cursor: &str,
+        _page_size: u32,
+    ) -> Result<NativeQueryPage> {
+        Err(unsupported_driver_feature("Native query pagination"))
+    }
+
+    /// Release a native query cursor. This operation is idempotent at the
+    /// driver boundary so tab disposal and reconnect cleanup can race safely.
+    async fn close_native_query_page(&self, _cursor: &str) -> Result<()> {
+        Err(unsupported_driver_feature("Native query pagination"))
+    }
 
     /// Execute a query against an explicitly selected server database.
     ///

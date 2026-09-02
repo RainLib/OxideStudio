@@ -1,6 +1,7 @@
 import { invokeWithInterceptors } from "./client";
 import type {
   QueryResult,
+  NativeQueryPage,
   CompletionContext,
   ExplainPlan,
   ExplainQueryRequest,
@@ -72,6 +73,46 @@ export async function validateSqlSyntax(
     sql,
     ...(lspLanguageId ? { lspLanguageId } : {}),
     ...(lspServerDialect ? { lspServerDialect } : {}),
+  });
+}
+
+export async function executeNativeQueryPage(
+  connectionId: string,
+  sql: string,
+  pageSize: number,
+  maxRows?: number,
+  queryId?: string,
+): Promise<NativeQueryPage> {
+  return invokeWithInterceptors<NativeQueryPage>("execute_native_query_page", {
+    connectionId,
+    sql,
+    pageSize,
+    maxRows,
+    queryId,
+  });
+}
+
+export async function fetchNativeQueryPage(
+  connectionId: string,
+  cursor: string,
+  pageSize: number,
+  queryId?: string,
+): Promise<NativeQueryPage> {
+  return invokeWithInterceptors<NativeQueryPage>("fetch_native_query_page", {
+    connectionId,
+    cursor,
+    pageSize,
+    queryId,
+  });
+}
+
+export async function closeNativeQueryPage(
+  connectionId: string,
+  cursor: string,
+): Promise<void> {
+  await invokeWithInterceptors<void>("close_native_query_page", {
+    connectionId,
+    cursor,
   });
 }
 
@@ -168,6 +209,9 @@ export async function getSqlCompletion(
  */
 export const queryService = {
   executeQuery,
+  executeNativeQueryPage,
+  fetchNativeQueryPage,
+  closeNativeQueryPage,
   executeReadOnlyQuery,
   previewSqlScriptImport,
   importSqlScript,

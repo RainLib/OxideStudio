@@ -324,6 +324,17 @@ pub struct DocumentPage {
     pub total: Option<u64>,
 }
 
+/// One bounded page from a native SQL/result cursor. Unlike table OFFSET
+/// paging, `next_cursor` is opaque and only valid for the originating live
+/// connection. It lets external drivers retain vendor-native cursor semantics
+/// without rewriting the submitted statement.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeQueryPage {
+    pub result: QueryResult,
+    pub next_cursor: Option<String>,
+}
+
 /// Driver-owned Elasticsearch-compatible metadata endpoints. Keeping the
 /// endpoint as a closed enum prevents renderer input from becoming an
 /// arbitrary transport path.

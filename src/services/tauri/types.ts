@@ -573,6 +573,16 @@ export interface QueryResult {
   responseMeta?: QueryResponseMeta;
 }
 
+/**
+ * A page backed by a live driver cursor. `nextCursor` is opaque and valid only
+ * for the connection that returned it; callers must close it when abandoning
+ * the result view.
+ */
+export interface NativeQueryPage {
+  result: QueryResult;
+  nextCursor?: string | null;
+}
+
 export interface DatabaseSearchColumn {
   name: string;
   dataType: string;

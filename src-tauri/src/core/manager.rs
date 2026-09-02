@@ -879,6 +879,40 @@ impl ConnectionManager {
         }
     }
 
+    pub async fn query_native_page(
+        &self,
+        id: &str,
+        query_id: Option<&str>,
+        sql: &str,
+        page_size: u32,
+        max_rows: Option<u32>,
+    ) -> Result<super::protocol::NativeQueryPage> {
+        self.get_driver(id)
+            .await?
+            .query_native_page(query_id, sql, page_size, max_rows)
+            .await
+    }
+
+    pub async fn fetch_native_query_page(
+        &self,
+        id: &str,
+        query_id: Option<&str>,
+        cursor: &str,
+        page_size: u32,
+    ) -> Result<super::protocol::NativeQueryPage> {
+        self.get_driver(id)
+            .await?
+            .fetch_native_query_page(query_id, cursor, page_size)
+            .await
+    }
+
+    pub async fn close_native_query_page(&self, id: &str, cursor: &str) -> Result<()> {
+        self.get_driver(id)
+            .await?
+            .close_native_query_page(cursor)
+            .await
+    }
+
     pub async fn cancel_query(&self, id: &str, query_id: &str) -> Result<bool> {
         let driver = self.get_driver(id).await?;
         driver.cancel_query(query_id).await

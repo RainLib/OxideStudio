@@ -26,6 +26,43 @@ func TestQueryRejectsBoundParametersBeforeOpeningSession(t *testing.T) {
 	}
 }
 
+func TestPagedQueryRejectsInvalidBoundsBeforeOpeningSession(t *testing.T) {
+	server := &sidecar{sessions: map[string]*sessionState{}}
+	params, err := json.Marshal(map[string]any{
+		"connection_id": "missing", "statement": "SELECT 1", "page_size": 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, failure := server.queryPage(params)
+	if failure == nil || failure.Code != "INVALID_PAGE_SIZE" {
+		t.Fatalf("failure = %#v", failure)
+	}
+
+	params, err = json.Marshal(map[string]any{
+		"connection_id": "missing", "statement": "SELECT 1", "page_size": 10, "max_rows": iotdb.MaxQueryRows + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, failure = server.queryPage(params)
+	if failure == nil || failure.Code != "INVALID_PAGE_LIMIT" {
+		t.Fatalf("failure = %#v", failure)
+	}
+}
+
+func TestHandshakeAdvertisesNativeQueryPaging(t *testing.T) {
+	handshake := iotdb.Handshake()
+	value, ok := handshake["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("handshake value = %#v", handshake["value"])
+	}
+	capabilities, ok := value["capabilities"].(map[string]any)
+	if !ok || capabilities["queryPaging"] != true {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+}
+
 func TestCancelOnlySignalsTheMatchingActiveQuery(t *testing.T) {
 	canceled := false
 	state := &sessionState{active: map[string]context.CancelFunc{

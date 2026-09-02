@@ -8,7 +8,7 @@ use crate::core::{
     driver_sidecar::DatabaseDriverSidecar,
     protocol::{
         CollectionInfo, CollectionPage, ColumnDef, ColumnInfo, ConstraintInfo,
-        DatabaseCreateRequest, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo,
+        DatabaseCreateRequest, ForeignKeyReferenceInfo, FunctionInfo, IndexInfo, NativeQueryPage,
         ParameterizedStatement, QueryParameter, QueryResult, TableInfo,
     },
     statement::StatementScanDialect,
@@ -16,7 +16,7 @@ use crate::core::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use oxide_driver_protocol::{
-    DatabaseCreateRequest as SidecarDatabaseCreateRequest, DriverQueryContext,
+    DatabaseCreateRequest as SidecarDatabaseCreateRequest, DriverQueryContext, DriverQueryPage,
     DriverQueryParameter, DriverQueryResult, DriverRequest, DriverResult, MetadataRequest,
     SchemaMigrationApplyRequest, SchemaMigrationApplyResult, SchemaMigrationMode,
     SchemaMigrationPlanRequest, SchemaMigrationPlanResult, SchemaMigrationPreflightRequest,
@@ -254,6 +254,99 @@ impl ExternalDriver {
         results.into_iter().map(query_result_from_sidecar).collect()
     }
 
+    async fn query_native_page_with_context(
+        &self,
+        query_id: Option<&str>,
+        statement: &str,
+        context: DriverQueryContext,
+        page_size: u32,
+        max_rows: Option<u32>,
+    ) -> Result<NativeQueryPage> {
+        let context = DriverQueryContext {
+            read_only: self.agent_read_only || context.read_only,
+            ..context
+        };
+        if !self.capabilities.lock().await.query_paging {
+            return Err(anyhow!(
+                "External driver runtime does not provide native query pagination"
+            ));
+        }
+        let result = self
+            .request(
+                DriverRequest::QueryPage {
+                    connection_id: self.connection_id.clone(),
+                    statement: statement.to_string(),
+                    parameters: Vec::new(),
+                    context,
+                    page_size,
+                    max_rows,
+                    query_id: query_id.map(str::to_string),
+                },
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let DriverResult::QueryPage(page) = result else {
+            return Err(anyhow!(
+                "External driver returned an invalid native query page response"
+            ));
+        };
+        native_query_page_from_sidecar(page)
+    }
+
+    async fn fetch_native_query_page_with_context(
+        &self,
+        query_id: Option<&str>,
+        cursor: &str,
+        page_size: u32,
+    ) -> Result<NativeQueryPage> {
+        if !self.capabilities.lock().await.query_paging {
+            return Err(anyhow!(
+                "External driver runtime does not provide native query pagination"
+            ));
+        }
+        let result = self
+            .request(
+                DriverRequest::FetchQueryPage {
+                    connection_id: self.connection_id.clone(),
+                    session_id: cursor.to_string(),
+                    page_size,
+                    query_id: query_id.map(str::to_string),
+                },
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let DriverResult::QueryPage(page) = result else {
+            return Err(anyhow!(
+                "External driver returned an invalid native query page response"
+            ));
+        };
+        native_query_page_from_sidecar(page)
+    }
+
+    async fn close_native_query_page_with_context(&self, cursor: &str) -> Result<()> {
+        if !self.capabilities.lock().await.query_paging {
+            return Err(anyhow!(
+                "External driver runtime does not provide native query pagination"
+            ));
+        }
+        let result = self
+            .request(
+                DriverRequest::CloseQuerySession {
+                    connection_id: self.connection_id.clone(),
+                    session_id: cursor.to_string(),
+                },
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        if matches!(result, DriverResult::Empty) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "External driver returned an invalid native query close response"
+            ))
+        }
+    }
+
     async fn metadata<T: DeserializeOwned>(&self, request: MetadataRequest) -> Result<T> {
         if !self.capabilities.lock().await.metadata {
             return Err(anyhow!("External driver package does not provide metadata"));
@@ -392,6 +485,22 @@ fn query_result_from_sidecar(result: DriverQueryResult) -> Result<QueryResult> {
         statement_type: result.statement_type,
         message: result.message,
         response_meta: None,
+    })
+}
+
+fn native_query_page_from_sidecar(page: DriverQueryPage) -> Result<NativeQueryPage> {
+    let next_cursor = match (page.session_id, page.has_more) {
+        (Some(session_id), true) if !session_id.trim().is_empty() => Some(session_id),
+        (None, false) => None,
+        _ => {
+            return Err(anyhow!(
+                "External driver returned an invalid native query cursor state"
+            ))
+        }
+    };
+    Ok(NativeQueryPage {
+        result: query_result_from_sidecar(page.result)?,
+        next_cursor,
     })
 }
 
@@ -820,6 +929,37 @@ impl DatabaseDriver for ExternalDriver {
     async fn query(&self, sql: &str) -> Result<Vec<QueryResult>> {
         self.query_with_context(None, sql, DriverQueryContext::default())
             .await
+    }
+
+    async fn query_native_page(
+        &self,
+        query_id: Option<&str>,
+        sql: &str,
+        page_size: u32,
+        max_rows: Option<u32>,
+    ) -> Result<NativeQueryPage> {
+        self.query_native_page_with_context(
+            query_id,
+            sql,
+            DriverQueryContext::default(),
+            page_size,
+            max_rows,
+        )
+        .await
+    }
+
+    async fn fetch_native_query_page(
+        &self,
+        query_id: Option<&str>,
+        cursor: &str,
+        page_size: u32,
+    ) -> Result<NativeQueryPage> {
+        self.fetch_native_query_page_with_context(query_id, cursor, page_size)
+            .await
+    }
+
+    async fn close_native_query_page(&self, cursor: &str) -> Result<()> {
+        self.close_native_query_page_with_context(cursor).await
     }
 
     async fn query_database(&self, database: &str, sql: &str) -> Result<Vec<QueryResult>> {
@@ -1626,6 +1766,49 @@ mod tests {
             external_statement_scan_dialect("mongodb", Some("mongodb")),
             None
         );
+    }
+
+    #[test]
+    fn native_query_pages_require_consistent_opaque_cursor_state() {
+        let result = DriverQueryResult {
+            columns: Vec::new(),
+            rows: vec![vec![serde_json::json!(1)]],
+            truncated: false,
+            row_limit: Some(1),
+            rows_affected: None,
+            statement_type: Some("SELECT".to_string()),
+            message: None,
+        };
+        let page = native_query_page_from_sidecar(DriverQueryPage {
+            result: result.clone(),
+            session_id: Some("opaque-cursor".to_string()),
+            has_more: true,
+        })
+        .unwrap();
+        assert_eq!(page.next_cursor.as_deref(), Some("opaque-cursor"));
+
+        let final_page = native_query_page_from_sidecar(DriverQueryPage {
+            result,
+            session_id: None,
+            has_more: false,
+        })
+        .unwrap();
+        assert!(final_page.next_cursor.is_none());
+
+        let inconsistent = native_query_page_from_sidecar(DriverQueryPage {
+            result: DriverQueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                truncated: false,
+                row_limit: None,
+                rows_affected: None,
+                statement_type: None,
+                message: None,
+            },
+            session_id: Some("unexpected".to_string()),
+            has_more: false,
+        });
+        assert!(inconsistent.is_err());
     }
 
     #[test]

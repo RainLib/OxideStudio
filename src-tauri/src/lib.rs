@@ -249,6 +249,9 @@ pub fn run() {
             enterprise::enterprise_connect_managed_source,
             // Query commands
             commands::query::execute_query,
+            commands::query::execute_native_query_page,
+            commands::query::fetch_native_query_page,
+            commands::query::close_native_query_page,
             commands::query::resolve_sql_statement_at_cursor,
             commands::query::validate_sql_syntax,
             commands::query::build_dml_change_preview_sql,

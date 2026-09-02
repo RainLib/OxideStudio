@@ -46,6 +46,11 @@ pub struct HandshakeResponse {
 pub struct DriverRuntimeCapabilities {
     pub metadata: bool,
     pub query: bool,
+    /// The sidecar can keep a bounded native result cursor and exposes its
+    /// lifecycle through QueryPage/FetchQueryPage/CloseQuerySession. This is
+    /// deliberately separate from `query`: callers must not synthesize LIMIT
+    /// or OFFSET SQL for an external dialect.
+    pub query_paging: bool,
     pub cancellation: bool,
     pub transactions: bool,
     pub database_scoped_queries: bool,
@@ -114,6 +119,30 @@ pub enum DriverRequest {
         context: DriverQueryContext,
         #[serde(default)]
         query_id: Option<String>,
+    },
+    QueryPage {
+        connection_id: String,
+        statement: String,
+        #[serde(default)]
+        parameters: Vec<DriverQueryParameter>,
+        #[serde(default)]
+        context: DriverQueryContext,
+        page_size: u32,
+        #[serde(default)]
+        max_rows: Option<u32>,
+        #[serde(default)]
+        query_id: Option<String>,
+    },
+    FetchQueryPage {
+        connection_id: String,
+        session_id: String,
+        page_size: u32,
+        #[serde(default)]
+        query_id: Option<String>,
+    },
+    CloseQuerySession {
+        connection_id: String,
+        session_id: String,
     },
     Cancel {
         connection_id: String,
@@ -440,6 +469,7 @@ pub enum DriverResult {
     Boolean(bool),
     ServerVersion(Option<String>),
     Query(Vec<DriverQueryResult>),
+    QueryPage(DriverQueryPage),
     Metadata(Value),
     SchemaMigrationPlan(SchemaMigrationPlanResult),
     SchemaMigrationPreflight(SchemaMigrationPreflightResult),
@@ -462,6 +492,21 @@ pub struct DriverQueryResult {
     pub statement_type: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+/// A bounded page returned by an external driver's native result cursor.
+///
+/// `session_id` is intentionally opaque to the desktop host. It is only
+/// accepted by the same external-driver connection and is invalidated by a
+/// close, disconnect, cancellation, or sidecar restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverQueryPage {
+    pub result: DriverQueryResult,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -554,6 +599,80 @@ mod tests {
     }
 
     #[test]
+    fn query_paging_requests_keep_cursor_identity_and_bounds_explicit() {
+        let start = DriverRequestEnvelope {
+            id: 9,
+            request: DriverRequest::QueryPage {
+                connection_id: "connection-1".to_string(),
+                statement: "SELECT * FROM metrics".to_string(),
+                parameters: Vec::new(),
+                context: DriverQueryContext::default(),
+                page_size: 250,
+                max_rows: Some(1_000),
+                query_id: Some("query-1".to_string()),
+            },
+        };
+        let encoded = serde_json::to_value(&start).unwrap();
+        assert_eq!(encoded["method"], "queryPage");
+        assert_eq!(encoded["params"]["connection_id"], "connection-1");
+        assert_eq!(encoded["params"]["page_size"], 250);
+        assert_eq!(encoded["params"]["max_rows"], 1_000);
+        assert_eq!(
+            serde_json::from_value::<DriverRequestEnvelope>(encoded).unwrap(),
+            start
+        );
+
+        let fetch = DriverRequestEnvelope {
+            id: 10,
+            request: DriverRequest::FetchQueryPage {
+                connection_id: "connection-1".to_string(),
+                session_id: "opaque-session".to_string(),
+                page_size: 250,
+                query_id: None,
+            },
+        };
+        let encoded = serde_json::to_value(&fetch).unwrap();
+        assert_eq!(encoded["method"], "fetchQueryPage");
+        assert_eq!(encoded["params"]["session_id"], "opaque-session");
+
+        let close = DriverRequestEnvelope {
+            id: 11,
+            request: DriverRequest::CloseQuerySession {
+                connection_id: "connection-1".to_string(),
+                session_id: "opaque-session".to_string(),
+            },
+        };
+        let encoded = serde_json::to_value(&close).unwrap();
+        assert_eq!(encoded["method"], "closeQuerySession");
+        assert_eq!(encoded["params"]["session_id"], "opaque-session");
+    }
+
+    #[test]
+    fn query_page_result_round_trips_without_exposing_cursor_in_rows() {
+        let page = DriverResult::QueryPage(DriverQueryPage {
+            result: DriverQueryResult {
+                columns: vec![DriverColumn {
+                    name: "time".to_string(),
+                    data_type: "TIMESTAMP".to_string(),
+                }],
+                rows: vec![vec![serde_json::json!(1)]],
+                truncated: false,
+                row_limit: Some(250),
+                rows_affected: None,
+                statement_type: Some("SELECT".to_string()),
+                message: None,
+            },
+            session_id: Some("opaque-session".to_string()),
+            has_more: true,
+        });
+        let encoded = serde_json::to_value(&page).unwrap();
+        assert_eq!(encoded["kind"], "queryPage");
+        assert_eq!(encoded["value"]["sessionId"], "opaque-session");
+        assert_eq!(encoded["value"]["hasMore"], true);
+        assert_eq!(serde_json::from_value::<DriverResult>(encoded).unwrap(), page);
+    }
+
+    #[test]
     fn create_database_request_stays_semantic_and_never_carries_sql() {
         let envelope = DriverRequestEnvelope {
             id: 11,
@@ -628,6 +747,7 @@ mod tests {
         .unwrap();
         assert!(capabilities.metadata);
         assert!(!capabilities.referencing_foreign_keys);
+        assert!(!capabilities.query_paging);
         assert!(!capabilities.schema_objects);
         assert!(!capabilities.schema_object_members);
         assert!(!capabilities.semantic_schema_migration);
