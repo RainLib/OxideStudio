@@ -76,3 +76,99 @@ func IsQueryStatement(statement string) bool {
 	}
 	return false
 }
+
+// IsReadOnlyStatement is the package-side safety gate used when the Host
+// marks an external-driver request as read-only. A leading WITH is not enough:
+// it can legally contain a data-modifying CTE. The scanner deliberately
+// ignores quoted text and comments, rejects multi-statements, and fails closed
+// for every mutation or transaction keyword it can observe.
+func IsReadOnlyStatement(statement string) bool {
+	tokens := iotdbSQLTokens(statement)
+	if len(tokens) == 0 {
+		return false
+	}
+	first := tokens[0]
+	switch first {
+	case "select", "show", "desc", "describe", "explain", "with":
+	default:
+		return false
+	}
+	semicolons := 0
+	hasSelect := first == "select"
+	for _, token := range tokens {
+		if token == ";" {
+			semicolons++
+			continue
+		}
+		if token == "select" {
+			hasSelect = true
+		}
+		switch token {
+		case "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate", "grant", "revoke", "call", "begin", "commit", "rollback", "set", "use":
+			return false
+		}
+	}
+	if semicolons > 1 || semicolons == 1 && tokens[len(tokens)-1] != ";" {
+		return false
+	}
+	return first != "with" || hasSelect
+}
+
+func iotdbSQLTokens(statement string) []string {
+	bytes := []byte(statement)
+	tokens := []string{}
+	for index := 0; index < len(bytes); {
+		switch bytes[index] {
+		case '\'', '"', '`':
+			quote := bytes[index]
+			index++
+			for index < len(bytes) {
+				if bytes[index] == quote {
+					index++
+					if index < len(bytes) && bytes[index] == quote {
+						index++
+						continue
+					}
+					break
+				}
+				index++
+			}
+		case '-':
+			if index+1 < len(bytes) && bytes[index+1] == '-' {
+				index += 2
+				for index < len(bytes) && bytes[index] != '\n' {
+					index++
+				}
+			} else {
+				index++
+			}
+		case '/':
+			if index+1 < len(bytes) && bytes[index+1] == '*' {
+				index += 2
+				for index+1 < len(bytes) && !(bytes[index] == '*' && bytes[index+1] == '/') {
+					index++
+				}
+				if index+1 < len(bytes) {
+					index += 2
+				}
+			} else {
+				index++
+			}
+		case ';':
+			tokens = append(tokens, ";")
+			index++
+		default:
+			if bytes[index] >= 'a' && bytes[index] <= 'z' || bytes[index] >= 'A' && bytes[index] <= 'Z' || bytes[index] == '_' {
+				start := index
+				index++
+				for index < len(bytes) && ((bytes[index] >= 'a' && bytes[index] <= 'z') || (bytes[index] >= 'A' && bytes[index] <= 'Z') || (bytes[index] >= '0' && bytes[index] <= '9') || bytes[index] == '_') {
+					index++
+				}
+				tokens = append(tokens, strings.ToLower(string(bytes[start:index])))
+			} else {
+				index++
+			}
+		}
+	}
+	return tokens
+}

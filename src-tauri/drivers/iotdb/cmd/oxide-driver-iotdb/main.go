@@ -216,7 +216,7 @@ func (s *sidecar) query(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	}
 	state.setActive(queryID, cancel)
 	defer state.clearActive(queryID, cancel)
-	if value.Context.ReadOnly && !iotdb.IsQueryStatement(value.Statement) {
+	if value.Context.ReadOnly && !iotdb.IsReadOnlyStatement(value.Statement) {
 		return nil, iotdb.Fail("READ_ONLY_REJECTED", "Read-only query required")
 	}
 	if err := state.session.UseDatabase(ctx, value.Context.Database); err != nil {
