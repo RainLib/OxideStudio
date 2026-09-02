@@ -31,7 +31,11 @@ func Handshake() map[string]any {
 			"capabilities": map[string]any{
 				"metadata": true, "query": true, "queryPaging": true, "cancellation": true, "transactions": false,
 				"databaseScopedQueries": true, "databaseCreation": false, "referencingForeignKeys": false,
-				"schemaObjects": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false,
+				// IoTDB exposes devices and tables through the relation catalog. It
+				// does not currently expose independent descriptor objects (such as
+				// types or sequences), so do not advertise schemaObjects merely
+				// because objectSource can render relation DDL.
+				"schemaObjects": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false,
 			},
 		},
 	}

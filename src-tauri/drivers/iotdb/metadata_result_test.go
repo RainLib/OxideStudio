@@ -22,13 +22,27 @@ func TestAdaptMetadataForTreeAndTableResults(t *testing.T) {
 }
 
 func TestAdaptMetadataOmitsUnprovenRows(t *testing.T) {
-	value, err := AdaptMetadata("databases", "", "", QueryResult{Rows: [][]any{{nil}, {"metrics"}}})
+	value, err := AdaptMetadata("databases", "", "", QueryResult{Rows: [][]any{{nil}, {"metrics"}, {"archive"}, {"metrics"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	databases := value.([]string)
-	if len(databases) != 1 || databases[0] != "metrics" {
+	if len(databases) != 2 || databases[0] != "archive" || databases[1] != "metrics" {
 		t.Fatalf("databases=%#v", databases)
+	}
+}
+
+func TestAdaptMetadataRelationsAreUniqueAndStable(t *testing.T) {
+	value, err := AdaptMetadata("relations", "root.factory", "", QueryResult{
+		Columns: []string{"Device"},
+		Rows:    [][]any{{"root.factory.zeta"}, {"root.factory.alpha"}, {"root.factory.zeta"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := value.([]map[string]any)
+	if len(items) != 2 || items[0]["name"] != "alpha" || items[1]["name"] != "zeta" {
+		t.Fatalf("relations=%#v", items)
 	}
 }
 

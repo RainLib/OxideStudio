@@ -23,3 +23,14 @@ func TestIoTDBHandshakeUsesTheExternalDriverProtocolShape(t *testing.T) {
 		t.Fatalf("handshake = %#v", handshake)
 	}
 }
+
+func TestIoTDBHandshakeDoesNotAdvertiseUnsupportedDescriptorObjects(t *testing.T) {
+	value, ok := Handshake()["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("handshake value=%#v", Handshake()["value"])
+	}
+	capabilities, ok := value["capabilities"].(map[string]any)
+	if !ok || capabilities["schemaObjects"] != false {
+		t.Fatalf("capabilities=%#v", capabilities)
+	}
+}

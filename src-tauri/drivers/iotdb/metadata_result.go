@@ -2,6 +2,7 @@ package iotdb
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -13,16 +14,23 @@ func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, erro
 	switch kind {
 	case "databases", "schemas":
 		values := make([]string, 0, len(result.Rows))
+		seen := make(map[string]struct{}, len(result.Rows))
 		for _, row := range result.Rows {
 			if len(row) > 0 {
 				if value := stringValue(row[0]); value != "" {
+					if _, exists := seen[value]; exists {
+						continue
+					}
+					seen[value] = struct{}{}
 					values = append(values, value)
 				}
 			}
 		}
+		sort.Strings(values)
 		return values, nil
 	case "relations":
 		items := make([]map[string]any, 0, len(result.Rows))
+		seen := make(map[string]struct{}, len(result.Rows))
 		nameIndex := columnIndex(result.Columns, "TableName", "table_name", "Device")
 		typeIndex := columnIndex(result.Columns, "TableType", "table_type")
 		commentIndex := columnIndex(result.Columns, "Comment", "comment")
@@ -31,12 +39,19 @@ func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, erro
 			if name == "" {
 				continue
 			}
+			if _, exists := seen[name]; exists {
+				continue
+			}
+			seen[name] = struct{}{}
 			item := map[string]any{"name": name, "schema": nullable(schema), "type": "TABLE", "comment": nullable(rowValue(row, commentIndex))}
 			if typ := rowValue(row, typeIndex); typ != "" {
 				item["type"] = typ
 			}
 			items = append(items, item)
 		}
+		sort.SliceStable(items, func(left, right int) bool {
+			return fmt.Sprint(items[left]["name"]) < fmt.Sprint(items[right]["name"])
+		})
 		return items, nil
 	case "columns":
 		items := make([]map[string]any, 0, len(result.Rows))
