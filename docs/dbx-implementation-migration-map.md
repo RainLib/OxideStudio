@@ -245,7 +245,11 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
   菜单将描述/快捷键同时用于可见提示、hover title 与 aria-label，支持 Escape、方向键、Home/End
   焦点导航。header/cell、过滤、FK 跳转、native document 与 staged mutation 均复用该契约，
   `data-grid-context-menu.test.ts` 覆盖提示和键盘边界。
-- [ ] Vim 跨区域导航由 focus router 管理，并覆盖 editor/grid/sidebar/tool-window。
+- [x] Vim 跨区域导航由 focus router 管理，并覆盖 editor/grid/sidebar/tool-window：
+  Monaco Vim normal mode 的 `Ctrl-w` 映射通过受限窗口导航事件交给 workbench；workbench 按当前
+  active surface 在 editor、left/right Tool Window 和 results grid 之间切换焦点，并支持关闭当前
+  tool window/tab。非编辑器焦点下也在 capture phase 处理同一前缀，避免由子控件各自解释。
+  `vim-mode-adapter.test.ts` 覆盖映射注册、dispatch 与 dispose 边界。
 - [ ] 主题、字体和高级外观设置由 token 层驱动，不向功能组件散落颜色值。
 
 ## 8. DBX 源码快速索引
