@@ -223,6 +223,20 @@ describe("app settings workbench layout", () => {
     ).toBe(true);
   });
 
+  it("keeps Explorer object hover tooltips opt-out and type-safe", () => {
+    expect(DEFAULT_APP_SETTINGS.databaseExplorer.showHoverTooltips).toBe(true);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { showHoverTooltips: false },
+      }).databaseExplorer.showHoverTooltips,
+    ).toBe(false);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { showHoverTooltips: "off" },
+      }).databaseExplorer.showHoverTooltips,
+    ).toBe(true);
+  });
+
   it("keeps blank-line full-document execution explicitly opt-in", () => {
     expect(DEFAULT_APP_SETTINGS.editor.executeAllOnBlankLine).toBe(false);
     expect(

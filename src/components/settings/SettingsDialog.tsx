@@ -2313,6 +2313,16 @@ function DatabaseExplorerSettings({
           })
         }
       />
+      <CheckboxLabel
+        label="Show object hover tooltips"
+        detail="Show connection and database-object details on hover. Turning this off also skips tooltip-only presentation work."
+        checked={databaseExplorer.showHoverTooltips}
+        onChange={() =>
+          updateDatabaseExplorer({
+            showHoverTooltips: !databaseExplorer.showHoverTooltips,
+          })
+        }
+      />
     </SettingsPanel>
   );
 }

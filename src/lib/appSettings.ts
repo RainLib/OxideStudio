@@ -168,6 +168,8 @@ export type AppSettings = {
     showOnlySelectedSchemas: boolean;
     showCacheBadges: boolean;
     showConnectionNotes: boolean;
+    /** Disable object-detail hover popups without removing keyboard labels. */
+    showHoverTooltips: boolean;
   };
   drivers: {
     /** HTTPS URL for the optional, signed external-driver discovery catalog. */
@@ -350,6 +352,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     showOnlySelectedSchemas: true,
     showCacheBadges: true,
     showConnectionNotes: true,
+    showHoverTooltips: true,
   },
   drivers: {
     catalogUrl: "",
@@ -813,6 +816,11 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["databaseExplorer", "showConnectionNotes"],
         defaults.databaseExplorer.showConnectionNotes,
+      ),
+      showHoverTooltips: boolAt(
+        raw,
+        ["databaseExplorer", "showHoverTooltips"],
+        defaults.databaseExplorer.showHoverTooltips,
       ),
     },
     drivers: {

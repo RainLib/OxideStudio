@@ -826,6 +826,8 @@ export function SchemaSidebar() {
   const shouldLimitVisibleSchemas =
     databaseExplorerSettings.showOnlySelectedSchemas;
   const explorerActivationMode = databaseExplorerSettings.activationMode;
+  const showExplorerHoverTooltips =
+    databaseExplorerSettings.showHoverTooltips;
 
   const {
     truncateTable,
@@ -3908,7 +3910,11 @@ export function SchemaSidebar() {
             <ContextMenuTrigger asChild>
               <div
                 className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                title={`${signature} -> ${returnType}`}
+                title={
+                  showExplorerHoverTooltips
+                    ? `${signature} -> ${returnType}`
+                    : undefined
+                }
               >
                 <Code2 size={12} className="shrink-0 opacity-70" />
                 <span className="min-w-0 flex-1 truncate">
@@ -4288,7 +4294,11 @@ export function SchemaSidebar() {
                       <ContextMenuTrigger asChild>
                         <div
                           className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
-                          title={`${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`}
+                          title={
+                            showExplorerHoverTooltips
+                              ? `${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`
+                              : undefined
+                          }
                         >
                           {object.membersExpandable ? (
                             <button
@@ -4483,9 +4493,11 @@ export function SchemaSidebar() {
                   );
                 }}
                 title={
-                  displayLabel === collection.name
-                    ? collection.name
-                    : `${displayLabel}\n${collection.name}`
+                  showExplorerHoverTooltips
+                    ? displayLabel === collection.name
+                      ? collection.name
+                      : `${displayLabel}\n${collection.name}`
+                    : undefined
                 }
                 aria-label={`${displayLabel}. ${explorerActivationLabel(explorerActivationMode)} to open data.`}
               >
@@ -5291,7 +5303,11 @@ export function SchemaSidebar() {
                               event.preventDefault();
                               void handleTableDoubleClick(table, schema);
                             }}
-                            title={`${relationObjectLabel(table.type)} · ${schema}.${table.name}\n${explorerActivationLabel(explorerActivationMode)} to open data · Ctrl/Cmd-click to select · Drag into a SQL editor · Right-click for actions`}
+                            title={
+                              showExplorerHoverTooltips
+                                ? `${relationObjectLabel(table.type)} · ${schema}.${table.name}\n${explorerActivationLabel(explorerActivationMode)} to open data · Ctrl/Cmd-click to select · Drag into a SQL editor · Right-click for actions`
+                                : undefined
+                            }
                           >
                             {isTableBatchSelectionActive && (
                               <Checkbox
@@ -6402,9 +6418,11 @@ export function SchemaSidebar() {
                           className="shrink-0"
                           style={{ color: connectionColor }}
                           title={
-                            isManagedConnection
-                              ? `${databaseDriverProfile(connection.driver).capabilities.displayName} through managed Gateway`
-                              : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`
+                            showExplorerHoverTooltips
+                              ? isManagedConnection
+                                ? `${databaseDriverProfile(connection.driver).capabilities.displayName} through managed Gateway`
+                                : `${databaseDriverProfile(connection.driver).capabilities.displayName} data source`
+                              : undefined
                           }
                         />
                         <ConnectionRuntimeBadge
@@ -6421,7 +6439,11 @@ export function SchemaSidebar() {
                           connection.note?.trim() && (
                             <span
                               className="ml-auto max-w-[42%] truncate text-[9px] font-normal text-[hsl(var(--wb-text-muted))]"
-                              title={connection.note.trim()}
+                              title={
+                                showExplorerHoverTooltips
+                                  ? connection.note.trim()
+                                  : undefined
+                              }
                             >
                               {connection.note.trim()}
                             </span>

@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-02
-> DBX 参考提交：`8772f10aa`（最新已审计提交）
+> DBX 参考提交：`e619b70d5`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -9,10 +9,11 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
-### 最新 HEAD 审计（`8772f10aa`）
+### 最新 HEAD 审计（`e619b70d5`）
 
 - DBX 最新增量包含设置页 Markdown 渲染、SQL Server 旧 probe 截断、PostgreSQL legacy `prokind`、MongoDB TTL index MCP 与 SQLite 文件权限修复。PostgreSQL routine metadata 的 `prokind` fallback 已落地；MongoDB TTL 已由完整 raw index definition 和专用 UI 表示保留。SQL Server probe 是 DBX native TDS 私有调用链，Oxide 不重写外置 package SQL；SQLite metadata DB 位于私有应用目录并由 credential-key 创建路径固定为 owner-private。额外补强 SQL LSP 的恢复路径：所有已注册的 DBX-compatible SQL 产品后缀（例如 `.sqlserver.sql`、`.oracle.sql`、`.dameng.sql`、`.redshift.sql`、`.kingbase.sql`、`.manticoresearch.sql`）现在在配置同步前也会推断到对应产品 identity，避免退回默认方言而丢失产品专用补全/诊断。
 - `245ea3b64` 与 `8772f10aa` 分别涉及 MongoDB transfer BSON 日期保真和 Elasticsearch Console DSL 补全。前者不应伪装为已完成的通用迁移：Oxide 当前 `TableDataTransfer` 仅对有审阅事务与行复制契约的关系型驱动开放，MongoDB 跨集合/跨连接 bulk transfer 尚未进入该能力面；现有单文档 clone/edit 已使用 canonical Extended JSON 并回归覆盖 `Bson::DateTime`。后者已补齐 Console 编辑态细节：未加引号的 JSON object key（例如 `term`）不会误判为 value/method，`match`、`term`、`exists` 等现有 DSL snippet 会按当前 JSON 行缩进插入；相关回归位于 `src/lib/elasticsearchConsole.test.ts`。这不替代真实 ES 版本验证。
+- `ee731a335` 只新增 DBX 已有 SQL prefix replacement 的回归案例；Oxide completion replacement 已由 Monaco/LSP range 和 `elasticsearchJsonKeyReplacementRange` 的完整 token 替换测试覆盖。`e619b70d5` 的 Explorer 悬浮提示开关已对齐：`databaseExplorer.showHoverTooltips` 默认开启、可在设置关闭；关闭后 object/connection hover detail 不再生成原生 tooltip，且保留所有可访问名称和操作。位置：`src/lib/appSettings.ts`、`SettingsDialog.tsx`、`SchemaSidebar.tsx`、`tests/frontend/app-settings.test.ts`。
 - 不把 DBX 的 CI 脚本、版本发布提交或删除的历史测试文件当作产品能力迁移；后续继续按提交对应的运行时/编辑器/驱动路径审计。
 
 ### Phase 171 增量：IoTDB / Kingbase 外置 Agent 执行边界
