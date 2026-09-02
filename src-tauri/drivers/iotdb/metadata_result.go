@@ -41,6 +41,7 @@ func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, erro
 		items := make([]map[string]any, 0, len(result.Rows))
 		nameIndex := columnIndex(result.Columns, "ColumnName", "column_name", "Timeseries")
 		typeIndex := columnIndex(result.Columns, "DataType", "data_type")
+		categoryIndex := columnIndex(result.Columns, "Category", "category")
 		for _, row := range result.Rows {
 			name := relativeTreeName(joinTreePath(schema, relation), rowValue(row, nameIndex))
 			if name == "" {
@@ -50,7 +51,9 @@ func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, erro
 			if typ == "" {
 				typ = "UNKNOWN"
 			}
-			items = append(items, map[string]any{"name": name, "data_type": typ, "is_nullable": true, "is_primary_key": false, "is_unique": false, "is_indexed": false, "is_auto_increment": false, "default_value": nil, "comment": nil})
+			category := strings.ToUpper(rowValue(row, categoryIndex))
+			isPrimary := category == "TIME" || category == "TAG"
+			items = append(items, map[string]any{"name": name, "data_type": typ, "is_nullable": !isPrimary, "is_primary_key": isPrimary, "is_unique": isPrimary, "is_indexed": isPrimary, "is_auto_increment": false, "default_value": nil, "comment": nil})
 		}
 		return items, nil
 	case "indexes", "constraints", "referencingForeignKeys", "routines", "schemaObjects", "schemaObjectMembers", "collections":
