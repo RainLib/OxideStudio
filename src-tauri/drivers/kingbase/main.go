@@ -123,7 +123,7 @@ func main() {
 func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	switch request.Method {
 	case "handshake":
-		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": true, "schemaObjects": true, "schemaObjectMembers": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
+		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": true, "schemaObjects": true, "schemaObjectMembers": true, "objectSource": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
 	case "connect":
 		var p struct {
 			ConnectionID string       `json:"connection_id"`

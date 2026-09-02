@@ -1,8 +1,10 @@
 package studio.oxide.jdbc;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.io.Reader;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -36,6 +38,9 @@ public final class DriverMain {
   private static final int MAX_RESULT_ROWS = 2_000;
   private static final int MAX_CELL_CHARACTERS = 8_192;
   private static final int MAX_RESULT_CHARACTERS = 3 * 1024 * 1024;
+  // Source definitions share the framed protocol with query results. Leave
+  // headroom below the Host's 4 MiB line limit.
+  private static final int MAX_OBJECT_SOURCE_CHARACTERS = 3 * 1024 * 1024;
   private static final int QUERY_TIMEOUT_SECONDS = 55;
   private static final Map<String, Connection> CONNECTIONS = new ConcurrentHashMap<>();
   // A JDBC Connection is not generally safe for arbitrary concurrent work.
@@ -123,7 +128,7 @@ public final class DriverMain {
     // Primary, imported and exported keys are part of the portable JDBC
     // DatabaseMetaData contract. Package capabilities still decide whether
     // Explorer exposes these nodes for a particular server family.
-    capabilities.put("referencingForeignKeys", true); capabilities.put("readOnlyEnforcement", false);
+    capabilities.put("referencingForeignKeys", true); capabilities.put("objectSource", isOracleDriver()); capabilities.put("readOnlyEnforcement", false);
     capabilities.put("semanticSchemaMigration", false);
     Map<String, Object> value = new LinkedHashMap<>();
     value.put("protocolVersion", "1.0"); value.put("packageId", requiredEnv("OXIDE_DRIVER_PACKAGE_ID"));
@@ -421,14 +426,75 @@ public final class DriverMain {
       case "constraints" -> constraints(metadata, nullable(request.get("database")), text(request.get("namespace")), text(request.get("relation")));
       case "referencingForeignKeys" -> referencingForeignKeys(metadata, nullable(request.get("database")), text(request.get("namespace")), text(request.get("relation")));
       case "routines" -> routines(metadata, nullable(request.get("database")), text(request.get("namespace")));
+      case "objectSource" -> objectSource(connection, request);
       case "collections" -> List.of();
       default -> throw new IllegalArgumentException("Unsupported JDBC metadata request: " + kind);
     };
   }
 
+  /**
+   * Oracle exposes materialized-view DDL through DBMS_METADATA rather than
+   * portable JDBC metadata. Keep this narrow, identity-gated adapter in the
+   * signed JDBC process: the Host never synthesizes vendor catalog SQL and
+   * every other JDBC product continues to return no source.
+   */
+  private static List<Object> objectSource(Connection connection, Map<String, Object> request) throws SQLException {
+    if (!isOracleDriver() || !isOracleMaterializedView(text(request.get("object_type")))) return List.of();
+    String schema = metadataIdentifier(request.get("namespace"), "schema");
+    String name = metadataIdentifier(request.get("object_name"), "object name");
+    String sql = "SELECT DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW', ?, ?) FROM DUAL";
+    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+      configureQueryStatement(statement);
+      statement.setString(1, name);
+      statement.setString(2, schema);
+      try (ResultSet rows = statement.executeQuery()) {
+        if (!rows.next()) return List.of();
+        String source = boundedObjectSource(rows, 1);
+        return source == null || source.isBlank() ? List.of() : List.of(source);
+      }
+    }
+  }
+
+  private static boolean isOracleDriver() { return "oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")); }
+
+  private static boolean isOracleMaterializedView(String objectType) {
+    if (objectType == null) return false;
+    String normalized = objectType.trim().toUpperCase(java.util.Locale.ROOT).replace(' ', '_');
+    return "MATERIALIZED_VIEW".equals(normalized);
+  }
+
+  private static String metadataIdentifier(Object value, String label) throws SQLException {
+    String identifier = value == null ? "" : String.valueOf(value).trim();
+    if (identifier.isEmpty() || identifier.length() > 256 || identifier.codePoints().anyMatch(Character::isISOControl)) {
+      throw new SQLException("The requested JDBC " + label + " is invalid");
+    }
+    return identifier;
+  }
+
+  private static String boundedObjectSource(ResultSet rows, int index) throws SQLException {
+    try (Reader reader = rows.getCharacterStream(index)) {
+      if (reader == null) return null;
+      StringBuilder source = new StringBuilder(); char[] chunk = new char[8_192]; int read;
+      try {
+        while ((read = reader.read(chunk)) >= 0) {
+          if (source.length() + read > MAX_OBJECT_SOURCE_CHARACTERS) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
+          source.append(chunk, 0, read);
+        }
+      } catch (IOException error) {
+        throw new SQLException("Unable to read JDBC object source", error);
+      }
+      return source.toString();
+    } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
+      String source = rows.getString(index);
+      if (source != null && source.length() > MAX_OBJECT_SOURCE_CHARACTERS) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
+      return source;
+    }
+  }
+
   private static List<Object> relations(DatabaseMetaData metadata, String catalog, String schema) throws SQLException {
-    List<Object> result = new ArrayList<>(); try (ResultSet rows = metadata.getTables(catalog, schema, "%", new String[]{"TABLE", "VIEW"})) {
-      while (rows.next()) { Map<String, Object> item = new LinkedHashMap<>(); item.put("name", rows.getString("TABLE_NAME")); item.put("schema", rows.getString("TABLE_SCHEM")); item.put("type", "VIEW".equalsIgnoreCase(rows.getString("TABLE_TYPE")) ? "view" : "table"); item.put("comment", rows.getString("REMARKS")); result.add(item); }
+    String[] relationTypes = isOracleDriver() ? new String[]{"TABLE", "VIEW", "MATERIALIZED VIEW"} : new String[]{"TABLE", "VIEW"};
+    List<Object> result = new ArrayList<>(); try (ResultSet rows = metadata.getTables(catalog, schema, "%", relationTypes)) {
+      while (rows.next()) { String relationType = rows.getString("TABLE_TYPE"); Map<String, Object> item = new LinkedHashMap<>(); item.put("name", rows.getString("TABLE_NAME")); item.put("schema", rows.getString("TABLE_SCHEM")); item.put("type", "MATERIALIZED VIEW".equalsIgnoreCase(relationType) ? "materialized_view" : "VIEW".equalsIgnoreCase(relationType) ? "view" : "table"); item.put("comment", rows.getString("REMARKS")); result.add(item); }
     } return result;
   }
   private static List<Object> columns(DatabaseMetaData metadata, String catalog, String schema, String relation) throws SQLException {
@@ -574,7 +640,7 @@ public final class DriverMain {
     }
   }
   private static boolean isOracleSdeGeometry(String typeName) {
-    if (!"oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")) || typeName == null) return false;
+    if (!isOracleDriver() || typeName == null) return false;
     String normalized = typeName.trim().toUpperCase(java.util.Locale.ROOT);
     return "SDE.ST_GEOMETRY".equals(normalized) || "ST_GEOMETRY".equals(normalized);
   }

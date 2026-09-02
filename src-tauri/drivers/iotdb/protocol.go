@@ -35,7 +35,7 @@ func Handshake() map[string]any {
 				// does not currently expose independent descriptor objects (such as
 				// types or sequences), so do not advertise schemaObjects merely
 				// because objectSource can render relation DDL.
-				"schemaObjects": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false,
+				"schemaObjects": false, "objectSource": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false,
 			},
 		},
 	}

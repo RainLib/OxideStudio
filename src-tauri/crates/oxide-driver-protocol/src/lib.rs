@@ -71,6 +71,11 @@ pub struct DriverRuntimeCapabilities {
     /// routines). This is separate from `schema_objects` so older packages
     /// cannot accidentally turn every descriptor into an expandable node.
     pub schema_object_members: bool,
+    /// The sidecar can return a driver-owned, read-only source definition for
+    /// a relation or descriptor. This is independent from `schema_objects`:
+    /// a driver may render a table or view definition without exposing a
+    /// separate type/package/sequence tree.
+    pub object_source: bool,
     /// The sidecar independently rejects mutation requests when
     /// `DriverQueryContext.read_only` is set. Agent-owned external drivers
     /// require this capability instead of trusting a host-side SQL parser.
@@ -750,6 +755,7 @@ mod tests {
         assert!(!capabilities.query_paging);
         assert!(!capabilities.schema_objects);
         assert!(!capabilities.schema_object_members);
+        assert!(!capabilities.object_source);
         assert!(!capabilities.semantic_schema_migration);
     }
 

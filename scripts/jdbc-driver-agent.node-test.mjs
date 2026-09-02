@@ -249,6 +249,7 @@ test("JDBC Agent keeps Oracle SDE geometry rows readable when vendor object deco
     `package fixture;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.io.StringReader;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
@@ -266,7 +267,7 @@ public final class OracleSdeDriver implements Driver {
   public Connection connect(String url, Properties properties) {
     if (!acceptsURL(url)) return null;
     return (Connection) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { Connection.class }, (proxy, method, args) -> {
-      if ("prepareStatement".equals(method.getName())) return statement();
+      if ("prepareStatement".equals(method.getName())) return statement((String) args[0]);
       if ("isValid".equals(method.getName())) return true;
       if ("isClosed".equals(method.getName())) return false;
       if ("close".equals(method.getName())) return null;
@@ -279,11 +280,24 @@ public final class OracleSdeDriver implements Driver {
   public Logger getParentLogger() { return Logger.getGlobal(); }
   public DriverPropertyInfo[] getPropertyInfo(String url, Properties properties) { return new DriverPropertyInfo[0]; }
 
-  private static PreparedStatement statement() {
+  private static PreparedStatement statement(String sql) {
     return (PreparedStatement) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
       if ("execute".equals(method.getName())) return true;
       if ("getResultSet".equals(method.getName())) return resultSet();
+      if ("executeQuery".equals(method.getName())) return objectSourceResultSet(sql);
       if ("close".equals(method.getName()) || "setQueryTimeout".equals(method.getName()) || "setFetchSize".equals(method.getName())) return null;
+      return defaultValue(method.getReturnType());
+    });
+  }
+
+  private static ResultSet objectSourceResultSet(String sql) {
+    final boolean metadataQuery = sql.contains("DBMS_METADATA.GET_DDL");
+    final int[] row = new int[] { -1 };
+    return (ResultSet) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
+      if ("next".equals(method.getName())) return metadataQuery && ++row[0] == 0;
+      if ("getCharacterStream".equals(method.getName())) return new StringReader("CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1");
+      if ("getString".equals(method.getName())) return "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
+      if ("close".equals(method.getName())) return null;
       return defaultValue(method.getReturnType());
     });
   }
@@ -359,8 +373,12 @@ public final class OracleSdeDriver implements Driver {
   );
   let responseBuffer = "";
   let resolveQuery;
+  let resolveMetadata;
   const queryResponse = new Promise((resolveResponse) => {
     resolveQuery = resolveResponse;
+  });
+  const metadataResponse = new Promise((resolveResponse) => {
+    resolveMetadata = resolveResponse;
   });
   agent.stdout.setEncoding("utf8");
   agent.stdout.on("data", (chunk) => {
@@ -370,6 +388,7 @@ public final class OracleSdeDriver implements Driver {
     for (const line of lines.filter(Boolean)) {
       const response = JSON.parse(line);
       if (response.id === 2) resolveQuery(response);
+      if (response.id === 3) resolveMetadata(response);
     }
   });
   agent.stdin.write(`${JSON.stringify({
@@ -382,12 +401,23 @@ public final class OracleSdeDriver implements Driver {
     method: "query",
     params: { connection_id: "oracle", statement: "SELECT id, shape FROM parcels", parameters: [], context: {} },
   })}\n`);
-  const response = await queryResponse;
+  agent.stdin.write(`${JSON.stringify({
+    id: 3,
+    method: "metadata",
+    params: {
+      connection_id: "oracle",
+      request: { kind: "objectSource", namespace: "HR", object_name: "SALES_MV", object_type: "MATERIALIZED_VIEW" },
+    },
+  })}\n`);
+  const [response, sourceResponse] = await Promise.all([queryResponse, metadataResponse]);
   agent.stdin.end();
   const [code] = await once(agent, "close");
   assert.equal(code, 0);
   assert.deepEqual(response?.result?.value?.[0]?.rows, [
     [41, "POINT (1 2)"],
     [42, "<SDE.ST_GEOMETRY unavailable in generic JDBC Agent>"],
+  ]);
+  assert.deepEqual(sourceResponse?.result?.value, [
+    'CREATE MATERIALIZED VIEW "HR"."SALES_MV" AS SELECT 1',
   ]);
 });

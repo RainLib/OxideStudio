@@ -1676,9 +1676,14 @@ impl DatabaseDriver for ExternalDriver {
         object_type: &str,
         relation_name: Option<&str>,
     ) -> Result<Vec<String>> {
-        if !self.capabilities.lock().await.schema_objects {
+        let capabilities = self.capabilities.lock().await;
+        // `schema_objects` was the original opt-in and remains accepted for
+        // already-published sidecars. New packages can expose source for
+        // ordinary relations without falsely claiming a descriptor tree.
+        if !capabilities.object_source && !capabilities.schema_objects {
             return Ok(Vec::new());
         }
+        drop(capabilities);
         self.metadata(MetadataRequest::ObjectSource {
             database: None,
             namespace: schema.to_string(),

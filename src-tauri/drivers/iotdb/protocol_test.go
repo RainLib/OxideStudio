@@ -30,7 +30,7 @@ func TestIoTDBHandshakeDoesNotAdvertiseUnsupportedDescriptorObjects(t *testing.T
 		t.Fatalf("handshake value=%#v", Handshake()["value"])
 	}
 	capabilities, ok := value["capabilities"].(map[string]any)
-	if !ok || capabilities["schemaObjects"] != false {
+	if !ok || capabilities["schemaObjects"] != false || capabilities["objectSource"] != true {
 		t.Fatalf("capabilities=%#v", capabilities)
 	}
 }
