@@ -83,6 +83,10 @@ const XLSX_MAX_CELL_CHARS: usize = 32_767;
 /// table-data transfer, not an unbounded background replication feature.
 const DEFAULT_TRANSFER_ROWS: u32 = 1_000;
 const MAX_TRANSFER_ROWS: u32 = 10_000;
+/// A copy can legitimately use a one-row batch for incompatible or very wide
+/// targets. Do not let that turn one transfer into thousands of renderer
+/// events; terminal state is always emitted separately and never throttled.
+const TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL: u64 = 4;
 const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
 const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
 const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
@@ -7684,6 +7688,21 @@ fn emit_table_data_transfer_progress(app: &AppHandle, progress: TableDataTransfe
     }
 }
 
+fn should_emit_table_data_transfer_progress(
+    last_emitted_batches: &mut Option<u64>,
+    batches: u64,
+) -> bool {
+    let should_emit = last_emitted_batches
+        .map(|previous| {
+            batches.saturating_sub(previous) >= TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL
+        })
+        .unwrap_or(true);
+    if should_emit {
+        *last_emitted_batches = Some(batches);
+    }
+    should_emit
+}
+
 fn bounded_table_data_transfer_message(message: &str) -> String {
     const MAX_CHARS: usize = 1_024;
     let mut bounded = message.chars().take(MAX_CHARS).collect::<String>();
@@ -12493,6 +12512,7 @@ pub async fn execute_table_data_transfer(
     };
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
+    let mut last_emitted_progress_batches = Some(0_u64);
     // Keep the reviewed baseline outside the transactional result. A failed
     // transaction has no transfer result, but its terminal audit report must
     // still record the non-sensitive count that was bound to the reviewed
@@ -12548,18 +12568,23 @@ pub async fn execute_table_data_transfer(
         let mut on_progress = |rows_transferred, batches| {
             last_progress_rows = rows_transferred;
             last_progress_batches = batches;
-            emit_table_data_transfer_progress(
-                &app,
-                TableDataTransferProgress {
-                    transfer_id: transfer_id.clone(),
-                    rows_transferred,
-                    max_rows: plan.max_rows,
-                    batches,
-                    status: TableDataTransferProgressStatus::Running,
-                    terminal: false,
-                    message: None,
-                },
-            );
+            if should_emit_table_data_transfer_progress(
+                &mut last_emitted_progress_batches,
+                batches,
+            ) {
+                emit_table_data_transfer_progress(
+                    &app,
+                    TableDataTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        rows_transferred,
+                        max_rows: plan.max_rows,
+                        batches,
+                        status: TableDataTransferProgressStatus::Running,
+                        terminal: false,
+                        message: None,
+                    },
+                );
+            }
         };
         let transfer_result = execute_resolved_table_data_transfer_in_transaction(
             &manager,
@@ -12933,6 +12958,7 @@ pub async fn execute_table_data_transfer_batch(
         let execution: Result<TableDataTransferBatchResult, String> = async {
             let mut rows_transferred = 0_u64;
             let mut batches = 0_u64;
+            let mut last_emitted_progress_batches = Some(0_u64);
             let mut limit_reached = false;
             let mut tables = Vec::with_capacity(resolved_tables.len());
             let mut deferred_foreign_key_statements = Vec::new();
@@ -12945,10 +12971,15 @@ pub async fn execute_table_data_transfer_batch(
                         batches = completed_batches + table_batches;
                         last_progress_rows = rows_transferred;
                         last_progress_batches = batches;
-                        emit_table_data_transfer_progress(&app, TableDataTransferProgress {
-                            transfer_id: transfer_id.clone(), rows_transferred, max_rows: total_max_rows,
-                            batches, status: TableDataTransferProgressStatus::Running, terminal: false, message: None,
-                        });
+                        if should_emit_table_data_transfer_progress(
+                            &mut last_emitted_progress_batches,
+                            batches,
+                        ) {
+                            emit_table_data_transfer_progress(&app, TableDataTransferProgress {
+                                transfer_id: transfer_id.clone(), rows_transferred, max_rows: total_max_rows,
+                                batches, status: TableDataTransferProgressStatus::Running, terminal: false, message: None,
+                            });
+                        }
                     };
                     execute_resolved_table_data_transfer_in_transaction(
                         &manager, table_request, table_plan, &transaction_id, &transfer_id, &mut cancel_rx, &mut on_progress,
@@ -20132,7 +20163,9 @@ pub async fn get_table_ddl(
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|source| !source.trim().is_empty())
-                .ok_or_else(|| "External driver did not provide this view definition".to_string())?;
+                .ok_or_else(|| {
+                    "External driver did not provide this view definition".to_string()
+                })?;
             return if object_type_is_materialized_view(object_type.as_deref()) {
                 Ok(generate_postgres_materialized_view_ddl(
                     DatabaseKind::Postgres,
@@ -20337,7 +20370,8 @@ mod tests {
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
         rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
         rewrite_sqlite_create_trigger_for_transfer, rewrite_sqlite_create_view_for_transfer,
-        sanitize_file_part, select_database_sql_export_tables, skipped_table_data_compare_result,
+        sanitize_file_part, select_database_sql_export_tables,
+        should_emit_table_data_transfer_progress, skipped_table_data_compare_result,
         sql_export_insert_batch_rows, sql_insert_statements, sqlite_transfer_target_index_name,
         summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
@@ -20372,7 +20406,7 @@ mod tests {
         TableImportTextEncoding, TableRowUpdate, TableSort, TransferTableSchemaObjects,
         MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
         MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
-        SQL_EXPORT_MAX_INSERT_BATCH_ROWS,
+        SQL_EXPORT_MAX_INSERT_BATCH_ROWS, TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -20422,6 +20456,25 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         affected_rows: u64,
         columns: Vec<ColumnInfo>,
+    }
+
+    #[test]
+    fn table_transfer_progress_is_bounded_but_keeps_the_first_update() {
+        let mut last = Some(0_u64);
+        assert!(!should_emit_table_data_transfer_progress(&mut last, 1));
+        assert!(!should_emit_table_data_transfer_progress(
+            &mut last,
+            TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL - 1,
+        ));
+        assert!(should_emit_table_data_transfer_progress(
+            &mut last,
+            TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL,
+        ));
+        assert_eq!(last, Some(TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL));
+
+        let mut empty = None;
+        assert!(should_emit_table_data_transfer_progress(&mut empty, 1));
+        assert_eq!(empty, Some(1));
     }
 
     #[test]
