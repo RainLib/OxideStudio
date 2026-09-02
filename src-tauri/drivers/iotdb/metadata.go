@@ -54,6 +54,10 @@ func treePath(parts ...string) string {
 	return strings.Join(result, ".")
 }
 
+// TreeDevicePath returns a safely quoted tree-dialect device path for the
+// signed sidecar. The Host never supplies this SQL fragment directly.
+func TreeDevicePath(parts ...string) string { return treePath(parts...) }
+
 func quoteTreeNode(value string) string {
 	for _, character := range value {
 		if !(character == '_' || character == '$' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9') {

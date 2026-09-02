@@ -31,7 +31,7 @@ func Handshake() map[string]any {
 			"capabilities": map[string]any{
 				"metadata": true, "query": true, "cancellation": true, "transactions": false,
 				"databaseScopedQueries": true, "databaseCreation": false, "referencingForeignKeys": false,
-				"readOnlyEnforcement": true, "semanticSchemaMigration": false,
+				"schemaObjects": true, "readOnlyEnforcement": true, "semanticSchemaMigration": false,
 			},
 		},
 	}

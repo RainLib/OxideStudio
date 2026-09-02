@@ -105,6 +105,14 @@ func stringValue(value any) string {
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
 }
+
+// MetadataRowBool decodes a native metadata boolean without treating arbitrary
+// strings as truthy. IoTDB currently returns IsAligned as a boolean or its
+// textual representation depending on server/client versions.
+func MetadataRowBool(result QueryResult, row []any, names ...string) bool {
+	value := strings.ToLower(rowValue(row, columnIndex(result.Columns, names...)))
+	return value == "true" || value == "1"
+}
 func nullable(value string) any {
 	if strings.TrimSpace(value) == "" {
 		return nil

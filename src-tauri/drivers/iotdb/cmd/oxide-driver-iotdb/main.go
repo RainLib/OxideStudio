@@ -286,9 +286,11 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	var value struct {
 		ConnectionID string `json:"connection_id"`
 		Request      struct {
-			Kind      string `json:"kind"`
-			Namespace string `json:"namespace"`
-			Relation  string `json:"relation"`
+			Kind       string `json:"kind"`
+			Namespace  string `json:"namespace"`
+			Relation   string `json:"relation"`
+			ObjectName string `json:"object_name"`
+			ObjectType string `json:"object_type"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(raw, &value); err != nil {
@@ -302,6 +304,48 @@ func (s *sidecar) metadata(raw json.RawMessage) (any, *iotdb.ProtocolError) {
 	defer state.mu.Unlock()
 	if state.session == nil {
 		return nil, iotdb.Fail("CONNECTION_NOT_FOUND", "Connection is closed")
+	}
+	if value.Request.Kind == "objectSource" {
+		object := strings.TrimSpace(value.Request.ObjectName)
+		if object == "" {
+			return nil, iotdb.Fail("METADATA_FAILED", "IoTDB object name is required")
+		}
+		schema := strings.TrimSpace(value.Request.Namespace)
+		if schema == "" {
+			return nil, iotdb.Fail("METADATA_FAILED", "IoTDB schema is required")
+		}
+		statement, err := iotdb.MetadataStatement(state.session.Dialect(), "columns", schema, object)
+		if err != nil {
+			return nil, iotdb.Fail("METADATA_FAILED", err.Error())
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		columns, err := state.session.Query(ctx, statement, iotdb.MaxQueryRows, state.session.TimestampPrecision())
+		if err != nil {
+			return nil, iotdb.Fail("METADATA_FAILED", err.Error())
+		}
+		details := iotdb.QueryResult{}
+		aligned := false
+		if state.session.Dialect() == iotdb.TableDialect {
+			details, err = state.session.Query(ctx, "SHOW TABLES DETAILS FROM "+iotdb.QuoteIdentifier(schema), iotdb.MaxQueryRows, state.session.TimestampPrecision())
+		} else {
+			var devices iotdb.QueryResult
+			devices, err = state.session.Query(ctx, "SHOW DEVICES "+iotdb.TreeDevicePath(schema, object), 1, state.session.TimestampPrecision())
+			if err == nil && len(devices.Rows) > 0 {
+				aligned = iotdb.MetadataRowBool(devices, devices.Rows[0], "IsAligned")
+			}
+		}
+		if err != nil {
+			return nil, iotdb.Fail("METADATA_FAILED", err.Error())
+		}
+		source, err := iotdb.ObjectSource(state.session.Dialect(), schema, object, columns, details, aligned)
+		if err != nil {
+			return nil, iotdb.Fail("METADATA_FAILED", err.Error())
+		}
+		if source == "" {
+			return map[string]any{"kind": "metadata", "value": []any{}}, nil
+		}
+		return map[string]any{"kind": "metadata", "value": []string{source}}, nil
 	}
 	statement, err := iotdb.MetadataStatement(state.session.Dialect(), value.Request.Kind, value.Request.Namespace, value.Request.Relation)
 	if err != nil {

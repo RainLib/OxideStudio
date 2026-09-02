@@ -211,3 +211,7 @@ func minDuration(left, right time.Duration) time.Duration {
 	return right
 }
 func quote(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }
+
+// QuoteIdentifier exposes the same reviewed table-dialect identifier quoting
+// used by metadata statements to the sidecar's object-source flow.
+func QuoteIdentifier(value string) string { return quote(value) }

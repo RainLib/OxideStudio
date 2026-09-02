@@ -20149,22 +20149,16 @@ pub async fn get_table_ddl(
             .is_external_driver_connection(&connection_id)
             .await
             .map_err(|error| error.to_string())?
-            && object_type_is_view(object_type.as_deref())
         {
+            let requested_type = object_type.as_deref().unwrap_or("TABLE");
             let source = manager
-                .get_object_source(
-                    &connection_id,
-                    &schema,
-                    table_name,
-                    object_type.as_deref().unwrap_or("VIEW"),
-                    None,
-                )
+                .get_object_source(&connection_id, &schema, table_name, requested_type, None)
                 .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|source| !source.trim().is_empty())
                 .ok_or_else(|| {
-                    "External driver did not provide this view definition".to_string()
+                    "External driver did not provide this object definition".to_string()
                 })?;
             return if object_type_is_materialized_view(object_type.as_deref()) {
                 Ok(generate_postgres_materialized_view_ddl(
@@ -20173,13 +20167,15 @@ pub async fn get_table_ddl(
                     table_name,
                     &source,
                 ))
-            } else {
+            } else if object_type_is_view(object_type.as_deref()) {
                 Ok(generate_postgres_view_ddl(
                     DatabaseKind::Postgres,
                     &schema,
                     table_name,
                     &source,
                 ))
+            } else {
+                Ok(source)
             };
         }
         // This command falls back to Host-generated SHOW CREATE and
