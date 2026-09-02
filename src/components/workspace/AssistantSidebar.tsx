@@ -223,6 +223,8 @@ function AgentHostAssistantSidebar() {
     })(),
   );
   const activeNamespace = useSchemaStore((state) => state.currentSchema);
+  const assistantSchemaOptions = useSchemaStore((state) => state.schemas);
+  const loadSchemas = useSchemaStore((state) => state.loadSchemas);
   const activeTab = useTabStore(
     useShallow((state) => {
       const tab = state.tabs.find(
@@ -301,6 +303,11 @@ function AgentHostAssistantSidebar() {
     conversationSelection.scopeKey,
   ]);
   const [message, setMessage] = useState("");
+  // `null` deliberately means "follow the Workspace default". A concrete
+  // value is a composer-only override that is frozen into the submitted turn.
+  const [assistantNamespace, setAssistantNamespace] = useState<string | null>(
+    null,
+  );
   const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
   const [databaseMentions, setDatabaseMentions] = useState<
     AssistantDatabaseTableMention[]
@@ -409,16 +416,25 @@ function AgentHostAssistantSidebar() {
     }, null);
   }, [session.contextMetrics?.modelUsage, turnMetricsVersion]);
   const previewContext = useMemo(
-    () => createWorkspaceAiToolContext("assistant-agent-context-preview"),
+    () =>
+      createWorkspaceAiToolContext("assistant-agent-context-preview", {
+        activeNamespace: assistantNamespace,
+      }),
     [
       activeConnectionId,
       activeConnectionDatabase,
       activeDriver,
       activeNamespace,
+      assistantNamespace,
       activeProjectId,
       activeTab,
     ],
   );
+  useEffect(() => {
+    // A schema selected for one data source must not leak into another one.
+    // Reset to the new workspace default instead of changing Explorer state.
+    setAssistantNamespace(null);
+  }, [activeConnectionId]);
   const contextProviderLabel = modelConfig
     ? providerDestinationLabel(modelConfig)
     : null;
@@ -1218,7 +1234,9 @@ function AgentHostAssistantSidebar() {
     }
     const contextSettingsSnapshot = { ...contextSettings };
     const scopedContext = applyAssistantContextSettings(
-      createWorkspaceAiToolContext(),
+      createWorkspaceAiToolContext(undefined, {
+        activeNamespace: assistantNamespace,
+      }),
       contextSettingsSnapshot,
     );
     const turnInput = createAssistantTurnInput(
@@ -1703,6 +1721,12 @@ function AgentHostAssistantSidebar() {
               );
             }}
             activeContextLabel={activeContextLabel}
+            selectedNamespace={assistantNamespace}
+            namespaceOptions={assistantSchemaOptions}
+            onNamespaceChange={setAssistantNamespace}
+            onRequestNamespaceOptions={() => {
+              if (activeConnectionId) void loadSchemas(activeConnectionId);
+            }}
             contextPreview={contextPreview}
             contextSettings={contextSettings}
             onContextSettingChange={(key, checked) =>

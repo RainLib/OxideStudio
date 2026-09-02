@@ -94,6 +94,7 @@ export function createWorkspaceAiToolRegistry(
 
 export function createWorkspaceAiToolContext(
   requestId: string = createRequestId(),
+  options: { activeNamespace?: string | null } = {},
 ): AiToolExecutionContext {
   const connectionState = useConnectionStore.getState();
   const schemaState = useSchemaStore.getState();
@@ -116,7 +117,9 @@ export function createWorkspaceAiToolContext(
     ),
     activeConnectionId: authorizedLocalConnection?.id ?? null,
     activeDriver: authorizedLocalConnection?.driver ?? null,
-    activeNamespace: schemaState.currentSchema,
+    // An Assistant composer may choose a schema for just its next turn. It is
+    // a frozen tool-context override, not a mutation of Explorer state.
+    activeNamespace: options.activeNamespace ?? schemaState.currentSchema,
     activeTab: activeTab ? workspaceTabSummaryFromTab(activeTab) : null,
   };
 }
