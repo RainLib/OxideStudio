@@ -400,6 +400,21 @@ pub enum MetadataRequest {
         object_name: String,
         object_type: String,
     },
+    /// Return a driver-rendered, read-only source definition for one object.
+    /// This is intentionally metadata rather than Query: the Host must never
+    /// synthesize catalog SQL for a signed external package whose dialect may
+    /// differ from a built-in driver sharing the same id.
+    ObjectSource {
+        #[serde(default)]
+        database: Option<String>,
+        namespace: String,
+        object_name: String,
+        object_type: String,
+        /// Required by object kinds (such as triggers) whose name is only
+        /// unique within a parent relation.
+        #[serde(default)]
+        relation_name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -632,6 +647,25 @@ mod tests {
         // MetadataRequest keeps its existing snake_case field wire contract;
         // only the tagged enum discriminator is camelCase.
         assert_eq!(encoded["object_name"], "customer_type");
+        assert_eq!(
+            serde_json::from_value::<MetadataRequest>(encoded).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn object_source_requests_keep_the_object_and_optional_parent_bound() {
+        let request = MetadataRequest::ObjectSource {
+            database: None,
+            namespace: "public".to_string(),
+            object_name: "report_view".to_string(),
+            object_type: "VIEW".to_string(),
+            relation_name: Some("reports".to_string()),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "objectSource");
+        assert_eq!(encoded["object_name"], "report_view");
+        assert_eq!(encoded["relation_name"], "reports");
         assert_eq!(
             serde_json::from_value::<MetadataRequest>(encoded).unwrap(),
             request

@@ -1528,6 +1528,26 @@ impl DatabaseDriver for ExternalDriver {
         })
         .await
     }
+
+    async fn get_object_source(
+        &self,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+        relation_name: Option<&str>,
+    ) -> Result<Option<String>> {
+        if !self.capabilities.lock().await.schema_objects {
+            return Ok(None);
+        }
+        self.metadata(MetadataRequest::ObjectSource {
+            database: None,
+            namespace: schema.to_string(),
+            object_name: object_name.to_string(),
+            object_type: object_type.to_string(),
+            relation_name: relation_name.map(str::to_string),
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

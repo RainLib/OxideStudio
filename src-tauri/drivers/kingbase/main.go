@@ -457,6 +457,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		}
 		return map[string]any{"kind": "metadata", "value": out}, nil
 	}
+	if p.Request.Kind == "objectSource" {
+		out, err := kingbaseObjectSource(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
 	var sqlText string
 	args := []any{}
 	switch p.Request.Kind {
@@ -946,6 +953,52 @@ JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
 JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
 WHERE n.nspname = $1 AND t.typname = $2
 ORDER BY e.enumsortorder`
+}
+
+// kingbaseObjectSource returns source only for object kinds whose server
+// catalog renderer has an unambiguous read-only result. Table reconstruction,
+// trigger lookup and mutations remain outside the v1 package contract.
+func kingbaseObjectSource(db *sql.DB, schema, name, objectType string) (any, error) {
+	if strings.TrimSpace(schema) == "" || strings.TrimSpace(name) == "" {
+		return nil, nil
+	}
+	var source sql.NullString
+	var err error
+	switch strings.ToUpper(strings.TrimSpace(objectType)) {
+	case "VIEW", "MATERIALIZED VIEW", "MATERIALIZED_VIEW":
+		err = db.QueryRow(kingbaseViewSourceQuery(), schema, name).Scan(&source)
+	case "FUNCTION", "PROCEDURE":
+		err = db.QueryRow(kingbaseRoutineSourceQuery(), schema, name).Scan(&source)
+	default:
+		return nil, nil
+	}
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !source.Valid || strings.TrimSpace(source.String) == "" {
+		return nil, nil
+	}
+	return source.String, nil
+}
+
+func kingbaseViewSourceQuery() string {
+	return `SELECT pg_catalog.pg_get_viewdef(c.oid)
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('v', 'm')
+LIMIT 1`
+}
+
+func kingbaseRoutineSourceQuery() string {
+	return `SELECT pg_catalog.pg_get_functiondef(p.oid)
+FROM pg_catalog.pg_proc p
+JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind IN ('f', 'p')
+ORDER BY pg_catalog.pg_get_function_identity_arguments(p.oid)
+LIMIT 1`
 }
 
 func optionalText(value string) any {

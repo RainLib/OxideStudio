@@ -89,6 +89,14 @@ func TestKingbaseTypeMemberQueriesUseBoundIdentifiers(t *testing.T) {
 	}
 }
 
+func TestKingbaseObjectSourceQueriesUseBoundIdentifiers(t *testing.T) {
+	for _, query := range []string{kingbaseViewSourceQuery(), kingbaseRoutineSourceQuery()} {
+		if !strings.Contains(query, "$1") || !strings.Contains(query, "$2") || strings.Contains(query, "%s") {
+			t.Fatalf("object-source query must bind schema and object name: %s", query)
+		}
+	}
+}
+
 func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
 	query := kingbaseReferencingForeignKeysQuery()
 	if !strings.Contains(query, "pk.table_schema = $1 AND pk.table_name = $2") {

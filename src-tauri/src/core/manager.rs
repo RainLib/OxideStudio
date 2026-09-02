@@ -1171,6 +1171,22 @@ impl ConnectionManager {
             .await
     }
 
+    /// Retrieves a driver-owned source definition without permitting the Host
+    /// to substitute a built-in driver's catalog grammar.
+    pub async fn get_object_source(
+        &self,
+        id: &str,
+        schema: &str,
+        object_name: &str,
+        object_type: &str,
+        relation_name: Option<&str>,
+    ) -> Result<Option<String>> {
+        let driver = self.get_driver(id).await?;
+        driver
+            .get_object_source(schema, object_name, object_type, relation_name)
+            .await
+    }
+
     pub async fn get_collections(
         &self,
         id: &str,

@@ -19847,11 +19847,6 @@ pub async fn get_view_definition(
         "view": view,
     });
     let result: Result<String, String> = async {
-        // The native view-definition query is vendor-specific catalog SQL.
-        // External packages must expose definition metadata through a future
-        // semantic protocol instead of inheriting this route from an alias.
-        ensure_host_table_ddl_allowed(&manager, &connection_id, "view definition introspection")
-            .await?;
         let view_name = view.trim();
         if view_name.is_empty() {
             return Err("View name is required".to_string());
@@ -19862,6 +19857,31 @@ pub async fn get_view_definition(
         if !object_type_is_view(object_type.as_deref()) {
             return Err(format!("{view_name} is not a view"));
         }
+
+        // Native view definition SQL is vendor-specific. An external package
+        // can now return its own reviewed renderer output through the
+        // read-only object-source protocol; it must never inherit this Host
+        // query merely because it shares a driver id with a built-in dialect.
+        if manager
+            .is_external_driver_connection(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return manager
+                .get_object_source(
+                    &connection_id,
+                    &schema,
+                    view_name,
+                    object_type.as_deref().unwrap_or("VIEW"),
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .filter(|source| !source.trim().is_empty())
+                .ok_or_else(|| "External driver did not provide this view definition".to_string());
+        }
+        ensure_host_table_ddl_allowed(&manager, &connection_id, "view definition introspection")
+            .await?;
 
         let sql = if is_sqlite_driver(&driver) {
             let catalog = if schema.trim().is_empty() {

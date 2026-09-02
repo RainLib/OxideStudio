@@ -567,6 +567,18 @@ pub trait DatabaseDriver: Send + Sync {
             .await
     }
 
+    /// Return a driver-owned, read-only source definition. External packages
+    /// must opt in explicitly rather than receiving Host catalog SQL.
+    async fn get_object_source(
+        &self,
+        _schema: &str,
+        _object_name: &str,
+        _object_type: &str,
+        _relation_name: Option<&str>,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Get collections, indexes, or analogous document/search objects in a namespace.
     async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
         Ok(Vec::new())
