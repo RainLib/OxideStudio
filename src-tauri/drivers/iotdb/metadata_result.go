@@ -25,12 +25,13 @@ func AdaptMetadata(kind, schema, relation string, result QueryResult) (any, erro
 		items := make([]map[string]any, 0, len(result.Rows))
 		nameIndex := columnIndex(result.Columns, "TableName", "table_name", "Device")
 		typeIndex := columnIndex(result.Columns, "TableType", "table_type")
+		commentIndex := columnIndex(result.Columns, "Comment", "comment")
 		for _, row := range result.Rows {
 			name := relativeTreeName(schema, rowValue(row, nameIndex))
 			if name == "" {
 				continue
 			}
-			item := map[string]any{"name": name, "schema": nullable(schema), "type": "TABLE", "comment": nil}
+			item := map[string]any{"name": name, "schema": nullable(schema), "type": "TABLE", "comment": nullable(rowValue(row, commentIndex))}
 			if typ := rowValue(row, typeIndex); typ != "" {
 				item["type"] = typ
 			}

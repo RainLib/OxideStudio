@@ -3,12 +3,12 @@ package iotdb
 import "testing"
 
 func TestAdaptMetadataForTreeAndTableResults(t *testing.T) {
-	value, err := AdaptMetadata("relations", "root.factory", "", QueryResult{Columns: []string{"Device"}, Rows: [][]any{{"root.factory.d1"}}})
+	value, err := AdaptMetadata("relations", "root.factory", "", QueryResult{Columns: []string{"Device", "Comment"}, Rows: [][]any{{"root.factory.d1", "production device"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	relations := value.([]map[string]any)
-	if relations[0]["name"] != "d1" || relations[0]["type"] != "TABLE" {
+	if relations[0]["name"] != "d1" || relations[0]["type"] != "TABLE" || relations[0]["comment"] != "production device" {
 		t.Fatalf("relations=%#v", relations)
 	}
 	value, err = AdaptMetadata("columns", "metrics", "", QueryResult{Columns: []string{"ColumnName", "DataType"}, Rows: [][]any{{"cpu", "DOUBLE"}}})
