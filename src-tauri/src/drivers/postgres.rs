@@ -429,7 +429,7 @@ impl PostgresDriver {
     }
 
     async fn functions_on_pool(pool: &Pool<Postgres>, schema: &str) -> Result<Vec<FunctionInfo>> {
-        let rows = sqlx::query(
+        let current = sqlx::query(
             r#"
             SELECT
                 p.proname AS function_name,
@@ -453,7 +453,26 @@ impl PostgresDriver {
         .bind(schema)
         .persistent(false)
         .fetch_all(pool)
-        .await?;
+        .await;
+        let rows = match current {
+            Ok(rows) => rows,
+            Err(error) if Self::postgres_missing_prokind_error(&error.to_string()) => {
+                sqlx::query(
+                    r#"
+                SELECT p.proname AS function_name, pg_get_function_arguments(p.oid) AS arguments,
+                       'function' AS routine_type, pg_get_function_result(p.oid) AS return_type,
+                       obj_description(p.oid, 'pg_proc') AS description
+                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = $1 AND NOT p.proisagg ORDER BY p.proname, p.oid
+                "#,
+                )
+                .bind(schema)
+                .persistent(false)
+                .fetch_all(pool)
+                .await?
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         Ok(rows
             .iter()
@@ -470,6 +489,16 @@ impl PostgresDriver {
                 }
             })
             .collect())
+    }
+
+    fn postgres_missing_prokind_error(error: &str) -> bool {
+        let lower = error.to_ascii_lowercase();
+        (lower.contains("sqlstate 42703")
+            || lower.contains("column") && lower.contains("does not exist")
+            || error.contains("字段") && error.contains("不存在"))
+            && (lower.contains("p.prokind")
+                || lower.contains("\"prokind\"")
+                || error.contains("p.prokind"))
     }
 
     async fn columns_on_pool(
