@@ -11,7 +11,7 @@
 
 ### 最新 HEAD 审计（`069b84daf`）
 
-- DBX 最新增量包含设置页 Markdown 渲染、SQL Server 旧 probe 截断、PostgreSQL legacy `prokind`、MongoDB TTL index MCP 与 SQLite 文件权限修复。PostgreSQL routine metadata 的 `prokind` fallback 已落地；MongoDB TTL 已由完整 raw index definition 和专用 UI 表示保留。SQL Server probe 是 DBX native TDS 私有调用链，Oxide 不重写外置 package SQL；SQLite metadata DB 位于私有应用目录并由 credential-key 创建路径固定为 owner-private。MongoDB、Elasticsearch 与 LSP 运行时路径没有新增协议或执行契约。
+- DBX 最新增量包含设置页 Markdown 渲染、SQL Server 旧 probe 截断、PostgreSQL legacy `prokind`、MongoDB TTL index MCP 与 SQLite 文件权限修复。PostgreSQL routine metadata 的 `prokind` fallback 已落地；MongoDB TTL 已由完整 raw index definition 和专用 UI 表示保留。SQL Server probe 是 DBX native TDS 私有调用链，Oxide 不重写外置 package SQL；SQLite metadata DB 位于私有应用目录并由 credential-key 创建路径固定为 owner-private。MongoDB、Elasticsearch 与 LSP 运行时路径没有新增协议或执行契约。额外补强 SQL LSP 的恢复路径：`.sqlserver.sql`、`.oracle.sql`、`.oceanbase-oracle.sql`、`.dameng.sql`、`.db2.sql`、`.h2.sql`、`.informix.sql`、`.questdb.sql`、`.manticoresearch.sql` 现在在配置同步前也会推断到已注册的产品 identity，避免退回默认方言而丢失产品专用补全/诊断。
 - 不把 DBX 的 CI 脚本、版本发布提交或删除的历史测试文件当作产品能力迁移；后续继续按提交对应的运行时/编辑器/驱动路径审计。
 
 ### Phase 171 增量：IoTDB / Kingbase 外置 Agent 执行边界
