@@ -89,6 +89,18 @@ func TestKingbaseTypeMemberQueriesUseBoundIdentifiers(t *testing.T) {
 	}
 }
 
+func TestKingbaseDomainSourceQueryUsesBoundIdentifiersAndCatalogDeparsers(t *testing.T) {
+	for _, catalog := range []string{"pg_catalog.pg", "sys_catalog.sys"} {
+		query := kingbaseDomainTypeQuery(catalog)
+		if !strings.Contains(query, "$1") || !strings.Contains(query, "$2") || strings.Contains(query, "%s") {
+			t.Fatalf("domain source query must bind schema and type: %s", query)
+		}
+		if !strings.Contains(query, kingbaseCatalogDeparser(catalog, "get_expr")) || !strings.Contains(query, kingbaseCatalogDeparser(catalog, "get_constraintdef")) {
+			t.Fatalf("domain source query must use one catalog family: %s", query)
+		}
+	}
+}
+
 func TestKingbaseObjectSourceQueriesUseBoundIdentifiers(t *testing.T) {
 	for _, query := range []string{kingbaseViewSourceQuery(), kingbaseRoutineSourceQuery(), kingbaseTriggerSourceQuery()} {
 		if !strings.Contains(query, "$1") || !strings.Contains(query, "$2") || strings.Contains(query, "%s") {

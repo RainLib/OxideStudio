@@ -1243,9 +1243,10 @@ func kingbaseEnsureStatement(statement string) string {
 }
 
 // kingbaseTypeSources reconstructs only type shapes with a complete,
-// catalog-visible definition. Domains, ranges and base types deliberately
-// remain unavailable here: emitting a plausible but incomplete CREATE TYPE is
-// more dangerous than asking the user to use the server's native tooling.
+// catalog-visible definition. Composite, enum and domain types are supported;
+// ranges and base types deliberately remain unavailable because emitting a
+// plausible but incomplete CREATE TYPE is more dangerous than asking the user
+// to use the server's native tooling.
 func kingbaseTypeSources(db *sql.DB, schema, name string) ([]any, error) {
 	attributeRows, err := db.Query(kingbaseCompositeTypeMembersQuery(), schema, name)
 	if err != nil {
@@ -1287,9 +1288,87 @@ func kingbaseTypeSources(db *sql.DB, schema, name string) ([]any, error) {
 		return nil, err
 	}
 	if len(labels) == 0 {
-		return []any{}, nil
+		return kingbaseDomainTypeSources(db, schema, name)
 	}
 	return []any{"CREATE TYPE " + qualified + " AS ENUM (" + strings.Join(labels, ", ") + ");"}, nil
+}
+
+// kingbaseDomainTypeSources covers DOMAIN because its complete definition is
+// catalog-visible: base type, default, nullability and every CHECK constraint.
+// Ranges and base types remain deliberately unavailable; recreating either
+// would require collations, subtype operators/functions and extension
+// dependencies that this v1 package cannot prove from a portable query.
+func kingbaseDomainTypeSources(db *sql.DB, schema, name string) ([]any, error) {
+	var lastErr error
+	for _, catalog := range []string{"pg_catalog.pg", "sys_catalog.sys"} {
+		rows, err := db.Query(kingbaseDomainTypeQuery(catalog), schema, name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		definition, readErr := readKingbaseDomainTypeSource(rows, schema, name)
+		_ = rows.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if definition == "" {
+			return []any{}, nil
+		}
+		return []any{definition}, nil
+	}
+	return nil, lastErr
+}
+
+func readKingbaseDomainTypeSource(rows *sql.Rows, schema, name string) (string, error) {
+	var baseType string
+	var nullable bool
+	var defaultValue sql.NullString
+	constraints := []kingbaseDDLDefinition{}
+	seen := false
+	for rows.Next() {
+		var constraintName, constraintDefinition sql.NullString
+		var rowBaseType string
+		var rowNullable bool
+		var rowDefault sql.NullString
+		if err := rows.Scan(&rowBaseType, &rowNullable, &rowDefault, &constraintName, &constraintDefinition); err != nil {
+			return "", err
+		}
+		if !seen {
+			baseType, nullable, defaultValue, seen = rowBaseType, rowNullable, rowDefault, true
+		}
+		if constraintName.Valid && constraintDefinition.Valid && strings.TrimSpace(constraintDefinition.String) != "" {
+			constraints = append(constraints, kingbaseDDLDefinition{name: constraintName.String, sql: constraintDefinition.String})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if !seen || strings.TrimSpace(baseType) == "" {
+		return "", nil
+	}
+	definition := "CREATE DOMAIN " + kingbaseQuoteIdentifier(schema) + "." + kingbaseQuoteIdentifier(name) + " AS " + baseType
+	if defaultValue.Valid && strings.TrimSpace(defaultValue.String) != "" {
+		definition += " DEFAULT " + defaultValue.String
+	}
+	if !nullable {
+		definition += " NOT NULL"
+	}
+	for _, constraint := range constraints {
+		definition += " CONSTRAINT " + kingbaseQuoteIdentifier(constraint.name) + " " + constraint.sql
+	}
+	return definition + ";", nil
+}
+
+func kingbaseDomainTypeQuery(catalog string) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	return fmt.Sprintf(`SELECT format_type(t.typbasetype, t.typtypmod), NOT t.typnotnull,
+  %s(t.typdefaultbin, 0), con.conname, %s(con.oid, true)
+FROM %s.%s_type t
+JOIN %s.%s_namespace n ON n.oid = t.typnamespace
+LEFT JOIN %s.%s_constraint con ON con.contypid = t.oid
+WHERE n.nspname = $1 AND t.typname = $2 AND t.typtype = 'd'
+ORDER BY con.conname`, kingbaseCatalogDeparser(catalog, "get_expr"), kingbaseCatalogDeparser(catalog, "get_constraintdef"), schema, prefix, schema, prefix, schema, prefix)
 }
 
 func kingbaseQuoteIdentifier(value string) string {
