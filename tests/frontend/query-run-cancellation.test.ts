@@ -8,6 +8,15 @@ import { ApiError } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(async () => []),
+  executeNativeQueryPage: vi.fn(async () => ({
+    result: { columns: [], rows: [] },
+    nextCursor: null,
+  })),
+  fetchNativeQueryPage: vi.fn(async () => ({
+    result: { columns: [], rows: [] },
+    nextCursor: null,
+  })),
+  closeNativeQueryPage: vi.fn(async () => undefined),
   explainQuery: vi.fn(async (request: { queryId: string }) => ({
     id: request.queryId,
     driver: "postgres",
@@ -43,6 +52,9 @@ vi.mock("@/services/tauri", () => ({
   },
   queryService: {
     executeQuery: mocks.executeQuery,
+    executeNativeQueryPage: mocks.executeNativeQueryPage,
+    fetchNativeQueryPage: mocks.fetchNativeQueryPage,
+    closeNativeQueryPage: mocks.closeNativeQueryPage,
     explainQuery: mocks.explainQuery,
     cancelQuery: mocks.cancelQuery,
   },
@@ -115,6 +127,9 @@ function resetWorkspaceState() {
 describe("query run cancellation store", () => {
   beforeEach(() => {
     mocks.executeQuery.mockClear();
+    mocks.executeNativeQueryPage.mockClear();
+    mocks.fetchNativeQueryPage.mockClear();
+    mocks.closeNativeQueryPage.mockClear();
     mocks.explainQuery.mockClear();
     mocks.cancelQuery.mockClear();
     mocks.getDatabaseCapabilities.mockClear();
@@ -159,6 +174,71 @@ describe("query run cancellation store", () => {
     expect(mocks.saveHistoryEntries).toHaveBeenCalledWith([
       expect.objectContaining({ status: "success", sql: "SELECT 1" }),
     ]);
+  });
+
+  it("pages IoTDB query results through the native cursor and releases the continuation", async () => {
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: "iotdb-1",
+          name: "IoTDB",
+          driver: "iotdb",
+          url: "iotdb://localhost:6667",
+        },
+      ],
+      activeConnectionId: "iotdb-1",
+      connectedConnectionIds: ["iotdb-1"],
+    });
+    useTabStore.setState({
+      tabs: [
+        {
+          ...useTabStore.getState().tabs[0]!,
+          connectionId: "iotdb-1",
+          sql: "SELECT * FROM metrics",
+        },
+      ],
+    });
+    mocks.executeNativeQueryPage.mockResolvedValueOnce({
+      result: {
+        columns: [{ name: "time", data_type: "TIMESTAMP" }],
+        rows: [[1]],
+      },
+      nextCursor: "cursor-one",
+    });
+    mocks.fetchNativeQueryPage.mockResolvedValueOnce({
+      result: {
+        columns: [{ name: "time", data_type: "TIMESTAMP" }],
+        rows: [[2]],
+      },
+      nextCursor: null,
+    });
+
+    await useTabStore.getState().runTabQuery("tab-1", "iotdb-1");
+
+    expect(mocks.executeNativeQueryPage).toHaveBeenCalledWith(
+      "iotdb-1",
+      "SELECT * FROM metrics",
+      500,
+      10_000,
+      expect.stringMatching(/^tab-1:/),
+    );
+    expect(useTabStore.getState().tabs[0]).toMatchObject({
+      nativeQueryCursor: "cursor-one",
+      nativeQueryHasMore: true,
+    });
+
+    await useTabStore.getState().loadMoreNativeQueryPage("tab-1");
+
+    expect(mocks.fetchNativeQueryPage).toHaveBeenCalledWith(
+      "iotdb-1",
+      "cursor-one",
+      500,
+    );
+    expect(useTabStore.getState().tabs[0]?.results?.[0]?.rows).toEqual([
+      [1],
+      [2],
+    ]);
+    expect(useTabStore.getState().tabs[0]?.nativeQueryHasMore).toBe(false);
   });
 
   it("records failed statement executions with their error and context", async () => {

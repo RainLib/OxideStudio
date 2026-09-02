@@ -271,6 +271,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               queryLanguage: tab.queryLanguage,
               results: tab.results,
               resultSql: tab.resultSql,
+              nativeQueryHasMore: tab.nativeQueryHasMore,
               activeResultIndex: tab.activeResultIndex,
               activeResultRunId: tab.activeResultRunId,
               executingResultIndex: tab.executingResultIndex,
@@ -308,6 +309,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       showAllColumns,
       deleteRows,
       runTabQuery,
+      loadMoreNativeQueryPage,
       findOrCreateTableTab,
       loadTablePage,
       setFilterMode,
@@ -329,6 +331,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         showAllColumns: state.showAllColumns,
         deleteRows: state.deleteRows,
         runTabQuery: state.runTabQuery,
+        loadMoreNativeQueryPage: state.loadMoreNativeQueryPage,
         findOrCreateTableTab: state.findOrCreateTableTab,
         loadTablePage: state.loadTablePage,
         setFilterMode: state.setFilterMode,
@@ -2945,6 +2948,23 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   <span className="truncate">Result truncated</span>
                 )}
               </div>
+            )}
+            {activeTab && activeTab.nativeQueryHasMore && !isTransposed && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={isActiveResultExecuting}
+                onClick={() => void loadMoreNativeQueryPage(activeTab.id)}
+                title="Load the next page from the native query cursor"
+                aria-label="Load more query rows"
+              >
+                <ChevronDown
+                  size={14}
+                  className={queryToolbarCompact ? undefined : "mr-1.5"}
+                />
+                {!queryToolbarCompact && "Load more"}
+              </Button>
             )}
             <div className="flex-1" />
             <Button
