@@ -742,25 +742,67 @@ func listKingbaseRoutines(db *sql.DB, schema string) ([]any, error) {
 	if strings.TrimSpace(schema) == "" {
 		return []any{}, nil
 	}
-	rows, err := db.Query(`SELECT routine_name, routine_type, data_type, routine_comment
-FROM information_schema.routines WHERE routine_schema = $1 ORDER BY routine_name`, schema)
+	rows, err := db.Query(kingbaseRoutinesQuery(), schema)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []any{}
+	type routineEntry struct {
+		name, kind, returnType, description string
+		parameters                          []any
+	}
+	bySpecificName := map[string]*routineEntry{}
+	order := []string{}
 	for rows.Next() {
-		var name string
-		var kind, returnType, description sql.NullString
-		if err := rows.Scan(&name, &kind, &returnType, &description); err != nil {
+		var specificName, name string
+		var kind, returnType, description, parameterName, parameterType sql.NullString
+		var ordinal sql.NullInt64
+		if err := rows.Scan(&specificName, &name, &kind, &returnType, &description, &parameterName, &parameterType, &ordinal); err != nil {
 			return nil, err
 		}
+		item := bySpecificName[specificName]
+		if item == nil {
+			item = &routineEntry{name: name, kind: kind.String, returnType: valueOrUnknown(returnType), description: description.String, parameters: []any{}}
+			bySpecificName[specificName] = item
+			order = append(order, specificName)
+		}
+		if parameterType.Valid && strings.TrimSpace(parameterType.String) != "" {
+			parameterLabel := parameterName.String
+			if strings.TrimSpace(parameterLabel) == "" {
+				parameterLabel = fmt.Sprintf("arg%d", len(item.parameters)+1)
+			}
+			item.parameters = append(item.parameters, map[string]any{
+				"name": parameterLabel, "data_type": parameterType.String, "optional": false,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(order))
+	for _, specificName := range order {
+		item := bySpecificName[specificName]
 		out = append(out, map[string]any{
-			"name": name, "routine_type": optionalText(kind.String), "parameters": []any{},
-			"return_type": valueOrUnknown(returnType), "description": optionalText(description.String),
+			"name": item.name, "routine_type": optionalText(item.kind), "parameters": item.parameters,
+			"return_type": item.returnType, "description": optionalText(item.description),
 		})
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// kingbaseRoutinesQuery keeps overloaded routines distinct through
+// specific_name and returns input-bearing parameters in their catalog order.
+// OUT-only result fields are deliberately omitted: FunctionInfo parameters are
+// invocation arguments, not a reconstruction of a composite result shape.
+func kingbaseRoutinesQuery() string {
+	return `SELECT r.specific_name, r.routine_name, r.routine_type, r.data_type, r.routine_comment,
+  p.parameter_name, p.data_type, p.ordinal_position
+FROM information_schema.routines r
+LEFT JOIN information_schema.parameters p
+  ON p.specific_catalog = r.specific_catalog AND p.specific_schema = r.specific_schema
+  AND p.specific_name = r.specific_name AND p.parameter_mode IN ('IN', 'INOUT', 'VARIADIC')
+WHERE r.routine_schema = $1
+ORDER BY r.routine_name, r.specific_name, p.ordinal_position`
 }
 
 // listKingbaseSchemaObjects is intentionally descriptor-only. Relations stay

@@ -54,9 +54,18 @@ func TestKingbaseIndexCatalogQueryUsesBoundIdentifiers(t *testing.T) {
 }
 
 func TestKingbaseMetadataQueriesUseBoundScope(t *testing.T) {
-	for _, query := range []string{kingbaseConstraintsQuery(), `SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1`} {
+	for _, query := range []string{kingbaseConstraintsQuery(), kingbaseRoutinesQuery()} {
 		if !strings.Contains(query, "$1") || strings.Contains(query, "%s") {
 			t.Fatalf("metadata query must bind its scope: %s", query)
+		}
+	}
+}
+
+func TestKingbaseRoutinesQueryKeepsOverloadsAndInputParameters(t *testing.T) {
+	query := kingbaseRoutinesQuery()
+	for _, expected := range []string{"r.specific_name", "p.specific_name = r.specific_name", "p.parameter_mode IN ('IN', 'INOUT', 'VARIADIC')", "ORDER BY r.routine_name, r.specific_name, p.ordinal_position"} {
+		if !strings.Contains(query, expected) {
+			t.Fatalf("routine query missing %q: %s", expected, query)
 		}
 	}
 }
