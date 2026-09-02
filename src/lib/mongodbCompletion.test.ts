@@ -169,6 +169,23 @@ describe("MongoDB native JSON aggregation completion", () => {
 });
 
 describe("MongoDB shell completion", () => {
+  it("offers the bounded database selection command at the shell root", () => {
+    const source = "use ";
+    const result = buildMongoDbConsoleCompletions(source, source.length, {});
+
+    expect(result.context).toMatchObject({
+      area: "shell-root",
+      typed: "use",
+      syntax: "shell",
+    });
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        label: "use database",
+        insertText: "use ${1:database}",
+      }),
+    ]);
+  });
+
   it("offers only Host-supported methods after a collection dot", () => {
     const source = "db.orders.fi";
     const result = buildMongoDbConsoleCompletions(source, source.length, {});

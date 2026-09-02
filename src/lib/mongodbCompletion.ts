@@ -437,6 +437,14 @@ function activeCollection(source: string, offset: number) {
 
 const MONGODB_SHELL_ROOT_COMPLETIONS: MongoDbConsoleCompletion[] = [
   {
+    label: "use database",
+    detail: "Select the database for subsequent MongoDB shell commands",
+    documentation:
+      "Changes this query tab's MongoDB database target; accepts one database name.",
+    insertText: "use ${1:database}",
+    kind: "snippet",
+  },
+  {
     label: "db.collection.find",
     detail: "Find documents with a bounded result",
     documentation: "Read-only shell syntax parsed by OxideStudio; the default limit is 100.",
@@ -817,7 +825,7 @@ function mongodbShellCompletionContext(
     };
   }
 
-  if (/^\s*(?:(?:d|db)|(?:s|sh|sho|show|show\s+d|show\s+db|show\s+dat|show\s+data))?$/iu.test(beforeCursor)) {
+  if (/^\s*(?:(?:d|db)|(?:s|sh|sho|show|show\s+d|show\s+db|show\s+dat|show\s+data)|(?:u|us|use))?\s*$/iu.test(beforeCursor)) {
     return {
       area: "shell-root",
       typed: beforeCursor.trim(),
