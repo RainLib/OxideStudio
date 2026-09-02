@@ -8,6 +8,7 @@ pub(super) fn looks_like_shell_command(input: &str) -> bool {
     source
         .get(..3)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("db."))
+        || parse_use_database(source).is_some()
         || matches!(
             source.to_ascii_lowercase().as_str(),
             "show dbs" | "show databases"
@@ -35,6 +36,10 @@ pub(super) fn parse_command(input: &str) -> Result<Value, String> {
         return Ok(json!({
             "command": { "listDatabases": 1, "nameOnly": true }
         }));
+    }
+
+    if let Some(database) = parse_use_database(source) {
+        return Ok(json!({ "useDatabase": database }));
     }
 
     if let Some((args, tail)) = method_call(source, 2, "version") {
@@ -611,6 +616,23 @@ pub(super) fn parse_command(input: &str) -> Result<Value, String> {
     }
 
     Err("Unsupported MongoDB shell command. Use a supported method or native JSON command.".into())
+}
+
+/// `use <database>` changes the shell's selected database; it is not JavaScript
+/// evaluation. Accept one bare, whitespace-free token only and let the native
+/// driver apply its final server-compatible database-name validation.
+fn parse_use_database(source: &str) -> Option<&str> {
+    let prefix = source.get(..3)?;
+    if !prefix.eq_ignore_ascii_case("use") {
+        return None;
+    }
+    let suffix = source.get(3..)?;
+    if !suffix.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let database = suffix.trim();
+    (!database.is_empty() && !database.chars().any(char::is_whitespace) && !database.contains(';'))
+        .then_some(database)
 }
 
 fn required_document_value(value: Option<&String>, label: &str) -> Result<Value, String> {
@@ -1299,6 +1321,15 @@ mod tests {
         assert_eq!(databases["command"]["listDatabases"], 1);
         let version = parse_command("db.version()").unwrap();
         assert_eq!(version["command"]["buildInfo"], 1);
+    }
+
+    #[test]
+    fn parses_a_single_shell_use_database_statement() {
+        let command = parse_command("use reporting").unwrap();
+        assert_eq!(command["useDatabase"], "reporting");
+        assert!(looks_like_shell_command("use reporting"));
+        assert!(!looks_like_shell_command("useful"));
+        assert!(parse_command("use reporting warehouse").is_err());
     }
 
     #[test]

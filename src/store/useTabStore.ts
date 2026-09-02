@@ -3002,6 +3002,16 @@ export const useTabStore = create<TabState>((set, get) => ({
       }
 
       console.log("[TabStore] Query successfully finished", results);
+      const mongoUseDatabase =
+        connection?.driver.trim().toLocaleLowerCase() === "mongodb"
+          ? extractSchemaContextChange(sqlToRun)
+          : null;
+      if (mongoUseDatabase) {
+        // MongoDB shell `use <database>` changes the selected namespace for
+        // subsequent statements. Pin it on this tab before the asynchronous
+        // Explorer refresh so later runs cannot fall back to a stale target.
+        get().setTargetSchema(id, mongoUseDatabase);
+      }
       const rowCount = queryHistoryRowCount(results);
       const finishedAt = Date.now();
       useHistoryStore.getState().recordExecution({

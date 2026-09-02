@@ -47,6 +47,7 @@ pub struct MongoDbDriver {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MongoCommandInput {
     database: Option<String>,
+    use_database: Option<String>,
     collection: Option<String>,
     command: Option<Value>,
     find: Option<Value>,
@@ -123,6 +124,14 @@ impl MongoDbDriver {
     }
 
     async fn execute_command(&self, input: MongoCommandInput) -> Result<QueryResult> {
+        if let Some(database) = input.use_database.as_deref() {
+            let database = validate_mongodb_database_name(database)?;
+            // `use` is the same local selection operation as the Explorer's
+            // database picker. It never sends a synthetic server command or
+            // exposes an arbitrary command surface.
+            *self.active_database.lock().await = database.clone();
+            return Ok(mongodb_use_database_result(&database));
+        }
         let client = self.client().await?;
         let database_name = self.database_name_for(input.database.as_deref()).await?;
         let database = client.database(&database_name);
@@ -330,15 +339,18 @@ impl DatabaseDriver for MongoDbDriver {
     async fn query_with_context(&self, sql: &str, schema: &str) -> Result<Vec<QueryResult>> {
         let database = validate_mongodb_database_name(schema)?;
         *self.active_database.lock().await = database.clone();
-        let commands = parse_mongodb_commands(sql)?
-            .into_iter()
-            .map(|mut command| {
-                if command.database.is_none() {
-                    command.database = Some(database.clone());
-                }
-                command
-            })
-            .collect();
+        let mut commands = parse_mongodb_commands(sql)?;
+        let mut scoped_database = Some(database);
+        for command in &mut commands {
+            if command.database.is_none() {
+                command.database = scoped_database.clone();
+            }
+            // Shell `use` is sequential: commands after it inherit the new
+            // active database instead of the query tab's old target.
+            if command.use_database.is_some() {
+                scoped_database = None;
+            }
+        }
         self.execute_commands(commands).await
     }
 
@@ -727,6 +739,7 @@ impl MongoCommandInput {
     fn operation_count(&self) -> usize {
         [
             self.command.is_some(),
+            self.use_database.is_some(),
             self.find.is_some(),
             self.aggregate.is_some(),
             self.count_documents.is_some(),
@@ -752,6 +765,24 @@ impl MongoCommandInput {
             return Err(anyhow!(
                 "MongoDB command must contain exactly one operation"
             ));
+        }
+        if self.use_database.is_some() {
+            if operation_count != 1
+                || self.collection.is_some()
+                || self.aggregate_options.is_some()
+                || self.limit.is_some()
+                || self.skip.is_some()
+                || self.sort.is_some()
+                || self.projection.is_some()
+                || self.collation.is_some()
+                || self.find_options.is_some()
+            {
+                return Err(anyhow!(
+                    "MongoDB useDatabase cannot be combined with another operation or options"
+                ));
+            }
+            validate_mongodb_database_name(self.use_database.as_deref().unwrap_or_default())?;
+            return Ok(());
         }
         if self.command.is_none() && self.collection.is_none() {
             return Err(anyhow!("MongoDB collection is required"));
@@ -1253,6 +1284,25 @@ fn documents_result(documents: Vec<Document>) -> QueryResult {
     QueryResult::rows(columns, rows)
 }
 
+fn mongodb_use_database_result(database: &str) -> QueryResult {
+    QueryResult::rows(
+        vec![
+            ColumnDef {
+                name: "database".to_string(),
+                data_type: "text".to_string(),
+            },
+            ColumnDef {
+                name: "operation".to_string(),
+                data_type: "text".to_string(),
+            },
+        ],
+        vec![vec![
+            Value::String(database.to_string()),
+            Value::String("use".to_string()),
+        ]],
+    )
+}
+
 fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
     let mut fields = Vec::<(String, String, usize)>::new();
     let mut field_positions = HashMap::<String, usize>::new();
@@ -1548,6 +1598,22 @@ mod tests {
             mongodb_default_database("mongodb://localhost:27017"),
             "admin"
         );
+    }
+
+    #[tokio::test]
+    async fn shell_use_database_updates_the_active_database_without_server_commands() {
+        let driver = MongoDbDriver::new("mongodb://localhost/default_db");
+        let commands = parse_mongodb_commands("use reporting").unwrap();
+        let results = driver.execute_commands(commands).await.unwrap();
+
+        assert_eq!(driver.active_database_name().await, "reporting");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].columns[0].name, "database");
+        assert_eq!(
+            results[0].rows[0][0],
+            Value::String("reporting".to_string())
+        );
+        assert_eq!(results[0].rows[0][1], Value::String("use".to_string()));
     }
 
     #[test]
