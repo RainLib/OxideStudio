@@ -281,22 +281,25 @@ public final class OracleSdeDriver implements Driver {
   public DriverPropertyInfo[] getPropertyInfo(String url, Properties properties) { return new DriverPropertyInfo[0]; }
 
   private static PreparedStatement statement(String sql) {
+    final String[] parameters = new String[3];
     return (PreparedStatement) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
       if ("execute".equals(method.getName())) return true;
       if ("getResultSet".equals(method.getName())) return resultSet();
-      if ("executeQuery".equals(method.getName())) return objectSourceResultSet(sql);
+      if ("setString".equals(method.getName())) { parameters[((Integer) args[0]) - 1] = (String) args[1]; return null; }
+      if ("executeQuery".equals(method.getName())) return objectSourceResultSet(sql, parameters);
       if ("close".equals(method.getName()) || "setQueryTimeout".equals(method.getName()) || "setFetchSize".equals(method.getName())) return null;
       return defaultValue(method.getReturnType());
     });
   }
 
-  private static ResultSet objectSourceResultSet(String sql) {
+  private static ResultSet objectSourceResultSet(String sql, String[] parameters) {
     final boolean metadataQuery = sql.contains("DBMS_METADATA.GET_DDL");
+    final String ddl = "TABLE".equals(parameters[0]) ? "CREATE TABLE \\\"HR\\\".\\\"SALES\\\" (ID NUMBER)" : "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
     final int[] row = new int[] { -1 };
     return (ResultSet) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
       if ("next".equals(method.getName())) return metadataQuery && ++row[0] == 0;
-      if ("getCharacterStream".equals(method.getName())) return new StringReader("CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1");
-      if ("getString".equals(method.getName())) return "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
+      if ("getCharacterStream".equals(method.getName())) return new StringReader(ddl);
+      if ("getString".equals(method.getName())) return ddl;
       if ("close".equals(method.getName())) return null;
       return defaultValue(method.getReturnType());
     });
@@ -374,6 +377,7 @@ public final class OracleSdeDriver implements Driver {
   let responseBuffer = "";
   let resolveQuery;
   let resolveMetadata;
+  let resolveTableMetadata;
   const queryResponse = new Promise((resolveResponse) => {
     resolveQuery = resolveResponse;
   });
@@ -388,7 +392,8 @@ public final class OracleSdeDriver implements Driver {
     for (const line of lines.filter(Boolean)) {
       const response = JSON.parse(line);
       if (response.id === 2) resolveQuery(response);
-      if (response.id === 3) resolveMetadata(response);
+    if (response.id === 3) resolveMetadata(response);
+    if (response.id === 4) resolveTableMetadata(response);
     }
   });
   agent.stdin.write(`${JSON.stringify({
@@ -409,7 +414,16 @@ public final class OracleSdeDriver implements Driver {
       request: { kind: "objectSource", namespace: "HR", object_name: "SALES_MV", object_type: "MATERIALIZED_VIEW" },
     },
   })}\n`);
-  const [response, sourceResponse] = await Promise.all([queryResponse, metadataResponse]);
+  const tableMetadataResponse = new Promise((resolve) => { resolveTableMetadata = resolve; });
+  agent.stdin.write(`${JSON.stringify({
+    id: 4,
+    method: "metadata",
+    params: {
+      connection_id: "oracle",
+      request: { kind: "objectSource", namespace: "HR", object_name: "SALES", object_type: "TABLE" },
+    },
+  })}\n`);
+  const [response, sourceResponse, tableSourceResponse] = await Promise.all([queryResponse, metadataResponse, tableMetadataResponse]);
   agent.stdin.end();
   const [code] = await once(agent, "close");
   assert.equal(code, 0);
@@ -419,5 +433,8 @@ public final class OracleSdeDriver implements Driver {
   ]);
   assert.deepEqual(sourceResponse?.result?.value, [
     'CREATE MATERIALIZED VIEW "HR"."SALES_MV" AS SELECT 1',
+  ]);
+  assert.deepEqual(tableSourceResponse?.result?.value, [
+    'CREATE TABLE "HR"."SALES" (ID NUMBER)',
   ]);
 });

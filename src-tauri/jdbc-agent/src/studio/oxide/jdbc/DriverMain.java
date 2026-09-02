@@ -433,20 +433,22 @@ public final class DriverMain {
   }
 
   /**
-   * Oracle exposes materialized-view DDL through DBMS_METADATA rather than
-   * portable JDBC metadata. Keep this narrow, identity-gated adapter in the
-   * signed JDBC process: the Host never synthesizes vendor catalog SQL and
-   * every other JDBC product continues to return no source.
+   * Oracle exposes table and materialized-view DDL through DBMS_METADATA
+   * rather than portable JDBC metadata. Keep this narrow, identity-gated
+   * adapter in the signed JDBC process: the Host never synthesizes vendor
+   * catalog SQL and every other JDBC product continues to return no source.
    */
   private static List<Object> objectSource(Connection connection, Map<String, Object> request) throws SQLException {
-    if (!isOracleDriver() || !isOracleMaterializedView(text(request.get("object_type")))) return List.of();
+    String metadataType = oracleMetadataObjectType(text(request.get("object_type")));
+    if (!isOracleDriver() || metadataType == null) return List.of();
     String schema = metadataIdentifier(request.get("namespace"), "schema");
     String name = metadataIdentifier(request.get("object_name"), "object name");
-    String sql = "SELECT DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW', ?, ?) FROM DUAL";
+    String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
     try (PreparedStatement statement = connection.prepareStatement(sql)) {
       configureQueryStatement(statement);
-      statement.setString(1, name);
-      statement.setString(2, schema);
+      statement.setString(1, metadataType);
+      statement.setString(2, name);
+      statement.setString(3, schema);
       try (ResultSet rows = statement.executeQuery()) {
         if (!rows.next()) return List.of();
         String source = boundedObjectSource(rows, 1);
@@ -457,10 +459,13 @@ public final class DriverMain {
 
   private static boolean isOracleDriver() { return "oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")); }
 
-  private static boolean isOracleMaterializedView(String objectType) {
-    if (objectType == null) return false;
+  private static String oracleMetadataObjectType(String objectType) {
+    if (objectType == null) return null;
     String normalized = objectType.trim().toUpperCase(java.util.Locale.ROOT).replace(' ', '_');
-    return "MATERIALIZED_VIEW".equals(normalized);
+    return switch (normalized) {
+      case "TABLE", "MATERIALIZED_VIEW", "SEQUENCE", "SYNONYM" -> normalized;
+      default -> null;
+    };
   }
 
   private static String metadataIdentifier(Object value, String label) throws SQLException {
