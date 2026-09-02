@@ -1180,7 +1180,7 @@ impl ConnectionManager {
         object_name: &str,
         object_type: &str,
         relation_name: Option<&str>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Vec<String>> {
         let driver = self.get_driver(id).await?;
         driver
             .get_object_source(schema, object_name, object_type, relation_name)

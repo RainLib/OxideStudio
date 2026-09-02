@@ -575,8 +575,8 @@ pub trait DatabaseDriver: Send + Sync {
         _object_name: &str,
         _object_type: &str,
         _relation_name: Option<&str>,
-    ) -> Result<Option<String>> {
-        Ok(None)
+    ) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// Get collections, indexes, or analogous document/search objects in a namespace.

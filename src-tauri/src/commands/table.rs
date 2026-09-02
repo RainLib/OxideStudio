@@ -19877,7 +19877,8 @@ pub async fn get_view_definition(
                 )
                 .await
                 .map_err(|error| error.to_string())?
-                .filter(|source| !source.trim().is_empty())
+                .into_iter()
+                .find(|source| !source.trim().is_empty())
                 .ok_or_else(|| "External driver did not provide this view definition".to_string());
         }
         ensure_host_table_ddl_allowed(&manager, &connection_id, "view definition introspection")

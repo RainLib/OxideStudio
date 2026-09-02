@@ -1535,9 +1535,9 @@ impl DatabaseDriver for ExternalDriver {
         object_name: &str,
         object_type: &str,
         relation_name: Option<&str>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Vec<String>> {
         if !self.capabilities.lock().await.schema_objects {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         self.metadata(MetadataRequest::ObjectSource {
             database: None,

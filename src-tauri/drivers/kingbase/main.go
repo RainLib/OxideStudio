@@ -458,7 +458,7 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		return map[string]any{"kind": "metadata", "value": out}, nil
 	}
 	if p.Request.Kind == "objectSource" {
-		out, err := kingbaseObjectSource(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType)
+		out, err := kingbaseObjectSources(db, p.Request.Namespace, p.Request.ObjectName, p.Request.ObjectType)
 		if err != nil {
 			return nil, fail("METADATA_FAILED", err.Error())
 		}
@@ -958,30 +958,38 @@ ORDER BY e.enumsortorder`
 // kingbaseObjectSource returns source only for object kinds whose server
 // catalog renderer has an unambiguous read-only result. Table reconstruction,
 // trigger lookup and mutations remain outside the v1 package contract.
-func kingbaseObjectSource(db *sql.DB, schema, name, objectType string) (any, error) {
+func kingbaseObjectSources(db *sql.DB, schema, name, objectType string) ([]any, error) {
 	if strings.TrimSpace(schema) == "" || strings.TrimSpace(name) == "" {
-		return nil, nil
+		return []any{}, nil
 	}
-	var source sql.NullString
+	var rows *sql.Rows
 	var err error
 	switch strings.ToUpper(strings.TrimSpace(objectType)) {
 	case "VIEW", "MATERIALIZED VIEW", "MATERIALIZED_VIEW":
-		err = db.QueryRow(kingbaseViewSourceQuery(), schema, name).Scan(&source)
+		rows, err = db.Query(kingbaseViewSourceQuery(), schema, name)
 	case "FUNCTION", "PROCEDURE":
-		err = db.QueryRow(kingbaseRoutineSourceQuery(), schema, name).Scan(&source)
+		rows, err = db.Query(kingbaseRoutineSourceQuery(), schema, name)
 	default:
-		return nil, nil
-	}
-	if err == sql.ErrNoRows {
-		return nil, nil
+		return []any{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !source.Valid || strings.TrimSpace(source.String) == "" {
-		return nil, nil
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var source sql.NullString
+		if err := rows.Scan(&source); err != nil {
+			return nil, err
+		}
+		if source.Valid && strings.TrimSpace(source.String) != "" {
+			out = append(out, source.String)
+		}
 	}
-	return source.String, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func kingbaseViewSourceQuery() string {
@@ -998,7 +1006,7 @@ FROM pg_catalog.pg_proc p
 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind IN ('f', 'p')
 ORDER BY pg_catalog.pg_get_function_identity_arguments(p.oid)
-LIMIT 1`
+LIMIT 20`
 }
 
 func optionalText(value string) any {

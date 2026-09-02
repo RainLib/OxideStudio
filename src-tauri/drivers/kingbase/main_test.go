@@ -95,6 +95,9 @@ func TestKingbaseObjectSourceQueriesUseBoundIdentifiers(t *testing.T) {
 			t.Fatalf("object-source query must bind schema and object name: %s", query)
 		}
 	}
+	if !strings.Contains(kingbaseRoutineSourceQuery(), "LIMIT 20") {
+		t.Fatalf("routine source query must bound overload results: %s", kingbaseRoutineSourceQuery())
+	}
 }
 
 func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
