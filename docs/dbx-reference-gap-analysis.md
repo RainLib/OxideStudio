@@ -488,7 +488,10 @@ Editor，而不是引入一个新的 Git UI 框架。
   JSON object/array 现在由 `serde_json` 顶层 visitor 增量解析：预览仅保留有界样本，
   文件字节与顶层 `Value::Array` 不再双重物化；值继续经目标列参数绑定执行既有类型转换。
   为保持现有单事务 rollback 契约，规范化行仍受 100,000 行上限并在共享 executor 前物化。
-  所有入口仍缺错误行隔离、断点恢复、映射快照和可恢复失败报告。
+  JSON/JSONL 现与 CSV 一样在事务前按冻结的目标 column mapping、driver/database scope、
+  mode 和完整文件 digest 执行全文件 strict preflight；最多仅返回 100 个失败行号与稳定
+  `ROW_INVALID` code，任一失败均不启动事务，也不回传源值或 SQL。所有入口仍缺“跳过坏行”
+  的显式策略、断点恢复、映射快照和可恢复失败报告。
 - 批量编辑、fill、normalize、find/replace、extractor profile 不足。
 - 表格 WHERE 已复用 LSP 虚拟文档并以相同 metadata 类型提供本地即时降级；语法位置、
   typed literal、quoted identifier、NOT/IS NOT、BETWEEN/IN 与多谓词测试矩阵已补齐。

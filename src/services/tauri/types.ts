@@ -995,6 +995,12 @@ export interface TableCsvImportPreflight {
   issues: TableImportRowIssue[]; issuesTruncated: boolean;
 }
 
+/** Full-file JSON/JSONL validation performed before the import transaction starts. */
+export interface TableJsonImportPreflight {
+  mappingDigest: string; totalRows: number; acceptedRows: number; rejectedRows: number;
+  issues: TableImportRowIssue[]; issuesTruncated: boolean;
+}
+
 /** A bounded, read-only prefix used to review a CSV selected by the desktop picker. */
 export interface TableCsvImportPreview {
   fileName: string;

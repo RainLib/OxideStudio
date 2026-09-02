@@ -982,6 +982,20 @@ pub struct TableCsvImportPreflight {
     pub issues_truncated: bool,
 }
 
+/// A bounded, read-only full-file JSON/JSONL preflight. It shares the CSV
+/// contract so a desktop review can reject unmappable rows before opening a
+/// transaction, while never returning row values or generated SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableJsonImportPreflight {
+    pub mapping_digest: String,
+    pub total_rows: u64,
+    pub accepted_rows: u64,
+    pub rejected_rows: u64,
+    pub issues: Vec<TableImportRowIssue>,
+    pub issues_truncated: bool,
+}
+
 /// Bytes returned to the desktop review dialog. This read-only command
 /// validates the selected CSV path and limits the renderer payload; it is
 /// paired with the existing desktop import command rather than a general file
@@ -18400,6 +18414,127 @@ pub async fn preflight_table_csv_import(
     }))
 }
 
+fn observe_json_import_preflight_row(
+    row_number: u64,
+    row: BTreeMap<String, Value>,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    total_rows: &mut u64,
+    accepted_rows: &mut u64,
+    rejected_rows: &mut u64,
+    issues: &mut Vec<TableImportRowIssue>,
+) -> Result<(), String> {
+    *total_rows += 1;
+    let valid = (|| {
+        let headers = row.keys().cloned().collect::<Vec<_>>();
+        let canonical_headers = canonical_import_columns(&headers, columns)?;
+        let values = headers
+            .into_iter()
+            .zip(canonical_headers)
+            .filter_map(|(source, target)| row.get(&source).cloned().map(|value| (target, value)))
+            .collect::<BTreeMap<_, _>>();
+        build_insert_mutation(kind, schema, table, columns, &values).map(|_| ())
+    })()
+    .is_ok();
+    if valid {
+        *accepted_rows += 1;
+    } else {
+        *rejected_rows += 1;
+        if issues.len() < 100 {
+            issues.push(TableImportRowIssue {
+                row_number,
+                code: "ROW_INVALID".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn preflight_table_json_import(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    driver: String,
+    schema: String,
+    table: String,
+    database: Option<String>,
+    file_path: String,
+    mode: Option<TableImportMode>,
+    expected_file_digest: Option<String>,
+) -> Result<Response<TableJsonImportPreflight>, String> {
+    let kind = table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
+    let path = PathBuf::from(file_path.trim());
+    validate_import_file(&path, TableImportFormat::Json)?;
+    verify_import_file_digest(&path, expected_file_digest.as_deref())?;
+    let target_columns = get_target_columns(
+        &manager,
+        &connection_id,
+        database.as_deref(),
+        &schema,
+        &table,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let columns = column_lookup(target_columns);
+    let mut total_rows = 0_u64;
+    let mut accepted_rows = 0_u64;
+    let mut rejected_rows = 0_u64;
+    let mut issues = Vec::new();
+    let mut observe_row = |row_number, row| {
+        observe_json_import_preflight_row(
+            row_number,
+            row,
+            kind,
+            &schema,
+            &table,
+            &columns,
+            &mut total_rows,
+            &mut accepted_rows,
+            &mut rejected_rows,
+            &mut issues,
+        )
+    };
+    if is_json_lines_path(&path) {
+        let reader = BufReader::new(File::open(&path).map_err(|error| error.to_string())?);
+        for (line_index, line) in reader.lines().enumerate() {
+            let line = line.map_err(|error| error.to_string())?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let row = serde_json::from_str::<BTreeMap<String, Value>>(&line).map_err(|error| {
+                format!("Invalid JSON object on line {}: {error}", line_index + 1)
+            })?;
+            observe_row(line_index as u64 + 1, row)?;
+        }
+    } else {
+        stream_json_document_rows(&path, &|| false, &mut observe_row)?;
+    }
+    if total_rows == 0 {
+        return Err("The JSON file does not contain any object rows".to_string());
+    }
+    if total_rows > MAX_IMPORT_ROWS as u64 {
+        return Err(format!(
+            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
+        ));
+    }
+    Ok(Response::ok(TableJsonImportPreflight {
+        mapping_digest: table_import_mapping_digest(
+            TableImportFormat::Json,
+            mode.unwrap_or_else(default_table_import_mode),
+            None,
+            None,
+        )?,
+        total_rows,
+        accepted_rows,
+        rejected_rows,
+        issues_truncated: rejected_rows > issues.len() as u64,
+        issues,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn import_json_lines_in_transaction(
     manager: &ConnectionManager,
@@ -20409,19 +20544,19 @@ mod tests {
         missing_deferred_cycle_foreign_keys, normalized_data_compare_threshold,
         normalized_table_data_transfer_objects, normalized_table_data_transfer_project_id,
         object_label_from_type, object_type_is_foreign_table, object_type_is_materialized_view,
-        object_type_is_view, order_postgres_views, overwrite_transfer_verification,
-        post_commit_schema_receipt, postgres_backup_index_definitions,
-        postgres_backup_routine_definitions, postgres_backup_routine_definitions_query,
-        postgres_identity_reseed_plan_from_results, postgres_identity_reseed_plan_query,
-        postgres_identity_reseed_statements, postgres_identity_reseed_verification_query,
-        postgres_materialized_view_populated_query, postgres_multirange_type_names,
-        postgres_multirange_type_query, postgres_range_type_ddls, postgres_range_type_query,
-        postgres_sequence_ddl, postgres_sequence_from_row, postgres_sequence_metadata_query,
-        postgres_sequence_setval_sql, postgres_view_definition_query,
-        postgres_view_dependency_query, preview_metadata_required, push_delimited_export_row,
-        query_target, query_target_parameterized, read_csv_import_preview,
-        read_json_import_preview, relation_operation_allowed, resolve_csv_import_columns,
-        resolve_csv_import_row_range, resolve_csv_text_encoding,
+        object_type_is_view, observe_json_import_preflight_row, order_postgres_views,
+        overwrite_transfer_verification, post_commit_schema_receipt,
+        postgres_backup_index_definitions, postgres_backup_routine_definitions,
+        postgres_backup_routine_definitions_query, postgres_identity_reseed_plan_from_results,
+        postgres_identity_reseed_plan_query, postgres_identity_reseed_statements,
+        postgres_identity_reseed_verification_query, postgres_materialized_view_populated_query,
+        postgres_multirange_type_names, postgres_multirange_type_query, postgres_range_type_ddls,
+        postgres_range_type_query, postgres_sequence_ddl, postgres_sequence_from_row,
+        postgres_sequence_metadata_query, postgres_sequence_setval_sql,
+        postgres_view_definition_query, postgres_view_dependency_query, preview_metadata_required,
+        push_delimited_export_row, query_target, query_target_parameterized,
+        read_csv_import_preview, read_json_import_preview, relation_operation_allowed,
+        resolve_csv_import_columns, resolve_csv_import_row_range, resolve_csv_text_encoding,
         resolve_table_data_transfer_target_plan, resolve_transfer_target_column_quoting,
         resolve_transfer_upsert_key_columns, reviewed_table_data_dialect,
         rewrite_sqlite_create_index_for_transfer, rewrite_sqlite_create_table_for_transfer,
@@ -22178,6 +22313,48 @@ mod tests {
         assert!(error.starts_with(TABLE_IMPORT_CANCELLED));
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_preflight_reports_unmappable_rows_without_exposing_values() {
+        let columns = column_lookup(vec![target_column("id")]);
+        let mut total_rows = 0_u64;
+        let mut accepted_rows = 0_u64;
+        let mut rejected_rows = 0_u64;
+        let mut issues = Vec::new();
+        observe_json_import_preflight_row(
+            7,
+            [("id".to_string(), json!(1))].into_iter().collect(),
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &mut total_rows,
+            &mut accepted_rows,
+            &mut rejected_rows,
+            &mut issues,
+        )
+        .unwrap();
+        observe_json_import_preflight_row(
+            8,
+            [("unknown".to_string(), json!("private value"))]
+                .into_iter()
+                .collect(),
+            DatabaseKind::Postgres,
+            "public",
+            "users",
+            &columns,
+            &mut total_rows,
+            &mut accepted_rows,
+            &mut rejected_rows,
+            &mut issues,
+        )
+        .unwrap();
+
+        assert_eq!((total_rows, accepted_rows, rejected_rows), (2, 1, 1));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].row_number, 8);
+        assert_eq!(issues[0].code, "ROW_INVALID");
     }
 
     #[test]

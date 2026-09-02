@@ -13,6 +13,7 @@ import {
   inferTableImportColumns,
   importTableData,
   preflightTableCsvImport,
+  preflightTableJsonImport,
   previewTablePage,
 } from "./table.service";
 
@@ -166,6 +167,21 @@ describe("table import write mode", () => {
     expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
       "preflight_table_csv_import",
       expect.objectContaining({ mode: "truncate" }),
+    );
+  });
+
+  it("binds the reviewed source and mode into JSON preflight", async () => {
+    await preflightTableJsonImport(
+      "connection-1", "postgres", "public", "users", "users.json",
+      "reporting", "sha256:reviewed", "truncate",
+    );
+    expect(invokeWithInterceptors).toHaveBeenLastCalledWith(
+      "preflight_table_json_import",
+      expect.objectContaining({
+        database: "reporting",
+        expectedFileDigest: "sha256:reviewed",
+        mode: "truncate",
+      }),
     );
   });
 });

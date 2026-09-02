@@ -1398,10 +1398,32 @@ export function TableDataView() {
       detail: activeTab.tableName,
     });
     setIsJsonImportSubmitting(true);
-    updateTask(taskId, { detail: "JSON preview approved; committing transaction" });
+    updateTask(taskId, { detail: "Running full-file JSON preflight" });
     const importId = tableService.createTableImportId();
     activeTableImportsRef.current.set(importId, taskId);
     try {
+      const preflight = await tableService.preflightTableJsonImport(
+        tabConnectionId,
+        driver,
+        activeTab.schemaName,
+        activeTab.tableName,
+        jsonImportSource.nativePath,
+        activeTab.databaseName,
+        jsonImportSource.preview.contentDigest,
+        mode,
+      );
+      if (preflight.rejectedRows > 0) {
+        const locations = preflight.issues
+          .slice(0, 5)
+          .map((issue) => issue.rowNumber)
+          .join(", ");
+        throw new Error(
+          `JSON preflight rejected ${preflight.rejectedRows.toLocaleString()} row(s)${locations ? ` (for example: ${locations})` : ""}. Strict import was not started.`,
+        );
+      }
+      updateTask(taskId, {
+        detail: `${preflight.acceptedRows.toLocaleString()} rows preflighted; committing transaction`,
+      });
       const imported = await tableService.importTableData(
         tabConnectionId,
         driver,
