@@ -461,7 +461,7 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 		sqlText = "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name"
 		args = []any{p.Request.Namespace}
 	case "columns":
-		sqlText = "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position"
+		sqlText = kingbaseColumnsQuery()
 		args = []any{p.Request.Namespace, p.Request.Relation}
 	default:
 		return map[string]any{"kind": "metadata", "value": []any{}}, nil
@@ -487,16 +487,40 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 			}
 			out = append(out, map[string]any{"name": first, "schema": p.Request.Namespace, "type": second, "comment": nil})
 		case "columns":
-			if err := rows.Scan(&first, &second, &third, &fourth); err != nil {
+			var primary, unique bool
+			if err := rows.Scan(&first, &second, &third, &fourth, &primary, &unique); err != nil {
 				return nil, fail("METADATA_FAILED", err.Error())
 			}
-			out = append(out, map[string]any{"name": first, "data_type": second, "is_nullable": third == "YES", "is_primary_key": false, "is_unique": false, "is_indexed": false, "is_auto_increment": false, "default_value": nullable(fourth), "comment": nil})
+			out = append(out, map[string]any{"name": first, "data_type": second, "is_nullable": third == "YES", "is_primary_key": primary, "is_unique": unique, "is_indexed": primary || unique, "is_auto_increment": false, "default_value": nullable(fourth), "comment": nil})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fail("METADATA_FAILED", err.Error())
 	}
 	return map[string]any{"kind": "metadata", "value": out}, nil
+}
+
+func kingbaseColumnsQuery() string {
+	return `SELECT c.column_name, c.data_type, c.is_nullable, c.column_default,
+  EXISTS (
+    SELECT 1 FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON kcu.constraint_catalog = tc.constraint_catalog AND kcu.constraint_schema = tc.constraint_schema
+      AND kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema AND kcu.table_name = tc.table_name
+    WHERE tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND kcu.column_name = c.column_name
+      AND tc.constraint_type = 'PRIMARY KEY'
+  ) AS is_primary_key,
+  EXISTS (
+    SELECT 1 FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON kcu.constraint_catalog = tc.constraint_catalog AND kcu.constraint_schema = tc.constraint_schema
+      AND kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema AND kcu.table_name = tc.table_name
+    WHERE tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND kcu.column_name = c.column_name
+      AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+  ) AS is_unique
+FROM information_schema.columns c
+WHERE c.table_schema = $1 AND c.table_name = $2
+ORDER BY c.ordinal_position`
 }
 
 // listKingbaseIndexes uses the same catalog shape as the DBX native agent.

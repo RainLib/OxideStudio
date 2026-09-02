@@ -79,6 +79,13 @@ func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
 	}
 }
 
+func TestKingbaseColumnQueryBindsTheRelationAndUsesCatalogKeys(t *testing.T) {
+	query := kingbaseColumnsQuery()
+	if !strings.Contains(query, "c.table_schema = $1 AND c.table_name = $2") || !strings.Contains(query, "tc.constraint_type = 'PRIMARY KEY'") {
+		t.Fatalf("column query must expose bound primary-key metadata: %s", query)
+	}
+}
+
 func TestCancelOnlySignalsTheMatchingKingbaseQuery(t *testing.T) {
 	canceled := false
 	a := &agent{connections: map[string]*sql.DB{}, active: map[string]context.CancelFunc{}}
