@@ -16,7 +16,20 @@
 - 本轮验证：`go test ./...`（IoTDB、Kingbase）均通过；`npm test -- --run --reporter=dot` 为 **342 files / 1814 tests passed**；`cargo test --manifest-path src-tauri/Cargo.toml --lib` 为 **880 passed / 0 failed / 2 ignored**。
 - 未完成且不得夸大：当前 Host v1 external-driver contract 尚未承载 DBX IoTDB Agent v2 的多 session、page cursor、完整 DDL/object-source/completion API；Kingbase 仍缺完整 catalog-backed object tree、trigger members/source、custom-type 属性/DDL、重载 routine source list 与版本回退。两个产品的真库版本、cluster、TLS、权限、取消恢复与跨平台 package 签名验证仍在 deferred validation queue。
 
-### 最新增量审计（`5d6f66777` → `d4d3995be`）
+### 最新增量审计（`d4d3995be` → `01ce303f4`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `01ce303f4` | completion assistant candidate kind 接受大写 Agent wire 值 | Oxide 的 `oxide-agent` headless LSP context 当前只向调用方返回受限的 candidate **名称**，没有反序列化 DBX 的 candidate-kind 枚举，因此不存在同一 wire failure。若后续把 kind/type 纳入该公开 JSON 契约，必须接受大小写两种输入并保持 canonical 小写输出；已记录为协议扩展前置条件。 |
+| `e9f2cc15b` | Sidebar 全局搜索可检查折叠的数据库/Schema 节点，并使用并发上限为 4 的任务队列 | Oxide `SchemaSidebar` 的 filter 是已加载 metadata 的本地投影，未主动连接或加载折叠节点；功能与 DBX 不等价。应在独立阶段引入连接范围确认、取消 generation、并发上限和恢复先前折叠状态，不能以无界 `Promise.all` 或自动连接所有保存连接替代。 |
+| `e79db23e1` | GROUP BY 分页只对 group keys 注入 positional `ORDER BY` | Oxide 编辑器结果为一次 materialized result，不会把任意 SELECT 改写成 OFFSET 分页 SQL；因此没有相同的重写 bug。未来若引入 server-side result paging，必须复用 DBX 的 group-key position 规则，避免 ClickHouse aggregate state 被排序。 |
+| `48f4fac89` | Table transfer 隔离到独立 Tokio task，并以容量 16 的 try-send progress queue 防止 UI 进度反压 | Oxide 已有单表与 batch transfer、取消、事务和终态回执，但 progress 仍在 copy batch 回调中直接发送 Tauri event。需要新增有界/节流的 progress relay 与 task-isolation audit，作为性能对齐项；在完成前不声称与 DBX transfer 运行时完全一致。 |
+| `877421e59` / `bd7ed6346` / `51ca40e86` | Oracle DDL metadata、IRIS JDBC object values、IRIS quoted preview identifiers | Oxide 当前对应产品通过签名 external/JDBC package 承接，Host 不得生成 Oracle/IRIS catalog SQL。待相应 package 纳入工作区后迁移并用 fixture 验证；现阶段没有把 PostgreSQL fallback 伪装成 Oracle/IRIS 支持。 |
+| `804120c0b` / `07688cac3` / `3325e9799` | Grid filter view、压缩备份删除、Kimi model deletion | 前两项分别需在 Grid/备份专项审计，Kimi 配置变更属于未纳入本轮的 AI Provider，不改变 Codex/CodeBuddy 或 SQL LSP 契约。 |
+
+> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `01ce303f4`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
+
+### 前一增量审计（`5d6f66777` → `d4d3995be`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
