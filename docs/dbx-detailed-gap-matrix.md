@@ -36,6 +36,8 @@
 
 > 本轮本地验证：指定 JDK 25 和经 SHA-256 校验的 H2 `2.3.232` 临时 fixture 后，`npm run test:release` 为 **54 passed / 0 skipped**；其中通用 JDBC Agent 的 H2 protocol、Oracle SDE/source、package manifest 与 release binding 均真实运行。临时 vendor jar 不进入工作区或发布产物。
 
+> LSP/Console 回归：`npm test -- --run --reporter=dot` 为 **343 files / 1819 tests passed**，覆盖 MongoDB shell/JSON completion、Elasticsearch REST/JSON completion、Monaco LSP adapter、session lifecycle 和 schema sync。真实 MongoDB、Elasticsearch 与 WebView 版本矩阵仍按统一 deferred validation 执行。
+
 ### 前一增量审计（`5d6f66777` → `d4d3995be`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
