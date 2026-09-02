@@ -103,6 +103,15 @@ func TestKingbaseObjectSourceQueriesUseBoundIdentifiers(t *testing.T) {
 	}
 }
 
+func TestKingbaseTypeSourceEscapesCatalogNamesAndLabels(t *testing.T) {
+	if got, want := kingbaseQuoteIdentifier(`kind"name`), `"kind""name"`; got != want {
+		t.Fatalf("quoted identifier = %q, want %q", got, want)
+	}
+	if got, want := kingbaseQuoteLiteral(`owner's`), `'owner''s'`; got != want {
+		t.Fatalf("quoted enum label = %q, want %q", got, want)
+	}
+}
+
 func TestKingbaseReferencingForeignKeyQueryUsesBoundTarget(t *testing.T) {
 	query := kingbaseReferencingForeignKeysQuery()
 	if !strings.Contains(query, "pk.table_schema = $1 AND pk.table_name = $2") {

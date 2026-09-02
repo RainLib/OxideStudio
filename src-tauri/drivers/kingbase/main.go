@@ -976,6 +976,8 @@ func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relation
 			return []any{}, nil
 		}
 		rows, err = db.Query(kingbaseTriggerSourceQuery(), schema, *relationName, name)
+	case "TYPE":
+		return kingbaseTypeSources(db, schema, name)
 	default:
 		return []any{}, nil
 	}
@@ -997,6 +999,64 @@ func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relation
 		return nil, err
 	}
 	return out, nil
+}
+
+// kingbaseTypeSources reconstructs only type shapes with a complete,
+// catalog-visible definition. Domains, ranges and base types deliberately
+// remain unavailable here: emitting a plausible but incomplete CREATE TYPE is
+// more dangerous than asking the user to use the server's native tooling.
+func kingbaseTypeSources(db *sql.DB, schema, name string) ([]any, error) {
+	attributeRows, err := db.Query(kingbaseCompositeTypeMembersQuery(), schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer attributeRows.Close()
+	attributes := []string{}
+	for attributeRows.Next() {
+		var attributeName, dataType string
+		if err := attributeRows.Scan(&attributeName, &dataType); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(dataType) == "" {
+			return []any{}, nil
+		}
+		attributes = append(attributes, kingbaseQuoteIdentifier(attributeName)+" "+dataType)
+	}
+	if err := attributeRows.Err(); err != nil {
+		return nil, err
+	}
+	qualified := kingbaseQuoteIdentifier(schema) + "." + kingbaseQuoteIdentifier(name)
+	if len(attributes) > 0 {
+		return []any{"CREATE TYPE " + qualified + " AS (" + strings.Join(attributes, ", ") + ");"}, nil
+	}
+	enumRows, err := db.Query(kingbaseEnumTypeMembersQuery(), schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer enumRows.Close()
+	labels := []string{}
+	for enumRows.Next() {
+		var label string
+		if err := enumRows.Scan(&label); err != nil {
+			return nil, err
+		}
+		labels = append(labels, kingbaseQuoteLiteral(label))
+	}
+	if err := enumRows.Err(); err != nil {
+		return nil, err
+	}
+	if len(labels) == 0 {
+		return []any{}, nil
+	}
+	return []any{"CREATE TYPE " + qualified + " AS ENUM (" + strings.Join(labels, ", ") + ");"}, nil
+}
+
+func kingbaseQuoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func kingbaseQuoteLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
 }
 
 func kingbaseViewSourceQuery() string {
