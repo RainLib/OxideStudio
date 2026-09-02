@@ -273,6 +273,16 @@ describe("MongoDB shell completion", () => {
     });
   });
 
+  it("offers the executable generic database command from the db scope", () => {
+    const scoped = buildMongoDbConsoleCompletions("db.run", "db.run".length);
+    expect(scoped.items).toContainEqual(
+      expect.objectContaining({
+        label: "runCommand",
+        insertText: "runCommand({ ping: 1 })",
+      }),
+    );
+  });
+
   it("does not complete method-shaped text inside comments or string values", () => {
     for (const source of [
       "// db.users.fi",

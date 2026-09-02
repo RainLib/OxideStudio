@@ -486,6 +486,14 @@ const MONGODB_SHELL_DATABASE_COMPLETIONS: MongoDbConsoleCompletion[] = [
     insertText: "version()",
     kind: "snippet",
   },
+  {
+    label: "runCommand",
+    detail: "Run a MongoDB command document",
+    documentation:
+      "The default ping example is read-only. Commands that mutate state remain subject to the query safety policy.",
+    insertText: "runCommand({ ping: 1 })",
+    kind: "snippet",
+  },
 ];
 
 const MONGODB_SHELL_METHOD_COMPLETIONS: MongoDbConsoleCompletion[] = [
