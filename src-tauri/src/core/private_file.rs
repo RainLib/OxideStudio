@@ -26,6 +26,48 @@ pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort protection for a SQLite database and the files SQLite creates
+/// beside it while journaling. Application metadata contains encrypted
+/// credentials and operational history, so a default umask must not leave the
+/// database or a stale WAL/journal readable by another local account.
+///
+/// This deliberately does not fail startup: an existing portable data root may
+/// belong to another account or live on a filesystem without POSIX modes. The
+/// caller still gets the normal SQLite error for an unusable database; this
+/// helper only narrows permissions where the platform permits it.
+pub(crate) fn restrict_sqlite_database_permissions(database_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sidecar = |suffix: &str| {
+            let mut name = database_path.as_os_str().to_os_string();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        for path in [
+            database_path.to_path_buf(),
+            sidecar("-journal"),
+            sidecar("-wal"),
+            sidecar("-shm"),
+        ] {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            let mode = metadata.permissions().mode() & 0o777;
+            let restricted = mode & 0o700;
+            if mode == restricted {
+                continue;
+            }
+            if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(restricted)) {
+                tracing::debug!(path = %path.display(), %error, "could not restrict SQLite metadata permissions");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = database_path;
+}
+
 /// Atomically replaces a user-private file.
 pub(crate) fn replace_private_file(path: &Path, contents: &[u8], temp_label: &str) -> Result<()> {
     let parent = path
@@ -146,5 +188,47 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_database_files_are_limited_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("metadata.db");
+        let mut paths = vec![database.clone()];
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut name = database.as_os_str().to_os_string();
+            name.push(suffix);
+            paths.push(std::path::PathBuf::from(name));
+        }
+        for path in &paths {
+            fs::write(path, b"sqlite-data").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
+        }
+
+        restrict_sqlite_database_permissions(&database);
+
+        for path in paths {
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+                0,
+                "{} retained group or other permissions",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn sqlite_database_permission_restriction_is_a_safe_platform_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("metadata.db");
+        fs::write(&database, b"sqlite-data").unwrap();
+
+        restrict_sqlite_database_permissions(&database);
+
+        assert_eq!(fs::read(&database).unwrap(), b"sqlite-data");
     }
 }

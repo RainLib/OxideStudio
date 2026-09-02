@@ -1,4 +1,6 @@
-use crate::core::private_file::create_private_file;
+use crate::core::private_file::{
+    create_private_directory, create_private_file, restrict_sqlite_database_permissions,
+};
 use aes_gcm::{
     aead::{Aead, Payload},
     Aes256Gcm, KeyInit, Nonce,
@@ -393,12 +395,18 @@ impl MetaStore {
         let credential_key =
             load_or_create_credential_key(&app_dir.join(CONNECTION_CREDENTIAL_KEY_FILE))?;
 
-        // Ensure directory exists
+        // Keep the credential key, SQLite metadata and its WAL sidecars in an
+        // owner-private directory even when an older installation created the
+        // application config root with the default umask.
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).context("failed to create config directory")?;
+            create_private_directory(parent).context("failed to create config directory")?;
         }
 
         let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy());
+
+        // Run before connecting (to repair an existing file) and again after
+        // migrations, when SQLite may have created WAL/journal sidecars.
+        restrict_sqlite_database_permissions(&db_path);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -410,7 +418,9 @@ impl MetaStore {
             pool,
             credential_key,
         };
-        store.init().await?;
+        let initialized = store.init().await;
+        restrict_sqlite_database_permissions(&db_path);
+        initialized?;
 
         Ok(store)
     }
