@@ -313,6 +313,38 @@ describe("cross-database table data view", () => {
     expect(mocks.ddlProps?.ddl).toContain("CREATE TABLE");
   });
 
+  it("opens a DDL draft in a query tab with the exact selected database scope", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<TableDataView />);
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.trim() === "DDL")
+        ?.click();
+    });
+    await vi.waitFor(() =>
+      expect(mocks.ddlProps?.onOpenInQuery).toEqual(expect.any(Function)),
+    );
+
+    await act(async () => {
+      (mocks.ddlProps?.onOpenInQuery as (ddl: string) => void)(
+        "ALTER TABLE public.users ADD COLUMN note text;",
+      );
+    });
+    const created = useTabStore
+      .getState()
+      .tabs.find((tab) => tab.title === "Edit DDL · users");
+    expect(created).toMatchObject({
+      type: "query",
+      connectionId: "postgres-1",
+      databaseName: "analytics",
+      schemaName: "public",
+      tableName: "users",
+      sql: "ALTER TABLE public.users ADD COLUMN note text;",
+    });
+  });
+
   it("renders MongoDB collections as read-only data instead of an editor", async () => {
     mocks.getDatabaseCapabilities.mockResolvedValue({
       driver: "mongodb",

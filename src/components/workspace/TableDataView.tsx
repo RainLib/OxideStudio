@@ -3,7 +3,6 @@ import {
   lazy,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -121,6 +120,7 @@ export function TableDataView() {
     loadTablePage,
     loadDocumentPage,
     runTabQuery,
+    createTab,
     addNewRow,
     commitEdits,
     cancelEdits,
@@ -271,6 +271,21 @@ export function TableDataView() {
   const structureRequestRef = useRef(0);
   const ddlRequestRef = useRef(0);
   const isGridReadOnly = isTableReadOnly || !isEditingEnabled;
+
+  const openDdlInQueryEditor = useCallback(
+    (ddl: string) => {
+      if (!ddl.trim() || !activeTab || !tabConnectionId) return;
+      const relationName = activeTab.tableName || "DDL";
+      createTab("query", `Edit DDL · ${relationName}`, ddl, {
+        connectionId: tabConnectionId,
+        databaseName: activeTab.databaseName,
+        schemaName: activeTab.schemaName,
+        tableName: activeTab.tableName,
+        objectType: activeTab.objectType,
+      });
+    },
+    [activeTab, createTab, tabConnectionId],
+  );
 
   const openCsvImportPicker = async () => {
     if (!isTauri()) {
@@ -785,10 +800,11 @@ export function TableDataView() {
   const result =
     activeTab?.results?.[resultIndex] ?? activeTab?.results?.[0];
   const isTransposed = Boolean(activeTab && transposedTabIds.has(activeTab.id));
-  const transposedResult = useMemo(
-    () => (isTransposed && result ? transposeQueryResult(result) : undefined),
-    [isTransposed, result],
-  );
+  // Keep all hooks above the non-table early return. Creating a Query tab
+  // from a DDL draft changes the active tab synchronously, before the parent
+  // has a chance to unmount this view.
+  const transposedResult =
+    isTransposed && result ? transposeQueryResult(result) : undefined;
   const csvImportColumns: ColumnInfo[] =
     metadataColumns.length > 0
       ? metadataColumns
@@ -2208,6 +2224,7 @@ export function TableDataView() {
           isLoading={isDdlLoading}
           error={ddlError}
           onRefresh={() => void refreshDdl(true)}
+          onOpenInQuery={openDdlInQueryEditor}
           kind={isSearchObjectPreview ? "mapping" : "ddl"}
         />
       )}

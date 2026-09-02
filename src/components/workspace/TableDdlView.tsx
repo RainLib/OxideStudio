@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
-import { Check, Copy, RefreshCw, Search } from "lucide-react";
+import { Check, Copy, FilePenLine, RefreshCw, Search } from "lucide-react";
 import { useTheme } from "@/theme/useTheme";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +9,9 @@ interface TableDdlViewProps {
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
+  /** Opens a mutable SQL draft in the normal Query Editor, which owns SQL
+   * execution confirmation and result lifecycle. */
+  onOpenInQuery?: (ddl: string) => void;
   kind?: "ddl" | "mapping";
 }
 
@@ -42,6 +45,7 @@ export function TableDdlView({
   isLoading,
   error,
   onRefresh,
+  onOpenInQuery,
   kind = "ddl",
 }: TableDdlViewProps) {
   const { mode } = useTheme();
@@ -77,6 +81,18 @@ export function TableDdlView({
           >
             <Search size={12} />
           </button>
+          {kind === "ddl" && onOpenInQuery && (
+            <button
+              type="button"
+              className="wb-icon-button"
+              onClick={() => onOpenInQuery(ddl)}
+              disabled={!ddl || isLoading}
+              title="Open an editable DDL draft in SQL editor"
+              aria-label="Open editable DDL draft in SQL editor"
+            >
+              <FilePenLine size={12} />
+            </button>
+          )}
           <button
             type="button"
             className="wb-icon-button"

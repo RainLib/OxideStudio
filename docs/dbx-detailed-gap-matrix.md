@@ -41,7 +41,7 @@
 | `a834da702` | AI composer 可直接选择 schema，并将 schema 绑定到 agent metadata / tool context | 已对齐：Assistant 输入框提供 schema 下拉，默认跟随 Workspace schema，也可为当前连接显式选择一个 schema；打开菜单时按需刷新 schema 列表。选择仅写入本次 composer state，不改变 Explorer。提交时 `createWorkspaceAiToolContext` 将其冻结为该 turn 的 active namespace，后续工具调用只能使用该快照；连接切换会清除覆盖并重新跟随新 Workspace 默认 schema。位置：`AssistantSidebar.tsx`、`assistant/AssistantPromptBox.tsx`、`ai/tools/defaultRegistry.ts`。 |
 | `716d2eafd` / `10ac21696` | 旧 Oracle Agent 缺 manual transaction 时只回退 read auto-commit；满足 source PK 的 DISTINCT join 可删行 | 不直接迁移：Oxide 的外置 driver capability contract 在连接阶段声明 transaction / row-mutation，不会对未知 legacy package 乐观调用未声明 RPC；DataGrid 删除同样只有绑定、可证明 identity 的 table target 才显示，DISTINCT/join result 不会因单一启发式而开放写入。保持保守拒绝比自动降级/删除更安全。 |
 | `103e221cc` | 老 MySQL server 不支持 `ADD COLUMN IF NOT EXISTS` 时通过 metadata precheck 重试 | 已对齐受限兼容路径：原生 MySQL Driver 仅在 MySQL syntax error `1064` 后，词法跳过注释/字符串找到 clause、再以 AST 证明它是唯一的 `ALTER TABLE … ADD [COLUMN] IF NOT EXISTS <column>` 操作。预检通过绑定参数读取同连接 `information_schema.COLUMNS`；已存在返回 0 affected rows，不存在才重试移除 clause 的单条 ALTER。多操作 ALTER、DROP、任意非 syntax error 和预检失败均保持原错误，不会被重写。位置：`src-tauri/src/drivers/mysql.rs`；单测覆盖 qualified table、comment/literal、非匹配操作。MySQL 5.x/MariaDB 真机版本验证仍延期。 |
-| `a0d868b63` | 切换 Structure 的 DDL tab 时保持编辑器草稿 | 不适用：Oxide 的 `TableDdlView` 是明确 read-only 的 metadata viewer，没有用户可编辑 DDL 草稿或卸载后丢失的状态。 |
+| `a0d868b63` / `b45300e9b` | Structure 的 DDL 草稿保持与编辑 | 已补齐安全等价交互：Table DDL 查看器增加“在 SQL 编辑器中打开草稿”，会创建绑定原 connection/database/schema/table 的普通 Query tab 并复制当前 DDL；草稿、Monaco 编辑、执行、危险 SQL 确认、事务及结果生命周期完全复用 Query Editor，而查看器本身不直接执行任意 DDL。这样既可编辑、关闭/切回仍保留草稿，又不引入绕过统一确认链的第二条 DDL 执行路径。位置：`TableDdlView.tsx`、`TableDataView.tsx`，前端回归覆盖跨数据库 scope。 |
 
 ### 前一增量审计（`d4d3995be` → `55a21f8e9`）
 
