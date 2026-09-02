@@ -957,9 +957,10 @@ ORDER BY e.enumsortorder`
 }
 
 // kingbaseObjectSources returns source only for object kinds whose server
-// catalog renderer has an unambiguous read-only result. Trigger lookup needs
-// its owning relation, while table reconstruction and mutations remain outside
-// the v1 package contract.
+// catalog renderer has an unambiguous read-only result. A table definition is
+// reconstructed from catalog-owned definitions rather than from the Explorer's
+// lossy column descriptor. This keeps "View definition" useful for Kingbase
+// tables without handing an external package Host-owned PostgreSQL SQL.
 func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relationName *string) ([]any, error) {
 	if strings.TrimSpace(schema) == "" || strings.TrimSpace(name) == "" {
 		return []any{}, nil
@@ -967,6 +968,8 @@ func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relation
 	var rows *sql.Rows
 	var err error
 	switch strings.ToUpper(strings.TrimSpace(objectType)) {
+	case "TABLE", "BASE TABLE":
+		return kingbaseTableSources(db, schema, name)
 	case "VIEW", "MATERIALIZED VIEW", "MATERIALIZED_VIEW":
 		rows, err = db.Query(kingbaseViewSourceQuery(), schema, name)
 	case "FUNCTION", "PROCEDURE":
@@ -999,6 +1002,244 @@ func kingbaseObjectSources(db *sql.DB, schema, name, objectType string, relation
 		return nil, err
 	}
 	return out, nil
+}
+
+type kingbaseDDLColumn struct {
+	name, dataType, defaultValue, comment, identity string
+	nullable, primary                               bool
+}
+
+// kingbaseTableSources obtains every executable fragment from a single
+// catalog family. Mixing pg_catalog and sys_catalog fragments can create a
+// definition that looks plausible but cannot be replayed on either Kingbase
+// compatibility mode, so a complete fallback is attempted only before any
+// DDL is emitted.
+func kingbaseTableSources(db *sql.DB, schema, table string) ([]any, error) {
+	var lastErr error
+	for _, catalog := range []string{"pg_catalog.pg", "sys_catalog.sys"} {
+		source, err := kingbaseTableSourceFromCatalog(db, catalog, schema, table)
+		if err == nil {
+			if strings.TrimSpace(source) == "" {
+				return []any{}, nil
+			}
+			return []any{source}, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func kingbaseTableSourceFromCatalog(db *sql.DB, catalog, schema, table string) (string, error) {
+	columns, tableComment, err := kingbaseTableDDLColumns(db, catalog, schema, table)
+	if err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", nil
+	}
+	qualified := kingbaseQuoteIdentifier(schema) + "." + kingbaseQuoteIdentifier(table)
+	definitions := make([]string, 0, len(columns)+1)
+	primary := make([]string, 0)
+	for _, column := range columns {
+		definition := kingbaseQuoteIdentifier(column.name) + " " + column.dataType
+		if column.identity != "" {
+			definition += " " + column.identity
+		}
+		if !column.nullable {
+			definition += " NOT NULL"
+		}
+		if column.defaultValue != "" {
+			definition += " DEFAULT " + column.defaultValue
+		}
+		definitions = append(definitions, definition)
+		if column.primary {
+			primary = append(primary, kingbaseQuoteIdentifier(column.name))
+		}
+	}
+	if len(primary) > 0 {
+		definitions = append(definitions, "PRIMARY KEY ("+strings.Join(primary, ", ")+")")
+	}
+	statements := []string{"CREATE TABLE " + qualified + " (\n  " + strings.Join(definitions, ",\n  ") + "\n);"}
+	if tableComment != "" {
+		statements = append(statements, "COMMENT ON TABLE "+qualified+" IS "+kingbaseQuoteLiteral(tableComment)+";")
+	}
+	for _, column := range columns {
+		if column.comment != "" {
+			statements = append(statements, "COMMENT ON COLUMN "+qualified+"."+kingbaseQuoteIdentifier(column.name)+" IS "+kingbaseQuoteLiteral(column.comment)+";")
+		}
+	}
+	constraints, err := kingbaseTableDDLDefinitions(db, kingbaseTableConstraintDefinitionsQuery(catalog), schema, table, true)
+	if err != nil {
+		return "", err
+	}
+	for _, definition := range constraints {
+		statements = append(statements, "ALTER TABLE "+qualified+" ADD CONSTRAINT "+kingbaseQuoteIdentifier(definition.name)+" "+definition.sql+";")
+	}
+	indexes, err := kingbaseTableDDLDefinitions(db, kingbaseTableIndexDefinitionsQuery(catalog), schema, table, false)
+	if err != nil {
+		return "", err
+	}
+	for _, definition := range indexes {
+		statements = append(statements, kingbaseEnsureStatement(definition.sql))
+	}
+	triggers, err := kingbaseTableDDLDefinitions(db, kingbaseTableTriggerDefinitionsQuery(catalog), schema, table, false)
+	if err != nil {
+		return "", err
+	}
+	for _, definition := range triggers {
+		statements = append(statements, kingbaseEnsureStatement(definition.sql))
+	}
+	return strings.Join(statements, "\n\n"), nil
+}
+
+func kingbaseTableDDLColumns(db *sql.DB, catalog, schema, table string) ([]kingbaseDDLColumn, string, error) {
+	// `attidentity` was added after older Kingbase releases. It is enrichment,
+	// not a reason to make an otherwise complete definition unavailable.
+	var rows *sql.Rows
+	var err error
+	for _, includeIdentity := range []bool{true, false} {
+		rows, err = db.Query(kingbaseTableColumnsQueryWithIdentity(catalog, includeIdentity), schema, table)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	columns := []kingbaseDDLColumn{}
+	tableComment := ""
+	for rows.Next() {
+		var column kingbaseDDLColumn
+		var defaultValue, comment, identity, relationComment sql.NullString
+		if err := rows.Scan(&column.name, &column.dataType, &column.nullable, &defaultValue, &comment, &identity, &column.primary, &relationComment); err != nil {
+			return nil, "", err
+		}
+		if defaultValue.Valid {
+			column.defaultValue = defaultValue.String
+		}
+		if comment.Valid {
+			column.comment = comment.String
+		}
+		if identity.Valid {
+			column.identity = kingbaseIdentityClause(identity.String)
+		}
+		if relationComment.Valid {
+			tableComment = relationComment.String
+		}
+		columns = append(columns, column)
+	}
+	return columns, tableComment, rows.Err()
+}
+
+type kingbaseDDLDefinition struct{ name, sql string }
+
+func kingbaseTableDDLDefinitions(db *sql.DB, query, schema, table string, named bool) ([]kingbaseDDLDefinition, error) {
+	rows, err := db.Query(query, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	definitions := []kingbaseDDLDefinition{}
+	for rows.Next() {
+		var definition kingbaseDDLDefinition
+		if named {
+			err = rows.Scan(&definition.name, &definition.sql)
+		} else {
+			err = rows.Scan(&definition.sql)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(definition.sql) != "" {
+			definitions = append(definitions, definition)
+		}
+	}
+	return definitions, rows.Err()
+}
+
+func kingbaseTableColumnsQuery(catalog string) string {
+	return kingbaseTableColumnsQueryWithIdentity(catalog, true)
+}
+
+func kingbaseTableColumnsQueryWithIdentity(catalog string, includeIdentity bool) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	identityExpression := "a.attidentity"
+	if !includeIdentity {
+		identityExpression = "CAST(NULL AS varchar(1))"
+	}
+	return fmt.Sprintf(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+  %s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum), %s,
+  EXISTS (SELECT 1 FROM %s.%s_constraint con WHERE con.conrelid = c.oid AND con.contype = 'p' AND a.attnum = ANY(con.conkey)),
+  obj_description(c.oid)
+FROM %s.%s_attribute a
+JOIN %s.%s_class c ON c.oid = a.attrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'f') AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum`, kingbaseCatalogDeparser(catalog, "get_expr"), identityExpression, schema, prefix, schema, prefix, schema, prefix, schema, prefix, schema, prefix)
+}
+
+func kingbaseTableConstraintDefinitionsQuery(catalog string) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	return fmt.Sprintf(`SELECT con.conname, %s(con.oid, true)
+FROM %s.%s_constraint con
+JOIN %s.%s_class c ON c.oid = con.conrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND con.contype <> 'p'
+ORDER BY con.conname`, kingbaseCatalogDeparser(catalog, "get_constraintdef"), schema, prefix, schema, prefix, schema, prefix)
+}
+
+func kingbaseTableIndexDefinitionsQuery(catalog string) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	return fmt.Sprintf(`SELECT %s(ix.indexrelid)
+FROM %s.%s_index ix
+JOIN %s.%s_class c ON c.oid = ix.indrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND NOT ix.indisprimary
+  AND NOT EXISTS (SELECT 1 FROM %s.%s_constraint con WHERE con.conindid = ix.indexrelid)
+ORDER BY ix.indexrelid`, kingbaseCatalogDeparser(catalog, "get_indexdef"), schema, prefix, schema, prefix, schema, prefix, schema, prefix)
+}
+
+func kingbaseTableTriggerDefinitionsQuery(catalog string) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	return fmt.Sprintf(`SELECT %s(tg.oid, true)
+FROM %s.%s_trigger tg
+JOIN %s.%s_class c ON c.oid = tg.tgrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2 AND NOT tg.tgisinternal
+ORDER BY tg.tgname`, kingbaseCatalogDeparser(catalog, "get_triggerdef"), schema, prefix, schema, prefix, schema, prefix)
+}
+
+func kingbaseCatalogParts(catalog string) (string, string) {
+	if catalog == "sys_catalog.sys" {
+		return "sys_catalog", "sys"
+	}
+	return "pg_catalog", "pg"
+}
+
+func kingbaseCatalogDeparser(catalog, name string) string {
+	schema, prefix := kingbaseCatalogParts(catalog)
+	return schema + "." + prefix + "_" + name
+}
+
+func kingbaseIdentityClause(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "a":
+		return "GENERATED ALWAYS AS IDENTITY"
+	case "d":
+		return "GENERATED BY DEFAULT AS IDENTITY"
+	default:
+		return ""
+	}
+}
+
+func kingbaseEnsureStatement(statement string) string {
+	trimmed := strings.TrimSpace(statement)
+	if trimmed == "" || strings.HasSuffix(trimmed, ";") {
+		return trimmed
+	}
+	return trimmed + ";"
 }
 
 // kingbaseTypeSources reconstructs only type shapes with a complete,
