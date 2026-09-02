@@ -87,6 +87,10 @@ const MAX_TRANSFER_ROWS: u32 = 10_000;
 /// targets. Do not let that turn one transfer into thousands of renderer
 /// events; terminal state is always emitted separately and never throttled.
 const TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL: u64 = 4;
+/// Progress is informational and must never make a transfer wait on renderer
+/// event delivery. Keep a small relay so a slow WebView cannot apply
+/// backpressure to database reads/writes; terminal progress is sent reliably.
+const TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY: usize = 16;
 const DEFAULT_TRANSFER_BATCH_SIZE: u32 = 250;
 const MAX_TRANSFER_BATCH_SIZE: u32 = 500;
 const MAX_TRANSFER_OVERWRITE_ROWS: u64 = 100_000;
@@ -7688,6 +7692,45 @@ fn emit_table_data_transfer_progress(app: &AppHandle, progress: TableDataTransfe
     }
 }
 
+struct TableDataTransferProgressRelay {
+    sender: mpsc::Sender<TableDataTransferProgress>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TableDataTransferProgressRelay {
+    fn new(app: AppHandle) -> Self {
+        let (sender, mut receiver) = mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
+        let task = tokio::spawn(async move {
+            while let Some(progress) = receiver.recv().await {
+                emit_table_data_transfer_progress(&app, progress);
+            }
+        });
+        Self { sender, task }
+    }
+
+    fn try_send(&self, progress: TableDataTransferProgress) {
+        // Intermediate updates are intentionally lossy. The receiver preserves
+        // FIFO order for accepted updates and finish() sends terminal state.
+        try_send_table_data_transfer_progress(&self.sender, progress);
+    }
+
+    async fn finish(self, progress: TableDataTransferProgress) {
+        let Self { sender, task } = self;
+        // Waiting for one final slot preserves order and ensures Done/Error/
+        // Cancelled is never dropped when the renderer is temporarily slow.
+        let _ = sender.send(progress).await;
+        drop(sender);
+        let _ = task.await;
+    }
+}
+
+fn try_send_table_data_transfer_progress(
+    sender: &mpsc::Sender<TableDataTransferProgress>,
+    progress: TableDataTransferProgress,
+) {
+    let _ = sender.try_send(progress);
+}
+
 fn should_emit_table_data_transfer_progress(
     last_emitted_batches: &mut Option<u64>,
     batches: u64,
@@ -12513,6 +12556,7 @@ pub async fn execute_table_data_transfer(
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
     let mut last_emitted_progress_batches = Some(0_u64);
+    let progress_relay = TableDataTransferProgressRelay::new(app.clone());
     // Keep the reviewed baseline outside the transactional result. A failed
     // transaction has no transfer result, but its terminal audit report must
     // still record the non-sensitive count that was bound to the reviewed
@@ -12552,8 +12596,7 @@ pub async fn execute_table_data_transfer(
         }
         .map_err(|error| format!("Could not start the target transfer transaction: {error}"))?;
 
-        emit_table_data_transfer_progress(
-            &app,
+        progress_relay.try_send(
             TableDataTransferProgress {
                 transfer_id: transfer_id.clone(),
                 rows_transferred: 0,
@@ -12572,8 +12615,7 @@ pub async fn execute_table_data_transfer(
                 &mut last_emitted_progress_batches,
                 batches,
             ) {
-                emit_table_data_transfer_progress(
-                    &app,
+                progress_relay.try_send(
                     TableDataTransferProgress {
                         transfer_id: transfer_id.clone(),
                         rows_transferred,
@@ -12664,51 +12706,46 @@ pub async fn execute_table_data_transfer(
 
     cancellation.take(&transfer_id).await;
 
-    match &result {
-        Ok(transfer) => emit_table_data_transfer_progress(
-            &app,
-            TableDataTransferProgress {
-                transfer_id: transfer_id.clone(),
-                rows_transferred: transfer.rows_transferred,
-                max_rows: normalized_transfer_limit(request.max_rows),
-                batches: transfer.batches,
-                status: if transfer
-                    .post_commit_receipt
-                    .as_ref()
-                    .is_some_and(|receipt| {
-                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
-                    }) {
-                    TableDataTransferProgressStatus::Error
-                } else {
-                    TableDataTransferProgressStatus::Done
-                },
-                terminal: true,
-                message: transfer
-                    .post_commit_receipt
-                    .as_ref()
-                    .filter(|receipt| {
-                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
-                    })
-                    .map(|receipt| receipt.message.clone()),
+    let terminal_progress = match &result {
+        Ok(transfer) => TableDataTransferProgress {
+            transfer_id: transfer_id.clone(),
+            rows_transferred: transfer.rows_transferred,
+            max_rows: normalized_transfer_limit(request.max_rows),
+            batches: transfer.batches,
+            status: if transfer
+                .post_commit_receipt
+                .as_ref()
+                .is_some_and(|receipt| {
+                    receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                }) {
+                TableDataTransferProgressStatus::Error
+            } else {
+                TableDataTransferProgressStatus::Done
             },
-        ),
-        Err(error) => emit_table_data_transfer_progress(
-            &app,
-            TableDataTransferProgress {
-                transfer_id: transfer_id.clone(),
-                rows_transferred: last_progress_rows,
-                max_rows: normalized_transfer_limit(request.max_rows),
-                batches: last_progress_batches,
-                status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
-                    TableDataTransferProgressStatus::Cancelled
-                } else {
-                    TableDataTransferProgressStatus::Error
-                },
-                terminal: true,
-                message: Some(bounded_table_data_transfer_message(error)),
+            terminal: true,
+            message: transfer
+                .post_commit_receipt
+                .as_ref()
+                .filter(|receipt| {
+                    receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+                })
+                .map(|receipt| receipt.message.clone()),
+        },
+        Err(error) => TableDataTransferProgress {
+            transfer_id: transfer_id.clone(),
+            rows_transferred: last_progress_rows,
+            max_rows: normalized_transfer_limit(request.max_rows),
+            batches: last_progress_batches,
+            status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
+                TableDataTransferProgressStatus::Cancelled
+            } else {
+                TableDataTransferProgressStatus::Error
             },
-        ),
-    }
+            terminal: true,
+            message: Some(bounded_table_data_transfer_message(error)),
+        },
+    };
+    progress_relay.finish(terminal_progress).await;
 
     let mut result = result;
     if let Some(project_id) =
@@ -12846,6 +12883,7 @@ pub async fn execute_table_data_transfer_batch(
     };
     let mut last_progress_rows = 0_u64;
     let mut last_progress_batches = 0_u64;
+    let progress_relay = TableDataTransferProgressRelay::new(app.clone());
     let mut expected_tables = Vec::<TableDataTransferRequest>::new();
     // This parallels expected_tables and is intentionally captured before
     // the shared target transaction starts. Reports remain useful if a later
@@ -12950,7 +12988,7 @@ pub async fn execute_table_data_transfer_batch(
         let total_max_rows = resolved_tables.iter().fold(0_u32, |total, (_, plan)| {
             total.saturating_add(plan.max_rows)
         });
-        emit_table_data_transfer_progress(&app, TableDataTransferProgress {
+        progress_relay.try_send(TableDataTransferProgress {
             transfer_id: transfer_id.clone(), rows_transferred: 0, max_rows: total_max_rows,
             batches: 0, status: TableDataTransferProgressStatus::Running, terminal: false, message: None,
         });
@@ -12975,7 +13013,7 @@ pub async fn execute_table_data_transfer_batch(
                             &mut last_emitted_progress_batches,
                             batches,
                         ) {
-                            emit_table_data_transfer_progress(&app, TableDataTransferProgress {
+                            progress_relay.try_send(TableDataTransferProgress {
                                 transfer_id: transfer_id.clone(), rows_transferred, max_rows: total_max_rows,
                                 batches, status: TableDataTransferProgressStatus::Running, terminal: false, message: None,
                             });
@@ -13094,48 +13132,43 @@ pub async fn execute_table_data_transfer_batch(
     cancellation.take(&transfer_id).await;
     let total_max_rows = normalized_transfer_limit(request.plan.max_rows)
         .saturating_mul(expected_tables.len().max(request.plan.tables.len()) as u32);
-    match &result {
-        Ok(summary) => emit_table_data_transfer_progress(
-            &app,
-            TableDataTransferProgress {
-                transfer_id: transfer_id.clone(),
-                rows_transferred: summary.rows_transferred,
-                max_rows: total_max_rows,
-                batches: summary.batches,
-                status: if summary.post_commit_receipt.as_ref().is_some_and(|receipt| {
+    let terminal_progress = match &result {
+        Ok(summary) => TableDataTransferProgress {
+            transfer_id: transfer_id.clone(),
+            rows_transferred: summary.rows_transferred,
+            max_rows: total_max_rows,
+            batches: summary.batches,
+            status: if summary.post_commit_receipt.as_ref().is_some_and(|receipt| {
+                receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
+            }) {
+                TableDataTransferProgressStatus::Error
+            } else {
+                TableDataTransferProgressStatus::Done
+            },
+            terminal: true,
+            message: summary
+                .post_commit_receipt
+                .as_ref()
+                .filter(|receipt| {
                     receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
-                }) {
-                    TableDataTransferProgressStatus::Error
-                } else {
-                    TableDataTransferProgressStatus::Done
-                },
-                terminal: true,
-                message: summary
-                    .post_commit_receipt
-                    .as_ref()
-                    .filter(|receipt| {
-                        receipt.status == TableDataTransferPostCommitStatus::NeedsManualReview
-                    })
-                    .map(|receipt| receipt.message.clone()),
+                })
+                .map(|receipt| receipt.message.clone()),
+        },
+        Err(error) => TableDataTransferProgress {
+            transfer_id: transfer_id.clone(),
+            rows_transferred: last_progress_rows,
+            max_rows: total_max_rows,
+            batches: last_progress_batches,
+            status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
+                TableDataTransferProgressStatus::Cancelled
+            } else {
+                TableDataTransferProgressStatus::Error
             },
-        ),
-        Err(error) => emit_table_data_transfer_progress(
-            &app,
-            TableDataTransferProgress {
-                transfer_id: transfer_id.clone(),
-                rows_transferred: last_progress_rows,
-                max_rows: total_max_rows,
-                batches: last_progress_batches,
-                status: if error.contains(TABLE_DATA_TRANSFER_CANCELLED) {
-                    TableDataTransferProgressStatus::Cancelled
-                } else {
-                    TableDataTransferProgressStatus::Error
-                },
-                terminal: true,
-                message: Some(bounded_table_data_transfer_message(error)),
-            },
-        ),
-    }
+            terminal: true,
+            message: Some(bounded_table_data_transfer_message(error)),
+        },
+    };
+    progress_relay.finish(terminal_progress).await;
 
     let mut result = result;
     if let Some(project_id) =
@@ -20375,34 +20408,37 @@ mod tests {
         table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
         transfer_confirmation_token, transfer_plan_can_execute, transfer_target_column_type,
         transfer_target_confirmation_token, transfer_target_default_expression,
-        transfer_type_mapping_assessment, transfer_type_mapping_warnings, tsv_escape,
-        validate_default_expression, validate_table_data_compare_sync_preview,
-        validate_table_data_transfer_id, validate_table_data_transfer_overwrite_rows,
-        validate_xlsx_headers, validated_raw_filter_sql, value_to_u64, view_definition_query,
-        write_table_export_stream, xlsx_cell_value, xlsx_column_name, xlsx_escape_text,
-        xlsx_import_rows_with_cancel, AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind,
-        AnalyticalTypePolicy, CreateTableColumn, FrozenTableDataCompareSyncPlan,
-        ImportInferredType, PostCommitSchemaStatement, RelationOperation, SqlExportDialect,
-        SqlInsertConflictPolicy, SqlInsertExportOptions, StreamingXlsxWriter,
-        TableCsvColumnMapping, TableCsvImportOptions, TableDataCompareCancellationState,
-        TableDataCompareDegradationLevel, TableDataCompareDegradationThreshold,
-        TableDataCompareEndpoint, TableDataCompareResult, TableDataCompareSamplingStrategy,
-        TableDataCompareSyncPlanState, TableDataCompareSyncPreviewRequest,
-        TableDataTransferBatchPlanRequest, TableDataTransferCancellationState,
-        TableDataTransferColumnMapping, TableDataTransferCompatibility,
-        TableDataTransferConfirmationBinding, TableDataTransferConversion,
-        TableDataTransferEndpoint, TableDataTransferIdentityReseedPlan, TableDataTransferMode,
-        TableDataTransferObjectAction, TableDataTransferObjectKind, TableDataTransferObjectReport,
+        transfer_type_mapping_assessment, transfer_type_mapping_warnings,
+        try_send_table_data_transfer_progress, tsv_escape, validate_default_expression,
+        validate_table_data_compare_sync_preview, validate_table_data_transfer_id,
+        validate_table_data_transfer_overwrite_rows, validate_xlsx_headers,
+        validated_raw_filter_sql, value_to_u64, view_definition_query, write_table_export_stream,
+        xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
+        AlterColumnValueMode, AlterTableColumn, AnalyticalColumnKind, AnalyticalTypePolicy,
+        CreateTableColumn, FrozenTableDataCompareSyncPlan, ImportInferredType,
+        PostCommitSchemaStatement, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        TableDataCompareCancellationState, TableDataCompareDegradationLevel,
+        TableDataCompareDegradationThreshold, TableDataCompareEndpoint, TableDataCompareResult,
+        TableDataCompareSamplingStrategy, TableDataCompareSyncPlanState,
+        TableDataCompareSyncPreviewRequest, TableDataTransferBatchPlanRequest,
+        TableDataTransferCancellationState, TableDataTransferColumnMapping,
+        TableDataTransferCompatibility, TableDataTransferConfirmationBinding,
+        TableDataTransferConversion, TableDataTransferEndpoint,
+        TableDataTransferIdentityReseedPlan, TableDataTransferMode, TableDataTransferObjectAction,
+        TableDataTransferObjectKind, TableDataTransferObjectReport,
         TableDataTransferObjectSelection, TableDataTransferPostCommitStatus,
-        TableDataTransferPreview, TableDataTransferProgressStatus, TableDataTransferReport,
-        TableDataTransferRequest, TableDataTransferRetryPolicy, TableDataTransferTargetColumn,
-        TableDataTransferTargetPlanRequest, TableDataTransferVerificationStatus,
-        TableExportEncoding, TableExportFormat, TableExportWriterContext, TableExportWriterMessage,
-        TableFilter, TableImportCancellationState, TableImportFormat, TableImportMode,
-        TableImportTextEncoding, TableRowUpdate, TableSort, TransferTableSchemaObjects,
+        TableDataTransferPreview, TableDataTransferProgress, TableDataTransferProgressStatus,
+        TableDataTransferReport, TableDataTransferRequest, TableDataTransferRetryPolicy,
+        TableDataTransferTargetColumn, TableDataTransferTargetPlanRequest,
+        TableDataTransferVerificationStatus, TableExportEncoding, TableExportFormat,
+        TableExportWriterContext, TableExportWriterMessage, TableFilter,
+        TableImportCancellationState, TableImportFormat, TableImportMode, TableImportTextEncoding,
+        TableRowUpdate, TableSort, TransferTableSchemaObjects,
         MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
         MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS, TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL,
+        TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -20471,6 +20507,26 @@ mod tests {
         let mut empty = None;
         assert!(should_emit_table_data_transfer_progress(&mut empty, 1));
         assert_eq!(empty, Some(1));
+    }
+
+    #[test]
+    fn table_transfer_progress_relay_queue_is_bounded() {
+        let (sender, receiver) = mpsc::channel(TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
+        for batches in 0..=TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY {
+            try_send_table_data_transfer_progress(
+                &sender,
+                TableDataTransferProgress {
+                    transfer_id: "transfer".to_string(),
+                    rows_transferred: batches as u64,
+                    max_rows: 100,
+                    batches: batches as u64,
+                    status: TableDataTransferProgressStatus::Running,
+                    terminal: false,
+                    message: None,
+                },
+            );
+        }
+        assert_eq!(receiver.len(), TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY);
     }
 
     #[test]
