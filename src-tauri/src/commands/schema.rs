@@ -253,6 +253,38 @@ pub async fn get_schema_object_members(
     ))
 }
 
+/// Gets one or more read-only source definitions from the owning driver. The
+/// Host never substitutes catalog SQL when a package does not expose a source.
+#[tauri::command]
+pub async fn get_schema_object_source(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    schema: String,
+    object_name: String,
+    object_type: String,
+    relation_name: Option<String>,
+) -> Result<Response<Vec<String>>, String> {
+    let result = manager
+        .get_object_source(
+            &connection_id,
+            &schema,
+            &object_name,
+            &object_type,
+            relation_name.as_deref(),
+        )
+        .await;
+    Ok(schema_result(
+        result,
+        "SCHEMA_OBJECT_SOURCE_FAILED",
+        serde_json::json!({
+            "connectionId": connection_id,
+            "schema": schema,
+            "objectName": object_name,
+            "objectType": object_type,
+        }),
+    ))
+}
+
 /// Get read-only descriptors for non-relation objects in one explicitly
 /// selected database. This metadata path never changes the query connection's
 /// active database.

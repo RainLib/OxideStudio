@@ -318,6 +318,7 @@ pub fn run() {
             commands::schema::get_tables,
             commands::schema::get_schema_objects,
             commands::schema::get_schema_object_members,
+            commands::schema::get_schema_object_source,
             commands::schema::get_database_tables,
             commands::schema::get_collections,
             commands::schema::get_collections_page,

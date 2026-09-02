@@ -4075,6 +4075,34 @@ export function SchemaSidebar() {
                       }));
                     });
                 };
+                const viewObjectSource = () => {
+                  void schemaService
+                    .getSchemaObjectSource(
+                      connectionId,
+                      schema,
+                      object.name,
+                      object.objectType,
+                      object.parentName,
+                    )
+                    .then((definitions) => {
+                      const definition = definitions.find(
+                        (value) => value.trim().length > 0,
+                      );
+                      if (!definition) {
+                        throw new Error(
+                          "This driver does not provide a source definition for the selected object.",
+                        );
+                      }
+                      setActiveTable(object.name);
+                      setDdlContent(definition);
+                      setDdlViewerOpen(true);
+                    })
+                    .catch((error) => {
+                      window.alert(
+                        `Unable to load ${object.objectType.toLowerCase()} definition: ${error instanceof Error ? error.message : String(error)}`,
+                      );
+                    });
+                };
                 return (
                   <div
                     key={`${objectType}:${object.name}:${object.parentName || ""}`}
@@ -4135,6 +4163,12 @@ export function SchemaSidebar() {
                           onClick={() => void copyText(qualifiedName)}
                         >
                           Copy qualified name
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={viewObjectSource}
+                        >
+                          View definition
                         </ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>

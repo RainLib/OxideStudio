@@ -136,6 +136,23 @@ export async function getSchemaObjectMembers(
   );
 }
 
+/** Driver-owned, read-only source definitions for one descriptor object. */
+export async function getSchemaObjectSource(
+  connectionId: string,
+  schema: string,
+  objectName: string,
+  objectType: string,
+  relationName?: string | null,
+): Promise<string[]> {
+  return invokeWithInterceptors<string[]>("get_schema_object_source", {
+    connectionId,
+    schema,
+    objectName,
+    objectType,
+    relationName: relationName || null,
+  });
+}
+
 /** Database-scoped descriptor members without changing the active database. */
 export async function getDatabaseSchemaObjectMembers(
   connectionId: string,
@@ -630,6 +647,7 @@ export const schemaService = {
   getTables,
   getSchemaObjects,
   getSchemaObjectMembers,
+  getSchemaObjectSource,
   getDatabaseTables,
   getCollections,
   getCollectionsPage,
