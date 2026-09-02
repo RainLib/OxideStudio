@@ -123,7 +123,7 @@ func main() {
 func (a *agent) dispatch(request envelope) (any, *protocolError) {
 	switch request.Method {
 	case "handshake":
-		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
+		return map[string]any{"kind": "handshake", "value": map[string]any{"protocolVersion": "1.0", "packageId": packageID, "packageVersion": packageVersion, "driverId": driverID, "capabilities": map[string]any{"metadata": true, "query": true, "cancellation": true, "transactions": false, "databaseScopedQueries": false, "databaseCreation": false, "referencingForeignKeys": false, "schemaObjects": true, "schemaObjectMembers": false, "readOnlyEnforcement": true, "semanticSchemaMigration": false}}}, nil
 	case "connect":
 		var p struct {
 			ConnectionID string       `json:"connection_id"`
@@ -400,10 +400,12 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 	var p struct {
 		ConnectionID string `json:"connection_id"`
 		Request      struct {
-			Kind      string  `json:"kind"`
-			Database  *string `json:"database"`
-			Namespace string  `json:"namespace"`
-			Relation  string  `json:"relation"`
+			Kind       string  `json:"kind"`
+			Database   *string `json:"database"`
+			Namespace  string  `json:"namespace"`
+			Relation   string  `json:"relation"`
+			ObjectName string  `json:"object_name"`
+			ObjectType string  `json:"object_type"`
 		} `json:"request"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -429,6 +431,13 @@ func (a *agent) metadata(raw json.RawMessage) (any, *protocolError) {
 	}
 	if p.Request.Kind == "routines" {
 		out, err := listKingbaseRoutines(db, p.Request.Namespace)
+		if err != nil {
+			return nil, fail("METADATA_FAILED", err.Error())
+		}
+		return map[string]any{"kind": "metadata", "value": out}, nil
+	}
+	if p.Request.Kind == "schemaObjects" {
+		out, err := listKingbaseSchemaObjects(db, p.Request.Namespace)
 		if err != nil {
 			return nil, fail("METADATA_FAILED", err.Error())
 		}
@@ -661,6 +670,72 @@ FROM information_schema.routines WHERE routine_schema = $1 ORDER BY routine_name
 		})
 	}
 	return out, rows.Err()
+}
+
+// listKingbaseSchemaObjects is intentionally descriptor-only. Relations stay
+// in the normal table tree; this endpoint exposes only the non-relation
+// families that DBX presents alongside it. The v1 package does not claim
+// expandable members until a catalog-backed member reader is implemented.
+func listKingbaseSchemaObjects(db *sql.DB, schema string) ([]any, error) {
+	if strings.TrimSpace(schema) == "" {
+		return []any{}, nil
+	}
+	out := []any{}
+	routines, err := listKingbaseRoutines(db, schema)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range routines {
+		routine := raw.(map[string]any)
+		objectType, _ := routine["routine_type"].(string)
+		if strings.TrimSpace(objectType) == "" {
+			objectType = "FUNCTION"
+		}
+		out = append(out, map[string]any{
+			"name": routine["name"], "schema": schema, "object_type": objectType,
+			"parent_name": nil, "comment": routine["description"], "members_expandable": false,
+		})
+	}
+	triggerRows, err := db.Query(`SELECT trigger_name, event_object_table
+FROM information_schema.triggers WHERE trigger_schema = $1 ORDER BY trigger_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	for triggerRows.Next() {
+		var name, parent string
+		if err := triggerRows.Scan(&name, &parent); err != nil {
+			_ = triggerRows.Close()
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"name": name, "schema": schema, "object_type": "TRIGGER", "parent_name": parent,
+			"comment": nil, "members_expandable": false,
+		})
+	}
+	if err := triggerRows.Err(); err != nil {
+		_ = triggerRows.Close()
+		return nil, err
+	}
+	if err := triggerRows.Close(); err != nil {
+		return nil, err
+	}
+	typeRows, err := db.Query(`SELECT user_defined_type_name
+FROM information_schema.user_defined_types WHERE user_defined_type_schema = $1 ORDER BY user_defined_type_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer typeRows.Close()
+	for typeRows.Next() {
+		var name string
+		if err := typeRows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"name": name, "schema": schema, "object_type": "TYPE", "parent_name": nil,
+			"comment": nil, "members_expandable": false,
+		})
+	}
+	return out, typeRows.Err()
 }
 
 func optionalText(value string) any {

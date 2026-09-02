@@ -61,6 +61,17 @@ func TestKingbaseMetadataQueriesUseBoundScope(t *testing.T) {
 	}
 }
 
+func TestKingbaseSchemaObjectQueriesUseBoundScope(t *testing.T) {
+	for _, query := range []string{
+		`SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = $1`,
+		`SELECT user_defined_type_name FROM information_schema.user_defined_types WHERE user_defined_type_schema = $1`,
+	} {
+		if !strings.Contains(query, "$1") {
+			t.Fatalf("schema-object query must bind its namespace: %s", query)
+		}
+	}
+}
+
 func TestCancelOnlySignalsTheMatchingKingbaseQuery(t *testing.T) {
 	canceled := false
 	a := &agent{connections: map[string]*sql.DB{}, active: map[string]context.CancelFunc{}}
