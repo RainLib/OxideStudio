@@ -1767,6 +1767,19 @@ fn schema_option(schema: &str) -> Option<&str> {
     }
 }
 
+/// Keep the initial InfluxDB 3 data-grid open bounded. A time-series table
+/// without a predicate can otherwise scan every shard merely because it was
+/// opened from the sidebar. This is deliberately limited to the data-grid's
+/// no-filter quick-open path: explicit user filters, exports, and editor SQL
+/// retain their requested semantics.
+fn default_time_series_preview_filter(driver: &str) -> Option<&'static str> {
+    matches!(
+        driver.trim().to_ascii_lowercase().as_str(),
+        "influxdb3" | "influxdb-3"
+    )
+    .then_some("time > now() - INTERVAL '5 minutes'")
+}
+
 /// SQLite and DuckDB accept the ANSI/PostgreSQL-style quoted identifiers,
 /// `LIMIT/OFFSET`, and numbered bind markers used by the bounded data-grid
 /// path. Keep this adapter deliberately narrow: it enables data preview and
@@ -1775,7 +1788,11 @@ fn schema_option(schema: &str) -> Option<&str> {
 fn table_data_dialect(driver: &str) -> Result<DatabaseKind, String> {
     if matches!(
         driver.trim().to_ascii_lowercase().as_str(),
-        "sqlite" | "sqlite3" | "duckdb"
+        // InfluxDB 3 uses DataFusion SQL: its identifier quoting and bounded
+        // LIMIT/OFFSET data-grid grammar match the PostgreSQL-compatible
+        // builder. InfluxDB 1/2 remains intentionally excluded because it
+        // uses InfluxQL/Flux rather than this SQL contract.
+        "sqlite" | "sqlite3" | "duckdb" | "influxdb3" | "influxdb-3"
     ) {
         return Ok(DatabaseKind::Postgres);
     }
@@ -15476,7 +15493,15 @@ pub async fn preview_table_page(
             (total_rows, results)
         } else {
             let validated_filter = validated_raw_filter_sql(kind, filter_sql.as_deref())?;
-            let filter = validated_filter.as_deref();
+            // The default is only for the unfiltered grid quick-open. A
+            // caller-provided filter always wins, and the helper is scoped to
+            // InfluxDB 3 so other SQL-compatible drivers retain their exact
+            // historical query shape.
+            let default_time_filter = validated_filter
+                .is_none()
+                .then(|| default_time_series_preview_filter(&driver))
+                .flatten();
+            let filter = validated_filter.as_deref().or(default_time_filter);
 
             let total_rows = if include_total {
                 let count_sql = kind.count_table_query(schema_option(&schema), &table, filter);
@@ -20531,14 +20556,15 @@ mod tests {
         data_compare_degradation_level, data_compare_key,
         data_compare_key_columns_are_declared_unique, data_compare_keyset_continuation,
         data_compare_row_values, data_compare_sample_key_predicate,
-        delete_table_data_transfer_target_for_overwrite, ensure_host_table_ddl_capability,
-        ensure_sql_insert_conflict_policy, ensure_table_export_format,
-        ensure_transfer_endpoint_driver_matches_connection, execute_frozen_table_data_compare_sync,
-        execute_mysql_post_commit_schema_statements, execute_target_parameterized_batch,
-        filter_sql_export_batch, finish_table_data_transfer_transaction,
-        generate_postgres_materialized_view_ddl, generate_postgres_materialized_view_ddl_with_data,
-        generate_postgres_table_ddl, generate_postgres_view_ddl, get_target_columns,
-        import_string_inferred_type, infer_csv_import_columns, infer_json_lines_import_columns,
+        default_time_series_preview_filter, delete_table_data_transfer_target_for_overwrite,
+        ensure_host_table_ddl_capability, ensure_sql_insert_conflict_policy,
+        ensure_table_export_format, ensure_transfer_endpoint_driver_matches_connection,
+        execute_frozen_table_data_compare_sync, execute_mysql_post_commit_schema_statements,
+        execute_target_parameterized_batch, filter_sql_export_batch,
+        finish_table_data_transfer_transaction, generate_postgres_materialized_view_ddl,
+        generate_postgres_materialized_view_ddl_with_data, generate_postgres_table_ddl,
+        generate_postgres_view_ddl, get_target_columns, import_string_inferred_type,
+        infer_csv_import_columns, infer_json_lines_import_columns,
         infer_materialized_import_columns, inferred_import_data_type, is_json_lines_path,
         json_import_rows_with_cancel, merge_data_compare_sample_keys,
         missing_deferred_cycle_foreign_keys, normalized_data_compare_threshold,
@@ -21084,6 +21110,20 @@ mod tests {
         assert!(!super::should_calculate_table_total(None));
         assert!(!super::should_calculate_table_total(Some(false)));
         assert!(super::should_calculate_table_total(Some(true)));
+    }
+
+    #[test]
+    fn influxdb3_quick_open_has_a_bounded_time_window() {
+        assert_eq!(
+            default_time_series_preview_filter("influxdb3"),
+            Some("time > now() - INTERVAL '5 minutes'")
+        );
+        assert_eq!(
+            default_time_series_preview_filter(" InFlUxDb-3 "),
+            Some("time > now() - INTERVAL '5 minutes'")
+        );
+        assert_eq!(default_time_series_preview_filter("postgres"), None);
+        assert_eq!(default_time_series_preview_filter("influxdb"), None);
     }
 
     #[test]
@@ -26534,6 +26574,15 @@ WITH DATA;"#
             table_data_dialect("duckdb").unwrap(),
             DatabaseKind::Postgres
         );
+        assert_eq!(
+            table_data_dialect("influxdb3").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert_eq!(
+            table_data_dialect("influxdb-3").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert!(table_data_dialect("influxdb").is_err());
         assert!(table_data_dialect("unsupported").is_err());
     }
 

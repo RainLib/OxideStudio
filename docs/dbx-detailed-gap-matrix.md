@@ -1,7 +1,7 @@
 # OxideStudio 与 DBX 详细差距矩阵
 
 > 审计基线：2026-09-02
-> DBX 参考提交：`55a21f8e9`（最新已审计提交）
+> DBX 参考提交：`84669b0d1`（最新已审计提交）
 > 参考工程：`sources/dbx`（只读）
 
 本文所有 DBX 路径都相对 `sources/dbx/`：`lib/...` 表示
@@ -18,7 +18,19 @@
 
 - 本轮分页协议验证：`go test ./...`（IoTDB package 与 sidecar）通过；`cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features` 为 **883 passed / 0 failed / 2 ignored**；`npm run build` 通过。真实 IoTDB、签名 package 和编辑器 cursor UI 仍未执行。
 
-### 最新增量审计（`d4d3995be` → `55a21f8e9`）
+### 最新增量审计（`55a21f8e9` → `84669b0d1`）
+
+| DBX 提交 | 最新变化 | OxideStudio 结论 |
+| --- | --- | --- |
+| `84669b0d1` | InfluxDB / InfluxDB 3 侧栏 quick-open 在未给出筛选条件时注入滚动五分钟 `time` 窗口，避免全 shard scan | 已对齐并修复 Oxide 自身可用性缺口：内置 InfluxDB 3 已明确映射到受审阅的 PostgreSQL-compatible DataFusion grid dialect；无 filter 的 Table Data 首屏会使用 `time > now() - INTERVAL '5 minutes'`，而用户 filter、导出和手写 SQL 均不被改写。InfluxDB 1/2 仍不伪装成 ANSI SQL grid（InfluxQL/Flux contract 不同）。位置：`src-tauri/src/commands/table.rs:table_data_dialect/default_time_series_preview_filter/preview_table_page`；Rust 回归覆盖 alias、非 Influx 隔离和 v1/2 拒绝。真实 InfluxDB 3 实例仍在 deferred validation queue。 |
+| `945285ef0` | PostgreSQL-compatible server 返回大小写折叠的大值隐藏 marker 时仍移除内部 marker 列 | 不适用：Oxide 不向查询注入 DBX 的 `__dbx_large_value_bytes_*` projection marker；JDBC/native result runtime 通过每单元格有界转换返回结果。因此不存在 marker 泄露链路。若后续引入服务端 large-value marker，必须按 ASCII case-insensitive 匹配并有回归。 |
+| `38b93505c` | MongoDB MCP `getIndexes` 由 generic index 改为完整 index spec，额外显示 TTL `expireAfterSeconds` | 语义已保留但呈现模型不同：Oxide 的 native MongoDB `listIndexes` 将完整原始 index document 安全序列化进 `IndexInfo.definition`，TTL/partial/hidden 等未丢失；Agent metadata tool 也直接带回该 definition。当前通用 IndexInfo 面板不单列 TTL，因此不复制 DBX 的 MCP 专用结果表格式；后续 MongoDB 专用 index inspector 可将其提升为字段。 |
+| `a834da702` | AI composer 可直接选择 schema，并将 schema 绑定到 agent metadata / tool context | 已具备等价上下文：Assistant 读取当前 Workspace schema，发送到 Host 的 active namespace，并且 schema tree 切换受 connection snapshot 绑定；不会在 assistant 内制造与 Workspace 不一致的第二份 schema 状态。DBX 的新增 selector 主要弥补其 Vue composer 与 Query Tab 各自 state 的分离。 |
+| `716d2eafd` / `10ac21696` | 旧 Oracle Agent 缺 manual transaction 时只回退 read auto-commit；满足 source PK 的 DISTINCT join 可删行 | 不直接迁移：Oxide 的外置 driver capability contract 在连接阶段声明 transaction / row-mutation，不会对未知 legacy package 乐观调用未声明 RPC；DataGrid 删除同样只有绑定、可证明 identity 的 table target 才显示，DISTINCT/join result 不会因单一启发式而开放写入。保持保守拒绝比自动降级/删除更安全。 |
+| `103e221cc` | 老 MySQL server 不支持 `ADD COLUMN IF NOT EXISTS` 时通过 metadata precheck 重试 | 延期为真实 MySQL/MariaDB conformance：Oxide 原生 SQLx 路径不重写用户任意 ALTER，避免 Host 在有 implicit commit 的 DDL 上制造竞态；表结构 UI 使用其自身 reviewed plan。若要支持该兼容语法，必须按 DBX 一样只识别单一 `ALTER TABLE … ADD COLUMN IF NOT EXISTS`、在同连接 metadata precheck 后重试，并覆盖 5.x/MariaDB 版本。 |
+| `a0d868b63` | 切换 Structure 的 DDL tab 时保持编辑器草稿 | 不适用：Oxide 的 `TableDdlView` 是明确 read-only 的 metadata viewer，没有用户可编辑 DDL 草稿或卸载后丢失的状态。 |
+
+### 前一增量审计（`d4d3995be` → `55a21f8e9`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
@@ -32,7 +44,7 @@
 | `877421e59` / `bd7ed6346` / `51ca40e86` | Oracle DDL metadata、IRIS JDBC object values、IRIS quoted preview identifiers | Oracle 通用 JDBC Agent 受 `OXIDE_DRIVER_ID=oracle` 双重身份门控，并通过独立 `objectSource` capability 声明只读 source 能力。普通表、materialized view、sequence/synonym 使用固定 `DBMS_METADATA.GET_DDL(?, ?, ?)`、受白名单约束的 object type 与绑定 object/schema；视图先通过同一 metadata API 读取，失败时才以绑定 `ALL_VIEWS` 回退；function/procedure/trigger/package/type（含 body）通过绑定 `ALL_SOURCE`、稳定 `LINE` 顺序和全响应共享的 3 MiB 上限读取。Oracle relation metadata 同时识别 `MATERIALIZED VIEW`。这补齐了 DBX Oracle Agent 的通用只读 source 形状，但不伪造其完整 descriptor catalog 或 SDE SQL rewrite。`objectSource` 现与 `schemaObjects` 分离，IoTDB relation DDL 不再因没有 descriptor tree 被 Host 隐藏，既有 Kingbase package 显式声明新字段并保持旧 package 的 `schemaObjects` 兼容。JDK fixture 已真实编译执行，覆盖 Oracle SDE 值隔离、materialized-view/table/view source 以及 routine line aggregation。IRIS 的 `Types.OTHER` list-value 在 Oxide 通用 Agent 已始终经 `getObject` 后有界归一化，不存在 DBX 修复前的 `getString` 路径；IRIS quoted table preview 仍需要 IRIS signed package/真实 JDBC conformance，Host 不生成 IRIS catalog SQL，也不把 PostgreSQL fallback 伪装成 IRIS 支持。 |
 | `804120c0b` / `07688cac3` / `3325e9799` | Grid filter view、压缩备份删除、Kimi model deletion | DBX 的 filter 修复仅针对其 non-quick view 关闭后失去工具栏入口；Oxide 的 Table tab 使用独立、始终可见的 `GridFilterRow`，visual/SQL 模式切换不复用该 popover/open state，故不存在同一失效链路。SQLite backup 已有 `.sqlite.gz` 的安全路径门禁；删除命令现抽为同一受 canonical parent、prefix、扩展名、regular-file/symlink 检查保护的 helper，并新增 gzip artifact 实际删除回归。Kimi 配置变更属于未纳入本轮的 AI Provider，不改变 Codex/CodeBuddy 或 SQL LSP 契约。 |
 
-> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `55a21f8e9`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
+> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `84669b0d1`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增 LSP wire 契约。
 
 > 本轮本地验证：指定 JDK 25 和经 SHA-256 校验的 H2 `2.3.232` 临时 fixture 后，`npm run test:release` 为 **54 passed / 0 skipped**；其中通用 JDBC Agent 的 H2 protocol、Oracle SDE/source、package manifest 与 release binding 均真实运行。临时 vendor jar 不进入工作区或发布产物。
 
