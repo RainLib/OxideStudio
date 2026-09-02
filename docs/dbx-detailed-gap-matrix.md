@@ -9,6 +9,15 @@
 `apps/desktop/src/components/...`；`crates/...`、`agents/...` 和 `src-tauri/...`
 均可直接从 DBX 根目录定位。带 `:函数名` 或 `:行号` 的条目进一步指出核心入口。
 
+### 剩余工作边界（2026-09-02）
+
+| 类别 | 尚存内容 | 进入完成条件 |
+| --- | --- | --- |
+| 可在现有 Host 合约继续实现 | PostgreSQL/MySQL/SQLite 之外的跨产品 table-create profile；跨产品 owned sequence/current value、CHECK/trigger、表达式/partial index、自定义类型依赖 | 每个产品对先定义的结构化 metadata、可逆/可审阅 DDL、一次性确认 token、取消/部分完成 receipt 与 fixture 回归；禁止以原始 source DDL 或 TEXT fallback 代替。 |
+| 需要专用、签名 driver runtime | Argo/Inceptor catalog DDL、HANA native result rewrite、Oracle Spatial WKT/metadata | 提供各自可签名 package、连接/版本/metadata/query/cancel/error-map conformance 与 vendor fixture 后，才可暴露 product capability；Host 不猜测 vendor system view 或改写用户 SQL。 |
+| 高风险管理操作 | RocketMQ topic/consumer/ACL 变更、offset reset、消息发送；跨产品 scheduler/admin 写入 | Desktop 层先具备目标范围冻结、生产/未分类阻断、动态确认短语、单次 lease、未知结果 recovery 与审计 receipt；不能透过只读 browser/Agent 直接开放。 |
+| 仅待环境验证 | 70+ 产品矩阵、Mongo/Elasticsearch/IoTDB/Kingbase 真库、CLI 安装登录、WebView、三平台包签名与 release | 使用记录在 `docs/*deferred-validation*.md` 的版本、权限、TLS、取消、并发与恢复场景执行；静态/fixture 测试不得替代该结论。 |
+
 ### 最新 HEAD 审计（`3e4c17bd5`）
 
 - `d3a6a6979` 的 SQLite 文件权限修复现已直接补齐到 Oxide 的应用 metadata store：应用 config root 使用 owner-private directory，启动连接 SQLite 前会修复旧的 `metadata.db`，完成 schema 初始化后再次收紧 `metadata.db`、`-journal`、`-wal`、`-shm`；Unix 去除 group/other 权限，Windows 保持既有 ACL 语义。权限收紧是 best-effort，不会把既有 portable/非 POSIX 文件系统的 chmod 限制伪装成连接失败。位置：`src-tauri/src/core/{private_file.rs,store.rs}`；全量 Rust 测试通过。
