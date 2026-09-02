@@ -18,11 +18,12 @@
 
 - 本轮分页协议验证：`go test ./...`（IoTDB package 与 sidecar）通过；`cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features` 为 **883 passed / 0 failed / 2 ignored**；`npm run build` 通过。真实 IoTDB、签名 package 和编辑器 cursor UI 仍未执行。
 
-### 最新增量审计（`d4d3995be` → `8b4b83658`）
+### 最新增量审计（`d4d3995be` → `55a21f8e9`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
 | `01ce303f4` | completion assistant candidate kind 接受大写 Agent wire 值 | Oxide 的 `oxide-agent` headless LSP context 当前只向调用方返回受限的 candidate **名称**，没有反序列化 DBX 的 candidate-kind 枚举，因此不存在同一 wire failure。若后续把 kind/type 纳入该公开 JSON 契约，必须接受大小写两种输入并保持 canonical 小写输出；已记录为协议扩展前置条件。 |
+| `55a21f8e9` | SQL Server 分页目录查询为派生表投影补全 `TABLE_TYPE` 别名 | 不适用，且不是遗漏：Oxide 的外置 SQL Server runtime 通过 JDBC `DatabaseMetaData.getTables` 读取关系目录，没有生成 DBX 的 `ROW_NUMBER`/derived-table SQL，也不会执行含未命名 `CASE` 投影的 catalog query。后续若引入 SQL Server 专用分页 catalog 查询，所有派生表投影必须显式别名并添加回归。 |
 | `8b4b83658` | Oracle `SDE.ST_GEOMETRY` 未注册对象使用 `SDE.ST_AsText` 投影，避免底层驱动 panic 终止查询 | DBX 位于专用 Go Oracle Agent，能安全解析 SELECT 并从 `ALL_TAB_COLUMNS` 识别 owner/type 后重写为 WKT。Oxide 尚无可激活的专用 Oracle runtime，不能在 Host 或通用 JDBC Agent 猜测/改写用户 SQL。通用 JDBC Agent 仅增加最小隔离：当已签名 package 身份为 `oracle` 且 JDBC type name 为 `SDE.ST_GEOMETRY`/`ST_GEOMETRY` 时，先尝试有界 `getString`；失败时返回明确 unavailable marker，使其余列和行仍可显示。JDK fixture 已覆盖 vendor `getObject` 失败后的 text 成功读取和 text 也失败时的单元格降级；本机缺 JDK，fixture 本轮跳过，未作为通过证据。它不宣称或伪造 WKT，完整空间值读取仍要求专用 Oracle package、真实 Oracle driver fixture 和可审查 SQL rewrite。 |
 | `2c04c2f1f` | Dameng 分页由 `FETCH FIRST` 改为 `ROWNUM` | 已对齐：`DatabaseSearchDialect` 将 `dameng` 路由至 ROWNUM 外层查询，DB2 仍保持 `FETCH FIRST`；SQL 编辑器的 `select rows` snippet 亦生成 `WHERE ROWNUM <= …`。Rust 与 Vitest 回归覆盖两条路径。 |
 | `e9f2cc15b` | Sidebar 全局搜索可检查折叠的数据库/Schema 节点，并使用并发上限为 4 的任务队列 | 已对齐当前 PostgreSQL catalog tree：非空 filter 等待 180ms 后仅为当前已连接的数据源加载尚未缓存的远程 database → schema → table/schema-object metadata，调度器上限为 4；任一节点失败不会取消其它节点。filter、连接或 catalog context 改变时递增 generation，迟到的结果绝不写回新树；没有自动连接其它保存连接，也不改变用户的展开状态。位置：`SchemaSidebar.tsx`、`sidebarSearchTasks.ts`。 |
@@ -31,7 +32,7 @@
 | `877421e59` / `bd7ed6346` / `51ca40e86` | Oracle DDL metadata、IRIS JDBC object values、IRIS quoted preview identifiers | Oracle 通用 JDBC Agent 受 `OXIDE_DRIVER_ID=oracle` 双重身份门控，并通过独立 `objectSource` capability 声明只读 source 能力。普通表、materialized view、sequence/synonym 使用固定 `DBMS_METADATA.GET_DDL(?, ?, ?)`、受白名单约束的 object type 与绑定 object/schema；视图先通过同一 metadata API 读取，失败时才以绑定 `ALL_VIEWS` 回退；function/procedure/trigger/package/type（含 body）通过绑定 `ALL_SOURCE`、稳定 `LINE` 顺序和全响应共享的 3 MiB 上限读取。Oracle relation metadata 同时识别 `MATERIALIZED VIEW`。这补齐了 DBX Oracle Agent 的通用只读 source 形状，但不伪造其完整 descriptor catalog 或 SDE SQL rewrite。`objectSource` 现与 `schemaObjects` 分离，IoTDB relation DDL 不再因没有 descriptor tree 被 Host 隐藏，既有 Kingbase package 显式声明新字段并保持旧 package 的 `schemaObjects` 兼容。JDK fixture 覆盖 Oracle SDE 值隔离、materialized-view/table/view source 以及 routine line aggregation；本机缺 JDK 时仍跳过。IRIS 的 `Types.OTHER` list-value 在 Oxide 通用 Agent 已始终经 `getObject` 后有界归一化，不存在 DBX 修复前的 `getString` 路径；IRIS quoted table preview 仍需要 IRIS signed package/真实 JDBC conformance，Host 不生成 IRIS catalog SQL，也不把 PostgreSQL fallback 伪装成 IRIS 支持。 |
 | `804120c0b` / `07688cac3` / `3325e9799` | Grid filter view、压缩备份删除、Kimi model deletion | DBX 的 filter 修复仅针对其 non-quick view 关闭后失去工具栏入口；Oxide 的 Table tab 使用独立、始终可见的 `GridFilterRow`，visual/SQL 模式切换不复用该 popover/open state，故不存在同一失效链路。SQLite backup 已有 `.sqlite.gz` 的安全路径门禁；删除命令现抽为同一受 canonical parent、prefix、扩展名、regular-file/symlink 检查保护的 helper，并新增 gzip artifact 实际删除回归。Kimi 配置变更属于未纳入本轮的 AI Provider，不改变 Codex/CodeBuddy 或 SQL LSP 契约。 |
 
-> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `8b4b83658`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
+> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `55a21f8e9`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
 
 ### 前一增量审计（`5d6f66777` → `d4d3995be`）
 
