@@ -298,8 +298,7 @@ public final class OracleSdeDriver implements Driver {
     final String ddl = "TABLE".equals(parameters[0]) ? "CREATE TABLE \\\"HR\\\".\\\"SALES\\\" (ID NUMBER)" : "VIEW".equals(parameters[0]) ? "CREATE VIEW \\\"HR\\\".\\\"ACTIVE_SALES\\\" AS SELECT 1" : "CREATE MATERIALIZED VIEW \\\"HR\\\".\\\"SALES_MV\\\" AS SELECT 1";
     final int[] row = new int[] { -1 };
     return (ResultSet) Proxy.newProxyInstance(OracleSdeDriver.class.getClassLoader(), new Class<?>[] { ResultSet.class }, (proxy, method, args) -> {
-      if ("next".equals(method.getName())) return metadataQuery && ++row[0] == 0;
-      if ("next".equals(method.getName())) return storedSourceQuery && ++row[0] < 2;
+      if ("next".equals(method.getName())) return metadataQuery ? ++row[0] == 0 : storedSourceQuery && ++row[0] < 2;
       if ("getCharacterStream".equals(method.getName())) return new StringReader(storedSourceQuery ? row[0] == 0 ? "CREATE PROCEDURE P AS\\n" : "BEGIN NULL; END;" : ddl);
       if ("getString".equals(method.getName())) return storedSourceQuery ? row[0] == 0 ? "CREATE PROCEDURE P AS\\n" : "BEGIN NULL; END;" : ddl;
       if ("close".equals(method.getName())) return null;

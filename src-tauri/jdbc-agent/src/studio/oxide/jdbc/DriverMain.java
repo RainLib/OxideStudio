@@ -544,18 +544,18 @@ public final class DriverMain {
 
   private static String boundedObjectSource(ResultSet rows, int index, int maximumCharacters) throws SQLException {
     if (maximumCharacters < 0) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
-    try (Reader reader = rows.getCharacterStream(index)) {
-      if (reader == null) return null;
-      StringBuilder source = new StringBuilder(); char[] chunk = new char[8_192]; int read;
-      try {
+    try {
+      try (Reader reader = rows.getCharacterStream(index)) {
+        if (reader == null) return null;
+        StringBuilder source = new StringBuilder(); char[] chunk = new char[8_192]; int read;
         while ((read = reader.read(chunk)) >= 0) {
           if (source.length() + read > maximumCharacters) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
           source.append(chunk, 0, read);
         }
-      } catch (IOException error) {
-        throw new SQLException("Unable to read JDBC object source", error);
+        return source.toString();
       }
-      return source.toString();
+    } catch (IOException error) {
+      throw new SQLException("Unable to read JDBC object source", error);
     } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
       String source = rows.getString(index);
       if (source != null && source.length() > maximumCharacters) throw new SQLException("The JDBC object source exceeds the 3 MiB safety limit");
