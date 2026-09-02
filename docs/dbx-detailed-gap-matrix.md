@@ -21,7 +21,7 @@
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
 | `01ce303f4` | completion assistant candidate kind 接受大写 Agent wire 值 | Oxide 的 `oxide-agent` headless LSP context 当前只向调用方返回受限的 candidate **名称**，没有反序列化 DBX 的 candidate-kind 枚举，因此不存在同一 wire failure。若后续把 kind/type 纳入该公开 JSON 契约，必须接受大小写两种输入并保持 canonical 小写输出；已记录为协议扩展前置条件。 |
-| `e9f2cc15b` | Sidebar 全局搜索可检查折叠的数据库/Schema 节点，并使用并发上限为 4 的任务队列 | Oxide `SchemaSidebar` 的 filter 是已加载 metadata 的本地投影，未主动连接或加载折叠节点；功能与 DBX 不等价。应在独立阶段引入连接范围确认、取消 generation、并发上限和恢复先前折叠状态，不能以无界 `Promise.all` 或自动连接所有保存连接替代。 |
+| `e9f2cc15b` | Sidebar 全局搜索可检查折叠的数据库/Schema 节点，并使用并发上限为 4 的任务队列 | 已对齐当前 PostgreSQL catalog tree：非空 filter 等待 180ms 后仅为当前已连接的数据源加载尚未缓存的远程 database → schema → table/schema-object metadata，调度器上限为 4；任一节点失败不会取消其它节点。filter、连接或 catalog context 改变时递增 generation，迟到的结果绝不写回新树；没有自动连接其它保存连接，也不改变用户的展开状态。位置：`SchemaSidebar.tsx`、`sidebarSearchTasks.ts`。 |
 | `e79db23e1` | GROUP BY 分页只对 group keys 注入 positional `ORDER BY` | Oxide 编辑器结果为一次 materialized result，不会把任意 SELECT 改写成 OFFSET 分页 SQL；因此没有相同的重写 bug。未来若引入 server-side result paging，必须复用 DBX 的 group-key position 规则，避免 ClickHouse aggregate state 被排序。 |
 | `48f4fac89` | Table transfer 隔离到独立 Tokio task，并以容量 16 的 try-send progress queue 防止 UI 进度反压 | Oxide 已有单表与 batch transfer、取消、事务和终态回执；copy progress 现只在起始后每 4 个 batch 发一次 Tauri event，终态始终必达，避免 one-row batch 造成 UI event flood。仍缺 DBX 同等的独立 task stack / bounded relay，保留为性能审计项，不能声称 transfer runtime 完全一致。 |
 | `877421e59` / `bd7ed6346` / `51ca40e86` | Oracle DDL metadata、IRIS JDBC object values、IRIS quoted preview identifiers | Oxide 当前对应产品通过签名 external/JDBC package 承接，Host 不得生成 Oracle/IRIS catalog SQL。待相应 package 纳入工作区后迁移并用 fixture 验证；现阶段没有把 PostgreSQL fallback 伪装成 Oracle/IRIS 支持。 |

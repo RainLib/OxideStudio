@@ -186,6 +186,11 @@ import {
   shouldActivateExplorerObject,
 } from "@/features/database-explorer/model/explorerActivation";
 import { explorerObjectIconClass } from "@/features/database-explorer/model/explorerObjectPresentation";
+import {
+  collapsedDatabaseSchemaTargets,
+  collapsedSchemaMetadataTargets,
+  runSidebarSearchTasks,
+} from "@/features/database-explorer/model/sidebarSearchTasks";
 import { searchIndexClearTouched } from "@/features/database-explorer/model/elasticsearchIndexActions";
 import {
   captureLiveSchemaSnapshot,
@@ -298,6 +303,7 @@ interface PostgresRemoteDatabaseState {
   connectionId: string | null;
   schemas: Record<string, string[]>;
   tables: Record<string, Record<string, TableInfo[]>>;
+  objects: Record<string, Record<string, SchemaObjectInfo[]>>;
 }
 
 interface ExplorerDataTransferRequest {
@@ -699,10 +705,12 @@ export function SchemaSidebar() {
       connectionId: null,
       schemas: {},
       tables: {},
+      objects: {},
     });
   const postgresRemoteRequestIds = useRef<Record<string, number>>({});
   const postgresRemoteRequestCounter = useRef(0);
   const postgresRemoteContextVersion = useRef(0);
+  const postgresGlobalSearchGenerationRef = useRef(0);
   const routineSourceMetadataVersionRef = useRef(metadataVersion);
 
   // Context Menu State
@@ -1283,6 +1291,7 @@ export function SchemaSidebar() {
       connectionId: canBrowseDatabaseCatalogs ? activeConnectionId : null,
       schemas: {},
       tables: {},
+      objects: {},
     });
   }, [
     activeConnectionId,
@@ -1702,6 +1711,14 @@ export function SchemaSidebar() {
         (databaseTables) =>
           databaseTables.some((table) =>
             table.name.toLocaleLowerCase().includes(normalizedFilter),
+          ),
+      ) ||
+      Object.values(postgresRemoteDatabases.objects[database] || {}).some(
+        (databaseObjects) =>
+          databaseObjects.some((object) =>
+            `${object.name} ${object.objectType} ${object.parentName || ""}`
+              .toLocaleLowerCase()
+              .includes(normalizedFilter),
           ),
       )
     );
@@ -3057,6 +3074,7 @@ export function SchemaSidebar() {
         [database]: Array.from(new Set(databaseSchemas)),
       },
       tables: current.connectionId === connectionId ? current.tables : {},
+      objects: current.connectionId === connectionId ? current.objects : {},
     }));
   };
 
@@ -3083,6 +3101,165 @@ export function SchemaSidebar() {
       };
     });
   };
+
+  // DBX searches collapsed catalog containers too. Keep Oxide's equivalent
+  // bounded and cancellation-safe: wait briefly for typing to settle, load
+  // only metadata that is absent from the local cache, and discard results
+  // once the filter, connection, or catalog context changes.
+  useEffect(() => {
+    const normalizedFilter = filterText.trim().toLocaleLowerCase();
+    const generation = postgresGlobalSearchGenerationRef.current + 1;
+    postgresGlobalSearchGenerationRef.current = generation;
+    if (
+      !normalizedFilter ||
+      !activeConnectionId ||
+      !canBrowseDatabaseCatalogs ||
+      !isActiveConnectionReady
+    ) {
+      return;
+    }
+
+    const connectionId = activeConnectionId;
+    const contextVersion = postgresRemoteContextVersion.current;
+    const databases = visiblePostgresDatabases.filter(
+      (database) => database !== activePostgresDatabase,
+    );
+    const cachedRemote =
+      postgresRemoteDatabases.connectionId === connectionId
+        ? postgresRemoteDatabases
+        : { connectionId, schemas: {}, tables: {}, objects: {} };
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        const schemaResults = await runSidebarSearchTasks(
+          collapsedDatabaseSchemaTargets(
+            databases,
+            activePostgresDatabase,
+            cachedRemote,
+          )
+            .map((database) => async () => ({
+              database,
+              schemas: await schemaService.getDatabaseSchemas(
+                connectionId,
+                database,
+              ),
+            })),
+        );
+        if (
+          postgresGlobalSearchGenerationRef.current !== generation ||
+          postgresRemoteContextVersion.current !== contextVersion ||
+          useConnectionStore.getState().activeConnectionId !== connectionId
+        ) {
+          return;
+        }
+
+        const discoveredSchemas = new Map<string, string[]>();
+        for (const result of schemaResults) {
+          if (result?.status === "fulfilled") {
+            discoveredSchemas.set(
+              result.value.database,
+              Array.from(new Set(result.value.schemas)),
+            );
+          }
+        }
+        const schemaByDatabase = new Map<string, string[]>();
+        for (const database of databases) {
+          schemaByDatabase.set(
+            database,
+            discoveredSchemas.get(database) || cachedRemote.schemas[database] || [],
+          );
+        }
+        if (discoveredSchemas.size > 0) {
+          setPostgresRemoteDatabases((current) => {
+            if (current.connectionId !== connectionId) return current;
+            return {
+              ...current,
+              schemas: {
+                ...current.schemas,
+                ...Object.fromEntries(discoveredSchemas),
+              },
+            };
+          });
+        }
+
+        const metadataResults = await runSidebarSearchTasks(
+          collapsedSchemaMetadataTargets(schemaByDatabase, cachedRemote).map(
+            ({ database, schema }) => async () => {
+                const objectRequest =
+                  typeof schemaService.getDatabaseSchemaObjects === "function"
+                    ? schemaService
+                        .getDatabaseSchemaObjects(connectionId, database, schema)
+                        .catch(() => [] as SchemaObjectInfo[])
+                    : Promise.resolve([] as SchemaObjectInfo[]);
+                const [tables, objects] = await Promise.all([
+                  schemaService.getDatabaseTables(connectionId, database, schema),
+                  objectRequest,
+                ]);
+                return { database, schema, tables, objects };
+            },
+          ),
+        );
+        if (
+          postgresGlobalSearchGenerationRef.current !== generation ||
+          postgresRemoteContextVersion.current !== contextVersion ||
+          useConnectionStore.getState().activeConnectionId !== connectionId
+        ) {
+          return;
+        }
+        const tablePatches: Record<string, Record<string, TableInfo[]>> = {};
+        const objectPatches: Record<
+          string,
+          Record<string, SchemaObjectInfo[]>
+        > = {};
+        for (const result of metadataResults) {
+          if (result?.status !== "fulfilled") continue;
+          const { database, schema, tables, objects } = result.value;
+          tablePatches[database] = {
+            ...(tablePatches[database] || {}),
+            [schema]: tables,
+          };
+          objectPatches[database] = {
+            ...(objectPatches[database] || {}),
+            [schema]: objects,
+          };
+        }
+        if (Object.keys(tablePatches).length === 0) return;
+        setPostgresRemoteDatabases((current) => {
+          if (current.connectionId !== connectionId) return current;
+          return {
+            ...current,
+            tables: {
+              ...current.tables,
+              ...Object.fromEntries(
+                Object.entries(tablePatches).map(([database, tables]) => [
+                  database,
+                  { ...(current.tables[database] || {}), ...tables },
+                ]),
+              ),
+            },
+            objects: {
+              ...current.objects,
+              ...Object.fromEntries(
+                Object.entries(objectPatches).map(([database, objects]) => [
+                  database,
+                  { ...(current.objects[database] || {}), ...objects },
+                ]),
+              ),
+            },
+          };
+        });
+      })();
+    }, 180);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeConnectionId,
+    activePostgresDatabase,
+    canBrowseDatabaseCatalogs,
+    filterText,
+    isActiveConnectionReady,
+    postgresRemoteDatabases,
+    visiblePostgresDatabases,
+  ]);
 
   const handleSchemaRowClick = async (
     connectionId: string,
