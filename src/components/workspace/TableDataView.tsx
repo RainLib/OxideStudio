@@ -82,6 +82,7 @@ import {
   type TableXlsxImportRequest,
 } from "@/lib/actionEvents";
 import { transposeQueryResult } from "@/features/data-grid";
+import { mongodbIndexPresentation } from "@/lib/mongodbIndexPresentation";
 
 const MongoDocumentCloneDialog = lazy(() =>
   import("@/features/data-grid/ui/MongoDocumentCloneDialog").then((module) => ({
@@ -2258,14 +2259,29 @@ export function TableDataView() {
             {tableIndexes.length === 0 ? (
               <div className="text-muted-foreground">No indexes loaded</div>
             ) : (
-              tableIndexes.map((index) => (
-                <div
+              tableIndexes.map((index) => {
+                const mongoPresentation = isMongoDocumentPreview
+                  ? mongodbIndexPresentation(index)
+                  : null;
+                const mongoHints = mongoPresentation
+                  ? [
+                      mongoPresentation.expireAfterSeconds !== null
+                        ? `TTL ${mongoPresentation.expireAfterSeconds}s`
+                        : null,
+                      mongoPresentation.isSparse ? "sparse" : null,
+                      mongoPresentation.isHidden ? "hidden" : null,
+                      mongoPresentation.hasPartialFilter ? "partial" : null,
+                    ].filter((hint): hint is string => Boolean(hint))
+                  : [];
+                return (
+                  <div
                   key={`index:${index.name}`}
                   className="flex min-w-0 items-center gap-2 border-b border-border/40 py-1.5 last:border-b-0"
                   title={[
                     index.is_primary ? "primary" : null,
                     index.is_unique ? "unique" : null,
                     index.index_type || null,
+                    ...mongoHints,
                   ]
                     .filter(Boolean)
                     .join(", ")}
@@ -2276,6 +2292,11 @@ export function TableDataView() {
                   <span className="min-w-0 flex-1 truncate text-foreground">
                     {formatColumnList(index.columns)}
                   </span>
+                  {mongoHints.length > 0 && (
+                    <span className="max-w-28 shrink truncate rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
+                      {mongoHints.join(" · ")}
+                    </span>
+                  )}
                   <Button
                     variant="ghost"
                     size="icon"
@@ -2314,8 +2335,9 @@ export function TableDataView() {
                   >
                     <Trash2 size={12} />
                   </Button>
-                </div>
-              ))
+                  </div>
+                );
+              })
             )}
           </div>
           <div className="min-w-0">
