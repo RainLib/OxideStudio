@@ -11,6 +11,9 @@ use crate::core::statement::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
+use sqlparser::ast::{AlterTableOperation, ObjectNamePart, Statement};
+use sqlparser::dialect::MySqlDialect;
+use sqlparser::parser::Parser;
 use sqlx::mysql::types::MySqlTime;
 use sqlx::mysql::{MySqlArguments, MySqlConnectOptions, MySqlPoolOptions, MySqlRow};
 use sqlx::pool::PoolConnection;
@@ -47,6 +50,18 @@ const MYSQL_SCHEMA_OBJECTS_SQL: &str = r#"
     ) objects
     ORDER BY object_type, parent_name, object_name
 "#;
+
+#[derive(Debug, PartialEq, Eq)]
+struct MysqlAddColumnIfNotExists {
+    database: Option<String>,
+    table: String,
+    column: String,
+}
+
+enum MysqlAddColumnFallback {
+    AlreadyExists,
+    Retry(String),
+}
 
 fn parse_mysql_connection_id(value: &str) -> Option<u64> {
     value
@@ -143,6 +158,124 @@ fn mysql_requires_unprepared(sql: &str) -> bool {
     }
 }
 
+/// Recognize only the one legacy-compatible statement shape. Older MySQL and
+/// MariaDB versions reject `ADD COLUMN IF NOT EXISTS`; broad string rewriting
+/// would be unsafe for multi-operation ALTER statements or quoted SQL text.
+fn mysql_add_column_if_not_exists(sql: &str) -> Option<MysqlAddColumnIfNotExists> {
+    let fallback_sql = mysql_add_column_fallback_sql(sql)?;
+    let statements = Parser::parse_sql(&MySqlDialect {}, &fallback_sql).ok()?;
+    let [Statement::AlterTable {
+        name, operations, ..
+    }] = statements.as_slice()
+    else {
+        return None;
+    };
+    let [AlterTableOperation::AddColumn {
+        if_not_exists: false,
+        column_def,
+        ..
+    }] = operations.as_slice()
+    else {
+        return None;
+    };
+
+    let (database, table) = match name.0.as_slice() {
+        [ObjectNamePart::Identifier(table)] => (None, table.value.clone()),
+        [ObjectNamePart::Identifier(database), ObjectNamePart::Identifier(table)] => {
+            (Some(database.value.clone()), table.value.clone())
+        }
+        _ => return None,
+    };
+
+    Some(MysqlAddColumnIfNotExists {
+        database,
+        table,
+        column: column_def.name.value.clone(),
+    })
+}
+
+fn mysql_add_column_fallback_sql(sql: &str) -> Option<String> {
+    let (start, end) = mysql_if_not_exists_clause(sql)?;
+    let mut fallback_sql = String::with_capacity(sql.len());
+    fallback_sql.push_str(&sql[..start]);
+    fallback_sql.push_str(&sql[end..]);
+    Some(fallback_sql)
+}
+
+/// Locate keywords without reading quoted literals or comments. This is kept
+/// intentionally small and is followed by AST validation above.
+fn mysql_if_not_exists_clause(sql: &str) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == b'#'
+            || (bytes[index] == b'-' && index + 1 < bytes.len() && bytes[index + 1] == b'-')
+        {
+            index += if bytes[index] == b'#' { 1 } else { 2 };
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            let quote = bytes[index];
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    if index + 1 < bytes.len() && bytes[index + 1] == quote {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else if bytes[index] == b'\\' && quote != b'`' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push((sql[start..index].to_ascii_lowercase(), start, index));
+        } else {
+            index += 1;
+        }
+    }
+
+    tokens.windows(3).find_map(|window| {
+        (window[0].0 == "if" && window[1].0 == "not" && window[2].0 == "exists")
+            .then_some((window[0].1, window[2].2))
+    })
+}
+
+fn mysql_is_syntax_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .is_some_and(|code| code == "1064")
+}
+
 impl MysqlDriver {
     pub fn new(connection_string: &str) -> Self {
         Self {
@@ -152,6 +285,82 @@ impl MysqlDriver {
             base_options: Mutex::new(None),
             connection_string: connection_string.to_string(),
         }
+    }
+
+    async fn legacy_add_column_fallback_on_pool(
+        pool: &Pool<MySql>,
+        sql: &str,
+        error: &sqlx::Error,
+    ) -> Option<MysqlAddColumnFallback> {
+        if !mysql_is_syntax_error(error) {
+            return None;
+        }
+        let target = mysql_add_column_if_not_exists(sql)?;
+        let exists = if let Some(database) = target.database.as_deref() {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+            )
+            .bind(database)
+            .bind(&target.table)
+            .bind(&target.column)
+            .fetch_optional(pool)
+            .await
+            .ok()?
+            .is_some()
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+            )
+            .bind(&target.table)
+            .bind(&target.column)
+            .fetch_optional(pool)
+            .await
+            .ok()?
+            .is_some()
+        };
+        Some(if exists {
+            MysqlAddColumnFallback::AlreadyExists
+        } else {
+            MysqlAddColumnFallback::Retry(mysql_add_column_fallback_sql(sql)?)
+        })
+    }
+
+    async fn legacy_add_column_fallback_on_connection(
+        conn: &mut sqlx::MySqlConnection,
+        sql: &str,
+        error: &sqlx::Error,
+    ) -> Option<MysqlAddColumnFallback> {
+        if !mysql_is_syntax_error(error) {
+            return None;
+        }
+        let target = mysql_add_column_if_not_exists(sql)?;
+        let exists = if let Some(database) = target.database.as_deref() {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+            )
+            .bind(database)
+            .bind(&target.table)
+            .bind(&target.column)
+            .fetch_optional(&mut *conn)
+            .await
+            .ok()?
+            .is_some()
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+            )
+            .bind(&target.table)
+            .bind(&target.column)
+            .fetch_optional(&mut *conn)
+            .await
+            .ok()?
+            .is_some()
+        };
+        Some(if exists {
+            MysqlAddColumnFallback::AlreadyExists
+        } else {
+            MysqlAddColumnFallback::Retry(mysql_add_column_fallback_sql(sql)?)
+        })
     }
 
     /// Helper to get or create a pool for a specific schema
@@ -332,7 +541,23 @@ impl MysqlDriver {
                 self.process_pool_rows(sql, rows, pool).await
             }
             QueryExecutionMode::AffectsRows => {
-                let result = sqlx::raw_sql(sql).execute(pool).await?;
+                let result = match sqlx::raw_sql(sql).execute(pool).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        match Self::legacy_add_column_fallback_on_pool(pool, sql, &error).await {
+                            Some(MysqlAddColumnFallback::AlreadyExists) => {
+                                return Ok(vec![QueryResult::execution(
+                                    execution_statement_kind(sql).as_str(),
+                                    0,
+                                )]);
+                            }
+                            Some(MysqlAddColumnFallback::Retry(fallback_sql)) => {
+                                sqlx::raw_sql(&fallback_sql).execute(pool).await?
+                            }
+                            None => return Err(error.into()),
+                        }
+                    }
+                };
                 Ok(vec![QueryResult::execution(
                     execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
@@ -359,7 +584,25 @@ impl MysqlDriver {
                     self.process_connection_rows(sql, rows, conn).await
                 }
                 QueryExecutionMode::AffectsRows => {
-                    let result = (&mut *conn).execute(sql).await?;
+                    let result = match (&mut *conn).execute(sql).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            match Self::legacy_add_column_fallback_on_connection(conn, sql, &error)
+                                .await
+                            {
+                                Some(MysqlAddColumnFallback::AlreadyExists) => {
+                                    return Ok(vec![QueryResult::execution(
+                                        execution_statement_kind(sql).as_str(),
+                                        0,
+                                    )]);
+                                }
+                                Some(MysqlAddColumnFallback::Retry(fallback_sql)) => {
+                                    (&mut *conn).execute(fallback_sql.as_str()).await?
+                                }
+                                None => return Err(error.into()),
+                            }
+                        }
+                    };
                     Ok(vec![QueryResult::execution(
                         execution_statement_kind(sql).as_str(),
                         result.rows_affected(),
@@ -380,10 +623,25 @@ impl MysqlDriver {
                 self.process_connection_rows(sql, rows, conn).await
             }
             QueryExecutionMode::AffectsRows => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(&mut *conn)
-                    .await?;
+                let result = match sqlx::query(sql).persistent(false).execute(&mut *conn).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        match Self::legacy_add_column_fallback_on_connection(conn, sql, &error)
+                            .await
+                        {
+                            Some(MysqlAddColumnFallback::AlreadyExists) => {
+                                return Ok(vec![QueryResult::execution(
+                                    execution_statement_kind(sql).as_str(),
+                                    0,
+                                )]);
+                            }
+                            Some(MysqlAddColumnFallback::Retry(fallback_sql)) => {
+                                (&mut *conn).execute(fallback_sql.as_str()).await?
+                            }
+                            None => return Err(error.into()),
+                        }
+                    }
+                };
                 Ok(vec![QueryResult::execution(
                     execution_statement_kind(sql).as_str(),
                     result.rows_affected(),
@@ -1686,6 +1944,49 @@ mod tests {
             (true, true)
         );
         assert_eq!(mysql_column_ownership("INVISIBLE"), (false, true));
+    }
+
+    #[test]
+    fn legacy_add_column_if_not_exists_only_accepts_one_verified_operation() {
+        assert_eq!(
+            mysql_add_column_if_not_exists(
+                "ALTER TABLE `app`.`users` ADD COLUMN IF NOT EXISTS `nickname` VARCHAR(64) AFTER `email`"
+            ),
+            Some(MysqlAddColumnIfNotExists {
+                database: Some("app".to_string()),
+                table: "users".to_string(),
+                column: "nickname".to_string(),
+            })
+        );
+        assert!(mysql_add_column_if_not_exists(
+            "ALTER TABLE users ADD COLUMN nickname VARCHAR(64)"
+        )
+        .is_none());
+        assert!(mysql_add_column_if_not_exists(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(64), ADD COLUMN status INT"
+        )
+        .is_none());
+        assert!(
+            mysql_add_column_if_not_exists("ALTER TABLE users DROP COLUMN IF EXISTS nickname")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_add_column_if_not_exists_skips_comments_and_literals() {
+        let sql = "/* IF NOT EXISTS */ ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(64) DEFAULT 'IF NOT EXISTS'";
+        assert_eq!(
+            mysql_add_column_fallback_sql(sql),
+            Some("/* IF NOT EXISTS */ ALTER TABLE users ADD COLUMN  nickname VARCHAR(64) DEFAULT 'IF NOT EXISTS'".to_string())
+        );
+        assert_eq!(
+            mysql_add_column_if_not_exists(sql),
+            Some(MysqlAddColumnIfNotExists {
+                database: None,
+                table: "users".to_string(),
+                column: "nickname".to_string(),
+            })
+        );
     }
 
     #[test]
