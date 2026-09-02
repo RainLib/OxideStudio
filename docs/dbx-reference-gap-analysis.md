@@ -485,8 +485,10 @@ Editor，而不是引入一个新的 Git UI 框架。
   声明 transaction 与 database-scoped query，Host 绝不回退到默认库事务。JSON Lines/NDJSON
   同样可流式导入；原生 CSV 现在接受与预览同形的映射计划并在事务前重验。桌面端完整映射
   预览目前上限为 32 MiB；更大的 CSV 仍是标准 UTF-8、comma、header 的 streaming path。
-  JSON object/array 仍未实现增量解析与类型转换。所有入口
-  仍缺错误行隔离、断点恢复、映射快照和可恢复失败报告。
+  JSON object/array 现在由 `serde_json` 顶层 visitor 增量解析：预览仅保留有界样本，
+  文件字节与顶层 `Value::Array` 不再双重物化；值继续经目标列参数绑定执行既有类型转换。
+  为保持现有单事务 rollback 契约，规范化行仍受 100,000 行上限并在共享 executor 前物化。
+  所有入口仍缺错误行隔离、断点恢复、映射快照和可恢复失败报告。
 - 批量编辑、fill、normalize、find/replace、extractor profile 不足。
 - 表格 WHERE 已复用 LSP 虚拟文档并以相同 metadata 类型提供本地即时降级；语法位置、
   typed literal、quoted identifier、NOT/IS NOT、BETWEEN/IN 与多谓词测试矩阵已补齐。

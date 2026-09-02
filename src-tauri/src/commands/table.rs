@@ -31,7 +31,10 @@ use parquet::{
     file::properties::WriterProperties,
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{value::MapAccessDeserializer, Error as DeError, MapAccess, SeqAccess, Visitor},
+    Deserialize, Serialize,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -57,8 +60,9 @@ const MAX_JSON_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_XLSX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_JSON_LINES_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// CSV records are parsed incrementally and written through a single explicit
-/// transaction, so they can have a larger bounded source budget than JSON,
-/// whose array form is still parsed into memory.
+/// transaction, so they can have a larger bounded source budget than JSON.
+/// JSON documents now stream their parser input, but their normalized rows are
+/// still bounded and materialized before the shared transaction executor.
 const MAX_CSV_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// The desktop CSV review UI intentionally reads only a bounded prefix.  The
 /// actual import remains streaming and is allowed to use the larger import
@@ -16750,6 +16754,71 @@ fn bounded_json_import_preview_value(value: &Value) -> Value {
     }
 }
 
+/// Streams top-level JSON objects or array elements without first copying the
+/// complete document into a `String`/`Value`. The callback owns the only row
+/// retention policy, so preview and import can keep their existing bounded
+/// memory contracts. JSON lines intentionally keeps its separate line reader.
+struct JsonImportRowVisitor<'a> {
+    is_cancelled: &'a dyn Fn() -> bool,
+    on_row: &'a mut dyn FnMut(u64, BTreeMap<String, Value>) -> Result<(), String>,
+    next_row_number: u64,
+}
+
+impl<'de> Visitor<'de> for JsonImportRowVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object or an array of JSON objects")
+    }
+
+    fn visit_seq<A>(mut self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(row) = sequence.next_element::<BTreeMap<String, Value>>()? {
+            self.next_row_number += 1;
+            if (self.is_cancelled)() {
+                return Err(A::Error::custom(TABLE_IMPORT_CANCELLED));
+            }
+            (self.on_row)(self.next_row_number, row).map_err(A::Error::custom)?;
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if (self.is_cancelled)() {
+            return Err(A::Error::custom(TABLE_IMPORT_CANCELLED));
+        }
+        let row = BTreeMap::<String, Value>::deserialize(MapAccessDeserializer::new(map))?;
+        (self.on_row)(1, row).map_err(A::Error::custom)
+    }
+}
+
+fn stream_json_document_rows(
+    path: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+    on_row: &mut dyn FnMut(u64, BTreeMap<String, Value>) -> Result<(), String>,
+) -> Result<(), String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
+    serde::de::Deserializer::deserialize_any(
+        &mut deserializer,
+        JsonImportRowVisitor {
+            is_cancelled,
+            on_row,
+            next_row_number: 0,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if is_cancelled() {
+        return Err(TABLE_IMPORT_CANCELLED.to_string());
+    }
+    Ok(())
+}
+
 fn read_json_lines_import_preview(path: &Path) -> Result<TableJsonImportPreview, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let reader = BufReader::new(file);
@@ -16803,36 +16872,33 @@ fn read_json_import_preview(path: &Path) -> Result<TableJsonImportPreview, Strin
     if is_json_lines_path(path) {
         return read_json_lines_import_preview(path);
     }
-    let rows = json_import_rows(path)?;
-    if rows.is_empty() {
+    let mut source_columns = BTreeSet::new();
+    let mut sample_rows = Vec::new();
+    let mut total_rows = 0_u64;
+    let mut collect_row = |_row_number: u64, row: BTreeMap<String, Value>| {
+        total_rows += 1;
+        if sample_rows.len() < MAX_JSON_IMPORT_PREVIEW_ROWS {
+            source_columns.extend(row.keys().take(MAX_JSON_IMPORT_PREVIEW_COLUMNS).cloned());
+            sample_rows.push(
+                row.into_iter()
+                    .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
+                    .collect(),
+            );
+        }
+        Ok(())
+    };
+    stream_json_document_rows(path, &|| false, &mut collect_row)?;
+    if total_rows == 0 {
         return Err("The JSON file does not contain any object rows".to_string());
     }
-    let source_columns = rows
-        .iter()
-        .flat_map(|row| row.keys().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .take(MAX_JSON_IMPORT_PREVIEW_COLUMNS)
-        .collect::<Vec<_>>();
-    let total_rows = rows.len() as u64;
-    let truncated = rows.len() > MAX_JSON_IMPORT_PREVIEW_ROWS;
-    let sample_rows = rows
-        .into_iter()
-        .take(MAX_JSON_IMPORT_PREVIEW_ROWS)
-        .map(|row| {
-            row.into_iter()
-                .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
-                .collect()
-        })
-        .collect();
     Ok(TableJsonImportPreview {
         file_name: import_file_name(path, "JSON data"),
         total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
         content_digest: import_file_digest(path)?,
-        source_columns,
+        source_columns: source_columns.into_iter().collect(),
         sample_rows,
         total_rows: Some(total_rows),
-        truncated,
+        truncated: total_rows > MAX_JSON_IMPORT_PREVIEW_ROWS as u64,
     })
 }
 
@@ -18463,55 +18529,16 @@ fn json_import_rows_with_cancel(
     path: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<BTreeMap<String, Value>>, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let mut reader = BufReader::new(file);
-    let mut source = Vec::new();
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
+    let mut rows = Vec::new();
+    let mut collect_row = |_row_number: u64, row: BTreeMap<String, Value>| {
         if is_cancelled() {
             return Err(TABLE_IMPORT_CANCELLED.to_string());
         }
-        let read = reader.read(&mut chunk).map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        source.extend_from_slice(&chunk[..read]);
-    }
-    if is_cancelled() {
-        return Err(TABLE_IMPORT_CANCELLED.to_string());
-    }
-    let source = String::from_utf8(source)
-        .map_err(|_| "JSON imports must use valid UTF-8 encoding".to_string())?;
-
-    let values = match serde_json::from_str::<Value>(&source) {
-        Ok(Value::Array(values)) => values,
-        Ok(Value::Object(object)) => vec![Value::Object(object)],
-        Ok(_) => {
-            return Err("JSON import expects an object or an array of objects".to_string());
-        }
-        Err(_) => source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(|(index, line)| {
-                if is_cancelled() {
-                    return Err(TABLE_IMPORT_CANCELLED.to_string());
-                }
-                serde_json::from_str::<Value>(line)
-                    .map_err(|error| format!("Invalid JSON object on line {}: {error}", index + 1))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        rows.push(row);
+        Ok(())
     };
-
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| match value {
-            Value::Object(object) if !is_cancelled() => Ok(object.into_iter().collect()),
-            Value::Object(_) => Err(TABLE_IMPORT_CANCELLED.to_string()),
-            _ => Err(format!("JSON row {} is not an object", index + 1)),
-        })
-        .collect()
+    stream_json_document_rows(path, is_cancelled, &mut collect_row)?;
+    Ok(rows)
 }
 
 fn json_import_rows(path: &Path) -> Result<Vec<BTreeMap<String, Value>>, String> {
@@ -20402,7 +20429,8 @@ mod tests {
         sanitize_file_part, select_database_sql_export_tables,
         should_emit_table_data_transfer_progress, skipped_table_data_compare_result,
         sql_export_insert_batch_rows, sql_insert_statements, sqlite_transfer_target_index_name,
-        summarize_mutation_affected, table_data_compare_sync_metadata_digest, table_data_dialect,
+        stream_json_document_rows, summarize_mutation_affected,
+        table_data_compare_sync_metadata_digest, table_data_dialect,
         table_data_transfer_batch_plan, table_data_transfer_dialect,
         table_data_transfer_plan_digest, table_data_transfer_report_id,
         table_import_mapping_digest, table_import_replace_statement, transfer_column_identifier,
@@ -20438,7 +20466,7 @@ mod tests {
         MAX_DATABASE_SQL_EXPORT_TABLE_SELECTION, MAX_FULL_DATA_COMPARE_DETAIL_ROWS_PER_STATUS,
         MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_TRANSFER_OVERWRITE_ROWS, SQL_EXPORT_INSERT_BATCH_ROWS,
         SQL_EXPORT_MAX_INSERT_BATCH_ROWS, TABLE_DATA_TRANSFER_PROGRESS_BATCH_INTERVAL,
-        TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY,
+        TABLE_DATA_TRANSFER_PROGRESS_QUEUE_CAPACITY, TABLE_IMPORT_CANCELLED,
     };
     use crate::core::{
         dialect::DatabaseKind,
@@ -21897,7 +21925,7 @@ mod tests {
         })
         .unwrap_err();
         fs::remove_file(json_path).unwrap();
-        assert_eq!(error, super::TABLE_IMPORT_CANCELLED);
+        assert!(error.starts_with(super::TABLE_IMPORT_CANCELLED));
 
         let missing_xlsx = std::env::temp_dir().join("oxide-import-cancel-missing.xlsx");
         assert_eq!(
@@ -22115,6 +22143,39 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             r#"[{"id":1,"name":"first"},{"id":2,"name":"second","active":true}]"#
         );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_document_row_stream_preserves_object_rows_and_cancellation() {
+        let path = std::env::temp_dir().join(format!(
+            "oxide-json-document-stream-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, r#"[{"id":1},{"id":2}]"#).unwrap();
+
+        let mut observed = Vec::new();
+        stream_json_document_rows(&path, &|| false, &mut |row_number, row| {
+            observed.push((row_number, row));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0, 1);
+        assert_eq!(observed[1].0, 2);
+        assert_eq!(observed[1].1.get("id"), Some(&json!(2)));
+
+        let cancelled = std::cell::Cell::new(false);
+        let mut received = 0_u64;
+        let error = stream_json_document_rows(&path, &|| cancelled.get(), &mut |_, _| {
+            received += 1;
+            cancelled.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(received, 1);
+        assert!(error.starts_with(TABLE_IMPORT_CANCELLED));
 
         fs::remove_file(path).unwrap();
     }
