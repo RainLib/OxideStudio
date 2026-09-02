@@ -36,6 +36,7 @@ describe("sqlCommandSnippetCompletions", () => {
   it.each([
     ["sqlserver", "SELECT TOP ${1:100} ${2:*}\nFROM ${3:table};"],
     ["oracle", "SELECT ${1:*}\nFROM ${2:table}\nWHERE ROWNUM <= ${3:100};"],
+    ["dameng", "SELECT ${1:*}\nFROM ${2:table}\nWHERE ROWNUM <= ${3:100};"],
     ["db2", "SELECT ${1:*}\nFROM ${2:table}\nFETCH FIRST ${3:100} ROWS ONLY;"],
   ])("uses the %s row-limit syntax", (driver, expected) => {
     const [item] = sqlCommandSnippetCompletions("sel", { driver });

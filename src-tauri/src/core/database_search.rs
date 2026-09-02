@@ -205,8 +205,8 @@ impl DatabaseSearchDialect {
             ("sqlserver" | "iris", _) | (_, "sqlserver" | "tsql") => PaginationStyle::Top,
             ("informix", _) | (_, "informix") => PaginationStyle::First,
             ("firebird", _) | (_, "firebird") => PaginationStyle::Rows,
-            ("db2" | "dameng", _) | (_, "db2" | "dameng") => PaginationStyle::FetchFirst,
-            ("oracle" | "oceanbase-oracle" | "oscar" | "shentong" | "sundb", _)
+            ("db2", _) | (_, "db2") => PaginationStyle::FetchFirst,
+            ("dameng" | "oracle" | "oceanbase-oracle" | "oscar" | "shentong" | "sundb", _)
             | (_, "oracle" | "plsql") => PaginationStyle::Rownum,
             _ => PaginationStyle::Limit,
         };
@@ -619,6 +619,32 @@ mod tests {
             },
         );
         assert_eq!(where_clause, "[id] = 42");
+    }
+
+    #[test]
+    fn dameng_search_uses_rownum_instead_of_fetch_first() {
+        let dialect = DatabaseSearchDialect::from_connection(
+            "dameng",
+            &capabilities("dameng", "dameng", "\""),
+        )
+        .unwrap();
+        let query = build_database_search_sql(
+            &dialect,
+            DatabaseSearchSqlOptions {
+                schema: Some("SYSDBA".into()),
+                table_name: "USERS".into(),
+                columns: vec![DatabaseSearchColumn {
+                    name: "name".into(),
+                    data_type: "VARCHAR".into(),
+                    is_primary_key: false,
+                }],
+                term: "rain".into(),
+                limit: Some(100),
+            },
+        )
+        .unwrap();
+        assert!(query.sql.contains("WHERE ROWNUM <= 100"));
+        assert!(!query.sql.contains("FETCH FIRST"));
     }
 
     #[test]

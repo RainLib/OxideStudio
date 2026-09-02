@@ -126,11 +126,12 @@ const TOP_LIMIT_DRIVERS = new Set([
   "iris",
   "teradata",
 ]);
-const FETCH_FIRST_LIMIT_DRIVERS = new Set(["dameng", "db2"]);
+const FETCH_FIRST_LIMIT_DRIVERS = new Set(["db2"]);
 const ROWNUM_LIMIT_DRIVERS = new Set([
   "oracle",
   "oceanbase-oracle",
   "oscar",
+  "dameng",
 ]);
 const PARENTHESIZED_ADD_COLUMN_DRIVERS = new Set([
   "oracle",

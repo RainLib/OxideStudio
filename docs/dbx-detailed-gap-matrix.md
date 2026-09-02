@@ -18,18 +18,19 @@
 
 - 本轮分页协议验证：`go test ./...`（IoTDB package 与 sidecar）通过；`cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features` 为 **883 passed / 0 failed / 2 ignored**；`npm run build` 通过。真实 IoTDB、签名 package 和编辑器 cursor UI 仍未执行。
 
-### 最新增量审计（`d4d3995be` → `01ce303f4`）
+### 最新增量审计（`d4d3995be` → `2c04c2f1f`）
 
 | DBX 提交 | 最新变化 | OxideStudio 结论 |
 | --- | --- | --- |
 | `01ce303f4` | completion assistant candidate kind 接受大写 Agent wire 值 | Oxide 的 `oxide-agent` headless LSP context 当前只向调用方返回受限的 candidate **名称**，没有反序列化 DBX 的 candidate-kind 枚举，因此不存在同一 wire failure。若后续把 kind/type 纳入该公开 JSON 契约，必须接受大小写两种输入并保持 canonical 小写输出；已记录为协议扩展前置条件。 |
+| `2c04c2f1f` | Dameng 分页由 `FETCH FIRST` 改为 `ROWNUM` | 已对齐：`DatabaseSearchDialect` 将 `dameng` 路由至 ROWNUM 外层查询，DB2 仍保持 `FETCH FIRST`；SQL 编辑器的 `select rows` snippet 亦生成 `WHERE ROWNUM <= …`。Rust 与 Vitest 回归覆盖两条路径。 |
 | `e9f2cc15b` | Sidebar 全局搜索可检查折叠的数据库/Schema 节点，并使用并发上限为 4 的任务队列 | 已对齐当前 PostgreSQL catalog tree：非空 filter 等待 180ms 后仅为当前已连接的数据源加载尚未缓存的远程 database → schema → table/schema-object metadata，调度器上限为 4；任一节点失败不会取消其它节点。filter、连接或 catalog context 改变时递增 generation，迟到的结果绝不写回新树；没有自动连接其它保存连接，也不改变用户的展开状态。位置：`SchemaSidebar.tsx`、`sidebarSearchTasks.ts`。 |
 | `e79db23e1` | GROUP BY 分页只对 group keys 注入 positional `ORDER BY` | Oxide 编辑器结果为一次 materialized result，不会把任意 SELECT 改写成 OFFSET 分页 SQL；因此没有相同的重写 bug。未来若引入 server-side result paging，必须复用 DBX 的 group-key position 规则，避免 ClickHouse aggregate state 被排序。 |
 | `48f4fac89` | Table transfer 隔离到独立 Tokio task，并以容量 16 的 try-send progress queue 防止 UI 进度反压 | Oxide 已有单表与 batch transfer、取消、事务和终态回执；copy progress 现只在起始后每 4 个 batch 发一次 Tauri event，终态始终必达，避免 one-row batch 造成 UI event flood。仍缺 DBX 同等的独立 task stack / bounded relay，保留为性能审计项，不能声称 transfer runtime 完全一致。 |
 | `877421e59` / `bd7ed6346` / `51ca40e86` | Oracle DDL metadata、IRIS JDBC object values、IRIS quoted preview identifiers | Oxide 当前对应产品通过签名 external/JDBC package 承接，Host 不得生成 Oracle/IRIS catalog SQL。待相应 package 纳入工作区后迁移并用 fixture 验证；现阶段没有把 PostgreSQL fallback 伪装成 Oracle/IRIS 支持。 |
 | `804120c0b` / `07688cac3` / `3325e9799` | Grid filter view、压缩备份删除、Kimi model deletion | 前两项分别需在 Grid/备份专项审计，Kimi 配置变更属于未纳入本轮的 AI Provider，不改变 Codex/CodeBuddy 或 SQL LSP 契约。 |
 
-> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `01ce303f4`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
+> `sources/dbx` 已在本机 fetch 到 `origin/main` 的 `2c04c2f1f`；本轮新增提交不包含参考仓库。MongoDB/Elasticsearch LSP 路径在这段 DBX 增量中没有新增契约。
 
 ### 前一增量审计（`5d6f66777` → `d4d3995be`）
 

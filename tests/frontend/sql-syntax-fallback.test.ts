@@ -85,6 +85,7 @@ SELECT`;
 
     expect(body("sqlserver")).toContain("SELECT TOP ${1:100}");
     expect(body("oracle")).toContain("ROWNUM <= ${3:100}");
+    expect(body("dameng")).toContain("ROWNUM <= ${3:100}");
     expect(body("db2")).toContain("FETCH FIRST ${3:100} ROWS ONLY");
     expect(body("firebird")).toContain("ROWS ${3:100}");
     expect(body("jdbc")).not.toContain("LIMIT");
