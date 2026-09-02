@@ -250,7 +250,11 @@ WHERE 与 SORT 输入不是普通文本框。应复用同一个 dialect/metadata
   active surface 在 editor、left/right Tool Window 和 results grid 之间切换焦点，并支持关闭当前
   tool window/tab。非编辑器焦点下也在 capture phase 处理同一前缀，避免由子控件各自解释。
   `vim-mode-adapter.test.ts` 覆盖映射注册、dispatch 与 dispose 边界。
-- [ ] 主题、字体和高级外观设置由 token 层驱动，不向功能组件散落颜色值。
+- [ ] 主题、字体和高级外观设置由 token 层驱动，不向功能组件散落颜色值。设置页、布局和
+  新建 Grid 菜单已使用 `--wb-*` token；但 2026-09-02 的静态扫描仍在 **82** 个功能文件中发现
+  直接 Tailwind 语义色阶。后续必须先定义 success/warning/danger/info、diff-add/diff-remove
+  等语义 token，再按语义分批替换并加入 light/dark/contrast 回归；不得把这些颜色机械替换为
+  单一 accent 或删除差异/风险信息。
 
 ## 8. DBX 源码快速索引
 
