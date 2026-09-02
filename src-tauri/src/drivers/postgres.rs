@@ -2954,6 +2954,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_prokind_fallback_only_accepts_undefined_column_failures() {
+        assert!(PostgresDriver::postgres_missing_prokind_error(
+            "ERROR: column p.prokind does not exist"
+        ));
+        assert!(PostgresDriver::postgres_missing_prokind_error(
+            "ERROR: undefined column p.prokind (SQLSTATE 42703)"
+        ));
+        assert!(PostgresDriver::postgres_missing_prokind_error(
+            "错误: 字段 p.prokind 不存在"
+        ));
+        assert!(!PostgresDriver::postgres_missing_prokind_error(
+            "ERROR: permission denied for column p.prokind"
+        ));
+        assert!(!PostgresDriver::postgres_missing_prokind_error(
+            "ERROR: relation public.prokind does not exist"
+        ));
+    }
+
+    #[test]
     fn postgres_search_path_keeps_existing_path_when_selected_schema_is_first() {
         assert_eq!(
             postgres_search_path_with_selected_schema(
