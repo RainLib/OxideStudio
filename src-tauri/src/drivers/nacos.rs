@@ -533,7 +533,9 @@ impl DatabaseDriver for NacosDriver {
     }
 }
 
-fn parse_nacos_connection_url(value: &str) -> Result<(Url, Option<(String, String)>, String)> {
+type NacosConnectionConfig = (Url, Option<(String, String)>, String);
+
+fn parse_nacos_connection_url(value: &str) -> Result<NacosConnectionConfig> {
     let mut url = Url::parse(value.trim()).context("Invalid Nacos connection URL")?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         bail!("Nacos connection URL must use HTTP or HTTPS and contain a host")

@@ -553,7 +553,9 @@ async fn bounded_influx_body(response: Response) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-fn influx_series_rows(value: &Value) -> Vec<(Vec<String>, Vec<Value>, BTreeMap<String, String>)> {
+type InfluxSeriesRow = (Vec<String>, Vec<Value>, BTreeMap<String, String>);
+
+fn influx_series_rows(value: &Value) -> Vec<InfluxSeriesRow> {
     value
         .get("results")
         .and_then(Value::as_array)

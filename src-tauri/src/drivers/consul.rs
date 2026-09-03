@@ -410,7 +410,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0u8; 8 * 1024];
-            socket.read(&mut request).await.unwrap();
+            let bytes_read = socket.read(&mut request).await.unwrap();
+            assert!(bytes_read > 0);
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",

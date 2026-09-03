@@ -18542,6 +18542,13 @@ pub async fn preflight_table_csv_import(
     }))
 }
 
+struct JsonImportPreflightCounters<'a> {
+    total_rows: &'a mut u64,
+    accepted_rows: &'a mut u64,
+    rejected_rows: &'a mut u64,
+    issues: &'a mut Vec<TableImportRowIssue>,
+}
+
 fn observe_json_import_preflight_row(
     row_number: u64,
     row: BTreeMap<String, Value>,
@@ -18549,12 +18556,9 @@ fn observe_json_import_preflight_row(
     schema: &str,
     table: &str,
     columns: &BTreeMap<String, ColumnInfo>,
-    total_rows: &mut u64,
-    accepted_rows: &mut u64,
-    rejected_rows: &mut u64,
-    issues: &mut Vec<TableImportRowIssue>,
+    counters: JsonImportPreflightCounters<'_>,
 ) -> Result<(), String> {
-    *total_rows += 1;
+    *counters.total_rows += 1;
     let valid = (|| {
         let headers = row.keys().cloned().collect::<Vec<_>>();
         let canonical_headers = canonical_import_columns(&headers, columns)?;
@@ -18567,11 +18571,11 @@ fn observe_json_import_preflight_row(
     })()
     .is_ok();
     if valid {
-        *accepted_rows += 1;
+        *counters.accepted_rows += 1;
     } else {
-        *rejected_rows += 1;
-        if issues.len() < 100 {
-            issues.push(TableImportRowIssue {
+        *counters.rejected_rows += 1;
+        if counters.issues.len() < 100 {
+            counters.issues.push(TableImportRowIssue {
                 row_number,
                 code: "ROW_INVALID".to_string(),
             });
@@ -18619,10 +18623,12 @@ pub async fn preflight_table_json_import(
             &schema,
             &table,
             &columns,
-            &mut total_rows,
-            &mut accepted_rows,
-            &mut rejected_rows,
-            &mut issues,
+            JsonImportPreflightCounters {
+                total_rows: &mut total_rows,
+                accepted_rows: &mut accepted_rows,
+                rejected_rows: &mut rejected_rows,
+                issues: &mut issues,
+            },
         )
     };
     if is_json_lines_path(&path) {
@@ -20708,9 +20714,9 @@ mod tests {
         xlsx_cell_value, xlsx_column_name, xlsx_escape_text, xlsx_import_rows_with_cancel,
         AbortTableDataTransferTaskOnDrop, AlterColumnValueMode, AlterTableColumn,
         AnalyticalColumnKind, AnalyticalTypePolicy, CreateTableColumn,
-        FrozenTableDataCompareSyncPlan, ImportInferredType, PostCommitSchemaStatement,
-        RelationOperation, SqlExportDialect, SqlInsertConflictPolicy, SqlInsertExportOptions,
-        StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
+        FrozenTableDataCompareSyncPlan, ImportInferredType, JsonImportPreflightCounters,
+        PostCommitSchemaStatement, RelationOperation, SqlExportDialect, SqlInsertConflictPolicy,
+        SqlInsertExportOptions, StreamingXlsxWriter, TableCsvColumnMapping, TableCsvImportOptions,
         TableDataCompareCancellationState, TableDataCompareDegradationLevel,
         TableDataCompareDegradationThreshold, TableDataCompareEndpoint, TableDataCompareResult,
         TableDataCompareSamplingStrategy, TableDataCompareSyncPlanState,
@@ -22486,10 +22492,12 @@ mod tests {
             "public",
             "users",
             &columns,
-            &mut total_rows,
-            &mut accepted_rows,
-            &mut rejected_rows,
-            &mut issues,
+            JsonImportPreflightCounters {
+                total_rows: &mut total_rows,
+                accepted_rows: &mut accepted_rows,
+                rejected_rows: &mut rejected_rows,
+                issues: &mut issues,
+            },
         )
         .unwrap();
         observe_json_import_preflight_row(
@@ -22501,10 +22509,12 @@ mod tests {
             "public",
             "users",
             &columns,
-            &mut total_rows,
-            &mut accepted_rows,
-            &mut rejected_rows,
-            &mut issues,
+            JsonImportPreflightCounters {
+                total_rows: &mut total_rows,
+                accepted_rows: &mut accepted_rows,
+                rejected_rows: &mut rejected_rows,
+                issues: &mut issues,
+            },
         )
         .unwrap();
 
