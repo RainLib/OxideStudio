@@ -27,7 +27,12 @@ committed to source control.
    tag and a commit-SHA tag for discovery only; neither mutable tag is a
    deployment reference.
 2. Replace all `example.invalid` values and the NetworkPolicy selectors with
-   the real control-plane, database, Vault, IdP, SIEM, and ingress identities.
+   the real control-plane, database, Vault, Casdoor, SIEM, and ingress identities.
+   Replace `REPLACE_WITH_CASDOOR_CLIENT_ID` in both `control-plane.yaml` and
+   `admin-web.yaml` with the same dedicated Casdoor application Client ID. The
+   browser configuration is public and belongs in the admin-web ConfigMap; a
+   Casdoor Client Secret does not belong there and is not used by the PKCE
+   client.
    The reference Gateway egress rule lists the standard managed-driver ports
    (PostgreSQL, MySQL, Redis, Elasticsearch, MongoDB) so every supported
    source can function; narrow it to each approved database CIDR/FQDN and port
@@ -37,7 +42,9 @@ committed to source control.
    client certificate, otherwise ticket/device binding correctly fails closed.
    Publish the control plane through a separately managed HTTPS ingress or
    service mesh; its in-cluster Service deliberately remains HTTP-only and
-   must not be exposed directly.
+   must not be exposed directly. Publish the admin-web Service through HTTPS
+   and register that exact URL (including its callback path) in the Casdoor
+   application's redirect URLs.
 4. The control plane applies its embedded migrations on startup. For an
    operationally controlled rollout, start one maintenance replica with the
    same private database URL mount, wait for it to become ready, then scale the
@@ -46,7 +53,13 @@ committed to source control.
 5. Use a CNI with FQDN egress policy for external IdP/SIEM/Vault hosts. The
    portable policy permits TCP/443 only; it cannot enforce host names.
 
-Validate with a non-production OIDC issuer, a real private CA, a revoked device
+Before promotion, run `npm run enterprise:deploy:verify` with
+`CASDOOR_PUBLIC_URL`, `OXIDE_CONTROL_PLANE_PUBLIC_URL`, and
+`OXIDE_ADMIN_WEB_URL` pointed at the deployed HTTPS endpoints. Provide a
+short-lived `OXIDE_VERIFY_ACCESS_TOKEN` and `OXIDE_VERIFY_ORGANIZATION_ID` for
+the authenticated checks.
+
+Validate with a non-production Casdoor tenant, a real private CA, a revoked device
 certificate, a failed SIEM endpoint, and PostgreSQL/MySQL read-only sources
 before promotion. These database/network checks remain intentionally separate
 from the local logic tests.

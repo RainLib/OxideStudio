@@ -44,13 +44,89 @@ summary, after verifying its attestation. Do not deploy the mutable version
 tag directly and do not automatically rewrite a production overlay during a
 desktop release; rollout approval remains an organization operation.
 
-Copy `deploy/.env.example` to `deploy/.env`, configure a Keycloak realm and
-clients, then start the control-plane reference environment:
+## Casdoor identity and local deployment
+
+The control plane validates standard OIDC access tokens and uses Casdoor as the
+reference identity provider. It never receives a Casdoor Client Secret: the
+administration web application is a public client and uses Authorization Code
+with PKCE (S256). Casdoor writes the application Client ID into the token `aud`
+claim, so `CASDOOR_CLIENT_ID`, `VITE_OXIDE_OIDC_CLIENT_ID`, and
+`OXIDE_OIDC_AUDIENCE` must resolve to the same value.
+
+For the local reference environment:
+
+1. Copy `deploy/.env.example` to `deploy/.env`. Generate the ticket signing
+   seed with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`
+   and place the result in `OXIDE_TICKET_SIGNING_KEY_BASE64`.
+2. Start only the database and Casdoor: `docker compose --env-file
+   enterprise/deploy/.env -f enterprise/deploy/compose.yaml up -d postgres
+   casdoor`.
+3. Open `http://localhost:8000`, sign in to a fresh Casdoor installation with
+   the documented bootstrap account (`built-in` / `admin` / `123`), and change
+   that password immediately. Create a dedicated organization and an
+   `app-oxide-enterprise-admin` application. Configure its redirect URL as
+   `http://localhost:1430/`, keep only the authorization-code flow needed by
+   the web application, disable public sign-up unless explicitly required, and
+   choose the `JWT-Standard` token format.
+4. Copy the application's Client ID into `CASDOOR_CLIENT_ID` in `deploy/.env`.
+   Do not put its Client Secret in Oxide configuration.
+5. Build and start the complete reference topology:
 
 ```bash
 docker compose --env-file enterprise/deploy/.env \
-  -f enterprise/deploy/compose.yaml up postgres keycloak control-plane admin-web
+  -f enterprise/deploy/compose.yaml up -d --build postgres casdoor control-plane admin-web
 ```
+
+### Local demo data
+
+After creating the local `hcloud` organization, load the repeatable demo data
+set to exercise the administration UI with members, projects, Gateways, data
+sources, resource catalog entries, managed devices, access grants, and audit
+events. From the repository root on Bash:
+
+```bash
+docker compose --env-file enterprise/deploy/.env \
+  -f enterprise/deploy/compose.yaml exec -T postgres \
+  psql -U oxide -d oxide_enterprise < enterprise/deploy/development/seed-demo.sql
+```
+
+On PowerShell:
+
+```powershell
+Get-Content -Raw enterprise/deploy/development/seed-demo.sql |
+  docker compose --env-file enterprise/deploy/.env `
+    -f enterprise/deploy/compose.yaml exec -T postgres `
+    psql -U oxide -d oxide_enterprise
+```
+
+The seed targets organization `386f9632-7ac7-4fd3-974c-58716b66e988` and can be
+run repeatedly. Its Gateway endpoints and email addresses use the reserved
+`.test` domain. Driver records cover PostgreSQL, MySQL, MongoDB,
+Elasticsearch, and Redis. They contain capabilities and an opaque target
+binding fingerprint, but intentionally contain no connection URL, username,
+password, or Gateway secret reference.
+
+The Compose Casdoor service is a development reference backed by the same
+PostgreSQL server but a separate `casdoor` database. For production, deploy a
+pinned Casdoor release independently (the official Helm chart is supported),
+use HTTPS, an external production database, backups, and your normal secret
+delivery mechanism. Set `OXIDE_OIDC_ISSUER` to the exact public Casdoor origin
+without an application-specific suffix. The control plane uses OIDC discovery
+by default; `OXIDE_OIDC_JWKS_URL` is only needed when an internal container URL
+must be used for signing-key retrieval.
+
+Run the deployment gate after the services are reachable:
+
+```bash
+npm run enterprise:deploy:verify
+```
+
+It checks Casdoor discovery, PKCE and JWKS, control-plane health, authentication
+denial and CORS, plus the administration bundle, runtime endpoints, and browser
+security headers. Set `OXIDE_VERIFY_ACCESS_TOKEN` to a short-lived Casdoor
+access token to include the authenticated `/v1/me` check. Setting
+`OXIDE_VERIFY_ORGANIZATION_ID` as well verifies that organization's admin
+overview. The verifier never prints the token.
 
 The Gateway requires an Ed25519 verification key and mutual-TLS certificate,
 private key, and client CA. Registration is a proof step, not a status switch:

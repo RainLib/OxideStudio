@@ -11,7 +11,7 @@ pub struct Config {
     pub database_url: String,
     pub oidc_issuer: String,
     pub oidc_audience: String,
-    pub oidc_jwks_url: String,
+    pub oidc_jwks_url: Option<String>,
     pub ticket_signing_key: [u8; 32],
     pub allowed_origins: Vec<HeaderValue>,
     pub audit_webhook: Option<AuditWebhookConfig>,
@@ -38,8 +38,12 @@ impl Config {
                 .parse()
                 .context("OXIDE_CONTROL_PLANE_BIND is invalid")?,
             database_url: required_secret("DATABASE_URL")?,
+            // Prefer standard OIDC discovery. An explicit JWKS URL remains
+            // available for container topologies where the public issuer is
+            // browser-reachable but not resolvable from this container.
             oidc_jwks_url: env::var("OXIDE_OIDC_JWKS_URL")
-                .unwrap_or_else(|_| format!("{oidc_issuer}/protocol/openid-connect/certs")),
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             oidc_issuer,
             oidc_audience: required("OXIDE_OIDC_AUDIENCE")?,
             ticket_signing_key,

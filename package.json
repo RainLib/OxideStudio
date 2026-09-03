@@ -27,6 +27,7 @@
         "oxide-agent:prepare": "node scripts/prepare-oxide-agent.mjs",
         "enterprise:admin:build": "npm run build --workspace @oxide/enterprise-admin",
         "enterprise:admin:dev": "npm run dev --workspace @oxide/enterprise-admin",
+        "enterprise:deploy:verify": "node --env-file-if-exists=enterprise/deploy/.env scripts/verify-enterprise-deployment.mjs",
         "enterprise:target-binding": "node scripts/print-enterprise-target-binding.mjs",
         "test:agent-contract": "npm test --workspace @oxide/agent-contract",
         "test:agent-host": "npm test --workspace @oxide/agent-host"

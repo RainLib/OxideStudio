@@ -1323,10 +1323,14 @@ impl ControlPlaneStore {
         .fetch_all(&self.pool)
         .await?;
         let source_rows = sqlx::query(
-            "SELECT id, project_id, display_name, driver
-             FROM data_sources
-             WHERE organization_id = $1
-             ORDER BY display_name",
+            "SELECT d.id, d.project_id, d.display_name, d.driver,
+                    d.target_binding, d.capabilities, d.allowed_resource_summary,
+                    g.id AS gateway_id, g.display_name AS gateway_name,
+                    g.status AS gateway_status
+             FROM data_sources d
+             JOIN gateways g ON g.id = d.gateway_id
+             WHERE d.organization_id = $1
+             ORDER BY d.display_name",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
@@ -1340,6 +1344,12 @@ impl ControlPlaneStore {
                     "id": row.try_get::<Uuid, _>("id")?,
                     "displayName": row.try_get::<String, _>("display_name")?,
                     "driver": row.try_get::<String, _>("driver")?,
+                    "targetBinding": row.try_get::<Option<String>, _>("target_binding")?,
+                    "capabilities": row.try_get::<serde_json::Value, _>("capabilities")?,
+                    "allowedResourceSummary": row.try_get::<serde_json::Value, _>("allowed_resource_summary")?,
+                    "gatewayId": row.try_get::<Uuid, _>("gateway_id")?,
+                    "gatewayName": row.try_get::<String, _>("gateway_name")?,
+                    "gatewayStatus": row.try_get::<String, _>("gateway_status")?,
                 }));
         }
         let gateway_rows = sqlx::query(

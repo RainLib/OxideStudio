@@ -6,9 +6,9 @@ metadata:
     app.kubernetes.io/name: oxide-control-plane
 data:
   OXIDE_CONTROL_PLANE_BIND: 0.0.0.0:8787
-  OXIDE_OIDC_ISSUER: https://id.example.invalid/realms/oxide
-  OXIDE_OIDC_AUDIENCE: oxide-control-plane
-  OXIDE_OIDC_JWKS_URL: https://id.example.invalid/realms/oxide/protocol/openid-connect/certs
+  OXIDE_OIDC_ISSUER: https://casdoor.example.invalid
+  # Casdoor writes the application Client ID into the access-token aud claim.
+  OXIDE_OIDC_AUDIENCE: REPLACE_WITH_CASDOOR_CLIENT_ID
   OXIDE_ALLOWED_ORIGINS: https://admin.example.invalid
   OXIDE_AUDIT_WEBHOOK_URL: https://siem.example.invalid/oxide/audit
 ---

@@ -33,10 +33,12 @@ pub use gateway_driver::ManagedGatewayDriver;
 
 const ENTERPRISE_REFRESH_SERVICE: &str = "com.houshuai.oxide-studio.enterprise";
 const ENTERPRISE_REFRESH_ACCOUNT: &str = "active-session";
+const ENTERPRISE_SESSION_KEY_ACCOUNT: &str = "active-session-key-v2";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_CALLBACK_BYTES: usize = 16 * 1024;
 const ENTERPRISE_CACHE_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const ENTERPRISE_CACHE_AAD: &[u8] = b"oxide-enterprise-cache-v1";
+const ENTERPRISE_SESSION_AAD: &[u8] = b"oxide-enterprise-session-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -187,6 +189,13 @@ struct EnterpriseCacheEnvelope {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EncryptedEnterpriseCache {
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedEnterpriseSession {
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
 }
@@ -360,7 +369,7 @@ impl EnterpriseClient {
     pub async fn sign_out(&self) -> Result<EnterpriseAccountStatus> {
         let _operation = self.operation.lock().await;
         self.session.lock().await.take();
-        let refresh_result = delete_refresh_token().await;
+        let refresh_result = delete_refresh_token(self.enterprise_directory()?).await;
         let cache_result = self.delete_cache();
         refresh_result?;
         cache_result?;
@@ -528,7 +537,8 @@ impl EnterpriseClient {
         let Some(config) = self.load_config()? else {
             return Ok(None);
         };
-        let Some(mut refresh_token) = load_refresh_token().await? else {
+        let Some(mut refresh_token) = load_refresh_token(self.enterprise_directory()?).await?
+        else {
             return Ok(None);
         };
         let discovery = self.discovery(&config).await?;
@@ -547,7 +557,7 @@ impl EnterpriseClient {
         if response.status() == reqwest::StatusCode::BAD_REQUEST
             || response.status() == reqwest::StatusCode::UNAUTHORIZED
         {
-            let _ = delete_refresh_token().await;
+            let _ = delete_refresh_token(self.enterprise_directory()?).await;
             return Ok(None);
         }
         let token = response
@@ -565,7 +575,7 @@ impl EnterpriseClient {
         mut token: TokenResponse,
     ) -> Result<EnterpriseAccountStatus> {
         if let Some(refresh_token) = token.refresh_token.as_deref() {
-            save_refresh_token(refresh_token).await?;
+            save_refresh_token(self.enterprise_directory()?, refresh_token).await?;
         }
         let status = self.fetch_status(config, &token.access_token).await?;
         let expires_at = now_seconds() + token.expires_in.unwrap_or(300).clamp(30, 3_600) as i64;
@@ -832,7 +842,12 @@ pub async fn enterprise_configure_account(
         .save_config(config)
         .map_err(|error| error.to_string())?;
     client.session.lock().await.take();
-    let refresh_result = delete_refresh_token().await;
+    let refresh_result = delete_refresh_token(
+        client
+            .enterprise_directory()
+            .map_err(|error| user_facing_enterprise_error(&error))?,
+    )
+    .await;
     let cache_result = client.delete_cache();
     refresh_result.map_err(|error| user_facing_enterprise_error(&error))?;
     cache_result.map_err(|error| user_facing_enterprise_error(&error))?;
@@ -957,12 +972,92 @@ fn parse_callback_request(request: &str) -> Result<(String, String)> {
     Ok((code, state))
 }
 
-async fn load_refresh_token() -> Result<Option<String>> {
+async fn load_refresh_token(enterprise_directory: PathBuf) -> Result<Option<String>> {
+    let encrypted_path = enterprise_directory.join("session.json.enc");
+    let encrypted_bytes = match fs::read(&encrypted_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("failed to read the enterprise session"),
+    };
+
+    if let Some(encrypted_bytes) = encrypted_bytes {
+        let mut key = match load_session_key().await? {
+            Some(key) => key,
+            None => return Ok(None),
+        };
+        let result = decrypt_refresh_token(&encrypted_bytes, &key);
+        key.zeroize();
+        return result.map(Some);
+    }
+
+    load_legacy_refresh_token().await
+}
+
+async fn save_refresh_token(enterprise_directory: PathBuf, token: &str) -> Result<()> {
+    let mut key = match load_session_key().await? {
+        Some(key) => key,
+        None => {
+            let mut key = [0_u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
+            save_session_key(key).await?;
+            key
+        }
+    };
+    let encrypted = encrypt_refresh_token(token, &key)?;
+    key.zeroize();
+    replace_private_file(
+        &enterprise_directory.join("session.json.enc"),
+        &encrypted,
+        "enterprise-session",
+    )?;
+
+    // Remove credentials written by older builds after the encrypted envelope is durable.
+    delete_keyring_entry(ENTERPRISE_REFRESH_ACCOUNT).await
+}
+
+async fn load_session_key() -> Result<Option<[u8; 32]>> {
+    tokio::task::spawn_blocking(|| {
+        let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, ENTERPRISE_SESSION_KEY_ACCOUNT)
+            .context("platform credential storage is unavailable")?;
+        match entry.get_secret() {
+            Ok(mut secret) => {
+                if secret.len() != 32 {
+                    secret.zeroize();
+                    return Err(anyhow!("stored enterprise session key is invalid"));
+                }
+                let mut key = [0_u8; 32];
+                key.copy_from_slice(&secret);
+                secret.zeroize();
+                Ok(Some(key))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(anyhow!(error)).context("failed to read the enterprise session key"),
+        }
+    })
+    .await
+    .context("enterprise credential task failed")?
+}
+
+async fn save_session_key(mut key: [u8; 32]) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, ENTERPRISE_SESSION_KEY_ACCOUNT)
+            .context("platform credential storage is unavailable")?;
+        let result = entry
+            .set_secret(&key)
+            .context("failed to protect the enterprise session key");
+        key.zeroize();
+        result
+    })
+    .await
+    .context("enterprise credential task failed")?
+}
+
+async fn load_legacy_refresh_token() -> Result<Option<String>> {
     tokio::task::spawn_blocking(|| {
         let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, ENTERPRISE_REFRESH_ACCOUNT)
             .context("platform credential storage is unavailable")?;
-        match entry.get_password() {
-            Ok(token) => Ok(Some(token)),
+        match entry.get_secret() {
+            Ok(secret) => Ok(Some(decode_refresh_token_secret(secret)?)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(anyhow!(error)).context("failed to read the enterprise session"),
         }
@@ -971,22 +1066,69 @@ async fn load_refresh_token() -> Result<Option<String>> {
     .context("enterprise credential task failed")?
 }
 
-async fn save_refresh_token(token: &str) -> Result<()> {
-    let token = token.to_string();
-    tokio::task::spawn_blocking(move || {
-        let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, ENTERPRISE_REFRESH_ACCOUNT)
-            .context("platform credential storage is unavailable")?;
-        entry
-            .set_password(&token)
-            .context("failed to protect the enterprise session")
+fn encrypt_refresh_token(token: &str, key: &[u8; 32]) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key).context("enterprise session key is invalid")?;
+    let mut nonce_bytes = [0_u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(
+            &Nonce::from(nonce_bytes),
+            Payload {
+                msg: token.as_bytes(),
+                aad: ENTERPRISE_SESSION_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("failed to encrypt the enterprise session"))?;
+    serde_json::to_vec(&EncryptedEnterpriseSession {
+        nonce: nonce_bytes.to_vec(),
+        ciphertext,
     })
-    .await
-    .context("enterprise credential task failed")?
+    .context("failed to encode the enterprise session")
 }
 
-async fn delete_refresh_token() -> Result<()> {
-    tokio::task::spawn_blocking(|| {
-        let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, ENTERPRISE_REFRESH_ACCOUNT)
+fn decrypt_refresh_token(encrypted_bytes: &[u8], key: &[u8; 32]) -> Result<String> {
+    let encrypted: EncryptedEnterpriseSession =
+        serde_json::from_slice(encrypted_bytes).context("stored enterprise session is invalid")?;
+    let nonce_bytes: [u8; 12] = encrypted
+        .nonce
+        .try_into()
+        .map_err(|_| anyhow!("stored enterprise session nonce is invalid"))?;
+    let cipher = Aes256Gcm::new_from_slice(key).context("enterprise session key is invalid")?;
+    let mut plaintext = cipher
+        .decrypt(
+            &Nonce::from(nonce_bytes),
+            Payload {
+                msg: &encrypted.ciphertext,
+                aad: ENTERPRISE_SESSION_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("stored enterprise session authentication failed"))?;
+    let result = std::str::from_utf8(&plaintext)
+        .map(str::to_owned)
+        .context("stored enterprise session is invalid");
+    plaintext.zeroize();
+    result
+}
+
+fn decode_refresh_token_secret(mut secret: Vec<u8>) -> Result<String> {
+    let decoded = match std::str::from_utf8(&secret) {
+        Ok(value) if !value.contains('\0') => Ok(value.to_string()),
+        _ if secret.len().is_multiple_of(2) => {
+            let utf16 = secret
+                .chunks_exact(2)
+                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                .collect::<Vec<_>>();
+            String::from_utf16(&utf16).context("stored enterprise session is invalid")
+        }
+        _ => Err(anyhow!("stored enterprise session is invalid")),
+    };
+    secret.zeroize();
+    decoded
+}
+
+async fn delete_keyring_entry(account: &'static str) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let entry = keyring::Entry::new(ENTERPRISE_REFRESH_SERVICE, account)
             .context("platform credential storage is unavailable")?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -995,6 +1137,16 @@ async fn delete_refresh_token() -> Result<()> {
     })
     .await
     .context("enterprise credential task failed")?
+}
+
+async fn delete_refresh_token(enterprise_directory: PathBuf) -> Result<()> {
+    delete_keyring_entry(ENTERPRISE_REFRESH_ACCOUNT).await?;
+    delete_keyring_entry(ENTERPRISE_SESSION_KEY_ACCOUNT).await?;
+    match fs::remove_file(enterprise_directory.join("session.json.enc")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("failed to remove the enterprise session"),
+    }
 }
 
 fn normalized_https_url(value: &str, label: &str) -> Result<String> {
@@ -1058,5 +1210,33 @@ mod tests {
         assert!(normalized_https_url("https://secret@example.test", "issuer").is_err());
         assert!(normalized_https_url("http://example.test", "issuer").is_err());
         assert!(normalized_https_url("http://127.0.0.1:8080", "issuer").is_ok());
+    }
+
+    #[test]
+    fn refresh_token_secret_supports_utf8_and_legacy_windows_utf16() {
+        assert_eq!(
+            decode_refresh_token_secret(b"opaque-refresh-token".to_vec()).unwrap(),
+            "opaque-refresh-token"
+        );
+
+        let legacy = "legacy-refresh-token"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decode_refresh_token_secret(legacy).unwrap(),
+            "legacy-refresh-token"
+        );
+    }
+
+    #[test]
+    fn long_refresh_token_round_trips_through_encrypted_session() {
+        let token = "refresh-token-segment.".repeat(512);
+        let key = [42_u8; 32];
+        let encrypted = encrypt_refresh_token(&token, &key).unwrap();
+
+        assert_ne!(encrypted, token.as_bytes());
+        assert_eq!(decrypt_refresh_token(&encrypted, &key).unwrap(), token);
+        assert!(decrypt_refresh_token(&encrypted, &[7_u8; 32]).is_err());
     }
 }

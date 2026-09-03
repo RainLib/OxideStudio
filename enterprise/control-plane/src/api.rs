@@ -1,5 +1,5 @@
 use crate::{
-    auth::OidcVerifier,
+    auth::{AuthenticationError, OidcVerifier},
     store::{allowed_paths_for_action, ControlPlaneStore},
 };
 use axum::{
@@ -1191,6 +1191,19 @@ impl ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         Self::internal(error)
+    }
+}
+
+impl From<AuthenticationError> for ApiError {
+    fn from(error: AuthenticationError) -> Self {
+        match error {
+            AuthenticationError::Unauthorized(message) => Self {
+                status: StatusCode::UNAUTHORIZED,
+                code: "UNAUTHENTICATED",
+                message: message.into(),
+            },
+            AuthenticationError::Internal(error) => Self::internal(error),
+        }
     }
 }
 

@@ -24,6 +24,19 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: oxide-admin-web-default-deny
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: oxide-enterprise-admin-web } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ protocol: TCP, port: 8080 }]
+  # The static web server makes no network calls. Casdoor and control-plane
+  # requests originate in the administrator's browser.
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: oxide-gateway-default-deny
 spec:
   podSelector: { matchLabels: { app.kubernetes.io/name: oxide-enterprise-gateway } }

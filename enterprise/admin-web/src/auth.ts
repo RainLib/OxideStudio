@@ -1,6 +1,7 @@
-const issuer = (import.meta.env.VITE_OXIDE_OIDC_ISSUER || "").replace(/\/$/, "");
-const clientId =
-  import.meta.env.VITE_OXIDE_OIDC_CLIENT_ID || "oxide-enterprise-admin";
+import { adminConfig } from "./config";
+
+const issuer = adminConfig.oidcIssuer;
+const clientId = adminConfig.oidcClientId;
 const accessTokenKey = "oxide.enterprise.admin.access-token";
 const verifierKey = "oxide.enterprise.admin.pkce-verifier";
 const stateKey = "oxide.enterprise.admin.oauth-state";

@@ -17,6 +17,29 @@ pub struct AuthenticatedIdentity {
     pub verified_email: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum AuthenticationError {
+    Unauthorized(&'static str),
+    Internal(anyhow::Error),
+}
+
+impl AuthenticationError {
+    fn internal(error: impl Into<anyhow::Error>) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl std::fmt::Display for AuthenticationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized(message) => formatter.write_str(message),
+            Self::Internal(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AuthenticationError {}
+
 #[derive(Debug, Deserialize)]
 struct Claims {
     iss: String,
@@ -26,6 +49,12 @@ struct Claims {
     preferred_username: Option<String>,
     email: Option<String>,
     email_verified: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcDiscovery {
+    issuer: String,
+    jwks_uri: String,
 }
 
 pub struct OidcVerifier {
@@ -38,7 +67,7 @@ pub struct OidcVerifier {
 }
 
 impl OidcVerifier {
-    pub async fn load(issuer: String, audience: String, jwks_url: &str) -> Result<Self> {
+    pub async fn load(issuer: String, audience: String, jwks_url: Option<&str>) -> Result<Self> {
         let client = reqwest::Client::new();
         Self::load_with_client(issuer, audience, jwks_url, client).await
     }
@@ -46,36 +75,51 @@ impl OidcVerifier {
     async fn load_with_client(
         issuer: String,
         audience: String,
-        jwks_url: &str,
+        jwks_url: Option<&str>,
         client: reqwest::Client,
     ) -> Result<Self> {
-        let jwks = fetch_jwks(&client, jwks_url).await?;
+        let jwks_url = match jwks_url {
+            Some(url) => url.to_string(),
+            None => discover_jwks_url(&client, &issuer).await?,
+        };
+        let jwks = fetch_jwks(&client, &jwks_url).await?;
         Ok(Self {
             issuer,
             audience,
-            jwks_url: jwks_url.into(),
+            jwks_url,
             client,
             jwks: RwLock::new(jwks),
             refresh_lock: Mutex::new(()),
         })
     }
 
-    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthenticatedIdentity> {
+    pub async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+    ) -> std::result::Result<AuthenticatedIdentity, AuthenticationError> {
         let token = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("missing bearer access token"))?;
-        let header = decode_header(token).context("access token header is invalid")?;
+            .ok_or(AuthenticationError::Unauthorized(
+                "missing bearer access token",
+            ))?;
+        let header = decode_header(token)
+            .map_err(|_| AuthenticationError::Unauthorized("access token is invalid"))?;
         let key = self
             .signing_key(header.kid.as_deref().unwrap_or_default())
             .await?;
-        let decoding_key =
-            DecodingKey::from_jwk(&key).context("OIDC signing key is unsupported")?;
+        let decoding_key = DecodingKey::from_jwk(&key).map_err(|error| {
+            AuthenticationError::internal(anyhow!(error).context("OIDC signing key is unsupported"))
+        })?;
         let algorithm = match header.alg {
             Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::EdDSA => header.alg,
-            _ => return Err(anyhow!("access token uses a forbidden signing algorithm")),
+            _ => {
+                return Err(AuthenticationError::Unauthorized(
+                    "access token uses a forbidden signing algorithm",
+                ))
+            }
         };
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
@@ -83,7 +127,7 @@ impl OidcVerifier {
         validation.required_spec_claims =
             HashSet::from(["exp".into(), "iss".into(), "sub".into(), "aud".into()]);
         let claims = decode::<Claims>(token, &decoding_key, &validation)
-            .context("access token validation failed")?
+            .map_err(|_| AuthenticationError::Unauthorized("access token validation failed"))?
             .claims;
         let _ = claims.exp;
         let verified_email = claims
@@ -103,7 +147,7 @@ impl OidcVerifier {
         })
     }
 
-    async fn signing_key(&self, kid: &str) -> Result<Jwk> {
+    async fn signing_key(&self, kid: &str) -> std::result::Result<Jwk, AuthenticationError> {
         if let Some(key) = self.jwks.read().await.find(kid).cloned() {
             return Ok(key);
         }
@@ -111,14 +155,45 @@ impl OidcVerifier {
         if let Some(key) = self.jwks.read().await.find(kid).cloned() {
             return Ok(key);
         }
-        let refreshed = fetch_jwks(&self.client, &self.jwks_url).await?;
+        let refreshed = fetch_jwks(&self.client, &self.jwks_url)
+            .await
+            .map_err(AuthenticationError::internal)?;
         let key = refreshed
             .find(kid)
             .cloned()
-            .ok_or_else(|| anyhow!("access token signing key is unknown after JWKS refresh"))?;
+            .ok_or(AuthenticationError::Unauthorized(
+                "access token signing key is unknown",
+            ))?;
         *self.jwks.write().await = refreshed;
         Ok(key)
     }
+}
+
+async fn discover_jwks_url(client: &reqwest::Client, issuer: &str) -> Result<String> {
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let metadata = client
+        .get(&discovery_url)
+        .send()
+        .await
+        .context("failed to fetch OIDC discovery metadata")?
+        .error_for_status()
+        .context("OIDC discovery endpoint rejected the request")?
+        .json::<OidcDiscovery>()
+        .await
+        .context("OIDC discovery response is invalid")?;
+    if metadata.issuer != issuer {
+        return Err(anyhow!(
+            "OIDC discovery issuer mismatch: expected {issuer}, received {}",
+            metadata.issuer
+        ));
+    }
+    if metadata.jwks_uri.trim().is_empty() {
+        return Err(anyhow!("OIDC discovery response does not contain jwks_uri"));
+    }
+    Ok(metadata.jwks_uri)
 }
 
 async fn fetch_jwks(client: &reqwest::Client, jwks_url: &str) -> Result<JwkSet> {
@@ -160,6 +235,48 @@ mod tests {
         Json(keys.read().await.clone())
     }
 
+    async fn oidc_metadata(State(metadata): State<serde_json::Value>) -> Json<serde_json::Value> {
+        Json(metadata)
+    }
+
+    #[tokio::test]
+    async fn discovers_jwks_only_from_matching_issuer_metadata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test discovery listener must bind");
+        let address = listener
+            .local_addr()
+            .expect("listener address must resolve");
+        let issuer = format!("http://{address}");
+        let metadata = json!({
+            "issuer": issuer,
+            "jwks_uri": format!("http://{address}/jwks"),
+        });
+        let app = Router::new()
+            .route("/.well-known/openid-configuration", get(oidc_metadata))
+            .with_state(metadata);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test discovery server must run");
+        });
+        let local_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build");
+
+        assert_eq!(
+            discover_jwks_url(&local_client, &issuer)
+                .await
+                .expect("matching discovery metadata must be accepted"),
+            format!("http://{address}/jwks")
+        );
+        assert!(discover_jwks_url(&local_client, &format!("{issuer}/other"))
+            .await
+            .is_err());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn refreshes_unknown_key_ids_after_oidc_rotation() {
         let keys = Arc::new(RwLock::new(JwkSet {
@@ -190,7 +307,7 @@ mod tests {
         let verifier = OidcVerifier::load_with_client(
             "https://issuer.example".into(),
             "oxide-control-plane".into(),
-            &format!("http://{address}/jwks"),
+            Some(&format!("http://{address}/jwks")),
             local_client,
         )
         .await

@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let verifier = OidcVerifier::load(
         config.oidc_issuer,
         config.oidc_audience,
-        &config.oidc_jwks_url,
+        config.oidc_jwks_url.as_deref(),
     )
     .await?;
     let state = AppState {

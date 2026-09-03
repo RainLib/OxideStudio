@@ -4,5 +4,6 @@ namespace: oxide-enterprise
 resources:
   - namespace.yaml
   - control-plane.yaml
+  - admin-web.yaml
   - gateway.yaml
   - network-policies.yaml

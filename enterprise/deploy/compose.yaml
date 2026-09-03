@@ -13,14 +13,27 @@ services:
       timeout: 3s
       retries: 20
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.2
-    command: ["start-dev", "--http-port=8080"]
+  casdoor:
+    image: casbin/casdoor:4.1.0
+    command: ["--createDatabase=true"]
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?required}
+      driverName: postgres
+      # Casdoor connects to this existing maintenance database before
+      # --createDatabase creates the separate database named below.
+      # Keep dbname last: Casdoor replaces that segment with the maintenance
+      # database while creating `casdoor` and otherwise uses it as-is.
+      dataSourceName: user=oxide password=${POSTGRES_PASSWORD} host=postgres port=5432 sslmode=disable dbname=casdoor
+      dbName: casdoor
+      runmode: dev
+      origin: ${CASDOOR_PUBLIC_URL:-http://localhost:8000}
+      originFrontend: ${CASDOOR_PUBLIC_URL:-http://localhost:8000}
+      enableErrorMask: "true"
     ports:
-      - "8080:8080"
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   control-plane:
     build:
@@ -29,26 +42,34 @@ services:
     environment:
       DATABASE_URL: postgres://oxide:${POSTGRES_PASSWORD}@postgres/oxide_enterprise
       OXIDE_CONTROL_PLANE_BIND: 0.0.0.0:8787
-      OXIDE_OIDC_ISSUER: http://keycloak:8080/realms/oxide
-      OXIDE_OIDC_AUDIENCE: oxide-control-plane
-      OXIDE_OIDC_JWKS_URL: http://keycloak:8080/realms/oxide/protocol/openid-connect/certs
+      # Tokens retain the browser-visible issuer. Only the signing-key fetch
+      # uses the internal container address.
+      OXIDE_OIDC_ISSUER: ${CASDOOR_PUBLIC_URL:-http://localhost:8000}
+      OXIDE_OIDC_AUDIENCE: ${CASDOOR_CLIENT_ID:?required}
+      OXIDE_OIDC_JWKS_URL: http://casdoor:8000/.well-known/jwks
       OXIDE_TICKET_SIGNING_KEY_BASE64: ${OXIDE_TICKET_SIGNING_KEY_BASE64:?required}
-      OXIDE_ALLOWED_ORIGINS: http://localhost:1430
+      OXIDE_ALLOWED_ORIGINS: ${OXIDE_ADMIN_WEB_URL:-http://localhost:1430}
     ports:
       - "8787:8787"
     depends_on:
       postgres:
         condition: service_healthy
+      casdoor:
+        condition: service_started
+    restart: on-failure
 
   admin-web:
     build:
       context: ../..
       dockerfile: enterprise/deploy/Dockerfile.admin-web
       args:
-        VITE_OXIDE_CONTROL_PLANE_URL: http://localhost:8787
-        VITE_OXIDE_OIDC_ISSUER: http://localhost:8080/realms/oxide
+        VITE_OXIDE_CONTROL_PLANE_URL: ${OXIDE_CONTROL_PLANE_PUBLIC_URL:-http://localhost:8787}
+        VITE_OXIDE_OIDC_ISSUER: ${CASDOOR_PUBLIC_URL:-http://localhost:8000}
+        VITE_OXIDE_OIDC_CLIENT_ID: ${CASDOOR_CLIENT_ID:?required}
     ports:
       - "1430:8080"
+    depends_on:
+      - control-plane
 
   # The Gateway profile is intentionally not a one-command local data-plane
   # demo: it now requires a real HTTPS control plane and one-time enrollment

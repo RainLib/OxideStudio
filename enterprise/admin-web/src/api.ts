@@ -1,3 +1,6 @@
+import { adminConfig } from "./config";
+import { adminAuth } from "./auth";
+
 export interface AdminOverview {
   organization: { id: string; displayName: string; minimumDesktopVersion: string };
   viewerRole: string;
@@ -18,6 +21,12 @@ export interface AdminOverview {
       id: string;
       displayName: string;
       driver: string;
+      targetBinding?: string;
+      capabilities: string[];
+      allowedResourceSummary: string[];
+      gatewayId: string;
+      gatewayName: string;
+      gatewayStatus: string;
     }>;
   }>;
   gateways: Array<{
@@ -74,9 +83,7 @@ export interface GatewayCertificateRotation {
   };
 }
 
-const baseUrl = (
-  import.meta.env.VITE_OXIDE_CONTROL_PLANE_URL || ""
-).replace(/\/$/, "");
+const baseUrl = adminConfig.controlPlaneUrl;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const accessToken = adminAuth.accessToken();
@@ -278,4 +285,3 @@ export const adminApi = {
       },
     ),
 };
-import { adminAuth } from "./auth";

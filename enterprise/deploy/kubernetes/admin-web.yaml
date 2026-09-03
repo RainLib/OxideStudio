@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oxide-enterprise-admin-web-config
+  labels:
+    app.kubernetes.io/name: oxide-enterprise-admin-web
+data:
+  # These values are public browser configuration, not credentials. Replace
+  # all three together; oidcClientId must also match OXIDE_OIDC_AUDIENCE.
+  config.js: |
+    window.__OXIDE_ENTERPRISE_CONFIG__ = {
+      controlPlaneUrl: "https://control-plane.example.invalid",
+      oidcIssuer: "https://casdoor.example.invalid",
+      oidcClientId: "REPLACE_WITH_CASDOOR_CLIENT_ID"
+    };
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxide-enterprise-admin-web
+  labels:
+    app.kubernetes.io/name: oxide-enterprise-admin-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: oxide-enterprise-admin-web }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oxide-enterprise-admin-web }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: admin-web
+          # Browser endpoints and the Casdoor Client ID are supplied by the
+          # runtime ConfigMap, so one pinned image can serve every environment.
+          image: ghcr.io/rainlib/oxidestudio-enterprise-admin-web@sha256:REPLACE_WITH_SIGNED_DIGEST
+          ports: [{ name: http-web, containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /, port: http-web }, initialDelaySeconds: 3 }
+          livenessProbe: { httpGet: { path: /, port: http-web }, initialDelaySeconds: 10 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: nginx-cache, mountPath: /var/cache/nginx }
+            - { name: nginx-run, mountPath: /run }
+            - { name: runtime-config, mountPath: /usr/share/nginx/html/config.js, subPath: config.js, readOnly: true }
+      volumes:
+        - { name: nginx-cache, emptyDir: {} }
+        - { name: nginx-run, emptyDir: {} }
+        - { name: runtime-config, configMap: { name: oxide-enterprise-admin-web-config } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxide-enterprise-admin-web
+  labels: { app.kubernetes.io/name: oxide-enterprise-admin-web }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: oxide-enterprise-admin-web }
+  ports: [{ name: http-web, port: 8080, targetPort: http-web }]
