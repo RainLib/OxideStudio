@@ -15,18 +15,30 @@ default-run = "oxide-studio"
 name = "oxide_studio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:keyring",
+    "dep:tauri",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-global-shortcut",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-process",
+    "dep:tauri-plugin-updater",
+]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 tonic-prost-build = "0.14.6"
 cc = "1"
 
 [dependencies]
-tauri = { version = "2.11.5", features = ["macos-private-api", "rustls-tls"] }
-tauri-plugin-opener = "2"
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-updater = "2.10.1"
-tauri-plugin-process = "2.3.1"
-tauri-plugin-dialog = "2.7.1"
+tauri = { version = "2.11.5", features = ["macos-private-api", "rustls-tls"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2.10.1", optional = true }
+tauri-plugin-process = { version = "2.3.1", optional = true }
+tauri-plugin-dialog = { version = "2.7.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 json5 = "0.4"
@@ -78,7 +90,7 @@ aes-gcm = "0.10"
 rand = "0.8"
 libc = "0.2"
 zeroize = "1"
-keyring = { version = "=4.1.5", default-features = true }
+keyring = { version = "=4.1.5", default-features = true, optional = true }
 oxide-enterprise-contracts = { path = "../enterprise/contracts", default-features = false }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 prost = "0.14.4"

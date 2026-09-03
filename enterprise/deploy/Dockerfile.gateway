@@ -1,13 +1,19 @@
 FROM rust:1.91.1-bookworm AS build
 WORKDIR /workspace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 COPY enterprise ./enterprise
 COPY src-tauri ./src-tauri
-RUN cargo build --manifest-path enterprise/Cargo.toml --release -p oxide-enterprise-gateway
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/enterprise/target \
+    cargo build --manifest-path enterprise/Cargo.toml --release -p oxide-enterprise-gateway \
+    && cp enterprise/target/release/oxide-enterprise-gateway /tmp/oxide-enterprise-gateway
 
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /workspace/enterprise/target/release/oxide-enterprise-gateway /usr/local/bin/
+COPY --from=build /tmp/oxide-enterprise-gateway /usr/local/bin/
 USER 65532:65532
 ENTRYPOINT ["oxide-enterprise-gateway"]

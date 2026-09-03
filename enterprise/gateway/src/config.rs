@@ -87,7 +87,12 @@ impl GatewayConfig {
         let tls_certificate = read_required_file("OXIDE_GATEWAY_TLS_CERTIFICATE")?;
         let public_endpoint =
             validated_https_endpoint(&required("OXIDE_GATEWAY_PUBLIC_ENDPOINT")?)?;
-        let control_plane_url = validated_https_endpoint(&required("OXIDE_CONTROL_PLANE_URL")?)?;
+        let allow_insecure_control_plane = env::var("OXIDE_ALLOW_INSECURE_CONTROL_PLANE")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        let control_plane_url = validated_control_plane_endpoint(
+            &required("OXIDE_CONTROL_PLANE_URL")?,
+            allow_insecure_control_plane,
+        )?;
         let enrollment_token = env::var("OXIDE_GATEWAY_ENROLLMENT_TOKEN_FILE")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -241,6 +246,33 @@ fn validated_https_endpoint(value: &str) -> Result<String> {
     Ok(endpoint.as_str().trim_end_matches('/').to_string())
 }
 
+/// Production Gateways require HTTPS for the control plane. The local Compose
+/// topology may opt in to its internal HTTP service name explicitly; the flag
+/// never permits arbitrary clear-text hosts.
+fn validated_control_plane_endpoint(value: &str, allow_insecure: bool) -> Result<String> {
+    let endpoint = Url::parse(value.trim()).context("control-plane endpoint is invalid")?;
+    let host = endpoint
+        .host_str()
+        .context("control-plane endpoint must include a host")?;
+    let credential_free = endpoint.username().is_empty()
+        && endpoint.password().is_none()
+        && endpoint.query().is_none()
+        && endpoint.fragment().is_none();
+    let approved_local_http_host = matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "control-plane" | "host.docker.internal"
+    );
+    if !credential_free
+        || !(endpoint.scheme() == "https"
+            || (allow_insecure && endpoint.scheme() == "http" && approved_local_http_host))
+    {
+        anyhow::bail!(
+            "control-plane endpoint must be credential-free HTTPS (local Compose HTTP requires OXIDE_ALLOW_INSECURE_CONTROL_PLANE=true)"
+        );
+    }
+    Ok(endpoint.as_str().trim_end_matches('/').to_string())
+}
+
 fn parse_sources(
     payload: &[u8],
     allow_insecure_database_transport: bool,
@@ -350,7 +382,18 @@ pub(crate) fn database_target_binding(driver: &str, connection_url: &str) -> Res
         "redis" => "redis",
         _ => anyhow::bail!("Gateway database driver is unsupported"),
     };
-    let port = url.port_or_known_default().unwrap_or(0);
+    // `url::Url::port_or_known_default` only knows a small set of web
+    // schemes. Keep this in parity with scripts/print-enterprise-target-binding.mjs
+    // so a descriptor generated outside the Gateway cannot fail closed merely
+    // because a standard database port was omitted.
+    let port = url.port().unwrap_or_else(|| match url.scheme() {
+        "postgres" | "postgresql" => 5432,
+        "mysql" => 3306,
+        "mongodb" => 27017,
+        "redis" => 6379,
+        "rediss" => 6380,
+        _ => url.port_or_known_default().unwrap_or(0),
+    });
     // Query parameters can contain credentials. The driver, scheme, normalized
     // host, port, and path identify the target without hashing secret material.
     let locator = format!("{driver}|{}|{host}|{port}|{}", url.scheme(), url.path());
@@ -590,6 +633,38 @@ mod tests {
     }
 
     #[test]
+    fn target_binding_normalizes_standard_database_ports() {
+        for (driver, implicit, explicit) in [
+            (
+                "postgres",
+                "postgres://reader:secret@db.example.test/analytics",
+                "postgres://reader:secret@db.example.test:5432/analytics",
+            ),
+            (
+                "mysql",
+                "mysql://reader:secret@db.example.test/analytics",
+                "mysql://reader:secret@db.example.test:3306/analytics",
+            ),
+            (
+                "mongodb",
+                "mongodb://reader:secret@db.example.test/analytics",
+                "mongodb://reader:secret@db.example.test:27017/analytics",
+            ),
+            (
+                "redis",
+                "redis://reader:secret@db.example.test/0",
+                "redis://reader:secret@db.example.test:6379/0",
+            ),
+        ] {
+            assert_eq!(
+                database_target_binding(driver, implicit).unwrap(),
+                database_target_binding(driver, explicit).unwrap(),
+                "{driver} default port must be canonical",
+            );
+        }
+    }
+
+    #[test]
     fn source_template_is_checked_for_verified_transport_before_startup() {
         let id = Uuid::new_v4();
         let template = "postgres://{username}:{password}@db.example.test/analytics?sslmode=require";
@@ -615,6 +690,23 @@ mod tests {
         assert_eq!(
             validated_https_endpoint("https://gateway.example.test:8790/").unwrap(),
             "https://gateway.example.test:8790"
+        );
+    }
+
+    #[test]
+    fn local_control_plane_http_requires_an_explicit_scoped_opt_in() {
+        assert!(validated_control_plane_endpoint("http://control-plane:8787", false).is_err());
+        assert_eq!(
+            validated_control_plane_endpoint("http://control-plane:8787", true).unwrap(),
+            "http://control-plane:8787"
+        );
+        assert!(validated_control_plane_endpoint("http://example.test:8787", true).is_err());
+        assert!(
+            validated_control_plane_endpoint("http://user:secret@localhost:8787", true).is_err()
+        );
+        assert_eq!(
+            validated_control_plane_endpoint("https://control.example.test/", false).unwrap(),
+            "https://control.example.test"
         );
     }
 

@@ -28,6 +28,7 @@ src-tauri/binaries/oxide-agent-host-*
 src-tauri/binaries/oxide-agent-*
 /enterprise/target/
 /enterprise/deploy/.env
+/enterprise/deploy/.local-runtime/
 
 # Local Tauri updater signing keys
 /oxide-studio.key

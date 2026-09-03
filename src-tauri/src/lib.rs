@@ -1,11 +1,16 @@
 /// OxideStudio - Tauri Application Entry Point
 /// 重构后的精简版本,使用模块化的 commands
+#[cfg(feature = "desktop")]
 pub mod agent;
+#[cfg(feature = "desktop")]
 pub mod ai_cli;
+#[cfg(feature = "desktop")]
 pub mod commands;
 pub mod core;
 pub mod drivers;
+#[cfg(feature = "desktop")]
 pub mod enterprise;
+#[cfg(feature = "desktop")]
 pub mod lsp;
 
 // `tauri-plugin-dialog` imports TaskDialogIndirect. Cargo's Windows library
@@ -23,17 +28,25 @@ unsafe extern "C" {
 #[used]
 static OXIDE_UNIT_TEST_MANIFEST_ANCHOR: unsafe extern "C" fn() = oxide_unit_test_manifest_anchor;
 
+#[cfg(feature = "desktop")]
 use commands::query::{ParserState, QueryCancellationState};
+#[cfg(feature = "desktop")]
 use core::cache::CacheManager;
+#[cfg(feature = "desktop")]
 use core::config::ConfigManager;
+#[cfg(feature = "desktop")]
 use core::manager::ConnectionManager;
+#[cfg(feature = "desktop")]
 use core::parser::SqlParser;
-use std::sync::Arc;
-use std::sync::Mutex;
+#[cfg(feature = "desktop")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "desktop")]
 use tauri::Manager;
+#[cfg(feature = "desktop")]
 use tauri_plugin_opener::OpenerExt;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg_attr(all(feature = "desktop", mobile), tauri::mobile_entry_point)]
+#[cfg(feature = "desktop")]
 pub fn run() {
     let manager = ConnectionManager::new();
 

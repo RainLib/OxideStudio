@@ -64,6 +64,7 @@ fn browser_flow_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(feature = "desktop")]
 pub fn set_browser_opener(opener: BrowserOpener) {
     *browser_opener()
         .write()

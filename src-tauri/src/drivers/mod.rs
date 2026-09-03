@@ -21,6 +21,7 @@ pub mod nacos;
 pub mod postgres;
 pub mod redis;
 pub mod sqlite;
+#[cfg(feature = "desktop")]
 pub mod sqlite_ssh;
 pub mod victoriametrics;
 

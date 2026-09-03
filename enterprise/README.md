@@ -106,6 +106,35 @@ Elasticsearch, and Redis. They contain capabilities and an opaque target
 binding fingerprint, but intentionally contain no connection URL, username,
 password, or Gateway secret reference.
 
+Those seeded descriptors are administration examples only: their `.test`
+Gateways are deliberately unreachable. To exercise the complete desktop data
+path after signing in, run this from the repository root:
+
+```bash
+npm run enterprise:local:bootstrap
+```
+
+The bootstrap is repeatable. It generates an ignored development CA, Gateway
+server identity, and device client identity; enrolls the currently signed-in
+desktop device; binds `Local Enterprise PostgreSQL` to the Compose PostgreSQL
+database; starts the mTLS Gateway on `https://localhost:8790`; and writes only
+the three certificate paths plus the device ID into the desktop's public
+enterprise account file. Database credentials and private signing material
+remain under the ignored `deploy/.local-runtime` directory and are mounted
+only into the Gateway.
+
+After it reports success, use **Refresh projects** in the desktop account menu
+and open **Local Enterprise PostgreSQL** in Database Explorer. Recreate the
+development identities when required with:
+
+```bash
+npm run enterprise:local:bootstrap -- --reset-certificates
+```
+
+This command is for the loopback Compose environment only. Production still
+requires administrator-issued device certificates, an HTTPS control plane,
+an enrolled Gateway, and a production `SecretProvider`.
+
 The Compose Casdoor service is a development reference backed by the same
 PostgreSQL server but a separate `casdoor` database. For production, deploy a
 pinned Casdoor release independently (the official Helm chart is supported),
