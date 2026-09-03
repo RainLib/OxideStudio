@@ -2,6 +2,35 @@ import { useEffect } from "react";
 import { keybindingMatchesEvent } from "@/lib/keybindings";
 import { useSettingsStore } from "@/store/useSettingsStore";
 
+const TEXT_INPUT_GLOBAL_ACTIONS = new Set([
+  "commandPalette.open",
+  "settings.open",
+  "window.new",
+  "editor.splitLeft",
+  "editor.splitRight",
+  "editor.splitUp",
+  "editor.splitDown",
+  "query.newConsole",
+  "query.searchDatabase",
+  "query.reopenClosed",
+  "query.closeTab",
+  "workbench.toggleDatabaseExplorer",
+  "workbench.openProjectFiles",
+  "workbench.toggleSqlLibrary",
+  "workbench.toggleAssistant",
+  "workbench.toggleCommit",
+  "workbench.toggleVersionControl",
+  "workbench.toggleResults",
+  "workbench.focusDatabaseExplorer",
+  "workbench.hideActiveToolWindow",
+  "workbench.toggleAllToolWindows",
+  "workbench.jumpToLastToolWindow",
+  "workbench.resizeActiveToolWindowLeft",
+  "workbench.resizeActiveToolWindowRight",
+  "workbench.resizeActiveToolWindowUp",
+  "workbench.resizeActiveToolWindowDown",
+]);
+
 export function useShortcuts() {
   const keymap = useSettingsStore((state) => state.settings.keymap);
 
@@ -34,7 +63,8 @@ export function useShortcuts() {
             "editor.inlineCompletion.accept",
             "editor.inlineCompletion.acceptNextWord",
             "editor.inlineCompletion.hide",
-          ].includes(actionId)
+          ].includes(actionId) &&
+          !TEXT_INPUT_GLOBAL_ACTIONS.has(actionId)
         ) {
           return;
         }

@@ -18,6 +18,8 @@ type ResizeDirection = "left" | "right" | "up" | "down";
 type WorkbenchLayoutSettings = AppSettings["workbench"]["layout"];
 
 type WorkbenchLayoutState = {
+  lastToolWindow: WorkbenchToolWindowId | null;
+  hiddenToolWindowLayout: WorkbenchLayoutSettings | null;
   toggleToolWindow: (id: WorkbenchToolWindowId) => void;
   setToolWindowVisible: (id: WorkbenchToolWindowId, visible: boolean) => void;
   setActiveToolWindow: (id: WorkbenchToolWindowId | "editor") => void;
@@ -28,19 +30,33 @@ type WorkbenchLayoutState = {
   moveActiveToolWindow: (side: WorkbenchSide) => void;
   setTitleToolPinned: (id: PinnableTitleToolId, pinned: boolean) => void;
   resizeActiveToolWindow: (direction: ResizeDirection) => void;
+  hideActiveToolWindow: () => void;
+  toggleAllToolWindows: () => void;
+  jumpToLastToolWindow: () => void;
 };
 
-export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
+export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>((set, get) => ({
+  lastToolWindow: "databaseExplorer",
+  hiddenToolWindowLayout: null,
+
   toggleToolWindow: (id) => {
     const settingsStore = useSettingsStore.getState();
     if (id !== "results") {
+      const nextWorkbench = toggleSideToolWindow(
+        settingsStore.settings.workbench,
+        id,
+      );
+      if (nextWorkbench.layout.activeToolWindow === id) {
+        set({ lastToolWindow: id, hiddenToolWindowLayout: null });
+      }
       void settingsStore.updateSettings({
-        workbench: toggleSideToolWindow(settingsStore.settings.workbench, id),
+        workbench: nextWorkbench,
       });
       return;
     }
     const layout = settingsStore.settings.workbench.layout;
     const visible = visibilityForToolWindow(layout, id);
+    if (!visible) set({ lastToolWindow: id, hiddenToolWindowLayout: null });
     void settingsStore.updateSettings({
       workbench: {
         ...settingsStore.settings.workbench,
@@ -58,6 +74,7 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
 
   setToolWindowVisible: (id, visible) => {
     const settingsStore = useSettingsStore.getState();
+    if (visible) set({ lastToolWindow: id, hiddenToolWindowLayout: null });
     if (id !== "results") {
       void settingsStore.updateSettings({
         workbench: visible
@@ -84,6 +101,9 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
 
   setActiveToolWindow: (id) => {
     const settingsStore = useSettingsStore.getState();
+    if (id !== "editor") {
+      set({ lastToolWindow: id, hiddenToolWindowLayout: null });
+    }
     if (id !== "editor" && id !== "results") {
       void settingsStore.updateSettings({
         workbench: openSideToolWindow(settingsStore.settings.workbench, id),
@@ -194,6 +214,86 @@ export const useWorkbenchLayoutStore = create<WorkbenchLayoutState>(() => ({
         ),
       });
     }
+  },
+
+  hideActiveToolWindow: () => {
+    const settingsStore = useSettingsStore.getState();
+    const workbench = settingsStore.settings.workbench;
+    const active = workbench.layout.activeToolWindow;
+    if (active === "editor") return;
+    set({ lastToolWindow: active, hiddenToolWindowLayout: null });
+    if (active === "results") {
+      const layout = workbench.layout;
+      void settingsStore.updateSettings({
+        workbench: {
+          ...workbench,
+          layout: {
+            ...layout,
+            visibility: { ...layout.visibility, results: false },
+            activeToolWindow: "editor",
+          },
+        },
+      });
+      return;
+    }
+    void settingsStore.updateSettings({
+      workbench: closeSideToolWindow(workbench, active),
+    });
+  },
+
+  toggleAllToolWindows: () => {
+    const settingsStore = useSettingsStore.getState();
+    const workbench = settingsStore.settings.workbench;
+    const layout = workbench.layout;
+    const hasVisibleToolWindow = Object.values(layout.visibility).some(Boolean);
+    const hiddenToolWindowLayout = get().hiddenToolWindowLayout;
+    if (!hasVisibleToolWindow && hiddenToolWindowLayout) {
+      const restoredLayout = hiddenToolWindowLayout;
+      set({
+        hiddenToolWindowLayout: null,
+        lastToolWindow:
+          restoredLayout.activeToolWindow === "editor"
+            ? get().lastToolWindow
+            : restoredLayout.activeToolWindow,
+      });
+      void settingsStore.updateSettings({
+        workbench: { ...workbench, layout: restoredLayout },
+      });
+      return;
+    }
+    if (!hasVisibleToolWindow) return;
+    set({
+      hiddenToolWindowLayout: layout,
+      lastToolWindow:
+        layout.activeToolWindow === "editor"
+          ? get().lastToolWindow
+          : layout.activeToolWindow,
+    });
+    void settingsStore.updateSettings({
+      workbench: {
+        ...workbench,
+        layout: {
+          ...layout,
+          visibility: Object.fromEntries(
+            Object.keys(layout.visibility).map((id) => [id, false]),
+          ) as WorkbenchLayoutSettings["visibility"],
+          activeToolWindow: "editor",
+          activeSideToolWindows: { left: null, right: null },
+        },
+      },
+    });
+  },
+
+  jumpToLastToolWindow: () => {
+    const settingsStore = useSettingsStore.getState();
+    const active = settingsStore.settings.workbench.layout.activeToolWindow;
+    if (active !== "editor") {
+      set({ lastToolWindow: active });
+      get().setActiveToolWindow("editor");
+      return;
+    }
+    const target = get().lastToolWindow;
+    if (target) get().setActiveToolWindow(target);
   },
 }));
 

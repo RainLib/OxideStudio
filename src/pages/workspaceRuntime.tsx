@@ -108,6 +108,11 @@ const DatabaseBrowser = lazy(() =>
     default: module.DatabaseBrowser,
   })),
 );
+const ObjectBrowser = lazy(() =>
+  import("@/components/workspace/ObjectBrowser").then((module) => ({
+    default: module.ObjectBrowser,
+  })),
+);
 const RocketMqWorkspace = lazy(() =>
   import("@/components/workspace/RocketMqWorkspace").then((module) => ({
     default: module.RocketMqWorkspace,
@@ -726,6 +731,8 @@ export function WorkspaceRuntime() {
                         <DataCompareView />
                       ) : activeTab?.type === "database_browser" ? (
                         <DatabaseBrowser />
+                      ) : activeTab?.type === "object_browser" ? (
+                        <ObjectBrowser />
                       ) : activeTab?.type === "rocketmq_workspace" ? (
                         <RocketMqWorkspace />
                       ) : (

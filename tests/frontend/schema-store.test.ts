@@ -3,6 +3,7 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import {
   getConnectionMetadataNodeKey,
   getSchemaMetadataNodeKey,
+  getSchemaObjectMetadataSnapshotKey,
   useSchemaStore,
 } from "@/store/useSchemaStore";
 
@@ -10,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getResources: vi.fn(async () => []),
   refreshSchemas: vi.fn(async () => []),
   refreshTables: vi.fn(async () => []),
+  getTables: vi.fn(async () => []),
   replaceResources: vi.fn(async () => undefined),
   saveResources: vi.fn(async () => undefined),
   deleteResources: vi.fn(async () => undefined),
@@ -61,6 +63,7 @@ vi.mock("@/services/tauri", () => ({
     getFunctions: mocks.getFunctions,
     refreshSchemas: mocks.refreshSchemas,
     refreshTables: mocks.refreshTables,
+    getTables: mocks.getTables,
     setCurrentSchema: mocks.setCurrentSchema,
   },
   storeService: {
@@ -81,6 +84,7 @@ describe("schema store", () => {
     mocks.getResources.mockResolvedValue([]);
     mocks.refreshSchemas.mockResolvedValue([]);
     mocks.refreshTables.mockResolvedValue([]);
+    mocks.getTables.mockResolvedValue([]);
     mocks.replaceResources.mockResolvedValue(undefined);
     mocks.saveResources.mockResolvedValue(undefined);
     mocks.deleteResources.mockResolvedValue(undefined);
@@ -205,6 +209,68 @@ describe("schema store", () => {
       collectionLoadingKey: null,
       isCollectionsLoading: false,
     });
+  });
+
+  it("loads a collapsed schema for search without replacing the active schema", async () => {
+    mocks.getTables.mockResolvedValueOnce([
+      {
+        name: "audit_log",
+        schema: "audit",
+        type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+    mocks.getFunctions.mockResolvedValueOnce([
+      {
+        name: "audit_entry",
+        schema: "audit",
+        type: "FUNCTION",
+        returnType: "void",
+        parameters: [],
+      },
+    ]);
+
+    const loaded = await useSchemaStore
+      .getState()
+      .loadSchemaObjectsForSearch("conn-1", "audit");
+
+    expect(loaded).toBe(true);
+    expect(useSchemaStore.getState().currentSchema).toBe("public");
+    expect(useSchemaStore.getState().tables.map((table) => table.name)).toEqual([
+      "users",
+    ]);
+    const snapshot =
+      useSchemaStore.getState().objectSnapshots[
+        getSchemaObjectMetadataSnapshotKey("conn-1", "postgres", "audit")
+      ];
+    expect(snapshot?.tables.map((table) => table.name)).toEqual(["audit_log"]);
+    expect(snapshot?.functions.map((routine) => routine.name)).toEqual([
+      "audit_entry",
+    ]);
+  });
+
+  it("keeps usable collapsed search metadata when an optional catalog fails", async () => {
+    mocks.getTables.mockResolvedValueOnce([
+      {
+        name: "audit_log",
+        schema: "audit",
+        type: "BASE TABLE",
+        comment: null,
+      },
+    ]);
+    mocks.getFunctions.mockRejectedValueOnce(new Error("not supported"));
+
+    expect(
+      await useSchemaStore
+        .getState()
+        .loadSchemaObjectsForSearch("conn-1", "audit"),
+    ).toBe(true);
+    const snapshot =
+      useSchemaStore.getState().objectSnapshots[
+        getSchemaObjectMetadataSnapshotKey("conn-1", "postgres", "audit")
+      ];
+    expect(snapshot?.tables.map((table) => table.name)).toEqual(["audit_log"]);
+    expect(snapshot?.functions).toEqual([]);
   });
 
   it("keeps cached MongoDB collections when background revalidation fails", async () => {

@@ -99,7 +99,7 @@ OxideStudio 已经具备“连接 → 浏览元数据 → 编写/执行查询 �
 
 | 对象层级 | 已支持 | 仍缺少或需增强 | 优先级 |
 | --- | --- | --- | --- |
-| Data Source | 新建对象、刷新、缓存失效、属性、移除、SQL script import | 连接复制、连接分组、会话/锁监控、native backup/restore、跨环境数据传输 | P1/P2 |
+| Data Source | 新建对象、刷新、缓存失效、属性、移除、SQL script import；支持嵌套连接分组、批量移入/移出、Manual/A–Z/Z–A 与 before/inside/after 拖放 | 会话/锁监控、更多产品的 native backup/restore、跨环境数据传输真实矩阵验证 | P1/P2 |
 | Database / Schema | 展开与过滤、刷新、重命名/删除（按 driver capability）、快照/diff、SQL script import | 批量 DDL + data export、native dump/restore、schema clone、对象搜索/find usages、权限/owner 管理 | P1 |
 | Table / View | 打开数据/DDL、复制名称/路径/DDL、重命名、列编辑、truncate/drop、CSV/JSON import、CSV/JSON/SQL inserts export、SQL script import、loaded-page data compare | duplicate/copy table、server-wide data compare/sync、依赖/usage、索引/约束专用编辑器、统计信息/ANALYZE/VACUUM、批量多表导入导出 | P1 |
 | Query Result | CSV/JSON 等已有导出路径和有界结果 | Excel/Markdown/XML、自定义 extractor、导出列映射、后台流式超大结果 | P1 |

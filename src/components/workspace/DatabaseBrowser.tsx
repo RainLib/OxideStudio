@@ -9,16 +9,12 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
-import {
-  requestDatabaseReveal,
-  requestDatabaseSchemaReveal,
-} from "@/lib/databaseNavigation";
 import { schemaService, type DatabaseInfo } from "@/services/tauri";
 import { useConnectionStore } from "@/store/useConnectionStore";
-import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import {
@@ -98,17 +94,20 @@ export function DatabaseBrowser() {
     state.connections.find((candidate) => candidate.id === activeTab?.connectionId),
   );
   const setActiveConnection = useConnectionStore((state) => state.setActiveConnection);
-  const projectId = useProjectStore((state) => state.activeProjectId);
+  const openObjectBrowser = useTabStore((state) => state.openObjectBrowser);
   const activationMode = useSettingsStore(
     (state) => state.settings.databaseExplorer.activationMode,
   );
+  const viewMode = useSettingsStore(
+    (state) => state.settings.databaseExplorer.objectBrowserViewMode,
+  );
+  const updateSettings = useSettingsStore((state) => state.updateSettings);
   const [rows, setRows] = useState<DatabaseInfo[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<ColumnKey>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [columnWidths, setColumnWidths] = useState(INITIAL_WIDTHS);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -180,17 +179,18 @@ export function DatabaseBrowser() {
     if (!connection) return;
     const capabilities = defaultDatabaseCapabilities(connection.driver);
     if (capabilities.supportsDatabaseCatalogs) {
-      requestDatabaseReveal({
-        projectId,
-        connectionId: connection.id,
-        databaseName: database,
-      });
+      openObjectBrowser(connection.id, connection.name, database);
       return;
     }
-    requestDatabaseSchemaReveal({
-      projectId,
-      connectionId: connection.id,
-      schemaName: database,
+    openObjectBrowser(connection.id, connection.name, undefined, database);
+  };
+
+  const setViewMode = (mode: ViewMode) => {
+    void updateSettings({
+      databaseExplorer: {
+        ...useSettingsStore.getState().settings.databaseExplorer,
+        objectBrowserViewMode: mode,
+      },
     });
   };
 
@@ -237,7 +237,7 @@ export function DatabaseBrowser() {
     )
     .join(" ");
   const minimumWidth = columns.reduce((total, key) => total + columnWidths[key], 0);
-  const activationHint = `${explorerActivationLabel(activationMode)} to reveal in Database Explorer`;
+  const activationHint = `${explorerActivationLabel(activationMode)} to browse database objects`;
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col bg-[hsl(var(--wb-editor))] text-[hsl(var(--wb-text))]">
@@ -251,10 +251,23 @@ export function DatabaseBrowser() {
             ref={searchRef}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            className="h-7 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] pl-8 pr-2 text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+            className="h-7 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-input))] pl-8 pr-7 text-[11px] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
             placeholder="Search databases and comments"
             aria-label="Search databases"
           />
+          {search && (
+            <button
+              type="button"
+              className="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+              onClick={() => {
+                setSearch("");
+                searchRef.current?.focus();
+              }}
+              aria-label="Clear search"
+            >
+              <X size={11} />
+            </button>
+          )}
         </label>
         <select
           value={sortKey}
@@ -290,7 +303,7 @@ export function DatabaseBrowser() {
         <div className="flex flex-1 items-center justify-center text-xs wb-muted">{search ? "No databases match this search." : "No databases are visible to this account."}</div>
       ) : viewMode === "list" ? (
         <div className="min-h-0 flex-1 overflow-auto">
-          <div className="grid h-7 items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-[10px] font-medium uppercase tracking-wide wb-muted" style={{ gridTemplateColumns, minWidth: minimumWidth }}>
+          <div className="grid h-7 items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-3 text-[11px] font-medium wb-muted" style={{ gridTemplateColumns, minWidth: minimumWidth }}>
             {columns.map((key) => (
               <div key={key} className="relative flex min-w-0 items-center">
                 <button type="button" className="flex min-w-0 items-center gap-1 truncate pr-4 text-left" onClick={() => toggleSort(key)}>
@@ -306,7 +319,7 @@ export function DatabaseBrowser() {
           {visibleRows.map((row) => (
             <button key={row.name} type="button" className="grid h-[34px] w-full items-center gap-3 border-b border-[hsl(var(--wb-border-subtle))] px-3 text-left outline-none hover:bg-[hsl(var(--wb-hover))] focus-visible:bg-[hsl(var(--wb-selected))]" style={{ gridTemplateColumns, minWidth: minimumWidth }} onClick={(event) => { if (shouldActivateExplorerObject(activationMode, "click", event.detail)) openDatabase(row.name); }} onDoubleClick={() => { if (shouldActivateExplorerObject(activationMode, "double-click")) openDatabase(row.name); }} onKeyDown={(event) => { if (event.key === "Enter") openDatabase(row.name); }} title={activationHint}>
               {columns.map((key) => (
-                <span key={key} className={cn("min-w-0 truncate text-[11px] wb-muted", key === "name" && "flex items-center gap-2 font-medium text-[hsl(var(--wb-text))]")} title={cellValue(row, key)}>
+                <span key={key} className={cn("min-w-0 truncate text-[11px] wb-muted", ["sizeBytes", "createdAt", "updatedAt"].includes(key) && "tabular-nums", key === "name" && "flex items-center gap-2 text-[12px] font-medium text-[hsl(var(--wb-text))]")} title={cellValue(row, key)}>
                   {key === "name" && <Database size={13} className="shrink-0 text-emerald-400" />}
                   {cellValue(row, key) || "-"}
                 </span>

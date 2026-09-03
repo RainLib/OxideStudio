@@ -183,7 +183,7 @@ describe("Database Explorer NoSQL navigation", () => {
     });
 
     const connectionRow = container.querySelector<HTMLElement>(
-      "#database-connection-redis-1 [role='button']",
+      "#database-connection-redis-1 [role='treeitem']",
     );
     const driverIcon = connectionRow?.querySelector<HTMLElement>(
       '[data-database-brand="redis"]',

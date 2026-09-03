@@ -8,11 +8,15 @@ import { PostgresRemoteDatabaseContents } from "@/components/workspace/PostgresR
 
 const mocks = vi.hoisted(() => ({
   getDatabaseTables: vi.fn(),
+  getDatabaseSchemaObjects: vi.fn(),
+  getDatabaseSchemaObjectMembers: vi.fn(),
 }));
 
 vi.mock("@/services/tauri", () => ({
   schemaService: {
     getDatabaseTables: mocks.getDatabaseTables,
+    getDatabaseSchemaObjects: mocks.getDatabaseSchemaObjects,
+    getDatabaseSchemaObjectMembers: mocks.getDatabaseSchemaObjectMembers,
   },
 }));
 
@@ -28,6 +32,8 @@ describe("PostgresRemoteDatabaseContents", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     mocks.getDatabaseTables.mockReset();
+    mocks.getDatabaseSchemaObjects.mockReset().mockResolvedValue([]);
+    mocks.getDatabaseSchemaObjectMembers.mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -362,5 +368,71 @@ describe("PostgresRemoteDatabaseContents", () => {
       "public",
       "orders",
     );
+  });
+
+  it("uses DBX directory groups for views and expandable schema objects", async () => {
+    mocks.getDatabaseTables.mockResolvedValue([
+      { name: "orders", schema: "public", type: "BASE TABLE" },
+      { name: "order_summary", schema: "public", type: "VIEW" },
+    ]);
+    mocks.getDatabaseSchemaObjects.mockResolvedValue([
+      {
+        name: "billing_api",
+        objectType: "PACKAGE",
+        membersExpandable: true,
+      },
+      { name: "orders_audit", objectType: "TRIGGER", parentName: "orders" },
+    ]);
+    mocks.getDatabaseSchemaObjectMembers.mockResolvedValue([
+      { name: "recalculate", objectType: "PROCEDURE" },
+    ]);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <PostgresRemoteDatabaseContents
+          connectionId="pg-1"
+          database="analytics"
+          schemas={["public"]}
+          connectionColor="#5b8dd6"
+          onOpenTable={vi.fn()}
+        />,
+      );
+    });
+
+    const schemaButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("public"),
+    );
+    await act(async () => {
+      schemaButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Tables");
+    expect(container.textContent).toContain("Views");
+    expect(container.textContent).toContain("Triggers");
+    expect(container.textContent).toContain("Packages");
+    expect(container.textContent).not.toContain("schema objects");
+
+    const packages = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Packages"),
+    );
+    await act(async () => packages?.click());
+    const packageMembers = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Expand billing_api members"]',
+    );
+    await act(async () => {
+      packageMembers?.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.getDatabaseSchemaObjectMembers).toHaveBeenCalledWith(
+      "pg-1",
+      "analytics",
+      "public",
+      "billing_api",
+      "PACKAGE",
+    );
+    expect(container.textContent).toContain("recalculate");
   });
 });

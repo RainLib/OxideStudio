@@ -25,8 +25,10 @@ import {
   Code2,
   Trash2,
   Clipboard,
+  CopyPlus,
   Folder,
-  FolderCog,
+  FolderOpen,
+  FolderPlus,
   Network,
   Search,
   X,
@@ -38,8 +40,20 @@ import {
   Wrench,
   ArchiveRestore,
   Sparkles,
+  Braces,
+  ScrollText,
+  ListOrdered,
+  Zap,
+  Boxes,
+  SearchCode,
+  Eye,
+  EyeOff,
+  Link2,
+  Clock3,
+  Package,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   getConnectionMetadataNodeKey,
   getConnectionMetadataSnapshotKey,
@@ -58,7 +72,16 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useSettingsStore } from "@/store/useSettingsStore";
 import { useTabStore } from "@/store/useTabStore";
 import { useTaskStore } from "@/store/useTaskStore";
+import { useHistoryStore } from "@/store/useHistoryStore";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
+import {
+  EMPTY_EXPLORER_CONNECTION_ASSIGNMENTS,
+  EMPTY_EXPLORER_CONNECTION_GROUPS,
+  EMPTY_EXPLORER_NODE_IDS,
+  EMPTY_EXPLORER_VISIBILITY_FILTERS,
+  useDatabaseExplorerStore,
+  useExplorerExpansionState,
+} from "@/store/useDatabaseExplorerStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
   APP_EVENT_OPEN_ASSISTANT,
@@ -72,7 +95,15 @@ import {
   useDatabaseNavigationStore,
 } from "@/lib/databaseNavigation";
 import { isExplorerRefreshShortcut } from "@/lib/keybindings";
-import { useTableOperations } from "@/hooks/useTableOperations";
+import {
+  queryHistoryDisplayTitle,
+  queryHistoryForScope,
+  type QueryHistoryItem,
+} from "@/lib/queryHistory";
+import {
+  useTableOperations,
+  type TableOperationTarget,
+} from "@/hooks/useTableOperations";
 import {
   databaseService,
   queryService,
@@ -112,6 +143,8 @@ import {
   isViewObject,
   normalizeDatabaseDriverName,
   pluralizeNamespaceLabel,
+  previewTableQuery,
+  qualifiedTableName,
   relationObjectLabel,
   supportsTableWorkspace,
 } from "@/lib/databaseDialect";
@@ -127,15 +160,17 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  Fragment,
   lazy,
   Suspense,
+  useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import {
-  ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
@@ -186,6 +221,54 @@ import {
   shouldActivateExplorerObject,
 } from "@/features/database-explorer/model/explorerActivation";
 import { explorerObjectIconClass } from "@/features/database-explorer/model/explorerObjectPresentation";
+import { explorerNodeId } from "@/features/database-explorer/model/explorerTreeNode";
+import { resolveExplorerSelection } from "@/features/database-explorer/model/explorerSelection";
+import { reorderExplorerConnectionIds } from "@/features/database-explorer/model/explorerConnectionOrder";
+import {
+  explorerTreeVisibleNodeIds,
+  moveExplorerTreeFocus,
+} from "@/features/database-explorer/ui/explorerTreeDom";
+import {
+  EXPLORER_MENU_CONTENT_CLASS,
+  EXPLORER_MENU_ITEM_CLASS,
+  EXPLORER_MENU_SEPARATOR_CLASS,
+} from "@/features/database-explorer/ui/explorerStyles";
+import { ExplorerDirectoryRow as ExplorerDirectoryGroupRow } from "@/features/database-explorer/ui/ExplorerDirectoryRow";
+import {
+  ExplorerSegmentedVirtualList,
+  ExplorerVirtualizationHost,
+  ExplorerVirtualList,
+} from "@/features/database-explorer/ui/ExplorerVirtualList";
+import {
+  ExplorerContextMenuHost,
+  ExplorerContextMenuRow,
+  ExplorerSharedContextMenu,
+} from "@/features/database-explorer/ui/ExplorerContextMenuHost";
+import {
+  EXPLORER_CONNECTION_DRAG_TYPE,
+  EXPLORER_GROUP_DRAG_TYPE,
+  ExplorerConnectionGroupRow,
+  explorerConnectionGroupAncestorsExpanded,
+  explorerConnectionGroupDepth,
+  readExplorerDraggedConnectionIds,
+} from "@/features/database-explorer/ui/ExplorerConnectionGroupRow";
+import { orderExplorerConnectionGroups } from "@/features/database-explorer/model/explorerGroupOrder";
+import { compileExplorerSearchPattern } from "@/features/database-explorer/model/explorerSearchPattern";
+import { explorerNodePassesVisibilityFilter } from "@/features/database-explorer/model/explorerVisibilityFilter";
+import {
+  EXPLORER_COMPACT_TREE_ROW_HEIGHT,
+  EXPLORER_TREE_ROW_HEIGHT,
+  explorerVirtualWindow,
+  nextExplorerVirtualizationState,
+} from "@/features/database-explorer/runtime/explorerFlatTree";
+import {
+  EXPLORER_DIRECTORY_GROUPS,
+  explorerDirectoryDefinition,
+  explorerDirectoryNodeKind,
+  explorerDirectoryGroupForObjectType,
+  groupSchemaObjectDescriptors,
+  type ExplorerDirectoryGroupKind,
+} from "@/features/database-explorer/model/explorerDirectory";
 import {
   collapsedDatabaseSchemaTargets,
   collapsedSchemaMetadataTargets,
@@ -367,11 +450,11 @@ interface ExplorerTableBatchSelection extends TableBatchSelection {
   scopeKey: string;
 }
 
-function routineMatchesFilter(routine: FunctionInfo, filter: string) {
-  const normalizedFilter = filter.trim().toLowerCase();
-  if (!normalizedFilter) return true;
-
-  return [
+function routineMatchesFilter(
+  routine: FunctionInfo,
+  matches: (...values: Array<unknown>) => boolean,
+) {
+  return matches(
     routine.name,
     routine.routine_type,
     routine.return_type,
@@ -380,9 +463,14 @@ function routineMatchesFilter(routine: FunctionInfo, filter: string) {
       parameter.name,
       parameter.data_type,
     ]),
-  ]
-    .filter(Boolean)
-    .some((value) => String(value).toLowerCase().includes(normalizedFilter));
+  );
+}
+
+function parseExplorerVisibilityPatterns(value: string) {
+  return value
+    .split(/[\n,;]+/u)
+    .map((pattern) => pattern.trim())
+    .filter(Boolean);
 }
 
 const DRIVER_TREE_COLORS: Record<string, string> = {
@@ -557,6 +645,7 @@ export function SchemaSidebar() {
     (state) => state.hasConnectionDisplayCache,
   );
   const connectionsLoading = useConnectionStore((state) => state.isLoading);
+  const queryHistory = useHistoryStore((state) => state.history);
   const connectionLoadError = useConnectionStore((state) => state.loadError);
   const loadConnections = useConnectionStore((state) => state.loadConnections);
   const connectedConnectionIds = useConnectionStore(
@@ -580,6 +669,7 @@ export function SchemaSidebar() {
   const removeConnection = useConnectionStore(
     (state) => state.removeConnection,
   );
+  const disconnect = useConnectionStore((state) => state.disconnect);
   const setToolWindowVisible = useWorkbenchLayoutStore(
     (store) => store.setToolWindowVisible,
   );
@@ -602,6 +692,7 @@ export function SchemaSidebar() {
     objectSnapshots,
     hydrateConnectionMetadataFromCache,
     hydrateSchemaObjectsFromCache,
+    loadSchemaObjectsForSearch,
     forgetConnectionMetadata,
     forgetSchemaMetadata,
     togglePinTable,
@@ -622,6 +713,7 @@ export function SchemaSidebar() {
     [connections],
   );
   const [filterText, setFilterText] = useState("");
+  const deferredFilterText = useDeferredValue(filterText);
   const [schemaObjectDescriptors, setSchemaObjectDescriptors] = useState<
     SchemaObjectInfo[]
   >([]);
@@ -639,11 +731,24 @@ export function SchemaSidebar() {
       { loading: boolean; error: boolean; members: SchemaObjectInfo[] }
     >
   >({});
-  const [isFilterVisible, setIsFilterVisible] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const [showConnectedConnectionsOnly, setShowConnectedConnectionsOnly] =
+    useState(false);
   const [isDataSourceDialogOpen, setIsDataSourceDialogOpen] = useState(false);
   const [isCreateDbDialogOpen, setIsCreateDbDialogOpen] = useState(false);
   const [isCreateViewDialogOpen, setIsCreateViewDialogOpen] = useState(false);
   const [isCreateRedisKeyOpen, setIsCreateRedisKeyOpen] = useState(false);
+  const [connectionGroupDraft, setConnectionGroupDraft] = useState<{
+    mode: "create" | "rename";
+    groupId?: string;
+    name: string;
+  } | null>(null);
+  const [visibilityFilterDraft, setVisibilityFilterDraft] = useState<{
+    parentNodeId: string;
+    label: string;
+    includePatterns: string;
+    excludePatterns: string;
+  } | null>(null);
   const [
     databaseAdministrationConnectionId,
     setDatabaseAdministrationConnectionId,
@@ -670,14 +775,362 @@ export function SchemaSidebar() {
   );
   const [showAllSchemas, setShowAllSchemas] = useState(false);
   const [visibleSchemaNames, setVisibleSchemaNames] = useState<string[]>([]);
-  const [expandedConnectionIds, setExpandedConnectionIds] = useState<string[]>(
-    [],
+  const explorerStateScope = activeProjectId || "unassigned";
+  const selectedExplorerNodeIds = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.selectedNodeIds ??
+      EMPTY_EXPLORER_NODE_IDS,
   );
-  const [expandedSchemaKeys, setExpandedSchemaKeys] = useState<string[]>([]);
-  const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] = useState<
-    string[]
-  >([]);
-  const [expandedTableKeys, setExpandedTableKeys] = useState<string[]>([]);
+  const explorerSelectionAnchorId = useDatabaseExplorerStore(
+    (state) => state.scopes[explorerStateScope]?.selectionAnchorId ?? null,
+  );
+  const setExplorerSelection = useDatabaseExplorerStore(
+    (state) => state.setSelection,
+  );
+  const explorerViewMode = useDatabaseExplorerStore(
+    (state) => state.scopes[explorerStateScope]?.viewMode ?? "hierarchical",
+  );
+  const explorerFilterScope = useDatabaseExplorerStore(
+    (state) => state.scopes[explorerStateScope]?.filterScope ?? "all",
+  );
+  const explorerSearchMode = useDatabaseExplorerStore(
+    (state) => state.scopes[explorerStateScope]?.searchMode ?? "global",
+  );
+  const explorerRegexSearch = useDatabaseExplorerStore(
+    (state) => state.scopes[explorerStateScope]?.regexSearch ?? false,
+  );
+  const explorerConnectionSortMode = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.connectionSortMode ?? "asc",
+  );
+  const explorerConnectionOrder = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.connectionOrder ??
+      EMPTY_EXPLORER_NODE_IDS,
+  );
+  const explorerVisibilityFilters = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.visibilityFilters ??
+      EMPTY_EXPLORER_VISIBILITY_FILTERS,
+  );
+  const explorerTreeRowHeight =
+    explorerViewMode === "flat"
+      ? EXPLORER_COMPACT_TREE_ROW_HEIGHT
+      : EXPLORER_TREE_ROW_HEIGHT;
+  const setExplorerViewMode = useDatabaseExplorerStore(
+    (state) => state.setViewMode,
+  );
+  const setExplorerFilterScope = useDatabaseExplorerStore(
+    (state) => state.setFilterScope,
+  );
+  const setExplorerSearchMode = useDatabaseExplorerStore(
+    (state) => state.setSearchMode,
+  );
+  const setExplorerRegexSearch = useDatabaseExplorerStore(
+    (state) => state.setRegexSearch,
+  );
+  const setExplorerConnectionSortMode = useDatabaseExplorerStore(
+    (state) => state.setConnectionSortMode,
+  );
+  const setExplorerConnectionOrder = useDatabaseExplorerStore(
+    (state) => state.setConnectionOrder,
+  );
+  const hideExplorerNodes = useDatabaseExplorerStore(
+    (state) => state.hideNodes,
+  );
+  const showOnlyExplorerNodes = useDatabaseExplorerStore(
+    (state) => state.showOnlyNodes,
+  );
+  const clearExplorerVisibilityFilter = useDatabaseExplorerStore(
+    (state) => state.clearVisibilityFilter,
+  );
+  const setExplorerVisibilityPatterns = useDatabaseExplorerStore(
+    (state) => state.setVisibilityPatterns,
+  );
+  const explorerSearchPattern = useMemo(
+    () =>
+      compileExplorerSearchPattern(deferredFilterText, explorerRegexSearch),
+    [deferredFilterText, explorerRegexSearch],
+  );
+  const explorerFilterMatches = useCallback(
+    (...values: Array<unknown>) => explorerSearchPattern.matches(...values),
+    [explorerSearchPattern],
+  );
+  const openExplorerVisibilityFilter = useCallback(
+    (parentNodeId: string, label: string) => {
+      const filter = explorerVisibilityFilters[parentNodeId];
+      setVisibilityFilterDraft({
+        parentNodeId,
+        label,
+        includePatterns: (filter?.includePatterns ?? []).join("\n"),
+        excludePatterns: (filter?.excludePatterns ?? []).join("\n"),
+      });
+    },
+    [explorerVisibilityFilters],
+  );
+  const explorerConnectionGroups = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.connectionGroups ??
+      EMPTY_EXPLORER_CONNECTION_GROUPS,
+  );
+  const orderedExplorerConnectionGroups = useMemo(
+    () => orderExplorerConnectionGroups(explorerConnectionGroups),
+    [explorerConnectionGroups],
+  );
+  const explorerConnectionGroupIds = useDatabaseExplorerStore(
+    (state) =>
+      state.scopes[explorerStateScope]?.connectionGroupIds ??
+      EMPTY_EXPLORER_CONNECTION_ASSIGNMENTS,
+  );
+  const createExplorerConnectionGroup = useDatabaseExplorerStore(
+    (state) => state.createConnectionGroup,
+  );
+  const renameExplorerConnectionGroup = useDatabaseExplorerStore(
+    (state) => state.renameConnectionGroup,
+  );
+  const deleteExplorerConnectionGroup = useDatabaseExplorerStore(
+    (state) => state.deleteConnectionGroup,
+  );
+  const moveExplorerConnectionsToGroup = useDatabaseExplorerStore(
+    (state) => state.moveConnectionsToGroup,
+  );
+  const moveExplorerConnectionGroup = useDatabaseExplorerStore(
+    (state) => state.moveConnectionGroup,
+  );
+  const placeExplorerConnectionGroup = useDatabaseExplorerStore(
+    (state) => state.placeConnectionGroup,
+  );
+  const selectExplorerNode = (
+    nodeId: string,
+    event?: {
+      currentTarget: HTMLElement;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      shiftKey: boolean;
+    },
+  ) => {
+    const result = resolveExplorerSelection({
+      visibleNodeIds: event
+        ? explorerTreeVisibleNodeIds(event.currentTarget)
+        : [nodeId],
+      selectedNodeIds: selectedExplorerNodeIds,
+      targetNodeId: nodeId,
+      anchorNodeId: explorerSelectionAnchorId,
+      additive: Boolean(event?.ctrlKey || event?.metaKey),
+      range: Boolean(event?.shiftKey),
+    });
+    setExplorerSelection(
+      explorerStateScope,
+      result.selectedNodeIds,
+      result.focusedNodeId,
+      result.anchorNodeId,
+    );
+  };
+  const [expandedConnectionIds, setExpandedConnectionIds] =
+    useExplorerExpansionState(explorerStateScope, "connections");
+  const [expandedSchemaKeys, setExpandedSchemaKeys] =
+    useExplorerExpansionState(explorerStateScope, "schemas");
+  const [expandedObjectGroupKeys, setExpandedObjectGroupKeys] =
+    useExplorerExpansionState(explorerStateScope, "groups");
+  const [expandedTableKeys, setExpandedTableKeys] = useExplorerExpansionState(
+    explorerStateScope,
+    "objects",
+  );
+  const explorerConnectionGroupById = useMemo(
+    () =>
+      new Map(explorerConnectionGroups.map((group) => [group.id, group])),
+    [explorerConnectionGroups],
+  );
+  const connectedConnectionIdSet = useMemo(
+    () => new Set(connectedConnectionIds),
+    [connectedConnectionIds],
+  );
+  const explorerConnectionFilterParentId = explorerNodeId(
+    "folder",
+    "connections",
+  );
+  const explorerConnectionVisibilityFilter =
+    explorerVisibilityFilters[explorerConnectionFilterParentId];
+  const explorerConnectionGroupCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const connection of connections) {
+      if (
+        !explorerNodePassesVisibilityFilter(
+          explorerConnectionVisibilityFilter,
+          explorerNodeId("connection", connection.id),
+          connection.name,
+        ) ||
+        showConnectedConnectionsOnly &&
+        !connectedConnectionIdSet.has(connection.id)
+      ) {
+        continue;
+      }
+      let groupId = explorerConnectionGroupIds[connection.id];
+      const visited = new Set<string>();
+      while (groupId && !visited.has(groupId)) {
+        visited.add(groupId);
+        counts.set(groupId, (counts.get(groupId) ?? 0) + 1);
+        groupId = explorerConnectionGroupById.get(groupId)?.parentId ?? "";
+      }
+    }
+    return counts;
+  }, [
+    connections,
+    connectedConnectionIdSet,
+    explorerConnectionGroupById,
+    explorerConnectionGroupIds,
+    explorerConnectionVisibilityFilter,
+    showConnectedConnectionsOnly,
+  ]);
+  useEffect(() => {
+    if (showConnectedConnectionsOnly && connectedConnectionIds.length === 0) {
+      setShowConnectedConnectionsOnly(false);
+    }
+  }, [connectedConnectionIds.length, showConnectedConnectionsOnly]);
+  const visibleExplorerConnections = useMemo(() => {
+    let filteredConnections = showConnectedConnectionsOnly
+      ? connections.filter((connection) =>
+          connectedConnectionIdSet.has(connection.id),
+        )
+      : connections;
+    filteredConnections = filteredConnections.filter((connection) =>
+      explorerNodePassesVisibilityFilter(
+        explorerConnectionVisibilityFilter,
+        explorerNodeId("connection", connection.id),
+        connection.name,
+      ),
+    );
+    if (
+      explorerFilterScope === "connections" &&
+      deferredFilterText.trim()
+    ) {
+      filteredConnections = filteredConnections.filter((connection) =>
+        explorerFilterMatches(
+          connection.name,
+          connection.driver,
+          connection.database,
+        ),
+      );
+    }
+    const groupOrder = new Map(
+      orderedExplorerConnectionGroups.map((group, index) => [group.id, index]),
+    );
+    const manualOrder = new Map(
+      explorerConnectionOrder.map((connectionId, index) => [
+        connectionId,
+        index,
+      ]),
+    );
+    const sourceOrder = new Map(
+      connections.map((connection, index) => [connection.id, index]),
+    );
+    return [...filteredConnections].sort((left, right) => {
+      const leftGroup = explorerConnectionGroupIds[left.id];
+      const rightGroup = explorerConnectionGroupIds[right.id];
+      const leftOrder = leftGroup
+        ? (groupOrder.get(leftGroup) ?? Number.MAX_SAFE_INTEGER - 1)
+        : Number.MAX_SAFE_INTEGER;
+      const rightOrder = rightGroup
+        ? (groupOrder.get(rightGroup) ?? Number.MAX_SAFE_INTEGER - 1)
+        : Number.MAX_SAFE_INTEGER;
+      const groupDifference = leftOrder - rightOrder;
+      if (groupDifference) return groupDifference;
+      if (explorerConnectionSortMode === "manual") {
+        return (
+          (manualOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+          (manualOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER) ||
+          (sourceOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+            (sourceOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+        );
+      }
+      const nameDifference = left.name.localeCompare(right.name);
+      return explorerConnectionSortMode === "desc"
+        ? -nameDifference
+        : nameDifference;
+    });
+  }, [
+    connections,
+    connectedConnectionIdSet,
+    deferredFilterText,
+    explorerConnectionGroupIds,
+    orderedExplorerConnectionGroups,
+    explorerConnectionOrder,
+    explorerConnectionSortMode,
+    explorerConnectionVisibilityFilter,
+    explorerFilterMatches,
+    explorerFilterScope,
+    showConnectedConnectionsOnly,
+  ]);
+  const explorerScrollRef = useRef<HTMLDivElement>(null);
+  const [explorerScrollMetrics, setExplorerScrollMetrics] = useState({
+    scrollTop: 0,
+    viewportHeight: 640,
+  });
+  const canVirtualizeConnectionRows =
+    explorerConnectionGroups.length === 0 &&
+    expandedConnectionIds.length === 0;
+  const [connectionVirtualizationArmed, setConnectionVirtualizationArmed] =
+    useState(
+      () =>
+        canVirtualizeConnectionRows &&
+        nextExplorerVirtualizationState(
+          false,
+          visibleExplorerConnections.length,
+        ),
+    );
+  useEffect(() => {
+    setConnectionVirtualizationArmed((armed) =>
+      canVirtualizeConnectionRows
+        ? nextExplorerVirtualizationState(
+            armed,
+            visibleExplorerConnections.length,
+          )
+        : false,
+    );
+  }, [canVirtualizeConnectionRows, visibleExplorerConnections.length]);
+  useEffect(() => {
+    const scroller = explorerScrollRef.current;
+    if (!scroller || typeof ResizeObserver === "undefined") return;
+    const updateViewport = () =>
+      setExplorerScrollMetrics((current) => ({
+        ...current,
+        viewportHeight: scroller.clientHeight || current.viewportHeight,
+      }));
+    updateViewport();
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
+  const connectionVirtualWindow = useMemo(
+    () =>
+      connectionVirtualizationArmed
+        ? explorerVirtualWindow(
+            visibleExplorerConnections.length,
+            explorerScrollMetrics.scrollTop,
+            explorerScrollMetrics.viewportHeight,
+            explorerTreeRowHeight,
+          )
+        : {
+            start: 0,
+            end: visibleExplorerConnections.length,
+            offsetTop: 0,
+            totalHeight:
+              visibleExplorerConnections.length * explorerTreeRowHeight,
+          },
+    [
+      connectionVirtualizationArmed,
+      explorerScrollMetrics.scrollTop,
+      explorerScrollMetrics.viewportHeight,
+      explorerTreeRowHeight,
+      visibleExplorerConnections.length,
+    ],
+  );
+  const renderedExplorerConnections = connectionVirtualizationArmed
+    ? visibleExplorerConnections.slice(
+        connectionVirtualWindow.start,
+        connectionVirtualWindow.end,
+      )
+    : visibleExplorerConnections;
   const suppressTableReferenceClickRef = useRef(false);
 
   // Programmatic activation (startup cache, Search Everywhere, AI navigation)
@@ -686,9 +1139,22 @@ export function SchemaSidebar() {
   useEffect(() => {
     if (!activeConnectionId) return;
     setExpandedConnectionIds((current) =>
-      current.includes(activeConnectionId) ? current : [activeConnectionId],
+      current.includes(activeConnectionId)
+        ? current
+        : [...current, activeConnectionId],
     );
-  }, [activeConnectionId]);
+    const groupId = explorerConnectionGroupIds[activeConnectionId];
+    if (groupId) {
+      setExpandedObjectGroupKeys((current) =>
+        current.includes(groupId) ? current : [...current, groupId],
+      );
+    }
+  }, [
+    activeConnectionId,
+    explorerConnectionGroupIds,
+    setExpandedConnectionIds,
+    setExpandedObjectGroupKeys,
+  ]);
   const databaseRevealRequest = useDatabaseNavigationStore(
     (state) => state.revealRequest,
   );
@@ -840,8 +1306,9 @@ export function SchemaSidebar() {
   const shouldLimitVisibleSchemas =
     databaseExplorerSettings.showOnlySelectedSchemas;
   const explorerActivationMode = databaseExplorerSettings.activationMode;
-  const showExplorerHoverTooltips =
-    databaseExplorerSettings.showHoverTooltips;
+  const showExplorerHoverTooltips = databaseExplorerSettings.showHoverTooltips;
+  const allowExplorerHorizontalScroll =
+    databaseExplorerSettings.allowHorizontalScroll;
 
   const {
     truncateTable,
@@ -921,13 +1388,12 @@ export function SchemaSidebar() {
     collectionPreviewProvider.objectPluralLabel ||
     `${collectionPreviewProvider.objectLabel}s`;
   const objectSectionLabel = canBrowseTables
-    ? "tables"
+    ? "Tables"
     : canBrowseCollections
       ? collectionLabelPlural
       : "Objects";
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
-  const canMutateNamespaces = activeCapabilities.supportsCreateDatabase;
   const schemaVisibilityStorageKey = activeConnectionId
     ? `oxide-studio-visible-schemas:${activeProjectId}:${activeConnectionId}:${activeDriver}`
     : null;
@@ -1053,13 +1519,11 @@ export function SchemaSidebar() {
         metadataNodeStates[getConnectionMetadataNodeKey(connectionId, driver)],
     };
   };
-  const menuContentClass =
-    "w-72 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_14px_32px_rgba(0,0,0,0.35)]";
-  const menuItemClass =
-    "h-7 rounded-[3px] px-2 text-[12px] text-[hsl(var(--wb-text))] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]";
+  const menuContentClass = EXPLORER_MENU_CONTENT_CLASS;
+  const menuItemClass = EXPLORER_MENU_ITEM_CLASS;
   const menuSubClass =
     "h-7 rounded-[3px] px-2 text-[12px] text-[hsl(var(--wb-text))] focus:bg-[hsl(var(--wb-hover))] data-[state=open]:bg-[hsl(var(--wb-hover))]";
-  const menuSeparatorClass = "bg-[hsl(var(--wb-border-subtle))]";
+  const menuSeparatorClass = EXPLORER_MENU_SEPARATOR_CLASS;
   const checkboxClass =
     "h-3.5 w-3.5 rounded-[3px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] data-[state=checked]:border-[hsl(var(--wb-accent))] data-[state=checked]:bg-[hsl(var(--wb-accent))] data-[state=checked]:text-[hsl(var(--wb-accent-foreground))]";
   const updateVisibleSchemas = (showAll: boolean, names: string[]) => {
@@ -1179,16 +1643,22 @@ export function SchemaSidebar() {
     setRenameDialogOpen(true);
   };
 
-  const handleDdlClick = async (table: TableInfo) => {
+  const handleDdlClick = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
     setActiveTable(table.name);
     setActiveTableType(table.type || null);
-    const ddl = await getTableDdl(table.name, table.type);
+    const ddl = await getTableDdl(table.name, table.type, target);
     setDdlContent(ddl);
     setDdlViewerOpen(true);
   };
 
-  const handleCopyTableDdl = async (table: TableInfo) => {
-    const ddl = await getTableDdl(table.name, table.type);
+  const handleCopyTableDdl = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
+    const ddl = await getTableDdl(table.name, table.type, target);
     await copyText(ddl);
   };
 
@@ -1198,14 +1668,21 @@ export function SchemaSidebar() {
     setColumnsDialogOpen(true);
   };
 
-  const handleEditViewClick = async (table: TableInfo) => {
+  const handleEditViewClick = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
     if (!isViewObject(table.type) || isMaterializedViewObject(table.type))
       return;
     setActiveTable(table.name);
     setActiveTableType(table.type || null);
 
     try {
-      const definition = await getViewDefinition(table.name, table.type);
+      const definition = await getViewDefinition(
+        table.name,
+        table.type,
+        target,
+      );
       setViewDialogMode("edit");
       setViewDialogKind("view");
       setViewDialogInitialName(table.name);
@@ -1216,28 +1693,37 @@ export function SchemaSidebar() {
     }
   };
 
-  const handleTruncateClick = async (table: TableInfo) => {
+  const handleTruncateClick = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
     if (isReadOnlyRelationObject(table.type)) return;
     const confirmed = window.confirm(
       `Empty all rows from "${table.name}"? This cannot be undone.`,
     );
     if (!confirmed) return;
-    await truncateTable(table.name);
+    await truncateTable(table.name, target);
   };
 
-  const handleDropClick = async (table: TableInfo) => {
+  const handleDropClick = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
     const label = relationObjectLabel(table.type).toLowerCase();
     const confirmed = window.confirm(
       `Drop ${label} "${table.name}"? This will remove the ${label}.`,
     );
     if (!confirmed) return;
-    await dropTable(table.name, table.type);
+    await dropTable(table.name, table.type, target);
   };
 
-  const handleRefreshMaterializedViewClick = async (table: TableInfo) => {
+  const handleRefreshMaterializedViewClick = async (
+    table: TableInfo,
+    target?: TableOperationTarget,
+  ) => {
     if (!isMaterializedViewObject(table.type)) return;
     try {
-      await refreshMaterializedView(table.name, table.type);
+      await refreshMaterializedView(table.name, table.type, target);
     } catch (e: any) {
       window.alert(`Failed to refresh materialized view: ${e}`);
     }
@@ -1577,6 +2063,7 @@ export function SchemaSidebar() {
   useEffect(() => {
     if (
       activeCapabilities.dataModel !== "keyValue" ||
+      explorerRegexSearch ||
       !isActiveConnectionReady ||
       isLoading ||
       !activeConnectionId ||
@@ -1598,6 +2085,7 @@ export function SchemaSidebar() {
     activeCapabilities.dataModel,
     activeConnectionId,
     collectionNamespace,
+    explorerRegexSearch,
     filterText,
     isActiveConnectionReady,
     isActiveNamespaceExpanded,
@@ -1626,11 +2114,44 @@ export function SchemaSidebar() {
     loadFunctions,
   ]);
 
+  const schemaObjectsRenderCache = useMemo(
+    () =>
+      new Map<
+        string,
+        {
+          tables: TableInfo[];
+          collections: CollectionInfo[];
+          functions: FunctionInfo[];
+          pinnedTables: string[];
+          hasSnapshot: boolean;
+        }
+      >(),
+    [
+      activeCapabilities,
+      activeConnectionId,
+      canBrowseCollections,
+      canBrowseTables,
+      collections,
+      currentSchema,
+      deferredFilterText,
+      explorerFilterMatches,
+      explorerVisibilityFilters,
+      functions,
+      objectSnapshots,
+      pinnedTables,
+      tables,
+    ],
+  );
+
   const schemaObjectsFor = (
     connectionId: string,
     driver: string | null | undefined,
     schema: string,
+    databaseName = "",
   ) => {
+    const cacheKey = `${connectionId}\u0000${driver || "unknown"}\u0000${databaseName}\u0000${schema}`;
+    const cached = schemaObjectsRenderCache.get(cacheKey);
+    if (cached) return cached;
     const isActiveSchema =
       connectionId === activeConnectionId && schema === currentSchema;
     const snapshot = isActiveSchema
@@ -1648,51 +2169,106 @@ export function SchemaSidebar() {
       snapshot?.functions ?? (isActiveSchema ? functions : []);
     const schemaPinnedTables =
       snapshot?.pinnedTables ?? (isActiveSchema ? pinnedTables : []);
+    const objectVisibilityParentId = explorerNodeId(
+      "folder",
+      "schema-objects",
+      connectionId,
+      databaseName,
+      schema,
+    );
+    const objectVisibilityFilter =
+      explorerVisibilityFilters[objectVisibilityParentId];
 
-    const sortedTables = [...schemaTables].sort((a, b) => {
+    const sortedTables = schemaTables
+      .filter((table) => {
+        const kind = isMaterializedViewObject(table.type)
+          ? "materialized-view"
+          : isViewObject(table.type)
+            ? "view"
+            : "table";
+        return explorerNodePassesVisibilityFilter(
+          objectVisibilityFilter,
+          explorerNodeId(kind, connectionId, databaseName, schema, table.name),
+          table.name,
+        );
+      })
+      .sort((a, b) => {
       const aPinned = schemaPinnedTables.includes(a.name);
       const bPinned = schemaPinnedTables.includes(b.name);
       if (aPinned && !bPinned) return -1;
       if (!aPinned && bPinned) return 1;
       return a.name.localeCompare(b.name);
-    });
+      });
 
-    return {
+    const result = {
       tables: sortedTables.filter((table) =>
-        table.name.toLowerCase().includes(filterText.toLowerCase()),
+        explorerFilterMatches(table.name, table.comment),
       ),
       collections: [...schemaCollections]
+        .filter((collection) =>
+          explorerNodePassesVisibilityFilter(
+            objectVisibilityFilter,
+            explorerNodeId(
+              activeCapabilities.dataModel === "search"
+                ? "search-index"
+                : activeCapabilities.dataModel === "keyValue"
+                  ? "key"
+                  : "collection",
+              connectionId,
+              databaseName,
+              schema,
+              collection.name,
+            ),
+            collection.name,
+          ),
+        )
         .sort((a, b) => a.name.localeCompare(b.name))
-        .filter((collection) => {
-          const normalizedFilter = filterText.toLowerCase();
-          return (
-            collection.name.toLowerCase().includes(normalizedFilter) ||
+        .filter((collection) =>
+          explorerFilterMatches(
+            collection.name,
             collectionDisplayLabelForCapabilities(
               activeCapabilities,
               collection,
-            )
-              .toLowerCase()
-              .includes(normalizedFilter)
-          );
-        }),
-      functions: schemaFunctions.filter((routine) =>
-        routineMatchesFilter(routine, filterText),
-      ),
+            ),
+          ),
+        ),
+      functions: schemaFunctions
+        .filter((routine) =>
+          explorerNodePassesVisibilityFilter(
+            objectVisibilityFilter,
+            explorerNodeId(
+              routine.routine_type?.toLocaleLowerCase() === "procedure"
+                ? "procedure"
+                : "function",
+              connectionId,
+              databaseName,
+              schema,
+              routine.name,
+              routineSignature(routine),
+            ),
+            routine.name,
+          ),
+        )
+        .filter((routine) =>
+          routineMatchesFilter(routine, explorerFilterMatches),
+        ),
       pinnedTables: schemaPinnedTables,
       hasSnapshot: Boolean(snapshot),
     };
+    schemaObjectsRenderCache.set(cacheKey, result);
+    return result;
   };
 
   const postgresDatabaseMatchesFilter = (
     connectionId: string,
     database: string,
     currentDatabase: string,
-    normalizedFilter: string,
+    filter: string,
   ) => {
-    if (!normalizedFilter) return true;
+    if (!filter.trim()) return true;
     if (database === currentDatabase) {
       return schemas.some((schema) => {
-        if (schema.toLocaleLowerCase().includes(normalizedFilter)) return true;
+        if (explorerFilterMatches(schema)) return true;
         const isActiveSchema = schema === currentSchema;
         const snapshot = isActiveSchema
           ? null
@@ -1709,10 +2285,10 @@ export function SchemaSidebar() {
           : snapshot?.functions || [];
         return (
           schemaTables.some((table) =>
-            table.name.toLocaleLowerCase().includes(normalizedFilter),
+            explorerFilterMatches(table.name, table.comment),
           ) ||
           schemaFunctions.some((routine) =>
-            routineMatchesFilter(routine, normalizedFilter),
+            routineMatchesFilter(routine, explorerFilterMatches),
           )
         );
       });
@@ -1721,20 +2297,22 @@ export function SchemaSidebar() {
     if (postgresRemoteDatabases.connectionId !== connectionId) return false;
     return (
       (postgresRemoteDatabases.schemas[database] || []).some((schema) =>
-        schema.toLocaleLowerCase().includes(normalizedFilter),
+        explorerFilterMatches(schema),
       ) ||
       Object.values(postgresRemoteDatabases.tables[database] || {}).some(
         (databaseTables) =>
           databaseTables.some((table) =>
-            table.name.toLocaleLowerCase().includes(normalizedFilter),
+            explorerFilterMatches(table.name, table.comment),
           ),
       ) ||
       Object.values(postgresRemoteDatabases.objects[database] || {}).some(
         (databaseObjects) =>
           databaseObjects.some((object) =>
-            `${object.name} ${object.objectType} ${object.parentName || ""}`
-              .toLocaleLowerCase()
-              .includes(normalizedFilter),
+            explorerFilterMatches(
+              object.name,
+              object.objectType,
+              object.parentName,
+            ),
           ),
       )
     );
@@ -1750,6 +2328,7 @@ export function SchemaSidebar() {
   const loadDocumentPage = useTabStore((state) => state.loadDocumentPage);
   const createTableTab = useTabStore((state) => state.createTableTab);
   const openDatabaseBrowser = useTabStore((state) => state.openDatabaseBrowser);
+  const openObjectBrowser = useTabStore((state) => state.openObjectBrowser);
   const openRocketMqWorkspace = useTabStore(
     (state) => state.openRocketMqWorkspace,
   );
@@ -1759,6 +2338,70 @@ export function SchemaSidebar() {
   );
   const runTabQuery = useTabStore((state) => state.runTabQuery);
   const setTableMetadata = useTabStore((state) => state.setTableMetadata);
+  const sqlHistoryMenuCache = useMemo(
+    () => new Map<string, ReactNode>(),
+    [createTab, queryHistory],
+  );
+
+  const openHistoryInQueryConsole = (item: QueryHistoryItem) => {
+    createTab(
+      "query",
+      `History \u00b7 ${queryHistoryDisplayTitle(item, 38)}`,
+      item.sql,
+      {
+        connectionId: item.connectionId || undefined,
+        databaseName: item.databaseName || undefined,
+        schemaName: item.schemaName || undefined,
+        targetSchema: item.schemaName || undefined,
+      },
+    );
+  };
+
+  const renderSqlHistorySubmenu = (scope: {
+    connectionId: string;
+    databaseName?: string | null;
+    schemaName?: string | null;
+  }) => {
+    const cacheKey = [
+      scope.connectionId,
+      scope.databaseName === undefined ? "*" : (scope.databaseName ?? ""),
+      scope.schemaName === undefined ? "*" : (scope.schemaName ?? ""),
+    ].join("\u0000");
+    if (sqlHistoryMenuCache.has(cacheKey)) {
+      return sqlHistoryMenuCache.get(cacheKey) ?? null;
+    }
+    const items = queryHistoryForScope(queryHistory, scope);
+    if (items.length === 0) {
+      sqlHistoryMenuCache.set(cacheKey, null);
+      return null;
+    }
+
+    const menu = (
+      <ContextMenuSub>
+        <ContextMenuSubTrigger className={menuSubClass}>
+          <Clock3 className="mr-2 h-3.5 w-3.5" />
+          Recent SQL
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent className={cn(menuContentClass, "max-w-[360px]")}>
+          {items.map((item) => (
+            <ContextMenuItem
+              key={item.id}
+              className={cn(menuItemClass, "min-w-0")}
+              title={item.sql}
+              onClick={() => openHistoryInQueryConsole(item)}
+            >
+              <Code2 className="mr-2 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[10px]">
+                {queryHistoryDisplayTitle(item)}
+              </span>
+            </ContextMenuItem>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+    );
+    sqlHistoryMenuCache.set(cacheKey, menu);
+    return menu;
+  };
 
   const handleNewQueryConsole = () => {
     const queryNumber =
@@ -1776,8 +2419,11 @@ export function SchemaSidebar() {
     );
   };
 
-  const handleNewDataSource = (driver: DatabaseDriver) => {
-    createNewConnection();
+  const handleNewDataSource = (
+    driver: DatabaseDriver,
+    connectionGroupId?: string,
+  ) => {
+    const draft = createNewConnection();
     const profile = databaseDriverProfile(driver);
     updateConnectionConfig({
       driver,
@@ -1787,12 +2433,49 @@ export function SchemaSidebar() {
       icon: profile.defaultIcon,
       connectionUrl: "",
     });
+    if (connectionGroupId) {
+      moveExplorerConnectionsToGroup(
+        explorerStateScope,
+        [draft.id],
+        connectionGroupId,
+      );
+      setExpandedObjectGroupKeys((current) =>
+        current.includes(connectionGroupId)
+          ? current
+          : [...current, connectionGroupId],
+      );
+    }
     setIsDataSourceDialogOpen(true);
   };
 
   const handleOpenConnectionProperties = (connectionId: string) => {
     selectConnection(connectionId);
     setIsDataSourceDialogOpen(true);
+  };
+
+  const handleDuplicateConnection = (
+    connection: (typeof connections)[number],
+  ) => {
+    const draft = createNewConnection();
+    updateConnectionConfig({
+      ...connection,
+      id: draft.id,
+      name: `${connection.name} Copy`,
+    });
+    setIsDataSourceDialogOpen(true);
+  };
+
+  const connectionIdsForExplorerAction = (connectionId: string) => {
+    const selectedConnectionIds = connections
+      .filter((item) =>
+        selectedExplorerNodeIds.includes(
+          explorerNodeId("connection", item.id),
+        ),
+      )
+      .map((item) => item.id);
+    return selectedConnectionIds.includes(connectionId)
+      ? selectedConnectionIds
+      : [connectionId];
   };
 
   const handleOpenDataTransfer = async (options: {
@@ -1973,6 +2656,12 @@ export function SchemaSidebar() {
         ? current
         : [...current, activeConnectionId],
     );
+    const groupId = explorerConnectionGroupIds[activeConnectionId];
+    if (groupId) {
+      setExpandedObjectGroupKeys((current) =>
+        current.includes(groupId) ? current : [...current, groupId],
+      );
+    }
   };
 
   const handleRevealActiveConnection = () => {
@@ -1991,31 +2680,65 @@ export function SchemaSidebar() {
   const handleTableDoubleClick = async (
     table: TableInfo,
     schemaName = currentSchema || "",
+    targetConnectionId = activeConnectionId || "",
+    databaseName?: string,
   ) => {
-    if (!schemaName || !activeConnectionId) return;
+    if (!schemaName || !targetConnectionId) return;
 
-    if (schemaName !== currentSchema) {
+    if (
+      activeConnectionId !== targetConnectionId ||
+      !connectedConnectionIds.includes(targetConnectionId)
+    ) {
+      const connectionError = await setActiveConnection(targetConnectionId);
+      if (connectionError) {
+        setNamespaceError(connectionError);
+        return;
+      }
+    }
+
+    if (schemaName !== useSchemaStore.getState().currentSchema) {
       await handleSchemaSelect(schemaName);
     }
 
+    const targetConnection = connections.find(
+      (connection) => connection.id === targetConnectionId,
+    );
+    const resolvedDatabaseName =
+      databaseName ||
+      (targetConnection &&
+      databaseDriverProfile(targetConnection.driver).capabilities
+        .supportsDatabaseCatalogs
+        ? connectionCatalogDatabaseName(targetConnection)
+        : undefined);
+
     // Use findOrCreateTableTab to reuse existing tabs
     const tabId = findOrCreateTableTab(
-      activeConnectionId,
+      targetConnectionId,
       schemaName,
       table.name,
       table.type,
-      undefined,
+      resolvedDatabaseName,
       { reuseMode: tableTabReuseMode },
     );
 
     await loadTablePage(tabId, 0);
   };
 
-  const handleTableCsvImport = async (table: TableInfo, schemaName: string) => {
-    if (!activeConnectionId) return;
-    await handleTableDoubleClick(table, schemaName);
+  const handleTableCsvImport = async (
+    table: TableInfo,
+    schemaName: string,
+    targetConnectionId = activeConnectionId || "",
+    databaseName?: string,
+  ) => {
+    if (!targetConnectionId) return;
+    await handleTableDoubleClick(
+      table,
+      schemaName,
+      targetConnectionId,
+      databaseName,
+    );
     const detail: TableCsvImportRequest = {
-      connectionId: activeConnectionId,
+      connectionId: targetConnectionId,
       schema: schemaName,
       table: table.name,
     };
@@ -2035,11 +2758,18 @@ export function SchemaSidebar() {
   const handleTableJsonImport = async (
     table: TableInfo,
     schemaName: string,
+    targetConnectionId = activeConnectionId || "",
+    databaseName?: string,
   ) => {
-    if (!activeConnectionId) return;
-    await handleTableDoubleClick(table, schemaName);
+    if (!targetConnectionId) return;
+    await handleTableDoubleClick(
+      table,
+      schemaName,
+      targetConnectionId,
+      databaseName,
+    );
     const detail: TableJsonImportRequest = {
-      connectionId: activeConnectionId,
+      connectionId: targetConnectionId,
       schema: schemaName,
       table: table.name,
     };
@@ -2056,11 +2786,18 @@ export function SchemaSidebar() {
   const handleTableXlsxImport = async (
     table: TableInfo,
     schemaName: string,
+    targetConnectionId = activeConnectionId || "",
+    databaseName?: string,
   ) => {
-    if (!activeConnectionId) return;
-    await handleTableDoubleClick(table, schemaName);
+    if (!targetConnectionId) return;
+    await handleTableDoubleClick(
+      table,
+      schemaName,
+      targetConnectionId,
+      databaseName,
+    );
     const detail: TableXlsxImportRequest = {
-      connectionId: activeConnectionId,
+      connectionId: targetConnectionId,
       schema: schemaName,
       table: table.name,
     };
@@ -2688,18 +3425,24 @@ export function SchemaSidebar() {
     setIsCreateDbDialogOpen(true);
   };
 
-  const handleRenameDatabase = async (schemaOverride?: string) => {
+  const handleRenameDatabase = async (
+    schemaOverride?: string,
+    connectionIdOverride = activeConnectionId || "",
+    driverOverride = activeDriver,
+  ) => {
     const targetSchema = schemaOverride || currentSchema;
-    if (!activeConnectionId || !targetSchema) return;
-    if (!activeCapabilities.supportsRenameDatabase) {
+    if (!connectionIdOverride || !targetSchema) return;
+    const targetCapabilities = defaultDatabaseCapabilities(driverOverride);
+    const targetNamespaceLabel = targetCapabilities.namespaceLabel || "database";
+    if (!targetCapabilities.supportsRenameDatabase) {
       setNamespaceError(
-        `${activeCapabilities.displayName} ${namespaceLabel} rename is not supported safely.`,
+        `${targetCapabilities.displayName} ${targetNamespaceLabel} rename is not supported safely.`,
       );
       return;
     }
 
     const nextName = window.prompt(
-      `Rename ${namespaceLabel} to:`,
+      `Rename ${targetNamespaceLabel} to:`,
       targetSchema,
     );
     if (nextName === null) return;
@@ -2709,13 +3452,15 @@ export function SchemaSidebar() {
 
     setNamespaceError(null);
     try {
+      const connectionError = await setActiveConnection(connectionIdOverride);
+      if (connectionError) throw new Error(connectionError);
       await databaseService.renameDatabase(
-        activeConnectionId,
-        activeDriver,
+        connectionIdOverride,
+        driverOverride,
         targetSchema,
         trimmedName,
       );
-      await loadSchemas(activeConnectionId, true);
+      await loadSchemas(connectionIdOverride, true);
       await setCurrentSchema(trimmedName);
       bumpMetadataVersion();
     } catch (err: any) {
@@ -2723,30 +3468,38 @@ export function SchemaSidebar() {
     }
   };
 
-  const handleDropDatabase = async (schemaOverride?: string) => {
+  const handleDropDatabase = async (
+    schemaOverride?: string,
+    connectionIdOverride = activeConnectionId || "",
+    driverOverride = activeDriver,
+  ) => {
     const targetSchema = schemaOverride || currentSchema;
-    if (!activeConnectionId || !targetSchema) return;
-    if (!canMutateNamespaces) {
+    if (!connectionIdOverride || !targetSchema) return;
+    const targetCapabilities = defaultDatabaseCapabilities(driverOverride);
+    const targetNamespaceLabel = targetCapabilities.namespaceLabel || "database";
+    if (!targetCapabilities.supportsCreateDatabase) {
       setNamespaceError(
-        `${activeCapabilities.displayName} ${namespaceLabel} deletion is not supported.`,
+        `${targetCapabilities.displayName} ${targetNamespaceLabel} deletion is not supported.`,
       );
       return;
     }
 
     const confirmed = window.confirm(
-      `Drop ${namespaceLabel} "${targetSchema}" and all contained objects? This cannot be undone.`,
+      `Drop ${targetNamespaceLabel} "${targetSchema}" and all contained objects? This cannot be undone.`,
     );
     if (!confirmed) return;
 
     setNamespaceError(null);
     try {
+      const connectionError = await setActiveConnection(connectionIdOverride);
+      if (connectionError) throw new Error(connectionError);
       await databaseService.dropDatabase(
-        activeConnectionId,
-        activeDriver,
+        connectionIdOverride,
+        driverOverride,
         targetSchema,
         true,
       );
-      await loadSchemas(activeConnectionId, true);
+      await loadSchemas(connectionIdOverride, true);
       bumpMetadataVersion();
     } catch (err: any) {
       setNamespaceError(err?.message || String(err));
@@ -2984,12 +3737,25 @@ export function SchemaSidebar() {
     setFilterText("");
   };
 
-  const runForSchema = async (
+  const runForExplorerSchema = async (
+    connectionId: string,
     schema: string,
     action: () => void | Promise<void>,
   ) => {
-    if (schema !== currentSchema) {
-      await handleSchemaSelect(schema);
+    const connectionState = useConnectionStore.getState();
+    if (
+      connectionState.activeConnectionId !== connectionId ||
+      !connectionState.connectedConnectionIds.includes(connectionId)
+    ) {
+      const connectionError = await setActiveConnection(connectionId);
+      if (connectionError) {
+        setNamespaceError(connectionError);
+        return;
+      }
+    }
+    if (useSchemaStore.getState().currentSchema !== schema) {
+      await setCurrentSchema(schema);
+      setFilterText("");
     }
     await action();
   };
@@ -3026,21 +3792,17 @@ export function SchemaSidebar() {
     });
   };
 
-  const handleConnectionRowClick = async (connectionId: string) => {
-    const isExpanded = expandedConnectionIds.includes(connectionId);
+  const handleConnectionSelect = async (
+    connectionId: string,
+    event?: {
+      currentTarget: HTMLElement;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      shiftKey: boolean;
+    },
+  ) => {
+    selectExplorerNode(explorerNodeId("connection", connectionId), event);
     const isConnected = connectedConnectionIds.includes(connectionId);
-
-    if (isExpanded && isConnected) {
-      setExpandedConnectionIds((current) =>
-        current.filter((id) => id !== connectionId),
-      );
-      return;
-    }
-
-    // Expand immediately so SQLite metadata can paint while the remote
-    // connection is still being established. Keep only the selected source
-    // expanded because object capabilities are scoped to the active driver.
-    setExpandedConnectionIds([connectionId]);
     if (!isConnected) {
       setConnectingConnectionIds((current) =>
         current.includes(connectionId) ? current : [...current, connectionId],
@@ -3052,6 +3814,24 @@ export function SchemaSidebar() {
       setConnectingConnectionIds((current) =>
         current.filter((id) => id !== connectionId),
       );
+    }
+  };
+
+  const handleConnectionToggle = async (
+    connectionId: string,
+    forceExpanded?: boolean,
+  ) => {
+    const isExpanded = expandedConnectionIds.includes(connectionId);
+    const shouldExpand = forceExpanded ?? !isExpanded;
+    setExpandedConnectionIds((current) =>
+      shouldExpand
+        ? current.includes(connectionId)
+          ? current
+          : [...current, connectionId]
+        : current.filter((id) => id !== connectionId),
+    );
+    if (shouldExpand && !connectedConnectionIds.includes(connectionId)) {
+      await handleConnectionSelect(connectionId);
     }
   };
 
@@ -3123,11 +3903,75 @@ export function SchemaSidebar() {
   // only metadata that is absent from the local cache, and discard results
   // once the filter, connection, or catalog context changes.
   useEffect(() => {
-    const normalizedFilter = filterText.trim().toLocaleLowerCase();
+    const normalizedFilter = deferredFilterText.trim().toLocaleLowerCase();
+    const activeConnectionMatches = Boolean(
+      activeConnection &&
+        explorerFilterMatches(
+          activeConnection.name,
+          activeConnection.driver,
+          activeConnection.database,
+        ),
+    );
+    if (
+      !normalizedFilter ||
+      explorerRegexSearch ||
+      explorerSearchMode !== "global" ||
+      explorerFilterScope === "connections" ||
+      (explorerFilterScope === "all" && activeConnectionMatches) ||
+      !activeConnectionId ||
+      !isActiveConnectionReady ||
+      activeCapabilities.dataModel === "keyValue"
+    ) {
+      return;
+    }
+    const connectionId = activeConnectionId;
+    const collapsedSchemas = schemas.filter(
+      (schema) =>
+        schema !== currentSchema &&
+        !Object.prototype.hasOwnProperty.call(
+          objectSnapshots,
+          getSchemaObjectMetadataSnapshotKey(
+            connectionId,
+            activeDriver,
+            schema,
+          ),
+        ),
+    );
+    if (collapsedSchemas.length === 0) return;
+
+    const timeout = window.setTimeout(() => {
+      void runSidebarSearchTasks(
+        collapsedSchemas.map(
+          (schema) => () => loadSchemaObjectsForSearch(connectionId, schema),
+        ),
+      );
+    }, 180);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeCapabilities.dataModel,
+    activeConnection,
+    activeConnectionId,
+    activeDriver,
+    currentSchema,
+    deferredFilterText,
+    explorerFilterScope,
+    explorerFilterMatches,
+    explorerRegexSearch,
+    explorerSearchMode,
+    isActiveConnectionReady,
+    loadSchemaObjectsForSearch,
+    objectSnapshots,
+    schemas,
+  ]);
+
+  useEffect(() => {
+    const normalizedFilter = deferredFilterText.trim().toLocaleLowerCase();
     const generation = postgresGlobalSearchGenerationRef.current + 1;
     postgresGlobalSearchGenerationRef.current = generation;
     if (
       !normalizedFilter ||
+      explorerRegexSearch ||
+      explorerSearchMode !== "global" ||
       !activeConnectionId ||
       !canBrowseDatabaseCatalogs ||
       !isActiveConnectionReady
@@ -3151,14 +3995,13 @@ export function SchemaSidebar() {
             databases,
             activePostgresDatabase,
             cachedRemote,
-          )
-            .map((database) => async () => ({
+          ).map((database) => async () => ({
+            database,
+            schemas: await schemaService.getDatabaseSchemas(
+              connectionId,
               database,
-              schemas: await schemaService.getDatabaseSchemas(
-                connectionId,
-                database,
-              ),
-            })),
+            ),
+          })),
         );
         if (
           postgresGlobalSearchGenerationRef.current !== generation ||
@@ -3181,7 +4024,9 @@ export function SchemaSidebar() {
         for (const database of databases) {
           schemaByDatabase.set(
             database,
-            discoveredSchemas.get(database) || cachedRemote.schemas[database] || [],
+            discoveredSchemas.get(database) ||
+              cachedRemote.schemas[database] ||
+              [],
           );
         }
         if (discoveredSchemas.size > 0) {
@@ -3199,19 +4044,28 @@ export function SchemaSidebar() {
 
         const metadataResults = await runSidebarSearchTasks(
           collapsedSchemaMetadataTargets(schemaByDatabase, cachedRemote).map(
-            ({ database, schema }) => async () => {
+            ({ database, schema }) =>
+              async () => {
                 const objectRequest =
                   typeof schemaService.getDatabaseSchemaObjects === "function"
                     ? schemaService
-                        .getDatabaseSchemaObjects(connectionId, database, schema)
+                        .getDatabaseSchemaObjects(
+                          connectionId,
+                          database,
+                          schema,
+                        )
                         .catch(() => [] as SchemaObjectInfo[])
                     : Promise.resolve([] as SchemaObjectInfo[]);
                 const [tables, objects] = await Promise.all([
-                  schemaService.getDatabaseTables(connectionId, database, schema),
+                  schemaService.getDatabaseTables(
+                    connectionId,
+                    database,
+                    schema,
+                  ),
                   objectRequest,
                 ]);
                 return { database, schema, tables, objects };
-            },
+              },
           ),
         );
         if (
@@ -3271,50 +4125,35 @@ export function SchemaSidebar() {
     activeConnectionId,
     activePostgresDatabase,
     canBrowseDatabaseCatalogs,
+    explorerRegexSearch,
+    explorerSearchMode,
     filterText,
     isActiveConnectionReady,
     postgresRemoteDatabases,
     visiblePostgresDatabases,
   ]);
 
-  const handleSchemaRowClick = async (
+  const activateSchemaRow = async (
     connectionId: string,
     schema: string,
     isCurrentSchema: boolean,
+    event?: {
+      currentTarget: HTMLElement;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      shiftKey: boolean;
+    },
   ) => {
     const connection = connections.find((item) => item.id === connectionId);
-    const driver = connection?.driver || activeDriver;
-    const isKeyValueNamespace =
-      defaultDatabaseCapabilities(driver).dataModel === "keyValue";
-    const key = schemaTreeKey(connectionId, driver, schema);
-    const isExpanded = expandedSchemaKeys.includes(key);
-
-    if (isExpanded) {
-      setExpandedSchemaKeys((current) =>
-        current.filter((item) => item !== key),
-      );
-      return;
-    }
-
-    // Acknowledge expansion before any connection, cache, or backend schema
-    // work. Non-default namespaces used to look unclickable while these awaits
-    // were still pending, whereas the already-selected default opened at once.
-    setExpandedSchemaKeys((current) =>
-      isKeyValueNamespace
-        ? [key]
-        : current.includes(key)
-          ? current
-          : [...current, key],
+    selectExplorerNode(
+      explorerNodeId(
+        "schema",
+        connectionId,
+        connection ? connectionCatalogDatabaseName(connection) : "",
+        schema,
+      ),
+      event,
     );
-    const objectsKey = objectGroupKey(connectionId, driver, schema, "objects");
-    setExpandedObjectGroupKeys((current) =>
-      isKeyValueNamespace
-        ? [objectsKey]
-        : current.includes(objectsKey)
-          ? current
-          : [...current, objectsKey],
-    );
-
     try {
       if (connectionId !== activeConnectionId) {
         const connectionError = await setActiveConnection(connectionId);
@@ -3335,6 +4174,45 @@ export function SchemaSidebar() {
       );
       throw error;
     }
+  };
+
+  const handleSchemaToggle = async (
+    connectionId: string,
+    schema: string,
+    isCurrentSchema: boolean,
+    forceExpanded?: boolean,
+  ) => {
+    const connection = connections.find((item) => item.id === connectionId);
+    const driver = connection?.driver || activeDriver;
+    const isKeyValueNamespace =
+      defaultDatabaseCapabilities(driver).dataModel === "keyValue";
+    const key = schemaTreeKey(connectionId, driver, schema);
+    const isExpanded = expandedSchemaKeys.includes(key);
+    const shouldExpand = forceExpanded ?? !isExpanded;
+
+    setExpandedSchemaKeys((current) =>
+      shouldExpand
+        ? isKeyValueNamespace
+          ? [key]
+          : current.includes(key)
+            ? current
+            : [...current, key]
+        : current.filter((item) => item !== key),
+    );
+    if (!shouldExpand) return;
+
+    // Keep the object group warm, but do not collapse sibling schemas. This
+    // mirrors DBX/DBeaver's navigator semantics and makes comparison work
+    // between multiple schemas.
+    const objectsKey = objectGroupKey(connectionId, driver, schema, "objects");
+    setExpandedObjectGroupKeys((current) =>
+      isKeyValueNamespace
+        ? [objectsKey]
+        : current.includes(objectsKey)
+          ? current
+          : [...current, objectsKey],
+    );
+    await activateSchemaRow(connectionId, schema, isCurrentSchema);
   };
 
   useEffect(() => {
@@ -3739,7 +4617,45 @@ export function SchemaSidebar() {
       objectConnection && supportsDatabaseCatalogTree(objectConnection.driver)
         ? connectionCatalogDatabaseName(objectConnection)
         : undefined;
-    const schemaObjects = schemaObjectsFor(connectionId, driver, schema);
+    // Every action created below is bound to this rendered node's connection,
+    // not whichever data source happens to be globally active when clicked.
+    const runForSchema = (
+      targetSchema: string,
+      action: () => void | Promise<void>,
+    ) => runForExplorerSchema(connectionId, targetSchema, action);
+    const openScopedQueryConsole = () => {
+      void setActiveConnection(connectionId).then((error) => {
+        if (error) {
+          setNamespaceError(error);
+          return;
+        }
+        createTab(
+          "query",
+          `console [${objectConnection?.name || "Database"}]`,
+          "",
+          {
+            connectionId,
+            databaseName: navigationDatabaseName,
+            schemaName: schema,
+          },
+        );
+      });
+    };
+    const schemaObjects = schemaObjectsFor(
+      connectionId,
+      driver,
+      schema,
+      navigationDatabaseName,
+    );
+    const objectVisibilityParentId = explorerNodeId(
+      "folder",
+      "schema-objects",
+      connectionId,
+      navigationDatabaseName,
+      schema,
+    );
+    const objectVisibilityFilter =
+      explorerVisibilityFilters[objectVisibilityParentId];
     const tableRelations = schemaObjects.tables.filter(
       (table) => !isViewObject(table.type),
     );
@@ -3846,30 +4762,35 @@ export function SchemaSidebar() {
         identifierQuote: activeCapabilities.identifierQuote,
       });
 
-    const routinesKey = objectGroupKey(
-      connectionId,
-      driver,
-      schema,
-      "routines",
-    );
-    const virtualViewsKey = objectGroupKey(
-      connectionId,
-      driver,
-      schema,
-      "virtual-views",
-    );
-    const descriptorObjectsKey = objectGroupKey(
-      connectionId,
-      driver,
-      schema,
-      "schema-descriptors",
-    );
     const descriptorObjects =
       isCurrentSchema &&
       schemaObjectDescriptorScope === `${connectionId}:${schema}`
         ? schemaObjectDescriptors
+            .filter((object) => {
+              const directoryKind = explorerDirectoryGroupForObjectType(
+                object.objectType,
+              );
+              if (!directoryKind) return true;
+              return explorerNodePassesVisibilityFilter(
+                objectVisibilityFilter,
+                explorerNodeId(
+                  explorerDirectoryNodeKind(directoryKind),
+                  connectionId,
+                  navigationDatabaseName,
+                  schema,
+                  object.name,
+                  object.objectType,
+                  object.parentName,
+                ),
+                object.name,
+              );
+            })
             .filter((object) =>
-              object.name.toLowerCase().includes(filterText.toLowerCase()),
+              explorerFilterMatches(
+                object.name,
+                object.objectType,
+                object.parentName,
+              ),
             )
             .sort((left, right) =>
               left.objectType === right.objectType
@@ -3877,6 +4798,48 @@ export function SchemaSidebar() {
                 : left.objectType.localeCompare(right.objectType),
             )
         : [];
+    const triggersByRelation = new Map<string, SchemaObjectInfo[]>();
+    for (const object of descriptorObjects) {
+      if (
+        explorerDirectoryGroupForObjectType(object.objectType) !== "triggers" ||
+        !object.parentName
+      ) {
+        continue;
+      }
+      const relationName = object.parentName.toLocaleLowerCase();
+      const triggers = triggersByRelation.get(relationName) || [];
+      triggers.push(object);
+      triggersByRelation.set(relationName, triggers);
+    }
+
+    const viewSchemaObjectSource = (object: SchemaObjectInfo) => {
+      void schemaService
+        .getSchemaObjectSource(
+          connectionId,
+          schema,
+          object.name,
+          object.objectType,
+          object.parentName,
+        )
+        .then((definitions) => {
+          const definition = definitions.find(
+            (value) => value.trim().length > 0,
+          );
+          if (!definition) {
+            throw new Error(
+              "This driver does not provide a source definition for the selected object.",
+            );
+          }
+          setActiveTable(object.name);
+          setDdlContent(definition);
+          setDdlViewerOpen(true);
+        })
+        .catch((error) => {
+          window.alert(
+            `Unable to load ${object.objectType.toLowerCase()} definition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    };
 
     const toggleObjectGroup = (key: string) => {
       setExpandedObjectGroupKeys((current) =>
@@ -3904,33 +4867,248 @@ export function SchemaSidebar() {
 
     const renderRoutines = () => {
       if (!activeCapabilities.supportsFunctions) return null;
-      const isExpanded = expandedObjectGroupKeys.includes(routinesKey);
-      const functions = schemaObjects.functions.filter(
-        (routine) => routineKind(routine) === "function",
-      );
-      const procedures = schemaObjects.functions.filter(
-        (routine) => routineKind(routine) === "procedure",
-      );
-
       const renderRoutineRow = (routine: FunctionInfo, index: number) => {
         const signature = routineSignature(routine);
         const returnType = routine.return_type || "unknown";
+        const kind = routineKind(routine);
+        const routineExplorerNodeId = explorerNodeId(
+          kind,
+          connectionId,
+          navigationDatabaseName,
+          schema,
+          routine.name,
+          signature,
+        );
+        const isRoutineSelected = selectedExplorerNodeIds.includes(
+          routineExplorerNodeId,
+        );
         const qualifiedName = schema
           ? `${schema}.${routine.name}`
           : routine.name;
+        const callTemplate = routineCallTemplate(schema, routine);
+        const openRoutineConsole = () => {
+          const tabId = createTab(
+            "query",
+            `${routine.name} [${objectConnection?.name || "query"}]`,
+            callTemplate,
+            {
+              connectionId,
+              databaseName: navigationDatabaseName,
+              schemaName: schema,
+            },
+          );
+          return tabId;
+        };
+        const viewRoutineSource = () => {
+          void schemaService
+            .getSchemaObjectSource(connectionId, schema, routine.name, kind)
+            .then((definitions) => {
+              const definition = definitions.find(
+                (value) => value.trim().length > 0,
+              );
+              if (!definition) {
+                throw new Error(
+                  "This driver does not provide a source definition for this routine.",
+                );
+              }
+              setActiveTable(routine.name);
+              setDdlContent(definition);
+              setDdlViewerOpen(true);
+            })
+            .catch((error) =>
+              window.alert(
+                `Unable to load ${kind} definition: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+        };
 
         return (
-          <ContextMenu key={`${routine.name}:${signature}:${index}`}>
-            <ContextMenuTrigger asChild>
+          <ExplorerContextMenuRow
+            key={`${routine.name}:${signature}:${index}`}
+            nodeId={routineExplorerNodeId}
+            menu={
+              <>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={openRoutineConsole}
+                >
+                  <Code2 className="mr-2 h-3.5 w-3.5" />
+                  Open Call in Query Console
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={viewRoutineSource}
+                >
+                  <Eye className="mr-2 h-3.5 w-3.5" />
+                  View Source
+                </ContextMenuItem>
+                <ContextMenuSeparator className={menuSeparatorClass} />
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void copyText(routine.name)}
+                >
+                  <Clipboard className="mr-2 h-3.5 w-3.5" />
+                  Copy Name
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void copyText(qualifiedName)}
+                >
+                  Copy Qualified Name
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void copyText(callTemplate)}
+                >
+                  Copy Call Template
+                </ContextMenuItem>
+                {activeConnectionId &&
+                  ["postgres", "postgresql", "pgsql"].includes(
+                    activeDriver.toLowerCase(),
+                  ) && (
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      onClick={() =>
+                        void loadPostgresRoutineDefinitions({
+                          projectId: activeProjectId || "local",
+                          connectionId: activeConnectionId,
+                          driver: activeDriver,
+                          driverPackageVersion:
+                            activeConnection?.driverPackageVersion,
+                          connectionDatabaseName: activeConnection?.database,
+                          schema,
+                          routine: routine.name,
+                        })
+                          .then((definitions) =>
+                            copyText(definitions.join("\n\n")),
+                          )
+                          .catch((error) =>
+                            window.alert(
+                              `Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`,
+                            ),
+                          )
+                      }
+                    >
+                      Copy Source Definition
+                    </ContextMenuItem>
+                  )}
+                <ContextMenuSub>
+                  <ContextMenuSubTrigger className={menuSubClass}>
+                    <EyeOff className="mr-2 h-3.5 w-3.5" />
+                    Filter
+                  </ContextMenuSubTrigger>
+                  <ContextMenuSubContent className={menuContentClass}>
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      onClick={() =>
+                        hideExplorerNodes(
+                          explorerStateScope,
+                          objectVisibilityParentId,
+                          [routineExplorerNodeId],
+                        )
+                      }
+                    >
+                      <EyeOff className="mr-2 h-3.5 w-3.5" />
+                      Hide this routine
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      onClick={() =>
+                        showOnlyExplorerNodes(
+                          explorerStateScope,
+                          objectVisibilityParentId,
+                          [routineExplorerNodeId],
+                        )
+                      }
+                    >
+                      <Eye className="mr-2 h-3.5 w-3.5" />
+                      Show only this routine
+                    </ContextMenuItem>
+                    <ContextMenuSeparator className={menuSeparatorClass} />
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      disabled={!objectVisibilityFilter}
+                      onClick={() =>
+                        clearExplorerVisibilityFilter(
+                          explorerStateScope,
+                          objectVisibilityParentId,
+                        )
+                      }
+                    >
+                      <X className="mr-2 h-3.5 w-3.5" />
+                      Clear object filter
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      onClick={() =>
+                        openExplorerVisibilityFilter(
+                          objectVisibilityParentId,
+                          `Objects in ${schema || "current namespace"}`,
+                        )
+                      }
+                    >
+                      <SearchCode className="mr-2 h-3.5 w-3.5" />
+                      Configure filter…
+                    </ContextMenuItem>
+                  </ContextMenuSubContent>
+                </ContextMenuSub>
+              </>
+            }
+          >
               <div
-                className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                role="treeitem"
+                data-explorer-node-id={routineExplorerNodeId}
+                aria-selected={isRoutineSelected}
+                tabIndex={isRoutineSelected ? 0 : -1}
+                className={cn(
+                  "group ml-4 flex h-7 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                  isRoutineSelected && "wb-tree-row-selected",
+                )}
+                onClick={(event) =>
+                  selectExplorerNode(routineExplorerNodeId, event)
+                }
+                onContextMenu={() =>
+                  selectExplorerNode(routineExplorerNodeId)
+                }
+                onDoubleClick={openRoutineConsole}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "ArrowDown" ||
+                    event.key === "ArrowUp"
+                  ) {
+                    event.preventDefault();
+                    moveExplorerTreeFocus(
+                      event.currentTarget,
+                      event.key === "ArrowDown" ? 1 : -1,
+                    );
+                  } else if (event.key === "Enter") {
+                    event.preventDefault();
+                    openRoutineConsole();
+                  }
+                }}
                 title={
                   showExplorerHoverTooltips
                     ? `${signature} -> ${returnType}`
                     : undefined
                 }
               >
-                <Code2 size={12} className="shrink-0 opacity-70" />
+                {kind === "procedure" ? (
+                  <ScrollText
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("procedure"),
+                    )}
+                  />
+                ) : (
+                  <Braces
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("function"),
+                    )}
+                  />
+                )}
                 <span className="min-w-0 flex-1 truncate">
                   {highlightMatch(routine.name, filterText)}
                 </span>
@@ -3938,233 +5116,472 @@ export function SchemaSidebar() {
                   {routineKindLabel(routine)}
                 </span>
               </div>
-            </ContextMenuTrigger>
-            <ContextMenuContent className={menuContentClass}>
-              <ContextMenuItem
-                className={menuItemClass}
-                onClick={() => void copyText(qualifiedName)}
-              >
-                Copy qualified name
-              </ContextMenuItem>
-              <ContextMenuItem
-                className={menuItemClass}
-                onClick={() =>
-                  void copyText(routineCallTemplate(schema, routine))
-                }
-              >
-                Copy call template
-              </ContextMenuItem>
-              {activeConnectionId &&
-                ["postgres", "postgresql", "pgsql"].includes(
-                  activeDriver.toLowerCase(),
-                ) && (
-                  <ContextMenuItem
-                    className={menuItemClass}
-                    onClick={() =>
-                      void loadPostgresRoutineDefinitions({
-                        projectId: activeProjectId || "local",
-                        connectionId: activeConnectionId,
-                        driver: activeDriver,
-                        driverPackageVersion:
-                          activeConnection?.driverPackageVersion,
-                        connectionDatabaseName: activeConnection?.database,
-                        schema,
-                        routine: routine.name,
-                      })
-                        .then((definitions) =>
-                          copyText(definitions.join("\n\n")),
-                        )
-                        .catch((error) =>
-                          window.alert(
-                            `Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`,
-                          ),
-                        )
-                    }
-                  >
-                    Copy source definition
-                  </ContextMenuItem>
-                )}
-            </ContextMenuContent>
-          </ContextMenu>
+          </ExplorerContextMenuRow>
         );
       };
 
-      const renderRoutineKind = (label: string, routines: FunctionInfo[]) => {
-        if (routines.length === 0) return null;
-
+      const renderRoutineGroup = (
+        kind: "procedures" | "functions",
+        routines: FunctionInfo[],
+      ) => {
+        const definition = explorerDirectoryDefinition(kind);
+        const key = objectGroupKey(connectionId, driver, schema, kind);
+        const isExpanded = expandedObjectGroupKeys.includes(key);
         return (
           <div>
-            <div className="ml-4 flex h-6 items-center gap-2 px-2 text-[10px] text-[hsl(var(--wb-text-muted))]">
-              <Folder size={11} className="shrink-0 opacity-60" />
-              <span className="min-w-0 flex-1 truncate">{label}</span>
-              <span className="text-[9px] opacity-60">{routines.length}</span>
-            </div>
-            {routines.map(renderRoutineRow)}
+            <ExplorerDirectoryGroupRow
+              expanded={isExpanded}
+              label={definition.label}
+              count={isFunctionsLoading ? undefined : routines.length}
+              icon={
+                kind === "procedures" ? (
+                  <ScrollText
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("procedure"),
+                    )}
+                  />
+                ) : (
+                  <Braces
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("function"),
+                    )}
+                  />
+                )
+              }
+              onToggle={() => toggleObjectGroup(key)}
+              onRefresh={() => void loadFunctions(connectionId, schema, true)}
+            />
+            {isExpanded &&
+              (isCurrentSchema &&
+              isFunctionsLoading &&
+              routines.length === 0 ? (
+                <div className="pl-7 text-[11px] italic wb-muted">
+                  Loading {definition.label.toLowerCase()}...
+                </div>
+              ) : routines.length === 0 ? (
+                <div className="pl-7 text-[11px] italic wb-muted">
+                  {filterText
+                    ? `No ${definition.label.toLowerCase()} match "${filterText}"`
+                    : `No ${definition.label.toLowerCase()} found`}
+                </div>
+              ) : (
+                <ExplorerContextMenuHost>
+                  <ExplorerVirtualList
+                    items={routines}
+                    rowHeight={explorerTreeRowHeight}
+                    getKey={(routine, index) =>
+                      `${routine.name}:${routineSignature(routine)}:${index}`
+                    }
+                    renderItem={renderRoutineRow}
+                  />
+                </ExplorerContextMenuHost>
+              ))}
           </div>
         );
       };
 
+      const procedures = schemaObjects.functions.filter(
+        (routine) => routineKind(routine) === "procedure",
+      );
+      const functions = schemaObjects.functions.filter(
+        (routine) => routineKind(routine) === "function",
+      );
+
       return (
-        <div>
-          <button
-            type="button"
-            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
-            onClick={() => toggleObjectGroup(routinesKey)}
-          >
-            {isExpanded ? (
-              <ChevronDown size={12} className="shrink-0 wb-muted" />
-            ) : (
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-            )}
-            <FolderCog size={12} className="shrink-0 text-sky-400/80" />
-            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
-              Routines
-            </span>
-            {!isFunctionsLoading && (
-              <span className="text-[9px] wb-muted">
-                {schemaObjects.functions.length}
-              </span>
-            )}
-          </button>
-          {isExpanded &&
-            (isCurrentSchema &&
-            isFunctionsLoading &&
-            schemaObjects.functions.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">
-                Loading routines...
-              </div>
-            ) : schemaObjects.functions.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">
-                {filterText
-                  ? `No routines match "${filterText}"`
-                  : "No routines found"}
-              </div>
-            ) : (
-              <>
-                {renderRoutineKind("Functions", functions)}
-                {renderRoutineKind("Procedures", procedures)}
-              </>
-            ))}
-        </div>
+        <>
+          {renderRoutineGroup("procedures", procedures)}
+          {renderRoutineGroup("functions", functions)}
+        </>
       );
     };
 
     const renderVirtualViews = () => {
       if (!canBrowseTables || !activeCapabilities.supportsViews) return null;
-      const isExpanded = expandedObjectGroupKeys.includes(virtualViewsKey);
+      const renderViewRow = (view: TableInfo) => {
+        const isSelectedView = isCurrentSchema && selectedTable === view.name;
+        const isMaterializedView = isMaterializedViewObject(view.type);
+        const viewExplorerNodeId = explorerNodeId(
+          isMaterializedView ? "materialized-view" : "view",
+          connectionId,
+          navigationDatabaseName,
+          schema,
+          view.name,
+        );
+        const isExplorerViewSelected = selectedExplorerNodeIds.includes(
+          viewExplorerNodeId,
+        );
+        const qualifiedName = schema ? `${schema}.${view.name}` : view.name;
+        const viewOperationTarget: TableOperationTarget = {
+          connectionId,
+          schema,
+          driver: (driver || activeDriver) as DatabaseDriver,
+        };
+        const viewTreeKey = tableTreeKey(
+          connectionId,
+          driver,
+          navigationDatabaseName,
+          schema,
+          view.name,
+        );
+        const isViewExpanded = expandedTableKeys.includes(viewTreeKey);
+        return (
+          <div key={`${schema}:view:${view.name}`}>
+            <ExplorerSharedContextMenu nodeId={viewExplorerNodeId}>
+              <ContextMenuTrigger asChild>
+                <div
+                  role="treeitem"
+                  data-explorer-node-id={viewExplorerNodeId}
+                  data-database-object-key={databaseObjectNavigationKey({
+                    connectionId,
+                    databaseName: navigationDatabaseName,
+                    schemaName: schema,
+                    objectName: view.name,
+                  })}
+                  tabIndex={isExplorerViewSelected ? 0 : -1}
+                  aria-selected={isExplorerViewSelected}
+                  aria-expanded={isViewExpanded}
+                  className={cn(
+                    "group ml-4 flex h-7 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-[11px]",
+                    isSelectedView || isExplorerViewSelected
+                      ? "wb-tree-row-selected"
+                      : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                  )}
+                  onClick={(event) => {
+                    selectExplorerNode(viewExplorerNodeId, event);
+                    if (
+                      shouldActivateExplorerObject(
+                        explorerActivationMode,
+                        "click",
+                        event.detail,
+                      )
+                    ) {
+                      void handleTableDoubleClick(
+                        view,
+                        schema,
+                        connectionId,
+                        navigationDatabaseName,
+                      );
+                      return;
+                    }
+                    void runForSchema(schema, () =>
+                      handleTableSelect(view.name),
+                    );
+                  }}
+                  onContextMenu={() =>
+                    selectExplorerNode(viewExplorerNodeId)
+                  }
+                  onDoubleClick={() => {
+                    if (
+                      shouldActivateExplorerObject(
+                        explorerActivationMode,
+                        "double-click",
+                      )
+                    ) {
+                      void handleTableDoubleClick(
+                        view,
+                        schema,
+                        connectionId,
+                        navigationDatabaseName,
+                      );
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "ArrowDown" ||
+                      event.key === "ArrowUp"
+                    ) {
+                      event.preventDefault();
+                      moveExplorerTreeFocus(
+                        event.currentTarget,
+                        event.key === "ArrowDown" ? 1 : -1,
+                      );
+                    } else if (event.key === "Enter") {
+                      event.preventDefault();
+                      void handleTableDoubleClick(
+                        view,
+                        schema,
+                        connectionId,
+                        navigationDatabaseName,
+                      );
+                    }
+                  }}
+                  title={`${explorerActivationLabel(explorerActivationMode)} to open ${schema}.${view.name} data`}
+                >
+                  <button
+                    type="button"
+                    className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                    aria-label={`${isViewExpanded ? "Collapse" : "Expand"} ${view.name} metadata`}
+                    aria-expanded={isViewExpanded}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setExpandedTableKeys((current) =>
+                        current.includes(viewTreeKey)
+                          ? current.filter((key) => key !== viewTreeKey)
+                          : [...current, viewTreeKey],
+                      );
+                    }}
+                  >
+                    {isViewExpanded ? (
+                      <ChevronDown size={10} />
+                    ) : (
+                      <ChevronRight size={10} />
+                    )}
+                  </button>
+                  <TableProperties
+                    size={12}
+                    className={cn(
+                      "shrink-0 opacity-90",
+                      explorerObjectIconClass(
+                        isMaterializedView ? "materialized-view" : "view",
+                      ),
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{view.name}</span>
+                  {view.comment?.trim() && (
+                    <span
+                      className="max-w-[34%] shrink truncate text-[9px] text-[hsl(var(--wb-text-muted))] opacity-75"
+                      title={
+                        showExplorerHoverTooltips
+                          ? view.comment.trim()
+                          : undefined
+                      }
+                    >
+                      {view.comment.trim()}
+                    </span>
+                  )}
+                  {isMaterializedView && (
+                    <span className="shrink-0 text-[8px] uppercase text-indigo-300/70">
+                      MV
+                    </span>
+                  )}
+                </div>
+              </ContextMenuTrigger>
+              <ContextMenuContent className={menuContentClass}>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() =>
+                    void handleTableDoubleClick(
+                      view,
+                      schema,
+                      connectionId,
+                      navigationDatabaseName,
+                    )
+                  }
+                >
+                  <TableProperties className="mr-2 h-3.5 w-3.5" />
+                  Open Data
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() =>
+                    createTab(
+                      "query",
+                      `${view.name} [${objectConnection?.name || "query"}]`,
+                      previewTableQuery(
+                        objectDriver || activeDriver,
+                        schema,
+                        view.name,
+                      ),
+                      {
+                        connectionId,
+                        databaseName: navigationDatabaseName,
+                        schemaName: schema,
+                        tableName: view.name,
+                        objectType: view.type || null,
+                      },
+                    )
+                  }
+                >
+                  <Code2 className="mr-2 h-3.5 w-3.5" />
+                  Open in Query Console
+                </ContextMenuItem>
+                {renderSqlHistorySubmenu({
+                  connectionId,
+                  databaseName: navigationDatabaseName,
+                  schemaName: schema,
+                })}
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() =>
+                    void runForSchema(schema, () =>
+                      handleDdlClick(view, viewOperationTarget),
+                    )
+                  }
+                >
+                  <Eye className="mr-2 h-3.5 w-3.5" />
+                  View Source / DDL
+                </ContextMenuItem>
+                {!isMaterializedView && (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      void runForSchema(schema, () =>
+                        handleEditViewClick(view, viewOperationTarget),
+                      )
+                    }
+                  >
+                    Edit View
+                  </ContextMenuItem>
+                )}
+                {isMaterializedView && (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      void runForSchema(schema, () =>
+                        handleRefreshMaterializedViewClick(
+                          view,
+                          viewOperationTarget,
+                        ),
+                      )
+                    }
+                  >
+                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                    Refresh Materialized View
+                  </ContextMenuItem>
+                )}
+                <ContextMenuSeparator className={menuSeparatorClass} />
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void copyText(view.name)}
+                >
+                  <Clipboard className="mr-2 h-3.5 w-3.5" />
+                  Copy Name
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() => void copyText(qualifiedName)}
+                >
+                  Copy Qualified Name
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() =>
+                    void runForSchema(schema, () =>
+                      handleCopyTableDdl(view, viewOperationTarget),
+                    )
+                  }
+                >
+                  Copy DDL
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ExplorerSharedContextMenu>
+            {isViewExpanded && (
+              <TableObjectTree
+                identity={{
+                  projectId: activeProjectId,
+                  connectionId,
+                  driver: (driver || activeDriver) as DatabaseDriver,
+                  databaseName: navigationDatabaseName || undefined,
+                  schema,
+                  table: view.name,
+                }}
+                includeIndexes={
+                  isMaterializedView && activeCapabilities.supportsTableIndexes
+                }
+                includeConstraints={false}
+              />
+            )}
+          </div>
+        );
+      };
+
+      const renderViewGroup = (
+        kind: "views" | "materialized-views",
+        views: TableInfo[],
+      ) => {
+        const definition = explorerDirectoryDefinition(kind);
+        const key = objectGroupKey(connectionId, driver, schema, kind);
+        const isExpanded = expandedObjectGroupKeys.includes(key);
+        return (
+          <div key={kind}>
+            <ExplorerDirectoryGroupRow
+              expanded={isExpanded}
+              label={definition.label}
+              count={views.length}
+              icon={
+                <Eye
+                  size={12}
+                  className={cn(
+                    "shrink-0",
+                    explorerObjectIconClass(definition.iconKind),
+                  )}
+                />
+              }
+              onToggle={() => toggleObjectGroup(key)}
+              onRefresh={() => void loadTables(connectionId, schema, true)}
+              menuActions={
+                kind === "views" && activeCapabilities.supportsViews ? (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() => void runForSchema(schema, handleCreateView)}
+                  >
+                    <Plus className="mr-2 h-3.5 w-3.5" />
+                    Create View
+                  </ContextMenuItem>
+                ) : kind === "materialized-views" &&
+                  activeCapabilities.supportsMaterializedViews ? (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      void runForSchema(schema, handleCreateMaterializedView)
+                    }
+                  >
+                    <Plus className="mr-2 h-3.5 w-3.5" />
+                    Create Materialized View
+                  </ContextMenuItem>
+                ) : null
+              }
+            />
+            {isExpanded &&
+              (views.length === 0 ? (
+                <div className="pl-7 text-[11px] italic wb-muted">
+                  {filterText
+                    ? `No ${definition.label.toLowerCase()} match "${filterText}"`
+                    : `No ${definition.label.toLowerCase()} found`}
+                </div>
+              ) : (
+                <ExplorerContextMenuHost>
+                  <ExplorerSegmentedVirtualList
+                    items={views}
+                    rowHeight={explorerTreeRowHeight}
+                    getKey={(view) => view.name}
+                    renderItem={renderViewRow}
+                    isExpanded={(view) =>
+                      expandedTableKeys.includes(
+                        tableTreeKey(
+                          connectionId,
+                          driver,
+                          navigationDatabaseName,
+                          schema,
+                          view.name,
+                        ),
+                      )
+                    }
+                  />
+                </ExplorerContextMenuHost>
+              ))}
+          </div>
+        );
+      };
+
+      const regularViews = virtualViews.filter(
+        (view) => !isMaterializedViewObject(view.type),
+      );
+      const materializedViews = virtualViews.filter((view) =>
+        isMaterializedViewObject(view.type),
+      );
 
       return (
-        <div>
-          <button
-            type="button"
-            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
-            onClick={() => toggleObjectGroup(virtualViewsKey)}
-          >
-            {isExpanded ? (
-              <ChevronDown size={12} className="shrink-0 wb-muted" />
-            ) : (
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-            )}
-            <Folder size={12} className="shrink-0 text-violet-400/85" />
-            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
-              virtual views
-            </span>
-            <span className="text-[9px] wb-muted">{virtualViews.length}</span>
-          </button>
-          {isExpanded &&
-            (virtualViews.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">
-                No views found
-              </div>
-            ) : (
-              virtualViews.map((view) => {
-                const isSelectedView =
-                  isCurrentSchema && selectedTable === view.name;
-                return (
-                  <ContextMenu key={`${schema}:view:${view.name}`}>
-                    <ContextMenuTrigger asChild>
-                      <div
-                        data-database-object-key={databaseObjectNavigationKey({
-                          connectionId,
-                          databaseName: navigationDatabaseName,
-                          schemaName: schema,
-                          objectName: view.name,
-                        })}
-                        tabIndex={-1}
-                        className={cn(
-                          "group ml-4 flex h-6 cursor-pointer items-center gap-2 rounded-[3px] px-2 text-[11px]",
-                          isSelectedView
-                            ? "wb-tree-row-selected"
-                            : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
-                        )}
-                        onClick={(event) => {
-                          if (
-                            shouldActivateExplorerObject(
-                              explorerActivationMode,
-                              "click",
-                              event.detail,
-                            )
-                          ) {
-                            void handleTableDoubleClick(view, schema);
-                            return;
-                          }
-                          void runForSchema(schema, () =>
-                            handleTableSelect(view.name),
-                          );
-                        }}
-                        onDoubleClick={() => {
-                          if (
-                            shouldActivateExplorerObject(
-                              explorerActivationMode,
-                              "double-click",
-                            )
-                          ) {
-                            void handleTableDoubleClick(view, schema);
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          void handleTableDoubleClick(view, schema);
-                        }}
-                        title={`${explorerActivationLabel(explorerActivationMode)} to open ${schema}.${view.name} data`}
-                      >
-                        <TableProperties
-                          size={12}
-                          className="shrink-0 opacity-75"
-                        />
-                        <span className="truncate">{view.name}</span>
-                      </div>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className={menuContentClass}>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() =>
-                          void handleTableDoubleClick(view, schema)
-                        }
-                      >
-                        Open Data
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() =>
-                          void runForSchema(schema, () => handleDdlClick(view))
-                        }
-                      >
-                        Quick Documentation
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        onClick={() => void copyText(view.name)}
-                      >
-                        Copy Name
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                );
-              })
-            ))}
-        </div>
+        <>
+          {renderViewGroup("views", regularViews)}
+          {(materializedViews.length > 0 ||
+            activeCapabilities.supportsMaterializedViews) &&
+            renderViewGroup("materialized-views", materializedViews)}
+        </>
       );
     };
 
@@ -4172,44 +5589,107 @@ export function SchemaSidebar() {
       if (!isCurrentSchema || activeCapabilities.dataModel !== "relational") {
         return null;
       }
-      const isExpanded = expandedObjectGroupKeys.includes(descriptorObjectsKey);
-      return (
-        <div>
-          <button
-            type="button"
-            className="wb-tree-row w-full gap-1.5 px-0.5 hover:bg-[hsl(var(--wb-hover))]"
-            onClick={() => toggleObjectGroup(descriptorObjectsKey)}
-          >
-            {isExpanded ? (
-              <ChevronDown size={12} className="shrink-0 wb-muted" />
-            ) : (
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-            )}
-            <Folder size={12} className="shrink-0 text-amber-400/80" />
-            <span className="truncate text-[11px] text-[hsl(var(--wb-text))]">
-              Schema objects
-            </span>
-            {!isSchemaObjectDescriptorsLoading && (
-              <span className="text-[9px] wb-muted">
-                {descriptorObjects.length}
-              </span>
-            )}
-          </button>
-          {isExpanded &&
-            (isSchemaObjectDescriptorsLoading &&
-            descriptorObjects.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">
-                Loading schema objects...
-              </div>
-            ) : descriptorObjects.length === 0 ? (
-              <div className="pl-7 text-[11px] italic wb-muted">
-                {filterText
-                  ? `No schema objects match "${filterText}"`
-                  : "No supported schema objects found"}
-              </div>
-            ) : (
-              descriptorObjects.map((object) => {
+      const descriptorGroups = groupSchemaObjectDescriptors(descriptorObjects);
+      const descriptorGroupDefinitions = EXPLORER_DIRECTORY_GROUPS.filter(
+        (definition) =>
+          [
+            "triggers",
+            "events",
+            "sequences",
+            "synonyms",
+            "jobs",
+            "packages",
+            "types",
+          ].includes(definition.kind) &&
+          (descriptorGroups.get(definition.kind)?.length || 0) > 0,
+      );
+      const directoryIcon = (kind: ExplorerDirectoryGroupKind) => {
+        const definition = explorerDirectoryDefinition(kind);
+        const className = cn(
+          "shrink-0",
+          explorerObjectIconClass(definition.iconKind),
+        );
+        if (kind === "triggers") return <Zap size={12} className={className} />;
+        if (kind === "events" || kind === "jobs") {
+          return <Clock3 size={12} className={className} />;
+        }
+        if (kind === "sequences") {
+          return <ListOrdered size={12} className={className} />;
+        }
+        if (kind === "synonyms") {
+          return <Link2 size={12} className={className} />;
+        }
+        if (kind === "packages") {
+          return <Package size={12} className={className} />;
+        }
+        return <Braces size={12} className={className} />;
+      };
+      const refreshDescriptorObjects = () => {
+        setIsSchemaObjectDescriptorsLoading(true);
+        void schemaService
+          .getSchemaObjects(connectionId, schema)
+          .then((objects) => {
+            setSchemaObjectDescriptors(objects);
+            setSchemaObjectDescriptorScope(`${connectionId}:${schema}`);
+          })
+          .catch((error) =>
+            setNamespaceError(
+              `Unable to refresh schema objects: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          )
+          .finally(() => setIsSchemaObjectDescriptorsLoading(false));
+      };
+
+      const renderDescriptorGroup = (
+        kind: ExplorerDirectoryGroupKind,
+        objects: SchemaObjectInfo[],
+      ) => {
+        const definition = explorerDirectoryDefinition(kind);
+        const key = objectGroupKey(connectionId, driver, schema, kind);
+        const isExpanded = expandedObjectGroupKeys.includes(key);
+        return (
+          <div key={kind}>
+            <ExplorerDirectoryGroupRow
+              expanded={isExpanded}
+              label={definition.label}
+              count={objects.length}
+              icon={directoryIcon(kind)}
+              onToggle={() => toggleObjectGroup(key)}
+              onRefresh={refreshDescriptorObjects}
+            />
+            {isExpanded && (
+              <ExplorerContextMenuHost>
+                <ExplorerSegmentedVirtualList
+                  items={objects}
+                  rowHeight={explorerTreeRowHeight}
+                  getKey={(object) =>
+                    `${object.objectType}:${object.name}:${object.parentName || ""}`
+                  }
+                  isExpanded={(object) =>
+                    expandedSchemaObjectMemberKeys.includes(
+                      [
+                        connectionId,
+                        navigationDatabaseName || "",
+                        schema,
+                        object.objectType,
+                        object.name,
+                      ].join("\u0000"),
+                    )
+                  }
+                  renderItem={(object) => {
                 const objectType = object.objectType.toLowerCase();
+                const descriptorExplorerNodeId = explorerNodeId(
+                  explorerDirectoryNodeKind(kind),
+                  connectionId,
+                  navigationDatabaseName,
+                  schema,
+                  object.name,
+                  object.objectType,
+                  object.parentName,
+                );
+                const isDescriptorSelected = selectedExplorerNodeIds.includes(
+                  descriptorExplorerNodeId,
+                );
                 const parentSuffix = object.parentName
                   ? ` on ${object.parentName}`
                   : "";
@@ -4272,42 +5752,141 @@ export function SchemaSidebar() {
                       }));
                     });
                 };
-                const viewObjectSource = () => {
-                  void schemaService
-                    .getSchemaObjectSource(
-                      connectionId,
-                      schema,
-                      object.name,
-                      object.objectType,
-                      object.parentName,
-                    )
-                    .then((definitions) => {
-                      const definition = definitions.find(
-                        (value) => value.trim().length > 0,
-                      );
-                      if (!definition) {
-                        throw new Error(
-                          "This driver does not provide a source definition for the selected object.",
-                        );
-                      }
-                      setActiveTable(object.name);
-                      setDdlContent(definition);
-                      setDdlViewerOpen(true);
-                    })
-                    .catch((error) => {
-                      window.alert(
-                        `Unable to load ${object.objectType.toLowerCase()} definition: ${error instanceof Error ? error.message : String(error)}`,
-                      );
-                    });
-                };
                 return (
                   <div
                     key={`${objectType}:${object.name}:${object.parentName || ""}`}
                   >
-                    <ContextMenu>
-                      <ContextMenuTrigger asChild>
+                    <ExplorerContextMenuRow
+                      nodeId={descriptorExplorerNodeId}
+                      menu={
+                        <>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() => viewSchemaObjectSource(object)}
+                          >
+                            <Eye className="mr-2 h-3.5 w-3.5" />
+                            View Source
+                          </ContextMenuItem>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() => void copyText(object.name)}
+                          >
+                            <Clipboard className="mr-2 h-3.5 w-3.5" />
+                            Copy Name
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() => void copyText(qualifiedName)}
+                          >
+                            Copy Qualified Name
+                          </ContextMenuItem>
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              <EyeOff className="mr-2 h-3.5 w-3.5" />
+                              Filter
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  hideExplorerNodes(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                    [descriptorExplorerNodeId],
+                                  )
+                                }
+                              >
+                                <EyeOff className="mr-2 h-3.5 w-3.5" />
+                                Hide this object
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  showOnlyExplorerNodes(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                    [descriptorExplorerNodeId],
+                                  )
+                                }
+                              >
+                                <Eye className="mr-2 h-3.5 w-3.5" />
+                                Show only this object
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!objectVisibilityFilter}
+                                onClick={() =>
+                                  clearExplorerVisibilityFilter(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                  )
+                                }
+                              >
+                                <X className="mr-2 h-3.5 w-3.5" />
+                                Clear object filter
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  openExplorerVisibilityFilter(
+                                    objectVisibilityParentId,
+                                    `Objects in ${schema || "current namespace"}`,
+                                  )
+                                }
+                              >
+                                <SearchCode className="mr-2 h-3.5 w-3.5" />
+                                Configure filter…
+                              </ContextMenuItem>
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+                        </>
+                      }
+                    >
                         <div
-                          className="group ml-4 flex h-6 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+                          role="treeitem"
+                          data-explorer-node-id={descriptorExplorerNodeId}
+                          aria-selected={isDescriptorSelected}
+                          aria-expanded={
+                            object.membersExpandable
+                              ? membersExpanded
+                              : undefined
+                          }
+                          tabIndex={isDescriptorSelected ? 0 : -1}
+                          className={cn(
+                            "group ml-4 flex h-7 items-center gap-2 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                            isDescriptorSelected && "wb-tree-row-selected",
+                          )}
+                          onClick={(event) =>
+                            selectExplorerNode(
+                              descriptorExplorerNodeId,
+                              event,
+                            )
+                          }
+                          onContextMenu={() =>
+                            selectExplorerNode(descriptorExplorerNodeId)
+                          }
+                          onDoubleClick={() => viewSchemaObjectSource(object)}
+                          onKeyDown={(event) => {
+                            if (
+                              event.key === "ArrowDown" ||
+                              event.key === "ArrowUp"
+                            ) {
+                              event.preventDefault();
+                              moveExplorerTreeFocus(
+                                event.currentTarget,
+                                event.key === "ArrowDown" ? 1 : -1,
+                              );
+                            } else if (event.key === "Enter") {
+                              event.preventDefault();
+                              viewSchemaObjectSource(object);
+                            }
+                          }}
                           title={
                             showExplorerHoverTooltips
                               ? `${object.objectType}${parentSuffix}${object.comment ? `\n${object.comment}` : ""}`
@@ -4333,46 +5912,21 @@ export function SchemaSidebar() {
                               )}
                             </button>
                           ) : null}
-                          {objectType === "sequence" ? (
-                            <KeyRound
-                              size={12}
-                              className="shrink-0 text-amber-400/80"
-                            />
-                          ) : objectType === "trigger" ? (
-                            <Network
-                              size={12}
-                              className="shrink-0 text-sky-400/80"
-                            />
-                          ) : (
-                            <Folder
-                              size={12}
-                              className="shrink-0 text-violet-400/80"
-                            />
-                          )}
+                          {directoryIcon(kind)}
                           <span className="min-w-0 flex-1 truncate">
                             {highlightMatch(object.name, filterText)}
                           </span>
+                          {object.comment?.trim() && (
+                            <span className="max-w-[30%] shrink truncate text-[9px] opacity-60">
+                              {object.comment.trim()}
+                            </span>
+                          )}
                           <span className="shrink-0 text-[9px] uppercase opacity-50">
                             {object.objectType}
                             {parentSuffix}
                           </span>
                         </div>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent className={menuContentClass}>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={() => void copyText(qualifiedName)}
-                        >
-                          Copy qualified name
-                        </ContextMenuItem>
-                        <ContextMenuItem
-                          className={menuItemClass}
-                          onClick={viewObjectSource}
-                        >
-                          View definition
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
+                    </ExplorerContextMenuRow>
                     {object.membersExpandable && membersExpanded && (
                       <div className="ml-10 border-l border-[hsl(var(--wb-border-subtle))] pl-2">
                         {membersState?.loading ? (
@@ -4413,9 +5967,35 @@ export function SchemaSidebar() {
                     )}
                   </div>
                 );
-              })
-            ))}
-        </div>
+                  }}
+                />
+              </ExplorerContextMenuHost>
+            )}
+          </div>
+        );
+      };
+
+      if (
+        isSchemaObjectDescriptorsLoading &&
+        descriptorGroupDefinitions.length === 0
+      ) {
+        return (
+          <div className="flex h-6 items-center gap-1.5 pl-6 text-[11px] italic wb-muted">
+            <RefreshCw size={11} className="animate-spin" />
+            Loading database object directories...
+          </div>
+        );
+      }
+
+      return (
+        <>
+          {descriptorGroupDefinitions.map((definition) =>
+            renderDescriptorGroup(
+              definition.kind,
+              descriptorGroups.get(definition.kind) || [],
+            ),
+          )}
+        </>
       );
     };
 
@@ -4453,27 +6033,64 @@ export function SchemaSidebar() {
       );
       const isCollectionExpanded =
         expandedTableKeys.includes(collectionTreeKey);
+      const collectionExplorerKind = isElasticsearchIndex
+        ? "search-index"
+        : isMongoCollection
+          ? "collection"
+          : "key";
+      const collectionExplorerNodeId = explorerNodeId(
+        collectionExplorerKind,
+        connectionId,
+        navigationDatabaseName,
+        schema,
+        collection.name,
+      );
+      const isExplorerCollectionSelected = selectedExplorerNodeIds.includes(
+        collectionExplorerNodeId,
+      );
+      const collectionNodeIdsForAction = isExplorerCollectionSelected
+        ? schemaObjects.collections
+            .map((candidate) =>
+              explorerNodeId(
+                collectionExplorerKind,
+                connectionId,
+                navigationDatabaseName,
+                schema,
+                candidate.name,
+              ),
+            )
+            .filter((nodeId) => selectedExplorerNodeIds.includes(nodeId))
+        : [collectionExplorerNodeId];
 
       return (
         <div key={`${schema}:${collection.name}`}>
-          <ContextMenu>
+          <ExplorerSharedContextMenu nodeId={collectionExplorerNodeId}>
             <ContextMenuTrigger>
               <div
+                role="treeitem"
+                data-explorer-node-id={collectionExplorerNodeId}
                 data-database-object-key={databaseObjectNavigationKey({
                   connectionId,
                   databaseName: navigationDatabaseName,
                   schemaName: schema,
                   objectName: collection.name,
                 })}
-                tabIndex={-1}
+                tabIndex={isExplorerCollectionSelected ? 0 : -1}
+                aria-selected={isExplorerCollectionSelected}
+                aria-expanded={
+                  canExpandCollectionMetadata
+                    ? isCollectionExpanded
+                    : undefined
+                }
                 className={cn(
-                  "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] py-1 pr-2 text-[11px] transition-colors",
-                  isSelectedCollection
+                  "group flex h-7 cursor-pointer select-none items-center gap-2 rounded-[3px] pr-2 text-[11px] transition-colors",
+                  isSelectedCollection || isExplorerCollectionSelected
                     ? "wb-tree-row-selected"
                     : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                 )}
                 style={{ paddingLeft: `${8 + depth * 14}px` }}
                 onClick={(event) => {
+                  selectExplorerNode(collectionExplorerNodeId, event);
                   if (
                     shouldActivateExplorerObject(
                       explorerActivationMode,
@@ -4490,6 +6107,9 @@ export function SchemaSidebar() {
                     handleCollectionSelect(collection.name),
                   );
                 }}
+                onContextMenu={() =>
+                  selectExplorerNode(collectionExplorerNodeId)
+                }
                 onDoubleClick={() => {
                   if (
                     shouldActivateExplorerObject(
@@ -4503,11 +6123,21 @@ export function SchemaSidebar() {
                   }
                 }}
                 onKeyDown={(event) => {
-                  if (event.key !== "Enter") return;
-                  event.preventDefault();
-                  void runForSchema(schema, () =>
-                    handleCollectionDoubleClick(collection),
-                  );
+                  if (
+                    event.key === "ArrowDown" ||
+                    event.key === "ArrowUp"
+                  ) {
+                    event.preventDefault();
+                    moveExplorerTreeFocus(
+                      event.currentTarget,
+                      event.key === "ArrowDown" ? 1 : -1,
+                    );
+                  } else if (event.key === "Enter") {
+                    event.preventDefault();
+                    void runForSchema(schema, () =>
+                      handleCollectionDoubleClick(collection),
+                    );
+                  }
                 }}
                 title={
                   showExplorerHoverTooltips
@@ -4541,16 +6171,43 @@ export function SchemaSidebar() {
                     )}
                   </button>
                 )}
-                <KeyRound
-                  size={12}
-                  className={cn(
-                    "shrink-0 text-red-400/80",
-                    isSelectedCollection && "opacity-100",
-                  )}
-                />
+                {isElasticsearchIndex ? (
+                  <SearchCode
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("search-index"),
+                    )}
+                  />
+                ) : isMongoCollection ? (
+                  <Boxes
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("collection"),
+                    )}
+                  />
+                ) : (
+                  <KeyRound
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("key"),
+                      isSelectedCollection && "opacity-100",
+                    )}
+                  />
+                )}
                 <span className="min-w-0 flex-1 truncate">
                   {highlightMatch(displayLabel || "(empty)", filterText)}
                 </span>
+                {collection.documentCount != null && (
+                  <span
+                    className="shrink-0 text-[9px] tabular-nums opacity-55"
+                    title={`${collection.documentCount.toLocaleString()} documents`}
+                  >
+                    {collection.documentCount.toLocaleString()}
+                  </span>
+                )}
                 {collection.type && (
                   <span className="shrink-0 text-[9px] uppercase opacity-50">
                     {collection.type}
@@ -4558,8 +6215,9 @@ export function SchemaSidebar() {
                 )}
               </div>
             </ContextMenuTrigger>
-            <ContextMenuContent className="w-48">
+            <ContextMenuContent className={menuContentClass}>
               <ContextMenuItem
+                className={menuItemClass}
                 onClick={() =>
                   void runForSchema(schema, () =>
                     handleCollectionDoubleClick(collection),
@@ -4570,23 +6228,128 @@ export function SchemaSidebar() {
                 Open Data
               </ContextMenuItem>
               <ContextMenuItem
+                className={menuItemClass}
+                onClick={() => {
+                  const previewCommand = collectionPreviewSql(collection);
+                  createTab(
+                    "query",
+                    `${collection.name} [${objectConnection?.name || "query"}]`,
+                    previewCommand,
+                    {
+                      connectionId,
+                      databaseName: navigationDatabaseName,
+                      schemaName: schema,
+                      tableName: collection.name,
+                      objectType: collection.type || null,
+                    },
+                  );
+                }}
+              >
+                <Code2 className="mr-2 h-3.5 w-3.5" />
+                Open in Query Console
+              </ContextMenuItem>
+              {isMongoCollection && (
+                <ContextMenuItem
+                  className={menuItemClass}
+                  onClick={() =>
+                    setExpandedTableKeys((current) =>
+                      current.includes(collectionTreeKey)
+                        ? current
+                        : [...current, collectionTreeKey],
+                    )
+                  }
+                >
+                  <ListOrdered className="mr-2 h-3.5 w-3.5" />
+                  Browse Indexes
+                </ContextMenuItem>
+              )}
+              <ContextMenuSeparator className={menuSeparatorClass} />
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() => void copyText(collection.name)}
+              >
+                <Clipboard className="mr-2 h-3.5 w-3.5" />
+                Copy Name
+              </ContextMenuItem>
+              <ContextMenuItem
+                className={menuItemClass}
                 onClick={() =>
                   void runForSchema(schema, () =>
                     handleCopyCollectionPreview(collection),
                   )
                 }
               >
-                <Clipboard className="mr-2 h-3.5 w-3.5" />
                 Copy Preview Query
               </ContextMenuItem>
+              <ContextMenuSub>
+                <ContextMenuSubTrigger className={menuSubClass}>
+                  <EyeOff className="mr-2 h-3.5 w-3.5" />
+                  Filter
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent className={menuContentClass}>
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      hideExplorerNodes(
+                        explorerStateScope,
+                        objectVisibilityParentId,
+                        collectionNodeIdsForAction,
+                      )
+                    }
+                  >
+                    <EyeOff className="mr-2 h-3.5 w-3.5" />
+                    Hide selected object
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      showOnlyExplorerNodes(
+                        explorerStateScope,
+                        objectVisibilityParentId,
+                        collectionNodeIdsForAction,
+                      )
+                    }
+                  >
+                    <Eye className="mr-2 h-3.5 w-3.5" />
+                    Show only selected object
+                  </ContextMenuItem>
+                  <ContextMenuSeparator className={menuSeparatorClass} />
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    disabled={!objectVisibilityFilter}
+                    onClick={() =>
+                      clearExplorerVisibilityFilter(
+                        explorerStateScope,
+                        objectVisibilityParentId,
+                      )
+                    }
+                  >
+                    <X className="mr-2 h-3.5 w-3.5" />
+                    Clear object filter
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      openExplorerVisibilityFilter(
+                        objectVisibilityParentId,
+                        `Objects in ${schema || "current namespace"}`,
+                      )
+                    }
+                  >
+                    <SearchCode className="mr-2 h-3.5 w-3.5" />
+                    Configure filter…
+                  </ContextMenuItem>
+                </ContextMenuSubContent>
+              </ContextMenuSub>
               {isElasticsearchIndex && (
                 <>
+                  <ContextMenuSeparator className={menuSeparatorClass} />
                   <ContextMenuSub>
-                    <ContextMenuSubTrigger>
+                    <ContextMenuSubTrigger className={menuSubClass}>
                       <Code2 className="mr-2 h-3.5 w-3.5" />
                       Index Metadata
                     </ContextMenuSubTrigger>
-                    <ContextMenuSubContent className="w-44">
+                    <ContextMenuSubContent className={menuContentClass}>
                       {(
                         [
                           ["mapping", "View Mapping"],
@@ -4596,6 +6359,7 @@ export function SchemaSidebar() {
                       ).map(([kind, metadataLabel]) => (
                         <ContextMenuItem
                           key={kind}
+                          className={menuItemClass}
                           onClick={() =>
                             setElasticsearchMetadataTarget({
                               connectionId,
@@ -4610,24 +6374,11 @@ export function SchemaSidebar() {
                       ))}
                     </ContextMenuSubContent>
                   </ContextMenuSub>
-                  <ContextMenuItem
-                    onClick={() =>
-                      setElasticsearchClearTarget({
-                        connectionId,
-                        driver: collectionDriver,
-                        schema,
-                        index: collection.name,
-                      })
-                    }
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Trash2 className="mr-2 h-3.5 w-3.5" />
-                    Clear Documents…
-                  </ContextMenuItem>
                 </>
               )}
               {nacosLocation && (
                 <ContextMenuItem
+                  className={menuItemClass}
                   onClick={() =>
                     setNacosConfigTransferRequest({
                       sourceConnectionId: connectionId,
@@ -4645,6 +6396,7 @@ export function SchemaSidebar() {
               )}
               {isMongoCollection && (
                 <ContextMenuItem
+                  className={menuItemClass}
                   onClick={() =>
                     setMongoCollectionTransferRequest({
                       sourceConnectionId: connectionId,
@@ -4661,21 +6413,40 @@ export function SchemaSidebar() {
                   Transfer Collection…
                 </ContextMenuItem>
               )}
-              <ContextMenuSeparator />
-              <ContextMenuItem
-                onClick={() =>
-                  void runForSchema(schema, () =>
-                    handleDeleteCollectionClick(collection),
-                  )
-                }
-                disabled={!canDeleteCollection}
-                className="text-destructive focus:text-destructive"
-              >
-                <Trash2 className="mr-2 h-3.5 w-3.5" />
-                Delete {collectionLabel}
-              </ContextMenuItem>
+              {(isElasticsearchIndex || canDeleteCollection) && (
+                <ContextMenuSeparator className={menuSeparatorClass} />
+              )}
+              {isElasticsearchIndex && (
+                <ContextMenuItem
+                  onClick={() =>
+                    setElasticsearchClearTarget({
+                      connectionId,
+                      driver: collectionDriver,
+                      schema,
+                      index: collection.name,
+                    })
+                  }
+                  className={cn(menuItemClass, "text-destructive")}
+                >
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  Clear Documents…
+                </ContextMenuItem>
+              )}
+              {canDeleteCollection && (
+                <ContextMenuItem
+                  onClick={() =>
+                    void runForSchema(schema, () =>
+                      handleDeleteCollectionClick(collection),
+                    )
+                  }
+                  className={cn(menuItemClass, "text-destructive")}
+                >
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  Delete {collectionLabel}…
+                </ContextMenuItem>
+              )}
             </ContextMenuContent>
-          </ContextMenu>
+          </ExplorerSharedContextMenu>
           {canExpandCollectionMetadata && isCollectionExpanded && (
             <TableObjectTree
               identity={{
@@ -4714,7 +6485,7 @@ export function SchemaSidebar() {
           <div key={`redis-group:${node.path}`}>
             <button
               type="button"
-              className="flex h-6 w-full items-center gap-1.5 rounded-[3px] pr-2 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
+              className="flex h-7 w-full items-center gap-1.5 rounded-[3px] pr-2 text-left text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
               style={{ paddingLeft: `${6 + depth * 14}px` }}
               onClick={() => toggleObjectGroup(key)}
               title={node.path}
@@ -4743,57 +6514,199 @@ export function SchemaSidebar() {
       });
 
     return (
-      <div
-        className="ml-4 pb-1 pl-2"
-        onMouseEnter={() => setIsTablesHovered(true)}
-        onMouseLeave={() => setIsTablesHovered(false)}
-      >
-        <button
-          type="button"
-          data-database-schema-key={databaseSchemaNavigationKey({
-            connectionId,
-            databaseName: navigationDatabaseName,
-            schemaName: schema,
-          })}
-          className="flex h-6 w-full items-center justify-between rounded-[3px] pr-1 text-left hover:bg-[hsl(var(--wb-hover))]"
-          onClick={() => {
-            setExpandedObjectGroupKeys((current) =>
-              current.includes(groupKey)
-                ? current.filter((item) => item !== groupKey)
-                : [...current, groupKey],
-            );
-          }}
+      <ExplorerContextMenuHost>
+        <div
+          className="ml-4 pb-1 pl-2"
+          onMouseEnter={() => setIsTablesHovered(true)}
+          onMouseLeave={() => setIsTablesHovered(false)}
         >
-          <div className="flex min-w-0 items-center gap-1.5">
-            {isObjectGroupExpanded ? (
-              <ChevronDown size={12} className="shrink-0 wb-muted" />
-            ) : (
-              <ChevronRight size={12} className="shrink-0 wb-muted" />
-            )}
-            {activeCapabilities.dataModel === "keyValue" ? (
-              <KeyRound size={12} className="shrink-0 text-red-400/85" />
-            ) : (
-              <Folder size={12} className="shrink-0 text-blue-400/85" />
-            )}
-            <span className="truncate text-[11px] font-medium text-[hsl(var(--wb-text))]">
-              {objectSectionLabel}
-            </span>
-            {hasSchemaObjectContext && (
-              <span
-                className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted"
-                title={
-                  activeCapabilities.dataModel === "keyValue"
-                    ? `Loads ${REDIS_KEY_PAGE_SIZE} keys per page and keeps up to ${MAX_REDIS_KEYS_IN_MEMORY} keys in memory`
-                    : undefined
+        <ExplorerSharedContextMenu
+          nodeId={explorerNodeId(
+            "group",
+            connectionId,
+            navigationDatabaseName,
+            schema,
+            "objects",
+          )}
+        >
+          <ContextMenuTrigger asChild>
+            <button
+              type="button"
+              data-database-schema-key={databaseSchemaNavigationKey({
+                connectionId,
+                databaseName: navigationDatabaseName,
+                schemaName: schema,
+              })}
+              className="flex h-7 w-full items-center justify-between rounded-[3px] pr-1 text-left hover:bg-[hsl(var(--wb-hover))]"
+              onClick={() => {
+                setExpandedObjectGroupKeys((current) =>
+                  current.includes(groupKey)
+                    ? current.filter((item) => item !== groupKey)
+                    : [...current, groupKey],
+                );
+              }}
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                {isObjectGroupExpanded ? (
+                  <ChevronDown size={12} className="shrink-0 wb-muted" />
+                ) : (
+                  <ChevronRight size={12} className="shrink-0 wb-muted" />
+                )}
+                {activeCapabilities.dataModel === "keyValue" ? (
+                  <KeyRound
+                    size={12}
+                    className={cn("shrink-0", explorerObjectIconClass("key"))}
+                  />
+                ) : activeCapabilities.dataModel === "document" ? (
+                  <Boxes
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("collection"),
+                    )}
+                  />
+                ) : activeCapabilities.dataModel === "search" ? (
+                  <SearchCode
+                    size={12}
+                    className={cn(
+                      "shrink-0",
+                      explorerObjectIconClass("search-index"),
+                    )}
+                  />
+                ) : (
+                  <Table
+                    size={12}
+                    className={cn("shrink-0", explorerObjectIconClass("table"))}
+                  />
+                )}
+                <span className="truncate text-[11px] font-medium text-[hsl(var(--wb-text))]">
+                  {objectSectionLabel}
+                </span>
+                {hasSchemaObjectContext && (
+                  <span
+                    className="rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[9px] wb-muted"
+                    title={
+                      activeCapabilities.dataModel === "keyValue"
+                        ? `Loads ${REDIS_KEY_PAGE_SIZE} keys per page and keeps up to ${MAX_REDIS_KEYS_IN_MEMORY} keys in memory`
+                        : undefined
+                    }
+                  >
+                    {schemaObjectCountLabel}
+                  </span>
+                )}
+                <MetadataNodeBadge state={schemaNodeState} />
+              </div>
+              {isCurrentSchema && isTablesHovered && renderObjectActions()}
+            </button>
+          </ContextMenuTrigger>
+          <ContextMenuContent className={menuContentClass}>
+            <ContextMenuSub>
+              <ContextMenuSubTrigger className={menuSubClass}>
+                <Plus className="mr-2 h-3.5 w-3.5" />
+                New
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent className={menuContentClass}>
+                {canBrowseTables && (
+                  <>
+                    <ContextMenuItem
+                      className={menuItemClass}
+                      disabled={!activeCapabilities.supportsTableDdl}
+                      onClick={() =>
+                        void runForSchema(schema, () => {
+                          createTableTab(connectionId, schema);
+                        })
+                      }
+                    >
+                      Table
+                    </ContextMenuItem>
+                  </>
+                )}
+                {canBrowseCollections && (
+                  <ContextMenuItem
+                    className={menuItemClass}
+                    onClick={() =>
+                      void runForSchema(schema, handleCreateCollectionClick)
+                    }
+                  >
+                    {collectionLabel}
+                  </ContextMenuItem>
+                )}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuItem
+              className={menuItemClass}
+              onClick={() => void copyText(objectSectionLabel)}
+            >
+              <Clipboard className="mr-2 h-3.5 w-3.5" />
+              Copy Name
+            </ContextMenuItem>
+            <ContextMenuSeparator className={menuSeparatorClass} />
+            {canBrowseTables && (
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() =>
+                  openObjectBrowser(
+                    connectionId,
+                    objectConnection?.name || "Database",
+                    navigationDatabaseName,
+                    schema,
+                  )
                 }
               >
-                {schemaObjectCountLabel}
-              </span>
+                <TableProperties className="mr-2 h-3.5 w-3.5" />
+                Open Object Browser
+              </ContextMenuItem>
             )}
-            <MetadataNodeBadge state={schemaNodeState} />
-          </div>
-          {isCurrentSchema && isTablesHovered && renderObjectActions()}
-        </button>
+            <ContextMenuItem
+              className={menuItemClass}
+              disabled={!activeCapabilities.supportsSqlQuery}
+              onClick={openScopedQueryConsole}
+            >
+              <Code2 className="mr-2 h-3.5 w-3.5" />
+              New Query Console
+            </ContextMenuItem>
+            {activeCapabilities.supportsSqlQuery &&
+              renderSqlHistorySubmenu({
+                connectionId,
+                databaseName: navigationDatabaseName,
+                schemaName: schema,
+              })}
+            {tableRelationNames.length > 0 && (
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() => void addTablesToAssistant(tableRelationNames)}
+              >
+                <Sparkles className="mr-2 h-3.5 w-3.5" />
+                Add Tables to AI Context
+              </ContextMenuItem>
+            )}
+            <ContextMenuSeparator className={menuSeparatorClass} />
+            <ContextMenuItem
+              className={menuItemClass}
+              disabled={isLoading || isCollectionsLoading}
+              onClick={() => void handleRefreshSchema(connectionId, schema)}
+            >
+              <RefreshCw className="mr-2 h-3.5 w-3.5" />
+              Load All / Refresh
+              <ContextMenuShortcut>⌘R</ContextMenuShortcut>
+            </ContextMenuItem>
+            {canBrowseTables && tableRelations.length > 0 && (
+              <ContextMenuItem
+                className={menuItemClass}
+                onClick={() =>
+                  setTableBatchSelection({
+                    scopeKey: groupKey,
+                    names: [],
+                    anchor: null,
+                  })
+                }
+              >
+                <ListChecks className="mr-2 h-3.5 w-3.5" />
+                Select Multiple Tables
+              </ContextMenuItem>
+            )}
+          </ContextMenuContent>
+        </ExplorerSharedContextMenu>
 
         {isObjectGroupExpanded && (
           <>
@@ -5116,18 +7029,60 @@ export function SchemaSidebar() {
                         : "No keys in this scan page"
                       : filterText
                         ? `No ${collectionLabelPlural.toLowerCase()} match "${filterText}"`
-                        : `No ${collectionLabelPlural.toLowerCase()} found`}
+                        : objectVisibilityFilter
+                          ? `All ${collectionLabelPlural.toLowerCase()} are hidden by the active filter`
+                          : `No ${collectionLabelPlural.toLowerCase()} found`}
                   </div>
+                  {objectVisibilityFilter && (
+                    <button
+                      type="button"
+                      className="mt-1 text-[10px] text-[hsl(var(--wb-accent))] hover:underline"
+                      onClick={() =>
+                        clearExplorerVisibilityFilter(
+                          explorerStateScope,
+                          objectVisibilityParentId,
+                        )
+                      }
+                    >
+                      Clear filter
+                    </button>
+                  )}
                   {renderLoadMoreKeys()}
                 </div>
               ) : (
                 <div className="space-y-0.5">
                   {activeCapabilities.dataModel === "keyValue"
-                    ? renderRedisKeyNodes(
-                        buildRedisKeyTree(schemaObjects.collections),
+                    ? (
+                        <ExplorerContextMenuHost>
+                          <div>
+                            {renderRedisKeyNodes(
+                              buildRedisKeyTree(schemaObjects.collections),
+                            )}
+                          </div>
+                        </ExplorerContextMenuHost>
                       )
-                    : schemaObjects.collections.map((collection) =>
-                        renderCollectionItem(collection),
+                    : (
+                        <ExplorerContextMenuHost>
+                          <ExplorerSegmentedVirtualList
+                            items={schemaObjects.collections}
+                            rowHeight={explorerTreeRowHeight}
+                            getKey={(collection) => collection.name}
+                            renderItem={(collection) =>
+                              renderCollectionItem(collection)
+                            }
+                            isExpanded={(collection) =>
+                              expandedTableKeys.includes(
+                                tableTreeKey(
+                                  connectionId,
+                                  driver,
+                                  navigationDatabaseName,
+                                  schema,
+                                  collection.name,
+                                ),
+                              )
+                            }
+                          />
+                        </ExplorerContextMenuHost>
                       )}
                   {renderLoadMoreKeys()}
                 </div>
@@ -5141,14 +7096,48 @@ export function SchemaSidebar() {
                 Loading tables...
               </div>
             ) : tableRelations.length === 0 ? (
-              <div className="px-2 py-1.5 text-[11px] italic wb-muted">
-                {filterText
-                  ? `No tables match "${filterText}"`
-                  : "No tables found"}
+              <div className="flex min-h-7 items-center gap-1 px-2 py-1.5 text-[11px] italic wb-muted">
+                <span>
+                  {filterText
+                    ? `No tables match "${filterText}"`
+                    : objectVisibilityFilter
+                      ? "All tables are hidden by the active filter"
+                      : "No tables found"}
+                </span>
+                {objectVisibilityFilter && (
+                  <button
+                    type="button"
+                    className="ml-auto shrink-0 not-italic text-[10px] text-[hsl(var(--wb-accent))] hover:underline"
+                    onClick={() =>
+                      clearExplorerVisibilityFilter(
+                        explorerStateScope,
+                        objectVisibilityParentId,
+                      )
+                    }
+                  >
+                    Clear filter
+                  </button>
+                )}
               </div>
             ) : (
               <div className="space-y-0.5">
-                {tableRelations.map((table) => {
+                <ExplorerContextMenuHost>
+                  <ExplorerSegmentedVirtualList
+                    items={tableRelations}
+                    rowHeight={explorerTreeRowHeight}
+                    getKey={(table) => table.name}
+                    isExpanded={(table) =>
+                      expandedTableKeys.includes(
+                        tableTreeKey(
+                          connectionId,
+                          driver,
+                          navigationDatabaseName,
+                          schema,
+                          table.name,
+                        ),
+                      )
+                    }
+                    renderItem={(table) => {
                   const isPinned = schemaObjects.pinnedTables.includes(
                     table.name,
                   );
@@ -5161,6 +7150,20 @@ export function SchemaSidebar() {
                   );
                   const isSelectedTable =
                     isCurrentSchema && selectedTable === table.name;
+                  const relationExplorerKind = isMaterializedView
+                    ? "materialized-view"
+                    : isView
+                      ? "view"
+                      : "table";
+                  const relationExplorerNodeId = explorerNodeId(
+                    relationExplorerKind,
+                    connectionId,
+                    navigationDatabaseName,
+                    schema,
+                    table.name,
+                  );
+                  const isExplorerRelationSelected =
+                    selectedExplorerNodeIds.includes(relationExplorerNodeId);
                   const relationTreeKey = tableTreeKey(
                     connectionId,
                     driver,
@@ -5178,6 +7181,11 @@ export function SchemaSidebar() {
                   const relationCapabilities = isCurrentSchema
                     ? activeCapabilities
                     : defaultDatabaseCapabilities(driver || activeDriver);
+                  const relationOperationTarget: TableOperationTarget = {
+                    connectionId,
+                    schema,
+                    driver: (driver || activeDriver) as DatabaseDriver,
+                  };
                   // The table editor already consumes this signed capability
                   // list. Keep the Explorer's quicker context-menu route on
                   // the same contract: an unreviewed sidecar must not show a
@@ -5205,10 +7213,56 @@ export function SchemaSidebar() {
                     selectedTableBatchNames.length > 0
                       ? selectedTableBatchNames
                       : [table.name];
+                  const relationNodeIdsForAction = contextualTableNames.map(
+                    (tableName) => {
+                      const candidate = tableRelations.find(
+                        (relation) => relation.name === tableName,
+                      );
+                      const candidateKind = candidate
+                        ? isMaterializedViewObject(candidate.type)
+                          ? "materialized-view"
+                          : isViewObject(candidate.type)
+                            ? "view"
+                            : "table"
+                        : "table";
+                      return explorerNodeId(
+                        candidateKind,
+                        connectionId,
+                        navigationDatabaseName,
+                        schema,
+                        tableName,
+                      );
+                    },
+                  );
+                  const openGeneratedSql = (
+                    operation: "SELECT" | "INSERT" | "UPDATE" | "DELETE",
+                  ) => {
+                    const sqlDriver = (objectDriver ||
+                      activeDriver) as DatabaseDriver;
+                    const relation = qualifiedTableName(
+                      sqlDriver,
+                      schema,
+                      table.name,
+                    );
+                    const sql =
+                      operation === "SELECT"
+                        ? previewTableQuery(sqlDriver, schema, table.name, 100)
+                        : operation === "INSERT"
+                          ? `INSERT INTO ${relation} (\n  column_name\n)\nVALUES (\n  value\n);`
+                          : operation === "UPDATE"
+                            ? `UPDATE ${relation}\nSET column_name = value\nWHERE condition;`
+                            : `DELETE FROM ${relation}\nWHERE condition;`;
+                    createTab("query", `${operation} ${table.name}`, sql, {
+                      connectionId,
+                      databaseName: navigationDatabaseName,
+                      schemaName: schema,
+                    });
+                  };
 
                   return (
                     <div key={`${schema}:${table.name}`}>
-                      <ContextMenu
+                      <ExplorerSharedContextMenu
+                        nodeId={relationExplorerNodeId}
                         onOpenChange={(open) => {
                           if (open) {
                             void runForSchema(schema, () =>
@@ -5219,6 +7273,8 @@ export function SchemaSidebar() {
                       >
                         <ContextMenuTrigger asChild>
                           <div
+                            role="treeitem"
+                            data-explorer-node-id={relationExplorerNodeId}
                             data-database-object-key={databaseObjectNavigationKey(
                               {
                                 connectionId,
@@ -5227,16 +7283,28 @@ export function SchemaSidebar() {
                                 objectName: table.name,
                               },
                             )}
-                            tabIndex={-1}
+                            tabIndex={isExplorerRelationSelected ? 0 : -1}
+                            aria-selected={isExplorerRelationSelected}
+                            aria-expanded={isTableExpanded}
                             aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. ${explorerActivationLabel(explorerActivationMode)} to open data; right-click for actions; expand for columns and indexes.`}
                             className={cn(
-                              "group flex cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 py-1 text-[11px] transition-colors",
+                              "group flex h-7 cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 text-[11px] transition-colors",
                               selectedTableBatchSet.has(table.name) ||
-                                isSelectedTable
+                                isSelectedTable ||
+                                isExplorerRelationSelected
                                 ? "wb-tree-row-selected"
                                 : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-active-strong)/0.55)] hover:text-[hsl(var(--wb-text))]",
                             )}
                             onClick={(event) => {
+                              selectExplorerNode(
+                                relationExplorerNodeId,
+                                event.currentTarget === event.target ||
+                                  !(event.target as HTMLElement).closest(
+                                    "button,[role='checkbox']",
+                                  )
+                                  ? event
+                                  : undefined,
+                              );
                               if (suppressTableReferenceClickRef.current) {
                                 suppressTableReferenceClickRef.current = false;
                                 event.preventDefault();
@@ -5281,7 +7349,12 @@ export function SchemaSidebar() {
                                   event.detail,
                                 )
                               ) {
-                                void handleTableDoubleClick(table, schema);
+                                void handleTableDoubleClick(
+                                  table,
+                                  schema,
+                                  connectionId,
+                                  navigationDatabaseName,
+                                );
                                 return;
                               }
                               void runForSchema(schema, () =>
@@ -5296,9 +7369,17 @@ export function SchemaSidebar() {
                                   "double-click",
                                 )
                               ) {
-                                void handleTableDoubleClick(table, schema);
+                                void handleTableDoubleClick(
+                                  table,
+                                  schema,
+                                  connectionId,
+                                  navigationDatabaseName,
+                                );
                               }
                             }}
+                            onContextMenu={() =>
+                              selectExplorerNode(relationExplorerNodeId)
+                            }
                             onMouseDown={(event) => {
                               const target = event.target as HTMLElement;
                               if (target.closest("button,[role='checkbox']")) {
@@ -5331,12 +7412,26 @@ export function SchemaSidebar() {
                             }}
                             onKeyDown={(event) => {
                               if (
-                                event.key !== "Enter" ||
-                                isTableBatchSelectionActive
-                              )
-                                return;
-                              event.preventDefault();
-                              void handleTableDoubleClick(table, schema);
+                                event.key === "ArrowDown" ||
+                                event.key === "ArrowUp"
+                              ) {
+                                event.preventDefault();
+                                moveExplorerTreeFocus(
+                                  event.currentTarget,
+                                  event.key === "ArrowDown" ? 1 : -1,
+                                );
+                              } else if (
+                                event.key === "Enter" &&
+                                !isTableBatchSelectionActive
+                              ) {
+                                event.preventDefault();
+                                void handleTableDoubleClick(
+                                  table,
+                                  schema,
+                                  connectionId,
+                                  navigationDatabaseName,
+                                );
+                              }
                             }}
                             title={
                               showExplorerHoverTooltips
@@ -5391,7 +7486,11 @@ export function SchemaSidebar() {
                               className={cn(
                                 "shrink-0 opacity-90",
                                 explorerObjectIconClass(
-                                  isView ? "view" : "table",
+                                  isMaterializedView
+                                    ? "materialized-view"
+                                    : isView
+                                      ? "view"
+                                      : "table",
                                 ),
                                 isSelectedTable && "opacity-100",
                                 isPinned && "text-primary opacity-100",
@@ -5405,6 +7504,23 @@ export function SchemaSidebar() {
                             >
                               {table.name}
                             </span>
+                            {table.comment?.trim() && (
+                              <span
+                                className="max-w-[34%] shrink truncate text-[9px] font-normal text-[hsl(var(--wb-text-muted))] opacity-75"
+                                title={
+                                  showExplorerHoverTooltips
+                                    ? table.comment.trim()
+                                    : undefined
+                                }
+                              >
+                                {table.comment.trim()}
+                              </span>
+                            )}
+                            {isMaterializedView && (
+                              <span className="shrink-0 text-[8px] uppercase text-indigo-300/70">
+                                MV
+                              </span>
+                            )}
                             <div className="flex items-center gap-1">
                               <Button
                                 variant="ghost"
@@ -5433,6 +7549,62 @@ export function SchemaSidebar() {
                           </div>
                         </ContextMenuTrigger>
                         <ContextMenuContent className={menuContentClass}>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={
+                              !relationCapabilities.supportsTableBrowsing
+                            }
+                            onClick={() =>
+                              void handleTableDoubleClick(
+                                table,
+                                schema,
+                                connectionId,
+                                navigationDatabaseName,
+                              )
+                            }
+                          >
+                            <TableProperties className="mr-2 h-3.5 w-3.5" />
+                            Open Data
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={
+                              !relationCapabilities.supportsTableBrowsing
+                            }
+                            onClick={() =>
+                              void runForSchema(schema, async () => {
+                                const tabId = findOrCreateTableTab(
+                                  connectionId,
+                                  schema,
+                                  table.name,
+                                  table.type,
+                                  navigationDatabaseName,
+                                  { reuseMode: "always-new" },
+                                );
+                                await loadTablePage(tabId, 0);
+                              })
+                            }
+                          >
+                            Open Data in New Tab
+                          </ContextMenuItem>
+                          {relationCapabilities.supportsSqlQuery && (
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() => openGeneratedSql("SELECT")}
+                            >
+                              <Code2 className="mr-2 h-3.5 w-3.5" />
+                              Open in Query Console
+                            </ContextMenuItem>
+                          )}
+                          {relationCapabilities.supportsSqlQuery &&
+                            renderSqlHistorySubmenu({
+                              connectionId,
+                              databaseName: navigationDatabaseName,
+                              schemaName: schema,
+                            })}
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
                           <ContextMenuItem
                             className={menuItemClass}
                             disabled={
@@ -5510,58 +7682,6 @@ export function SchemaSidebar() {
                           />
                           <ContextMenuSub>
                             <ContextMenuSubTrigger className={menuSubClass}>
-                              <Plus className="mr-2 h-3.5 w-3.5" />
-                              New
-                            </ContextMenuSubTrigger>
-                            <ContextMenuSubContent className={menuContentClass}>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, () => {
-                                    if (activeConnectionId) {
-                                      createTableTab(
-                                        activeConnectionId,
-                                        schema,
-                                      );
-                                    }
-                                  })
-                                }
-                                disabled={
-                                  !activeConnectionId ||
-                                  !canBrowseTables ||
-                                  !activeCapabilities.supportsTableDdl
-                                }
-                              >
-                                Table
-                              </ContextMenuItem>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, handleCreateView)
-                                }
-                                disabled={!activeCapabilities.supportsViews}
-                              >
-                                View
-                              </ContextMenuItem>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(
-                                    schema,
-                                    handleCreateMaterializedView,
-                                  )
-                                }
-                                disabled={
-                                  !activeCapabilities.supportsMaterializedViews
-                                }
-                              >
-                                Materialized View
-                              </ContextMenuItem>
-                            </ContextMenuSubContent>
-                          </ContextMenuSub>
-
-                          <ContextMenuSub>
-                            <ContextMenuSubTrigger className={menuSubClass}>
                               Copy/Paste
                             </ContextMenuSubTrigger>
                             <ContextMenuSubContent className={menuContentClass}>
@@ -5575,11 +7695,77 @@ export function SchemaSidebar() {
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleCopyTableDdl(table),
+                                    handleCopyTableDdl(
+                                      table,
+                                      relationOperationTarget,
+                                    ),
                                   )
                                 }
                               >
                                 Copy DDL
+                              </ContextMenuItem>
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger className={menuSubClass}>
+                              <EyeOff className="mr-2 h-3.5 w-3.5" />
+                              Filter
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent className={menuContentClass}>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  hideExplorerNodes(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                    relationNodeIdsForAction,
+                                  )
+                                }
+                              >
+                                <EyeOff className="mr-2 h-3.5 w-3.5" />
+                                Hide selected object
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  showOnlyExplorerNodes(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                    relationNodeIdsForAction,
+                                  )
+                                }
+                              >
+                                <Eye className="mr-2 h-3.5 w-3.5" />
+                                Show only selected object
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={!objectVisibilityFilter}
+                                onClick={() =>
+                                  clearExplorerVisibilityFilter(
+                                    explorerStateScope,
+                                    objectVisibilityParentId,
+                                  )
+                                }
+                              >
+                                <X className="mr-2 h-3.5 w-3.5" />
+                                Clear object filter
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  openExplorerVisibilityFilter(
+                                    objectVisibilityParentId,
+                                    `Objects in ${schema || "current namespace"}`,
+                                  )
+                                }
+                              >
+                                <SearchCode className="mr-2 h-3.5 w-3.5" />
+                                Configure filter…
                               </ContextMenuItem>
                             </ContextMenuSubContent>
                           </ContextMenuSub>
@@ -5659,66 +7845,80 @@ export function SchemaSidebar() {
                             className={menuItemClass}
                             onClick={() =>
                               void runForSchema(schema, () =>
-                                handleDdlClick(table),
+                                handleDdlClick(table, relationOperationTarget),
                               )
                             }
                           >
                             Quick Documentation
                             <ContextMenuShortcut>F1</ContextMenuShortcut>
                           </ContextMenuItem>
-                          <ContextMenuSub>
-                            <ContextMenuSubTrigger className={menuSubClass}>
-                              Navigation
-                            </ContextMenuSubTrigger>
-                            <ContextMenuSubContent className={menuContentClass}>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void handleTableDoubleClick(table, schema)
-                                }
-                              >
-                                Open Data
-                              </ContextMenuItem>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() =>
-                                  void runForSchema(schema, () =>
-                                    handleDdlClick(table),
-                                  )
-                                }
-                              >
-                                Go to DDL
-                              </ContextMenuItem>
-                            </ContextMenuSubContent>
-                          </ContextMenuSub>
                           <ContextMenuSeparator
                             className={menuSeparatorClass}
                           />
 
                           <ContextMenuSub>
                             <ContextMenuSubTrigger className={menuSubClass}>
-                              SQL Scripts
+                              Generate SQL
                             </ContextMenuSubTrigger>
                             <ContextMenuSubContent className={menuContentClass}>
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleDdlClick(table),
+                                    openGeneratedSql("SELECT"),
                                   )
                                 }
                               >
-                                Show DDL
+                                SELECT
                               </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={isReadOnlyRelation}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    openGeneratedSql("INSERT"),
+                                  )
+                                }
+                              >
+                                INSERT
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={isReadOnlyRelation}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    openGeneratedSql("UPDATE"),
+                                  )
+                                }
+                              >
+                                UPDATE
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                disabled={isReadOnlyRelation}
+                                onClick={() =>
+                                  void runForSchema(schema, () =>
+                                    openGeneratedSql("DELETE"),
+                                  )
+                                }
+                              >
+                                DELETE
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleCopyTableDdl(table),
+                                    handleDdlClick(
+                                      table,
+                                      relationOperationTarget,
+                                    ),
                                   )
                                 }
                               >
-                                Copy DDL
+                                DDL
                               </ContextMenuItem>
                             </ContextMenuSubContent>
                           </ContextMenuSub>
@@ -5757,7 +7957,10 @@ export function SchemaSidebar() {
                                 className={menuItemClass}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleTruncateClick(table),
+                                    handleTruncateClick(
+                                      table,
+                                      relationOperationTarget,
+                                    ),
                                   )
                                 }
                                 disabled={
@@ -5800,7 +8003,10 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      handleEditViewClick(table),
+                                      handleEditViewClick(
+                                        table,
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5812,7 +8018,10 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      handleRefreshMaterializedViewClick(table),
+                                      handleRefreshMaterializedViewClick(
+                                        table,
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5832,7 +8041,12 @@ export function SchemaSidebar() {
                                 disabled={!canImportRelationRows}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleTableCsvImport(table, schema),
+                                    handleTableCsvImport(
+                                      table,
+                                      schema,
+                                      connectionId,
+                                      navigationDatabaseName,
+                                    ),
                                   )
                                 }
                               >
@@ -5845,7 +8059,11 @@ export function SchemaSidebar() {
                                 title="Stream auto-detected UTF-8, UTF-16, or GB18030 delimited text. TSV defaults to a tab delimiter; CSV and TXT default to a comma. Use the reviewed import when you need row ranges or column mapping."
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    importTableData(table.name, "csv"),
+                                    importTableData(
+                                      table.name,
+                                      "csv",
+                                      relationOperationTarget,
+                                    ),
                                   )
                                 }
                               >
@@ -5857,7 +8075,12 @@ export function SchemaSidebar() {
                                 disabled={!canImportRelationRows}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleTableJsonImport(table, schema),
+                                    handleTableJsonImport(
+                                      table,
+                                      schema,
+                                      connectionId,
+                                      navigationDatabaseName,
+                                    ),
                                   )
                                 }
                               >
@@ -5869,7 +8092,12 @@ export function SchemaSidebar() {
                                 disabled={!canImportRelationRows}
                                 onClick={() =>
                                   void runForSchema(schema, () =>
-                                    handleTableXlsxImport(table, schema),
+                                    handleTableXlsxImport(
+                                      table,
+                                      schema,
+                                      connectionId,
+                                      navigationDatabaseName,
+                                    ),
                                   )
                                 }
                               >
@@ -5909,7 +8137,12 @@ export function SchemaSidebar() {
                                     className={menuItemClass}
                                     onClick={() =>
                                       void runForSchema(schema, () =>
-                                        exportTableData(table.name, "csv"),
+                                        exportTableData(
+                                          table.name,
+                                          "csv",
+                                          "utf8",
+                                          relationOperationTarget,
+                                        ),
                                       )
                                     }
                                   >
@@ -5924,6 +8157,7 @@ export function SchemaSidebar() {
                                           table.name,
                                           "csv",
                                           "utf8Bom",
+                                          relationOperationTarget,
                                         ),
                                       )
                                     }
@@ -5938,7 +8172,12 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "json"),
+                                      exportTableData(
+                                        table.name,
+                                        "json",
+                                        "utf8",
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5951,7 +8190,12 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "jsonl"),
+                                      exportTableData(
+                                        table.name,
+                                        "jsonl",
+                                        "utf8",
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5964,7 +8208,12 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "sql"),
+                                      exportTableData(
+                                        table.name,
+                                        "sql",
+                                        "utf8",
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5977,7 +8226,12 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "tsv"),
+                                      exportTableData(
+                                        table.name,
+                                        "tsv",
+                                        "utf8",
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -5994,6 +8248,7 @@ export function SchemaSidebar() {
                                         table.name,
                                         "xlsx",
                                         "binary",
+                                        relationOperationTarget,
                                       ),
                                     )
                                   }
@@ -6011,6 +8266,7 @@ export function SchemaSidebar() {
                                         table.name,
                                         "parquet",
                                         "binary",
+                                        relationOperationTarget,
                                       ),
                                     )
                                   }
@@ -6028,6 +8284,7 @@ export function SchemaSidebar() {
                                         table.name,
                                         "arrow",
                                         "binary",
+                                        relationOperationTarget,
                                       ),
                                     )
                                   }
@@ -6041,7 +8298,12 @@ export function SchemaSidebar() {
                                   className={menuItemClass}
                                   onClick={() =>
                                     void runForSchema(schema, () =>
-                                      exportTableData(table.name, "markdown"),
+                                      exportTableData(
+                                        table.name,
+                                        "markdown",
+                                        "utf8",
+                                        relationOperationTarget,
+                                      ),
                                     )
                                   }
                                 >
@@ -6107,7 +8369,7 @@ export function SchemaSidebar() {
                             disabled={!relationCapabilities.supportsTableDdl}
                             onClick={() =>
                               void runForSchema(schema, () =>
-                                handleDropClick(table),
+                                handleDropClick(table, relationOperationTarget),
                               )
                             }
                             className={cn(menuItemClass, "text-destructive")}
@@ -6116,7 +8378,7 @@ export function SchemaSidebar() {
                             Drop {relationObjectLabel(table.type)}...
                           </ContextMenuItem>
                         </ContextMenuContent>
-                      </ContextMenu>
+                      </ExplorerSharedContextMenu>
                       {isTableExpanded && (
                         <TableObjectTree
                           identity={{
@@ -6133,6 +8395,12 @@ export function SchemaSidebar() {
                           includeConstraints={
                             relationCapabilities.supportsTableConstraints
                           }
+                          triggers={
+                            triggersByRelation.get(
+                              table.name.toLocaleLowerCase(),
+                            ) || []
+                          }
+                          onTriggerOpen={viewSchemaObjectSource}
                           onReferenceSelect={({
                             schema: referencedSchema,
                             table: referencedTable,
@@ -6140,27 +8408,34 @@ export function SchemaSidebar() {
                             void handleTableDoubleClick(
                               { name: referencedTable },
                               referencedSchema,
+                              connectionId,
+                              navigationDatabaseName,
                             )
                           }
                         />
                       )}
                     </div>
                   );
-                })}
+                    }}
+                  />
+                </ExplorerContextMenuHost>
               </div>
             )}
           </>
         )}
-        {renderRoutines()}
-        {renderSchemaObjectDescriptors()}
         {renderVirtualViews()}
-      </div>
+        {renderRoutines()}
+          {renderSchemaObjectDescriptors()}
+        </div>
+      </ExplorerContextMenuHost>
     );
   };
 
   return (
     <div
       className="flex h-full min-w-0 flex-col"
+      data-explorer-view-mode={explorerViewMode}
+      data-explorer-horizontal-scroll={allowExplorerHorizontalScroll}
       onKeyDownCapture={handleExplorerKeyDownCapture}
     >
       <div className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)]">
@@ -6171,6 +8446,18 @@ export function SchemaSidebar() {
           onCollapseAll={handleCollapseAll}
           onRefresh={() => void handleRefresh()}
           onHide={() => setToolWindowVisible("databaseExplorer", false)}
+          viewMode={explorerViewMode}
+          filterScope={explorerFilterScope}
+          connectionSortMode={explorerConnectionSortMode}
+          onViewModeChange={(mode) =>
+            setExplorerViewMode(explorerStateScope, mode)
+          }
+          onFilterScopeChange={(scope) =>
+            setExplorerFilterScope(explorerStateScope, scope)
+          }
+          onConnectionSortModeChange={(mode) =>
+            setExplorerConnectionSortMode(explorerStateScope, mode)
+          }
         />
 
         <DatabaseExplorerToolbar
@@ -6189,53 +8476,183 @@ export function SchemaSidebar() {
             Boolean(activeConnectionId) &&
             supportsDatabaseAdministration(activeDriver)
           }
-          isFilterVisible={isFilterVisible}
+          isFilterVisible
           onNewQueryConsole={handleNewQueryConsole}
           onNewDataSource={handleNewDataSource}
+          onNewConnectionGroup={() =>
+            setConnectionGroupDraft({ mode: "create", name: "" })
+          }
           onCreateNamespace={handleCreateDatabase}
           onCreateTable={handleCreateTable}
           onCreateView={handleCreateView}
           onRefresh={() => void handleRefresh()}
-          onToggleFilter={() => setIsFilterVisible((visible) => !visible)}
+          onToggleFilter={() => filterInputRef.current?.focus()}
           onManageAdministration={() =>
             setDatabaseAdministrationConnectionId(activeConnectionId)
           }
         />
       </div>
 
-      {isFilterVisible && (
-        <div className="relative flex h-7 shrink-0 items-center border-b border-[hsl(var(--wb-border-subtle))] px-1.5">
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[hsl(var(--wb-border-subtle))] px-1.5 py-1">
+        <div className="relative min-w-0 flex-1">
           <Search
             size={12}
-            className="pointer-events-none absolute left-2.5 wb-muted"
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 wb-muted"
           />
           <input
-            autoFocus
+            ref={filterInputRef}
             value={filterText}
             onChange={(event) => setFilterText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && filterText) {
+                event.preventDefault();
+                setFilterText("");
+              }
+            }}
             placeholder={
               activeCapabilities.dataModel === "keyValue"
                 ? "Filter keys on server"
                 : "Filter database objects"
             }
-            className="h-6 w-full rounded-[3px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] pl-6 pr-6 text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))] focus:border-[hsl(var(--wb-accent))]"
+            aria-invalid={explorerSearchPattern.invalid || undefined}
+            title={
+              explorerSearchPattern.invalid
+                ? explorerSearchPattern.error || "Invalid regular expression"
+                : undefined
+            }
+            className={cn(
+              "h-6 w-full rounded-[3px] border bg-[hsl(var(--wb-editor))] pl-6 pr-[4.75rem] text-[11px] text-[hsl(var(--wb-text))] outline-none placeholder:text-[hsl(var(--wb-text-muted))]",
+              explorerSearchPattern.invalid
+                ? "border-[hsl(var(--destructive))] focus:border-[hsl(var(--destructive))]"
+                : "border-[hsl(var(--wb-border))] focus:border-[hsl(var(--wb-accent))]",
+            )}
           />
+          <div className="absolute inset-y-0 right-0.5 flex items-center gap-0.5">
+            {filterText && (
+              <button
+                type="button"
+                className="wb-icon-button h-5 w-5"
+                onClick={() => setFilterText("")}
+                title="Clear Filter"
+                aria-label="Clear database object filter"
+              >
+                <X size={11} />
+              </button>
+            )}
+            <button
+              type="button"
+              className={cn(
+                "flex h-5 min-w-5 items-center justify-center rounded-[2px] px-0.5 font-mono text-[9px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                explorerRegexSearch &&
+                  "bg-[hsl(var(--wb-accent))]/12 text-[hsl(var(--wb-accent))]",
+                explorerSearchPattern.invalid &&
+                  "text-[hsl(var(--destructive))]",
+              )}
+              aria-label="Use regular expression search"
+              aria-pressed={explorerRegexSearch}
+              title={
+                explorerSearchPattern.invalid
+                  ? explorerSearchPattern.error || "Invalid regular expression"
+                  : "Regex search (local only)"
+              }
+              onClick={() =>
+                setExplorerRegexSearch(
+                  explorerStateScope,
+                  !explorerRegexSearch,
+                )
+              }
+            >
+              .*
+            </button>
+            <span
+              className={cn(
+                "inline-flex h-5 items-center",
+                explorerRegexSearch && "opacity-70",
+              )}
+              title={
+                explorerRegexSearch
+                  ? "Regex search is always local and never sends the expression to a database"
+                  : "Local search: search only currently loaded objects without remote requests"
+              }
+            >
+              <Switch
+                checked={
+                  explorerRegexSearch || explorerSearchMode === "local"
+                }
+                disabled={explorerRegexSearch}
+                onCheckedChange={(checked) =>
+                  setExplorerSearchMode(
+                    explorerStateScope,
+                    checked ? "local" : "global",
+                  )
+                }
+                aria-label="Search only currently loaded database objects"
+                className="h-3.5 w-6 data-[state=checked]:bg-[hsl(var(--wb-accent))] [&>span]:h-2.5 [&>span]:w-2.5 [&>span]:data-[state=checked]:translate-x-3"
+              />
+            </span>
+          </div>
+        </div>
+        {explorerConnectionVisibilityFilter && (
           <button
             type="button"
-            className="wb-icon-button absolute right-1.5 h-5 w-5"
-            onClick={() => {
-              setFilterText("");
-              setIsFilterVisible(false);
-            }}
-            title="Close Filter"
+            className="wb-icon-button h-6 w-6 shrink-0 border border-[hsl(var(--wb-accent))]/45 bg-[hsl(var(--wb-accent))]/12 text-[hsl(var(--wb-accent))]"
+            onClick={() =>
+              clearExplorerVisibilityFilter(
+                explorerStateScope,
+                explorerConnectionFilterParentId,
+              )
+            }
+            title="Connection visibility filter active · click to clear"
+            aria-label="Clear active connection visibility filter"
           >
-            <X size={11} />
+            <EyeOff size={12} />
           </button>
-        </div>
-      )}
+        )}
+        <button
+          type="button"
+          className={cn(
+            "wb-icon-button h-6 w-6 shrink-0 border border-[hsl(var(--wb-border))]",
+            showConnectedConnectionsOnly &&
+              "border-[hsl(var(--wb-accent))]/45 bg-[hsl(var(--wb-accent))]/12 text-[hsl(var(--wb-accent))]",
+          )}
+          aria-pressed={showConnectedConnectionsOnly}
+          disabled={connectedConnectionIds.length === 0}
+          onClick={() =>
+            setShowConnectedConnectionsOnly((current) => !current)
+          }
+          title="Show connected data sources only"
+        >
+          <Link2 size={12} />
+        </button>
+      </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-1 py-1 custom-scrollbar">
-        <div className="space-y-0">
+      <ExplorerVirtualizationHost>
+        <ExplorerContextMenuHost>
+          <div
+          ref={explorerScrollRef}
+          data-explorer-scroll-root
+          className={cn(
+            "min-h-0 flex-1 overflow-y-auto px-1 py-1 custom-scrollbar",
+            allowExplorerHorizontalScroll
+              ? "overflow-x-auto"
+              : "overflow-x-hidden",
+          )}
+          onScroll={(event) => {
+            if (!connectionVirtualizationArmed) return;
+            const scrollTop = event.currentTarget.scrollTop;
+            setExplorerScrollMetrics((current) =>
+              current.scrollTop === scrollTop
+                ? current
+                : { ...current, scrollTop },
+            );
+          }}
+        >
+        <div
+          className={cn(
+            "space-y-0",
+            allowExplorerHorizontalScroll && "wb-explorer-natural-width min-w-max",
+          )}
+        >
           {connections.length === 0 && connectionDisplayCache.length > 0 ? (
             <div className="space-y-0">
               {connectionDisplayCache.map((connection) => (
@@ -6345,13 +8762,167 @@ export function SchemaSidebar() {
               </button>
             </div>
           ) : (
-            connections.map((connection) => {
+            <div
+              role="tree"
+              aria-label="Database connections"
+              onDragOver={(event) => {
+                if (
+                  event.dataTransfer.types.includes(
+                    EXPLORER_CONNECTION_DRAG_TYPE,
+                  ) ||
+                  event.dataTransfer.types.includes(EXPLORER_GROUP_DRAG_TYPE)
+                ) {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const connectionIds = readExplorerDraggedConnectionIds(
+                  event.dataTransfer,
+                );
+                if (connectionIds.length > 0) {
+                  moveExplorerConnectionsToGroup(
+                    explorerStateScope,
+                    connectionIds,
+                    null,
+                  );
+                  return;
+                }
+                const groupId = event.dataTransfer.getData(
+                  EXPLORER_GROUP_DRAG_TYPE,
+                );
+                if (groupId) {
+                  moveExplorerConnectionGroup(
+                    explorerStateScope,
+                    groupId,
+                    null,
+                  );
+                }
+              }}
+            >
+              {connectionVirtualizationArmed &&
+                connectionVirtualWindow.offsetTop > 0 && (
+                  <div
+                    aria-hidden="true"
+                    style={{ height: connectionVirtualWindow.offsetTop }}
+                  />
+                )}
+              {visibleExplorerConnections.length === 0 && (
+                <div
+                  role="status"
+                  className="px-3 py-3 text-[11px] wb-muted"
+                >
+                  {showConnectedConnectionsOnly && !deferredFilterText.trim()
+                    ? "No connected data sources"
+                    : `No data sources match “${deferredFilterText.trim()}”`}
+                </div>
+              )}
+              {!deferredFilterText.trim() &&
+                orderedExplorerConnectionGroups
+                  .filter(
+                    (group) =>
+                      explorerConnectionGroupAncestorsExpanded(
+                        group,
+                        explorerConnectionGroupById,
+                        expandedObjectGroupKeys,
+                      ) &&
+                      (!showConnectedConnectionsOnly ||
+                        (explorerConnectionGroupCounts.get(group.id) ?? 0) >
+                          0) &&
+                      !visibleExplorerConnections.some(
+                        (connection) =>
+                          explorerConnectionGroupIds[connection.id] ===
+                          group.id,
+                      ),
+                  )
+                  .map((group) => (
+                    <ExplorerConnectionGroupRow
+                      key={group.id}
+                      group={group}
+                      depth={explorerConnectionGroupDepth(
+                        group,
+                        explorerConnectionGroupById,
+                      )}
+                      count={
+                        explorerConnectionGroupCounts.get(group.id) ?? 0
+                      }
+                      expanded={expandedObjectGroupKeys.includes(group.id)}
+                      selected={selectedExplorerNodeIds.includes(
+                        explorerNodeId("folder", group.id),
+                      )}
+                      onSelect={(event) =>
+                        selectExplorerNode(
+                          explorerNodeId("folder", group.id),
+                          event,
+                        )
+                      }
+                      onToggle={() =>
+                        setExpandedObjectGroupKeys((current) =>
+                          current.includes(group.id)
+                            ? current.filter((id) => id !== group.id)
+                            : [...current, group.id],
+                        )
+                      }
+                      onNewSubgroup={() =>
+                        setConnectionGroupDraft({
+                          mode: "create",
+                          groupId: group.id,
+                          name: "",
+                        })
+                      }
+                      onNewConnection={() =>
+                        handleNewDataSource(DEFAULT_DATABASE_DRIVER, group.id)
+                      }
+                      onDropConnections={(connectionIds) =>
+                        moveExplorerConnectionsToGroup(
+                          explorerStateScope,
+                          connectionIds,
+                          group.id,
+                        )
+                      }
+                      onDropGroup={(groupId, placement) =>
+                        placeExplorerConnectionGroup(
+                          explorerStateScope,
+                          groupId,
+                          group.id,
+                          placement,
+                        )
+                      }
+                      onRename={() =>
+                        setConnectionGroupDraft({
+                          mode: "rename",
+                          groupId: group.id,
+                          name: group.name,
+                        })
+                      }
+                      onDelete={() => {
+                        if (
+                          window.confirm(
+                            `Delete connection group “${group.name}”?`,
+                          )
+                        ) {
+                          deleteExplorerConnectionGroup(
+                            explorerStateScope,
+                            group.id,
+                          );
+                        }
+                      }}
+                    />
+                  ))}
+              {renderedExplorerConnections.map(
+                (connection, renderedConnectionIndex) => {
+              const connectionIndex =
+                connectionVirtualWindow.start + renderedConnectionIndex;
               const isManagedConnection = connection.origin === "managed";
               const connectionColor = connectionTreeColor(
                 connection.driver,
                 connection.color,
               );
               const isActive = connection.id === activeConnectionId;
+              const isConnectionSelected = selectedExplorerNodeIds.includes(
+                explorerNodeId("connection", connection.id),
+              );
               const isConnecting = connectingConnectionIds.includes(
                 connection.id,
               );
@@ -6360,6 +8931,9 @@ export function SchemaSidebar() {
                 connection.id,
                 connection.driver,
               );
+              const connectionCapabilities = isActive
+                ? activeCapabilities
+                : defaultDatabaseCapabilities(connection.driver);
               const connectionSchemas = isActive
                 ? schemaRows
                 : connectionMetadata.schemas;
@@ -6375,28 +8949,63 @@ export function SchemaSidebar() {
                 connectionCanBrowseDatabaseCatalogs
                   ? connectionCatalogDatabaseName(connection)
                   : "";
-              const normalizedObjectFilter = filterText
+              const normalizedObjectFilter = deferredFilterText
                 .trim()
                 .toLocaleLowerCase();
+              const connectionMatchesFilter = Boolean(
+                normalizedObjectFilter &&
+                  explorerFilterMatches(
+                    connection.name,
+                    connection.driver,
+                    connection.database,
+                  ),
+              );
+              const descendantFilterText =
+                explorerFilterScope === "connections" ||
+                (explorerFilterScope === "all" && connectionMatchesFilter)
+                  ? ""
+                  : deferredFilterText;
+              const normalizedDescendantFilter = descendantFilterText
+                .trim()
+                .toLocaleLowerCase();
+              const schemaVisibilityParentId = connectionCanBrowseDatabaseCatalogs
+                ? explorerNodeId(
+                    "database",
+                    connection.id,
+                    connectedPostgresDatabase,
+                  )
+                : explorerNodeId("connection", connection.id);
+              const schemaVisibilityFilter =
+                explorerVisibilityFilters[schemaVisibilityParentId];
+              const visibilityFilteredConnectionSchemas =
+                connectionSchemas.filter((schema) =>
+                  explorerNodePassesVisibilityFilter(
+                    schemaVisibilityFilter,
+                    explorerNodeId(
+                      "schema",
+                      connection.id,
+                      connectionCanBrowseDatabaseCatalogs
+                        ? connectedPostgresDatabase
+                        : "",
+                      schema,
+                    ),
+                    schema,
+                  ),
+                );
               const renderedConnectionSchemas =
                 isActive &&
                 connectionCanBrowseDatabaseCatalogs &&
-                normalizedObjectFilter &&
-                !connectedPostgresDatabase
-                  .toLocaleLowerCase()
-                  .includes(normalizedObjectFilter)
-                  ? connectionSchemas.filter((schema) => {
-                      if (
-                        schema
-                          .toLocaleLowerCase()
-                          .includes(normalizedObjectFilter)
-                      ) {
+                normalizedDescendantFilter &&
+                !explorerFilterMatches(connectedPostgresDatabase)
+                  ? visibilityFilteredConnectionSchemas.filter((schema) => {
+                      if (explorerFilterMatches(schema)) {
                         return true;
                       }
                       const schemaObjects = schemaObjectsFor(
                         connection.id,
                         connection.driver,
                         schema,
+                        connectedPostgresDatabase,
                       );
                       return (
                         schemaObjects.tables.length > 0 ||
@@ -6404,48 +9013,280 @@ export function SchemaSidebar() {
                         schemaObjects.functions.length > 0
                       );
                     })
-                  : connectionSchemas;
+                  : visibilityFilteredConnectionSchemas;
+              const assignedGroupId = explorerConnectionGroupIds[connection.id];
+              const assignedGroup = assignedGroupId
+                ? explorerConnectionGroupById.get(assignedGroupId)
+                : undefined;
+              const previousConnection =
+                visibleExplorerConnections[connectionIndex - 1];
+              const areConnectionGroupAncestorsExpanded = assignedGroup
+                ? explorerConnectionGroupAncestorsExpanded(
+                    assignedGroup,
+                    explorerConnectionGroupById,
+                    expandedObjectGroupKeys,
+                  )
+                : true;
+              const beginsConnectionGroup = Boolean(
+                assignedGroup &&
+                  areConnectionGroupAncestorsExpanded &&
+                  explorerConnectionGroupIds[previousConnection?.id || ""] !==
+                    assignedGroup.id,
+              );
+              const isConnectionGroupExpanded = assignedGroup
+                ? areConnectionGroupAncestorsExpanded &&
+                  expandedObjectGroupKeys.includes(assignedGroup.id)
+                : true;
+              const assignedGroupCount = assignedGroup
+                ? (explorerConnectionGroupCounts.get(assignedGroup.id) ?? 0)
+                : 0;
 
               return (
+                <Fragment key={connection.id}>
+                  {beginsConnectionGroup && assignedGroup && (
+                    <ExplorerConnectionGroupRow
+                      group={assignedGroup}
+                      depth={explorerConnectionGroupDepth(
+                        assignedGroup,
+                        explorerConnectionGroupById,
+                      )}
+                      count={assignedGroupCount}
+                      expanded={isConnectionGroupExpanded}
+                      selected={selectedExplorerNodeIds.includes(
+                        explorerNodeId("folder", assignedGroup.id),
+                      )}
+                      onSelect={(event) =>
+                        selectExplorerNode(
+                          explorerNodeId("folder", assignedGroup.id),
+                          event,
+                        )
+                      }
+                      onToggle={() =>
+                        setExpandedObjectGroupKeys((current) =>
+                          current.includes(assignedGroup.id)
+                            ? current.filter((id) => id !== assignedGroup.id)
+                            : [...current, assignedGroup.id],
+                        )
+                      }
+                      onNewSubgroup={() =>
+                        setConnectionGroupDraft({
+                          mode: "create",
+                          groupId: assignedGroup.id,
+                          name: "",
+                        })
+                      }
+                      onNewConnection={() =>
+                        handleNewDataSource(
+                          DEFAULT_DATABASE_DRIVER,
+                          assignedGroup.id,
+                        )
+                      }
+                      onDropConnections={(connectionIds) =>
+                        moveExplorerConnectionsToGroup(
+                          explorerStateScope,
+                          connectionIds,
+                          assignedGroup.id,
+                        )
+                      }
+                      onDropGroup={(groupId, placement) =>
+                        placeExplorerConnectionGroup(
+                          explorerStateScope,
+                          groupId,
+                          assignedGroup.id,
+                          placement,
+                        )
+                      }
+                      onRename={() =>
+                        setConnectionGroupDraft({
+                          mode: "rename",
+                          groupId: assignedGroup.id,
+                          name: assignedGroup.name,
+                        })
+                      }
+                      onDelete={() => {
+                        if (
+                          window.confirm(
+                            `Delete connection group “${assignedGroup.name}”? Connections will be moved to Ungrouped.`,
+                          )
+                        ) {
+                          deleteExplorerConnectionGroup(
+                            explorerStateScope,
+                            assignedGroup.id,
+                          );
+                        }
+                      }}
+                    />
+                  )}
                 <div
                   id={`database-connection-${connection.id}`}
                   key={connection.id}
                   data-database-connection-id={connection.id}
-                  className="rounded-[3px] border border-transparent transition-colors"
+                  className={cn(
+                    "wb-explorer-connection-region rounded-[3px] border border-transparent transition-colors",
+                    assignedGroup && !isConnectionGroupExpanded && "hidden",
+                    assignedGroup && "ml-3",
+                  )}
                   style={connectionRegionStyle(connection.color, isActive)}
                 >
-                  <ContextMenu>
+                  <ExplorerSharedContextMenu
+                    nodeId={explorerNodeId("connection", connection.id)}
+                  >
                     <ContextMenuTrigger asChild>
                       <div
-                        role="button"
-                        tabIndex={0}
+                        role="treeitem"
+                        data-explorer-node-id={explorerNodeId(
+                          "connection",
+                          connection.id,
+                        )}
+                        aria-expanded={isConnectionExpanded}
+                        aria-selected={isConnectionSelected}
+                        draggable
+                        onDragOver={(event) => {
+                          if (
+                            event.dataTransfer.types.includes(
+                              EXPLORER_CONNECTION_DRAG_TYPE,
+                            )
+                          ) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            event.dataTransfer.dropEffect = "move";
+                          }
+                        }}
+                        onDrop={(event) => {
+                          const draggedConnectionIds =
+                            readExplorerDraggedConnectionIds(
+                              event.dataTransfer,
+                            );
+                          if (
+                            draggedConnectionIds.length === 0 ||
+                            draggedConnectionIds.includes(connection.id)
+                          ) {
+                            return;
+                          }
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const bounds =
+                            event.currentTarget.getBoundingClientRect();
+                          const placement =
+                            event.clientY < bounds.top + bounds.height / 2
+                              ? "before"
+                              : "after";
+                          const orderedIds = reorderExplorerConnectionIds(
+                            visibleExplorerConnections.map(
+                              (candidate) => candidate.id,
+                            ),
+                            draggedConnectionIds,
+                            connection.id,
+                            placement,
+                          );
+                          moveExplorerConnectionsToGroup(
+                            explorerStateScope,
+                            draggedConnectionIds,
+                            assignedGroupId || null,
+                          );
+                          setExplorerConnectionOrder(
+                            explorerStateScope,
+                            orderedIds,
+                          );
+                          setExplorerConnectionSortMode(
+                            explorerStateScope,
+                            "manual",
+                          );
+                        }}
+                        onDragStart={(event) => {
+                          const draggedConnectionIds = isConnectionSelected
+                            ? connections
+                                .filter((candidate) =>
+                                  selectedExplorerNodeIds.includes(
+                                    explorerNodeId(
+                                      "connection",
+                                      candidate.id,
+                                    ),
+                                  ),
+                                )
+                                .map((candidate) => candidate.id)
+                            : [connection.id];
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData(
+                            EXPLORER_CONNECTION_DRAG_TYPE,
+                            JSON.stringify(draggedConnectionIds),
+                          );
+                        }}
+                        tabIndex={
+                          isConnectionSelected ||
+                          (selectedExplorerNodeIds.length === 0 &&
+                            renderedConnectionIndex === 0)
+                            ? 0
+                            : -1
+                        }
                         className={cn(
-                          "wb-tree-row flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
-                          isActive
+                          "wb-tree-row flex h-7 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] transition-colors",
+                          isConnectionSelected || isActive
                             ? "wb-tree-row-selected"
                             : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                         )}
-                        onClick={() =>
-                          void handleConnectionRowClick(connection.id)
+                        onClick={(event) =>
+                          void handleConnectionSelect(connection.id, event)
+                        }
+                        onDoubleClick={() =>
+                          void handleConnectionToggle(connection.id)
+                        }
+                        onContextMenu={() =>
+                          void handleConnectionSelect(connection.id)
                         }
                         onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
+                          if (event.key === "Enter") {
                             event.preventDefault();
-                            void handleConnectionRowClick(connection.id);
+                            void handleConnectionSelect(connection.id);
+                          } else if (event.key === " ") {
+                            event.preventDefault();
+                            void handleConnectionToggle(connection.id);
+                          } else if (event.key === "ArrowRight") {
+                            event.preventDefault();
+                            void handleConnectionToggle(connection.id, true);
+                          } else if (event.key === "ArrowLeft") {
+                            event.preventDefault();
+                            void handleConnectionToggle(connection.id, false);
+                          } else if (
+                            event.key === "ArrowDown" ||
+                            event.key === "ArrowUp"
+                          ) {
+                            event.preventDefault();
+                            const nextId = moveExplorerTreeFocus(
+                              event.currentTarget,
+                              event.key === "ArrowDown" ? 1 : -1,
+                            );
+                            if (nextId) selectExplorerNode(nextId);
                           }
                         }}
                       >
-                        {isConnectionExpanded ? (
-                          <ChevronDown
-                            size={13}
-                            className="wb-tree-chevron shrink-0 wb-muted"
-                          />
-                        ) : (
-                          <ChevronRight
-                            size={13}
-                            className="wb-tree-chevron shrink-0 wb-muted"
-                          />
-                        )}
+                        <button
+                          type="button"
+                          className="-ml-0.5 inline-flex h-5 w-4 shrink-0 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover-strong))] hover:text-[hsl(var(--wb-text))]"
+                          aria-label={
+                            isConnectionExpanded
+                              ? `Collapse ${connection.name}`
+                              : `Expand ${connection.name}`
+                          }
+                          tabIndex={-1}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleConnectionToggle(connection.id);
+                          }}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                        >
+                          {isConnectionExpanded ? (
+                            <ChevronDown
+                              size={13}
+                              className="wb-tree-chevron shrink-0"
+                            />
+                          ) : (
+                            <ChevronRight
+                              size={13}
+                              className="wb-tree-chevron shrink-0"
+                            />
+                          )}
+                        </button>
                         <ConnectionGlyph
                           driver={connection.driver}
                           icon={connection.icon}
@@ -6483,6 +9324,23 @@ export function SchemaSidebar() {
                               {connection.note.trim()}
                             </span>
                           )}
+                        {connection.environment === "production" && (
+                          <span
+                            className="inline-flex h-4 shrink-0 items-center gap-0.5 rounded-[3px] border border-red-400/30 bg-red-500/10 px-1 text-[8px] font-semibold uppercase tracking-wide text-red-300"
+                            title="Production data source. AI database mutations are blocked."
+                          >
+                            <AlertTriangle size={8} />
+                            Prod
+                          </span>
+                        )}
+                        {connection.environment === "staging" && (
+                          <span
+                            className="inline-flex h-4 shrink-0 items-center rounded-[3px] border border-amber-400/25 bg-amber-500/8 px-1 text-[8px] font-medium uppercase tracking-wide text-amber-300/90"
+                            title="Staging data source"
+                          >
+                            Stg
+                          </span>
+                        )}
                         {isManagedConnection && (
                           <span
                             className="inline-flex h-4 shrink-0 items-center gap-1 rounded-[3px] border border-[hsl(var(--wb-accent)/0.35)] bg-[hsl(var(--wb-accent)/0.08)] px-1 text-[8px] font-medium uppercase tracking-wide text-[hsl(var(--wb-accent))]"
@@ -6508,38 +9366,104 @@ export function SchemaSidebar() {
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className={menuContentClass}>
-                      <ContextMenuSub>
-                        <ContextMenuSubTrigger
-                          className={menuSubClass}
-                          disabled={isManagedConnection}
+                      <ContextMenuItem
+                        className={menuItemClass}
+                        disabled={isConnecting}
+                        onClick={() => {
+                          if (connectedConnectionIds.includes(connection.id)) {
+                            void setActiveConnection(connection.id).then(
+                              (error) => {
+                                if (!error) void disconnect();
+                              },
+                            );
+                            return;
+                          }
+                          void handleConnectionSelect(connection.id);
+                        }}
+                      >
+                        <Database className="mr-2 h-3.5 w-3.5" />
+                        {connectedConnectionIds.includes(connection.id)
+                          ? "Disconnect"
+                          : "Connect"}
+                      </ContextMenuItem>
+                      {connectionCapabilities.supportsSqlQuery && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() => {
+                          void setActiveConnection(connection.id).then(
+                            (error) => {
+                              if (error) {
+                                setNamespaceError(error);
+                                return;
+                              }
+                              createTab(
+                                "query",
+                                `console [${connection.name}]`,
+                                "",
+                                {
+                                  connectionId: connection.id,
+                                  schemaName:
+                                    connectionMetadata.currentSchema ||
+                                    connectionMetadata.defaultSchema ||
+                                    undefined,
+                                },
+                              );
+                            },
+                          );
+                          }}
                         >
+                          <Code2 className="mr-2 h-3.5 w-3.5" />
+                          New Query Console
+                        </ContextMenuItem>
+                      )}
+                      {connectionCapabilities.supportsSqlQuery &&
+                        renderSqlHistorySubmenu({
+                          connectionId: connection.id,
+                        })}
+                      <ContextMenuSeparator className={menuSeparatorClass} />
+                      {!isManagedConnection &&
+                        (connectionCapabilities.supportsCreateDatabase ||
+                          (isActive &&
+                            Boolean(currentSchema) &&
+                            canBrowseTables &&
+                            connectionCapabilities.supportsTableDdl) ||
+                          (isFlatKeyValueTree &&
+                            connection.driver === "redis")) && (
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
                           <Plus className="mr-2 h-3.5 w-3.5" />
                           New
-                        </ContextMenuSubTrigger>
-                        <ContextMenuSubContent className={menuContentClass}>
-                          <ContextMenuItem
-                            className={menuItemClass}
-                            onClick={handleCreateDatabase}
-                            disabled={
-                              isManagedConnection ||
-                              !activeCapabilities.supportsCreateDatabase
-                            }
-                          >
-                            {namespaceLabel}
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            className={menuItemClass}
-                            onClick={handleCreateTable}
-                            disabled={
-                              isManagedConnection ||
-                              !isActive ||
-                              !currentSchema ||
-                              !canBrowseTables ||
-                              !activeCapabilities.supportsTableDdl
-                            }
-                          >
-                            Table
-                          </ContextMenuItem>
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                          {connectionCapabilities.supportsCreateDatabase && (
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                void setActiveConnection(connection.id).then(
+                                  (error) => {
+                                    if (error) {
+                                      setNamespaceError(error);
+                                      return;
+                                    }
+                                    setIsCreateDbDialogOpen(true);
+                                  },
+                                )
+                              }
+                            >
+                              {namespaceLabel}
+                            </ContextMenuItem>
+                          )}
+                          {isActive &&
+                            currentSchema &&
+                            canBrowseTables &&
+                            connectionCapabilities.supportsTableDdl && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={handleCreateTable}
+                              >
+                                Table
+                              </ContextMenuItem>
+                            )}
                           {isFlatKeyValueTree &&
                             connection.driver === "redis" && (
                               <ContextMenuItem
@@ -6559,53 +9483,119 @@ export function SchemaSidebar() {
                                 Key
                               </ContextMenuItem>
                             )}
-                        </ContextMenuSubContent>
-                      </ContextMenuSub>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+                      )}
                       <ContextMenuItem
                         className={menuItemClass}
                         onClick={() => void copyText(connection.name)}
                       >
+                        <Clipboard className="mr-2 h-3.5 w-3.5" />
                         Copy Name
                       </ContextMenuItem>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        disabled={
-                          !defaultDatabaseCapabilities(connection.driver)
-                            .supportsSqlQuery ||
-                          !defaultDatabaseCapabilities(connection.driver)
-                            .supportsTableBrowsing
-                        }
-                        onClick={() =>
-                          window.dispatchEvent(
-                            new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
-                              detail: {
-                                connectionId: connection.id,
-                                database: connectionCanBrowseDatabaseCatalogs
-                                  ? connectedPostgresDatabase
-                                  : undefined,
-                              },
-                            }),
-                          )
-                        }
-                      >
-                        <Search className="mr-2 h-3.5 w-3.5" />
-                        Search Current Database...
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        className={menuItemClass}
-                        disabled={
-                          !defaultDatabaseCapabilities(connection.driver)
-                            .supportsTableBrowsing ||
-                          defaultDatabaseCapabilities(connection.driver)
-                            .dataModel !== "relational"
-                        }
-                        onClick={() =>
-                          openDatabaseBrowser(connection.id, connection.name)
-                        }
-                      >
-                        <Database className="mr-2 h-3.5 w-3.5" />
-                        Browse Databases
-                      </ContextMenuItem>
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger className={menuSubClass}>
+                          <EyeOff className="mr-2 h-3.5 w-3.5" />
+                          Filter
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent className={menuContentClass}>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              hideExplorerNodes(
+                                explorerStateScope,
+                                explorerConnectionFilterParentId,
+                                connectionIdsForExplorerAction(
+                                  connection.id,
+                                ).map((connectionId) =>
+                                  explorerNodeId("connection", connectionId),
+                                ),
+                              )
+                            }
+                          >
+                            <EyeOff className="mr-2 h-3.5 w-3.5" />
+                            Hide selected data source
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              showOnlyExplorerNodes(
+                                explorerStateScope,
+                                explorerConnectionFilterParentId,
+                                connectionIdsForExplorerAction(
+                                  connection.id,
+                                ).map((connectionId) =>
+                                  explorerNodeId("connection", connectionId),
+                                ),
+                              )
+                            }
+                          >
+                            <Eye className="mr-2 h-3.5 w-3.5" />
+                            Show only selected data source
+                          </ContextMenuItem>
+                          <ContextMenuSeparator
+                            className={menuSeparatorClass}
+                          />
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            disabled={!explorerConnectionVisibilityFilter}
+                            onClick={() =>
+                              clearExplorerVisibilityFilter(
+                                explorerStateScope,
+                                explorerConnectionFilterParentId,
+                              )
+                            }
+                          >
+                            <X className="mr-2 h-3.5 w-3.5" />
+                            Clear data source filter
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            className={menuItemClass}
+                            onClick={() =>
+                              openExplorerVisibilityFilter(
+                                explorerConnectionFilterParentId,
+                                "Data sources",
+                              )
+                            }
+                          >
+                            <SearchCode className="mr-2 h-3.5 w-3.5" />
+                            Configure filter…
+                          </ContextMenuItem>
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
+                      {connectionCapabilities.supportsSqlQuery &&
+                        connectionCapabilities.supportsTableBrowsing && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() =>
+                            window.dispatchEvent(
+                              new CustomEvent(APP_EVENT_OPEN_DATABASE_SEARCH, {
+                                detail: {
+                                  connectionId: connection.id,
+                                  database: connectionCanBrowseDatabaseCatalogs
+                                    ? connectedPostgresDatabase
+                                    : undefined,
+                                },
+                              }),
+                            )
+                          }
+                        >
+                          <Search className="mr-2 h-3.5 w-3.5" />
+                          Search Current Database...
+                        </ContextMenuItem>
+                      )}
+                      {connectionCapabilities.supportsTableBrowsing &&
+                        connectionCapabilities.dataModel === "relational" && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() =>
+                            openDatabaseBrowser(connection.id, connection.name)
+                          }
+                        >
+                          <Database className="mr-2 h-3.5 w-3.5" />
+                          Browse Databases
+                        </ContextMenuItem>
+                      )}
                       {normalizeDatabaseDriverName(connection.driver) ===
                         "rocketmq" && (
                         <ContextMenuItem
@@ -6656,6 +9646,82 @@ export function SchemaSidebar() {
                           Properties...
                         </ContextMenuItem>
                       )}
+                      {!isManagedConnection && (
+                        <ContextMenuItem
+                          className={menuItemClass}
+                          onClick={() => handleDuplicateConnection(connection)}
+                        >
+                          <CopyPlus className="mr-2 h-3.5 w-3.5" />
+                          Duplicate Data Source...
+                        </ContextMenuItem>
+                      )}
+                      {!isManagedConnection && (
+                        <ContextMenuSub>
+                          <ContextMenuSubTrigger className={menuSubClass}>
+                            <FolderOpen className="mr-2 h-3.5 w-3.5" />
+                            Move to Group
+                          </ContextMenuSubTrigger>
+                          <ContextMenuSubContent className={menuContentClass}>
+                            {explorerConnectionGroups.map((group) => (
+                              <ContextMenuItem
+                                key={group.id}
+                                className={menuItemClass}
+                                disabled={assignedGroupId === group.id}
+                                onClick={() => {
+                                  moveExplorerConnectionsToGroup(
+                                    explorerStateScope,
+                                    connectionIdsForExplorerAction(
+                                      connection.id,
+                                    ),
+                                    group.id,
+                                  );
+                                  setExpandedObjectGroupKeys((current) =>
+                                    current.includes(group.id)
+                                      ? current
+                                      : [...current, group.id],
+                                  );
+                                }}
+                              >
+                                <Folder className="mr-2 h-3.5 w-3.5 text-amber-400/85" />
+                                {group.name}
+                              </ContextMenuItem>
+                            ))}
+                            {explorerConnectionGroups.length > 0 && (
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                            )}
+                            {assignedGroupId && (
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  moveExplorerConnectionsToGroup(
+                                    explorerStateScope,
+                                    connectionIdsForExplorerAction(
+                                      connection.id,
+                                    ),
+                                    null,
+                                  )
+                                }
+                              >
+                                Ungrouped
+                              </ContextMenuItem>
+                            )}
+                            <ContextMenuItem
+                              className={menuItemClass}
+                              onClick={() =>
+                                setConnectionGroupDraft({
+                                  mode: "create",
+                                  name: "",
+                                })
+                              }
+                            >
+                              <FolderPlus className="mr-2 h-3.5 w-3.5" />
+                              New Group…
+                            </ContextMenuItem>
+                          </ContextMenuSubContent>
+                        </ContextMenuSub>
+                      )}
                       {!isManagedConnection &&
                         supportsDatabaseAdministration(connection.driver) && (
                           <ContextMenuItem
@@ -6669,14 +9735,11 @@ export function SchemaSidebar() {
                             Database Administration...
                           </ContextMenuItem>
                         )}
-                      <ContextMenuSub>
+                      {!isManagedConnection &&
+                        connectionCapabilities.supportsSqlQuery && (
+                        <ContextMenuSub>
                         <ContextMenuSubTrigger
                           className={menuSubClass}
-                          disabled={
-                            isManagedConnection ||
-                            !defaultDatabaseCapabilities(connection.driver)
-                              .supportsSqlQuery
-                          }
                         >
                           Import/Export
                         </ContextMenuSubTrigger>
@@ -6732,7 +9795,8 @@ export function SchemaSidebar() {
                             Import SQL Script...
                           </ContextMenuItem>
                         </ContextMenuSubContent>
-                      </ContextMenuSub>
+                        </ContextMenuSub>
+                      )}
                       {!isManagedConnection && (
                         <>
                           <ContextMenuSeparator
@@ -6754,11 +9818,12 @@ export function SchemaSidebar() {
                         </>
                       )}
                     </ContextMenuContent>
-                  </ContextMenu>
+                  </ExplorerSharedContextMenu>
 
                   {isConnectionExpanded ? (
                     <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
                       <PostgresDatabaseTree
+                        explorerScopeId={explorerStateScope}
                         connectionId={connection.id}
                         key={`${connection.id}:${
                           connectionCanBrowseDatabaseCatalogs
@@ -6799,7 +9864,9 @@ export function SchemaSidebar() {
                             : undefined
                         }
                         filterText={
-                          connectionCanBrowseDatabaseCatalogs ? filterText : ""
+                          connectionCanBrowseDatabaseCatalogs
+                            ? descendantFilterText
+                            : ""
                         }
                         databaseMatchesFilter={(database, normalizedFilter) =>
                           postgresDatabaseMatchesFilter(
@@ -6809,6 +9876,7 @@ export function SchemaSidebar() {
                             normalizedFilter,
                           )
                         }
+                        matchesFilter={explorerFilterMatches}
                         onLoadDatabase={
                           isActive && connectionCanBrowseDatabaseCatalogs
                             ? async (database) => {
@@ -6843,6 +9911,50 @@ export function SchemaSidebar() {
                             <>
                               <ContextMenuItem
                                 className={menuItemClass}
+                                onClick={() => void copyText(database)}
+                              >
+                                <Clipboard className="mr-2 h-3.5 w-3.5" />
+                                Copy Name
+                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  openObjectBrowser(
+                                    connection.id,
+                                    connection.name,
+                                    database,
+                                  )
+                                }
+                              >
+                                <TableProperties className="mr-2 h-3.5 w-3.5" />
+                                Open Object Browser
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                className={menuItemClass}
+                                onClick={() =>
+                                  createTab(
+                                    "query",
+                                    `console [${database}]`,
+                                    "",
+                                    {
+                                      connectionId: connection.id,
+                                      databaseName: database,
+                                    },
+                                  )
+                                }
+                              >
+                                <Code2 className="mr-2 h-3.5 w-3.5" />
+                                New Query Console
+                              </ContextMenuItem>
+                              {renderSqlHistorySubmenu({
+                                connectionId: connection.id,
+                                databaseName: database,
+                              })}
+                              <ContextMenuItem
+                                className={menuItemClass}
                                 onClick={() =>
                                   window.dispatchEvent(
                                     new CustomEvent(
@@ -6860,12 +9972,9 @@ export function SchemaSidebar() {
                                 <Search className="mr-2 h-3.5 w-3.5" />
                                 Search Database Rows...
                               </ContextMenuItem>
-                              <ContextMenuItem
-                                className={menuItemClass}
-                                onClick={() => void copyText(database)}
-                              >
-                                Copy Name
-                              </ContextMenuItem>
+                              <ContextMenuSeparator
+                                className={menuSeparatorClass}
+                              />
                               <ContextMenuItem
                                 className={menuItemClass}
                                 onClick={() =>
@@ -6969,7 +10078,9 @@ export function SchemaSidebar() {
                         renderDatabaseChildren={(database) =>
                           database === connectedPostgresDatabase ? null : (
                             <PostgresRemoteDatabaseContents
+                              explorerScopeId={explorerStateScope}
                               connectionId={connection.id}
+                              driver={connection.driver}
                               database={database}
                               schemas={
                                 postgresRemoteDatabases.connectionId ===
@@ -6987,14 +10098,11 @@ export function SchemaSidebar() {
                                   : undefined
                               }
                               filterText={
-                                database
-                                  .toLocaleLowerCase()
-                                  .includes(
-                                    filterText.trim().toLocaleLowerCase(),
-                                  )
+                                explorerFilterMatches(database)
                                   ? ""
-                                  : filterText
+                                  : descendantFilterText
                               }
+                              matchesFilter={explorerFilterMatches}
                               onTablesLoaded={(schema, databaseTables) =>
                                 handlePostgresRemoteTablesLoaded(
                                   connection.id,
@@ -7013,6 +10121,42 @@ export function SchemaSidebar() {
                                   schemaName: schema,
                                 });
                               }}
+                              onOpenSchemaObjects={(databaseName, schema) =>
+                                openObjectBrowser(
+                                  connection.id,
+                                  connection.name,
+                                  databaseName,
+                                  schema,
+                                )
+                              }
+                              renderQueryContextMenu={(databaseName, schema) => (
+                                <>
+                                  <ContextMenuItem
+                                    className={menuItemClass}
+                                    onClick={() =>
+                                      createTab(
+                                        "query",
+                                        `console [${schema}]`,
+                                        "",
+                                        {
+                                          connectionId: connection.id,
+                                          databaseName,
+                                          schemaName: schema,
+                                          targetSchema: schema,
+                                        },
+                                      )
+                                    }
+                                  >
+                                    <Code2 className="mr-2 h-3.5 w-3.5" />
+                                    New Query Console
+                                  </ContextMenuItem>
+                                  {renderSqlHistorySubmenu({
+                                    connectionId: connection.id,
+                                    databaseName,
+                                    schemaName: schema,
+                                  })}
+                                </>
+                              )}
                               onOpenSchemaDataTransfer={(
                                 databaseName,
                                 schema,
@@ -7025,6 +10169,12 @@ export function SchemaSidebar() {
                                 })
                               }
                               activationMode={explorerActivationMode}
+                              includeIndexes={
+                                activeCapabilities.supportsTableIndexes
+                              }
+                              includeConstraints={
+                                activeCapabilities.supportsTableConstraints
+                              }
                               onOpenSchemaDataCompare={(databaseName, schema) =>
                                 void handleOpenDataCompare({
                                   connection,
@@ -7111,10 +10261,28 @@ export function SchemaSidebar() {
                             Loading {namespaceLabelPlural}...
                           </div>
                         ) : renderedConnectionSchemas.length === 0 ? (
-                          <div className="px-1.5 py-1 text-[11px] italic wb-muted">
-                            {normalizedObjectFilter
-                              ? `No ${namespaceLabelPlural} match “${filterText.trim()}”`
-                              : `No ${namespaceLabelPlural} found`}
+                          <div className="flex min-h-7 items-center gap-1 px-1.5 py-1 text-[11px] italic wb-muted">
+                            <span>
+                              {normalizedObjectFilter
+                                ? `No ${namespaceLabelPlural} match “${filterText.trim()}”`
+                                : schemaVisibilityFilter
+                                  ? `All ${namespaceLabelPlural} are hidden by the active filter`
+                                  : `No ${namespaceLabelPlural} found`}
+                            </span>
+                            {schemaVisibilityFilter && (
+                              <button
+                                type="button"
+                                className="ml-auto shrink-0 not-italic text-[10px] text-[hsl(var(--wb-accent))] hover:underline"
+                                onClick={() =>
+                                  clearExplorerVisibilityFilter(
+                                    explorerStateScope,
+                                    schemaVisibilityParentId,
+                                  )
+                                }
+                              >
+                                Clear filter
+                              </button>
+                            )}
                           </div>
                         ) : (
                           renderedConnectionSchemas.map((schema) => {
@@ -7129,8 +10297,36 @@ export function SchemaSidebar() {
                               connection.driver,
                               schema,
                             );
+                            const schemaExplorerNodeId = explorerNodeId(
+                              "schema",
+                              connection.id,
+                              connectionCanBrowseDatabaseCatalogs
+                                ? connectedPostgresDatabase
+                                : "",
+                              schema,
+                            );
                             const isSchemaExpanded =
                               expandedSchemaKeys.includes(schemaKey);
+                            const isSchemaSelected =
+                              selectedExplorerNodeIds.includes(
+                                schemaExplorerNodeId,
+                              );
+                            const schemaNodeIdsForAction = isSchemaSelected
+                              ? connectionSchemas
+                                  .map((candidate) =>
+                                    explorerNodeId(
+                                      "schema",
+                                      connection.id,
+                                      connectionCanBrowseDatabaseCatalogs
+                                        ? connectedPostgresDatabase
+                                        : "",
+                                      candidate,
+                                    ),
+                                  )
+                                  .filter((nodeId) =>
+                                    selectedExplorerNodeIds.includes(nodeId),
+                                  )
+                              : [schemaExplorerNodeId];
                             const schemaNodeState =
                               metadataNodeStates[
                                 getSchemaMetadataNodeKey(
@@ -7142,11 +10338,16 @@ export function SchemaSidebar() {
 
                             return (
                               <div key={schema} className="min-w-0">
-                                <ContextMenu>
+                                <ExplorerSharedContextMenu
+                                  nodeId={schemaExplorerNodeId}
+                                >
                                   <ContextMenuTrigger asChild>
-                                    <button
-                                      type="button"
+                                    <div
+                                      role="treeitem"
+                                      data-explorer-node-id={schemaExplorerNodeId}
                                       aria-expanded={isSchemaExpanded}
+                                      aria-selected={isSchemaSelected}
+                                      tabIndex={isSchemaSelected ? 0 : -1}
                                       data-database-schema-key={databaseSchemaNavigationKey(
                                         {
                                           connectionId: connection.id,
@@ -7161,10 +10362,14 @@ export function SchemaSidebar() {
                                         },
                                       )}
                                       className={cn(
-                                        "wb-tree-row flex h-6 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] font-normal [font-variation-settings:'wght'_430] transition-colors",
+                                        "wb-tree-row flex h-7 w-full min-w-0 items-center gap-1 rounded-[3px] px-1.5 text-left text-[11px] font-normal [font-variation-settings:'wght'_430] transition-colors",
+                                        !connectionCanBrowseDatabaseCatalogs &&
+                                          isSchemaExpanded &&
+                                          !normalizedObjectFilter &&
+                                          "sticky top-0 z-[2] bg-[hsl(var(--wb-panel))]",
                                         isLoginSchema &&
                                           "font-semibold [font-variation-settings:'wght'_600]",
-                                        isCurrentSchema
+                                        isSchemaSelected || isCurrentSchema
                                           ? "wb-tree-row-selected font-medium text-[hsl(var(--wb-text))]"
                                           : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                                       )}
@@ -7173,30 +10378,116 @@ export function SchemaSidebar() {
                                           ? `${schema} · current login user`
                                           : schema
                                       }
-                                      onClick={() => {
-                                        void handleSchemaRowClick(
+                                      onClick={(event) => {
+                                        void activateSchemaRow(
                                           connection.id,
                                           schema,
                                           isCurrentSchema,
+                                          event,
                                         ).catch((error) => {
                                           console.warn(
-                                            "Failed to toggle schema",
+                                            "Failed to select schema",
                                             error,
                                           );
                                         });
                                       }}
+                                      onDoubleClick={() => {
+                                        void handleSchemaToggle(
+                                          connection.id,
+                                          schema,
+                                          isCurrentSchema,
+                                        );
+                                      }}
+                                      onContextMenu={() => {
+                                        void activateSchemaRow(
+                                          connection.id,
+                                          schema,
+                                          isCurrentSchema,
+                                        );
+                                      }}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                          event.preventDefault();
+                                          void activateSchemaRow(
+                                            connection.id,
+                                            schema,
+                                            isCurrentSchema,
+                                          );
+                                        } else if (event.key === " ") {
+                                          event.preventDefault();
+                                          void handleSchemaToggle(
+                                            connection.id,
+                                            schema,
+                                            isCurrentSchema,
+                                          );
+                                        } else if (event.key === "ArrowRight") {
+                                          event.preventDefault();
+                                          void handleSchemaToggle(
+                                            connection.id,
+                                            schema,
+                                            isCurrentSchema,
+                                            true,
+                                          );
+                                        } else if (event.key === "ArrowLeft") {
+                                          event.preventDefault();
+                                          void handleSchemaToggle(
+                                            connection.id,
+                                            schema,
+                                            isCurrentSchema,
+                                            false,
+                                          );
+                                        } else if (
+                                          event.key === "ArrowDown" ||
+                                          event.key === "ArrowUp"
+                                        ) {
+                                          event.preventDefault();
+                                          const nextId = moveExplorerTreeFocus(
+                                            event.currentTarget,
+                                            event.key === "ArrowDown" ? 1 : -1,
+                                          );
+                                          if (nextId) selectExplorerNode(nextId);
+                                        }
+                                      }}
                                     >
-                                      {isSchemaExpanded ? (
-                                        <ChevronDown
-                                          size={12}
-                                          className="wb-tree-chevron shrink-0 wb-muted"
-                                        />
-                                      ) : (
-                                        <ChevronRight
-                                          size={12}
-                                          className="wb-tree-chevron shrink-0 wb-muted"
-                                        />
-                                      )}
+                                      <button
+                                        type="button"
+                                        className="-ml-0.5 inline-flex h-5 w-4 shrink-0 items-center justify-center rounded-[3px] wb-muted hover:bg-[hsl(var(--wb-hover-strong))] hover:text-[hsl(var(--wb-text))]"
+                                        aria-label={
+                                          isSchemaExpanded
+                                            ? `Collapse ${schema}`
+                                            : `Expand ${schema}`
+                                        }
+                                        aria-expanded={isSchemaExpanded}
+                                        tabIndex={-1}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          void handleSchemaToggle(
+                                            connection.id,
+                                            schema,
+                                            isCurrentSchema,
+                                          );
+                                        }}
+                                        onDoubleClick={(event) =>
+                                          event.stopPropagation()
+                                        }
+                                      >
+                                        <span className="sr-only">
+                                          {isFlatKeyValueTree
+                                            ? `db ${schema}`
+                                            : schema}
+                                        </span>
+                                        {isSchemaExpanded ? (
+                                          <ChevronDown
+                                            size={12}
+                                            className="wb-tree-chevron shrink-0"
+                                          />
+                                        ) : (
+                                          <ChevronRight
+                                            size={12}
+                                            className="wb-tree-chevron shrink-0"
+                                          />
+                                        )}
+                                      </button>
                                       {isFlatKeyValueTree ? (
                                         <Database
                                           size={12}
@@ -7217,10 +10508,21 @@ export function SchemaSidebar() {
                                           ? `db ${schema}`
                                           : schema}
                                       </span>
+                                      {schema ===
+                                        connectionMetadata.defaultSchema && (
+                                        <span className="shrink-0 rounded-[3px] border border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel-raised))] px-1 text-[8px] font-medium text-[hsl(var(--wb-text-muted))]">
+                                          Default
+                                        </span>
+                                      )}
+                                      {isLoginSchema && (
+                                        <span className="shrink-0 text-[8px] uppercase tracking-wide text-[hsl(var(--wb-accent))] opacity-80">
+                                          User
+                                        </span>
+                                      )}
                                       <MetadataNodeBadge
                                         state={schemaNodeState}
                                       />
-                                    </button>
+                                    </div>
                                   </ContextMenuTrigger>
                                   <ContextMenuContent
                                     className={menuContentClass}
@@ -7237,18 +10539,21 @@ export function SchemaSidebar() {
                                       >
                                         <ContextMenuItem
                                           className={menuItemClass}
-                                          onClick={() => {
-                                            if (activeConnectionId) {
-                                              createTableTab(
-                                                activeConnectionId,
-                                                schema,
-                                              );
-                                            }
-                                          }}
+                                          onClick={() =>
+                                            void runForExplorerSchema(
+                                              connection.id,
+                                              schema,
+                                              () => {
+                                                createTableTab(
+                                                  connection.id,
+                                                  schema,
+                                                );
+                                              },
+                                            )
+                                          }
                                           disabled={
-                                            !activeConnectionId ||
                                             !canBrowseTables ||
-                                            !activeCapabilities.supportsTableDdl
+                                            !connectionCapabilities.supportsTableDdl
                                           }
                                         >
                                           Table
@@ -7256,13 +10561,20 @@ export function SchemaSidebar() {
                                         <ContextMenuItem
                                           className={menuItemClass}
                                           onClick={() =>
-                                            void runForSchema(
+                                            void runForExplorerSchema(
+                                              connection.id,
                                               schema,
-                                              handleCreateView,
+                                              () => {
+                                                setViewDialogMode("create");
+                                                setViewDialogKind("view");
+                                                setViewDialogInitialName("");
+                                                setViewDialogInitialSql("");
+                                                setIsCreateViewDialogOpen(true);
+                                              },
                                             )
                                           }
                                           disabled={
-                                            !activeCapabilities.supportsViews
+                                            !connectionCapabilities.supportsViews
                                           }
                                         >
                                           View
@@ -7273,11 +10585,147 @@ export function SchemaSidebar() {
                                       className={menuItemClass}
                                       onClick={() => void copyText(schema)}
                                     >
+                                      <Clipboard className="mr-2 h-3.5 w-3.5" />
                                       Copy Name
                                     </ContextMenuItem>
+                                    <ContextMenuSub>
+                                      <ContextMenuSubTrigger
+                                        className={menuSubClass}
+                                      >
+                                        <EyeOff className="mr-2 h-3.5 w-3.5" />
+                                        Filter
+                                      </ContextMenuSubTrigger>
+                                      <ContextMenuSubContent
+                                        className={menuContentClass}
+                                      >
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() =>
+                                            hideExplorerNodes(
+                                              explorerStateScope,
+                                              schemaVisibilityParentId,
+                                              schemaNodeIdsForAction,
+                                            )
+                                          }
+                                        >
+                                          <EyeOff className="mr-2 h-3.5 w-3.5" />
+                                          Hide selected schema
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() =>
+                                            showOnlyExplorerNodes(
+                                              explorerStateScope,
+                                              schemaVisibilityParentId,
+                                              schemaNodeIdsForAction,
+                                            )
+                                          }
+                                        >
+                                          <Eye className="mr-2 h-3.5 w-3.5" />
+                                          Show only selected schema
+                                        </ContextMenuItem>
+                                        <ContextMenuSeparator
+                                          className={menuSeparatorClass}
+                                        />
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          disabled={!schemaVisibilityFilter}
+                                          onClick={() =>
+                                            clearExplorerVisibilityFilter(
+                                              explorerStateScope,
+                                              schemaVisibilityParentId,
+                                            )
+                                          }
+                                        >
+                                          <X className="mr-2 h-3.5 w-3.5" />
+                                          Clear schema filter
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                          className={menuItemClass}
+                                          onClick={() =>
+                                            openExplorerVisibilityFilter(
+                                              schemaVisibilityParentId,
+                                              `Schemas in ${connection.name}`,
+                                            )
+                                          }
+                                        >
+                                          <SearchCode className="mr-2 h-3.5 w-3.5" />
+                                          Configure filter…
+                                        </ContextMenuItem>
+                                      </ContextMenuSubContent>
+                                    </ContextMenuSub>
+                                    {schema !==
+                                      connectionMetadata.defaultSchema && (
+                                      <ContextMenuItem
+                                        className={menuItemClass}
+                                        onClick={() => {
+                                          void setActiveConnection(
+                                            connection.id,
+                                          ).then((error) => {
+                                            if (error) {
+                                              setNamespaceError(error);
+                                              return;
+                                            }
+                                            void useSchemaStore
+                                              .getState()
+                                              .setDefaultSchema(schema);
+                                          });
+                                        }}
+                                      >
+                                        <Pin className="mr-2 h-3.5 w-3.5" />
+                                        Set as Default
+                                      </ContextMenuItem>
+                                    )}
                                     <ContextMenuSeparator
                                       className={menuSeparatorClass}
                                     />
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      disabled={!canBrowseTables}
+                                      onClick={() =>
+                                        openObjectBrowser(
+                                          connection.id,
+                                          connection.name,
+                                          connectionCanBrowseDatabaseCatalogs
+                                            ? connectedPostgresDatabase
+                                            : undefined,
+                                          schema,
+                                        )
+                                      }
+                                    >
+                                      <TableProperties className="mr-2 h-3.5 w-3.5" />
+                                      Browse Objects
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      className={menuItemClass}
+                                      onClick={() =>
+                                        createTab(
+                                          "query",
+                                          `console [${schema}]`,
+                                          "",
+                                          {
+                                            connectionId: connection.id,
+                                            databaseName:
+                                              connectionCanBrowseDatabaseCatalogs
+                                                ? connectedPostgresDatabase
+                                                : undefined,
+                                            schemaName: schema,
+                                            targetSchema: schema,
+                                          },
+                                        )
+                                      }
+                                    >
+                                      <Code2 className="mr-2 h-3.5 w-3.5" />
+                                      New Query Console
+                                    </ContextMenuItem>
+                                    {renderSqlHistorySubmenu({
+                                      connectionId: connection.id,
+                                      databaseName:
+                                        connectionCanBrowseDatabaseCatalogs
+                                          ? connectedPostgresDatabase
+                                          : undefined,
+                                      schemaName: schema,
+                                    })}
                                     <ContextMenuItem
                                       className={menuItemClass}
                                       onClick={() =>
@@ -7484,10 +10932,14 @@ export function SchemaSidebar() {
                                     <ContextMenuItem
                                       className={menuItemClass}
                                       onClick={() =>
-                                        void handleRenameDatabase(schema)
+                                        void handleRenameDatabase(
+                                          schema,
+                                          connection.id,
+                                          connection.driver,
+                                        )
                                       }
                                       disabled={
-                                        !activeCapabilities.supportsRenameDatabase
+                                        !connectionCapabilities.supportsRenameDatabase
                                       }
                                     >
                                       Rename...
@@ -7498,51 +10950,26 @@ export function SchemaSidebar() {
                                     <ContextMenuSeparator
                                       className={menuSeparatorClass}
                                     />
-                                    <ContextMenuSub>
-                                      <ContextMenuSubTrigger
-                                        className={menuSubClass}
-                                      >
-                                        Introspection Level
-                                      </ContextMenuSubTrigger>
-                                      <ContextMenuSubContent
-                                        className={menuContentClass}
-                                      >
-                                        <ContextMenuItem
-                                          className={menuItemClass}
-                                        >
-                                          Standard
-                                        </ContextMenuItem>
-                                        <ContextMenuItem
-                                          className={menuItemClass}
-                                          disabled
-                                        >
-                                          Full
-                                        </ContextMenuItem>
-                                      </ContextMenuSubContent>
-                                    </ContextMenuSub>
-                                    <ContextMenuItem
-                                      className={menuItemClass}
-                                      disabled
-                                    >
-                                      Diagnostics
-                                    </ContextMenuItem>
-                                    <ContextMenuSeparator
-                                      className={menuSeparatorClass}
-                                    />
                                     <ContextMenuItem
                                       className={cn(
                                         menuItemClass,
                                         "text-destructive",
                                       )}
                                       onClick={() =>
-                                        void handleDropDatabase(schema)
+                                        void handleDropDatabase(
+                                          schema,
+                                          connection.id,
+                                          connection.driver,
+                                        )
                                       }
-                                      disabled={!canMutateNamespaces}
+                                      disabled={
+                                        !connectionCapabilities.supportsCreateDatabase
+                                      }
                                     >
                                       Drop...
                                     </ContextMenuItem>
                                   </ContextMenuContent>
-                                </ContextMenu>
+                                </ExplorerSharedContextMenu>
                                 {isSchemaExpanded &&
                                   renderSchemaObjects(
                                     connection.id,
@@ -7558,8 +10985,23 @@ export function SchemaSidebar() {
                     </div>
                   ) : null}
                 </div>
+                </Fragment>
               );
-            })
+                },
+              )}
+              {connectionVirtualizationArmed &&
+                connectionVirtualWindow.end <
+                  visibleExplorerConnections.length && (
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      height:
+                        connectionVirtualWindow.totalHeight -
+                        connectionVirtualWindow.end * explorerTreeRowHeight,
+                    }}
+                  />
+                )}
+            </div>
           )}
         </div>
         {namespaceError && (
@@ -7567,7 +11009,9 @@ export function SchemaSidebar() {
             {namespaceError}
           </div>
         )}
-      </div>
+          </div>
+        </ExplorerContextMenuHost>
+      </ExplorerVirtualizationHost>
 
       <SqlScriptImportDialog
         open={Boolean(pendingSqlScriptImport)}
@@ -7577,6 +11021,86 @@ export function SchemaSidebar() {
         onClose={closeSqlScriptImport}
         onImport={handleConfirmSqlScriptImport}
       />
+
+      <Dialog
+        open={Boolean(connectionGroupDraft)}
+        onOpenChange={(open) => {
+          if (!open) setConnectionGroupDraft(null);
+        }}
+      >
+        <DialogContent className="w-[380px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_14px_36px_rgba(0,0,0,0.42)]">
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!connectionGroupDraft?.name.trim()) return;
+              if (
+                connectionGroupDraft.mode === "rename" &&
+                connectionGroupDraft.groupId
+              ) {
+                renameExplorerConnectionGroup(
+                  explorerStateScope,
+                  connectionGroupDraft.groupId,
+                  connectionGroupDraft.name,
+                );
+              } else {
+                const groupId = createExplorerConnectionGroup(
+                  explorerStateScope,
+                  connectionGroupDraft.name,
+                  connectionGroupDraft.groupId || null,
+                );
+                setExpandedObjectGroupKeys((current) =>
+                  current.includes(groupId) ? current : [...current, groupId],
+                );
+              }
+              setConnectionGroupDraft(null);
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-[14px]">
+                {connectionGroupDraft?.mode === "rename"
+                  ? "Rename Connection Group"
+                  : connectionGroupDraft?.groupId
+                    ? "New Connection Subgroup"
+                    : "New Connection Group"}
+              </DialogTitle>
+              <DialogDescription className="text-[11px] leading-5 wb-muted">
+                Groups organize saved data sources only; they do not change the
+                database server or credentials.
+              </DialogDescription>
+            </DialogHeader>
+            <label className="block space-y-1.5 text-[11px] font-medium">
+              <span>Name</span>
+              <input
+                autoFocus
+                value={connectionGroupDraft?.name || ""}
+                onChange={(event) =>
+                  setConnectionGroupDraft((current) =>
+                    current ? { ...current, name: event.target.value } : null,
+                  )
+                }
+                className="h-8 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[12px] outline-none focus:border-[hsl(var(--wb-accent))] focus:ring-1 focus:ring-[hsl(var(--wb-accent)/0.35)]"
+                placeholder="e.g. Production, Analytics, Local"
+              />
+            </label>
+            <DialogFooter className="gap-2 sm:space-x-0">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setConnectionGroupDraft(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={!connectionGroupDraft?.name.trim()}
+              >
+                {connectionGroupDraft?.mode === "rename" ? "Rename" : "Create"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Suspense fallback={null}>
         {isDataSourceDialogOpen && (
@@ -7610,8 +11134,12 @@ export function SchemaSidebar() {
         {mongoCollectionTransferRequest !== null && (
           <MongoCollectionTransferDialog
             open
-            sourceConnectionId={mongoCollectionTransferRequest.sourceConnectionId}
-            sourceConnectionName={mongoCollectionTransferRequest.sourceConnectionName}
+            sourceConnectionId={
+              mongoCollectionTransferRequest.sourceConnectionId
+            }
+            sourceConnectionName={
+              mongoCollectionTransferRequest.sourceConnectionName
+            }
             sourceDatabase={mongoCollectionTransferRequest.sourceDatabase}
             sourceCollection={mongoCollectionTransferRequest.sourceCollection}
             connections={connections}
@@ -7683,6 +11211,101 @@ export function SchemaSidebar() {
           />
         )}
       </Suspense>
+      <Dialog
+        open={Boolean(visibilityFilterDraft)}
+        onOpenChange={(open) => {
+          if (!open) setVisibilityFilterDraft(null);
+        }}
+      >
+        <DialogContent className="w-[460px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+          <DialogHeader>
+            <DialogTitle className="text-[15px]">
+              Configure object filter
+            </DialogTitle>
+            <DialogDescription className="text-[12px] leading-5 wb-muted">
+              {visibilityFilterDraft?.label}. Enter one case-insensitive pattern
+              per line. Use <code>*</code> for any text and <code>?</code> for
+              one character. Exclude rules take precedence.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="grid gap-1.5 text-[11px] font-medium">
+            Include patterns
+            <textarea
+              value={visibilityFilterDraft?.includePatterns ?? ""}
+              rows={4}
+              spellCheck={false}
+              placeholder={"*\nreport_*"}
+              className="min-h-20 resize-y rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] px-2.5 py-2 font-mono text-[11px] font-normal outline-none focus:border-[hsl(var(--wb-accent))]"
+              onChange={(event) =>
+                setVisibilityFilterDraft((current) =>
+                  current
+                    ? { ...current, includePatterns: event.target.value }
+                    : current,
+                )
+              }
+            />
+          </label>
+          <label className="grid gap-1.5 text-[11px] font-medium">
+            Exclude patterns
+            <textarea
+              value={visibilityFilterDraft?.excludePatterns ?? ""}
+              rows={4}
+              spellCheck={false}
+              placeholder={"tmp_*\n*_archive"}
+              className="min-h-20 resize-y rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface))] px-2.5 py-2 font-mono text-[11px] font-normal outline-none focus:border-[hsl(var(--wb-accent))]"
+              onChange={(event) =>
+                setVisibilityFilterDraft((current) =>
+                  current
+                    ? { ...current, excludePatterns: event.target.value }
+                    : current,
+                )
+              }
+            />
+          </label>
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                if (!visibilityFilterDraft) return;
+                clearExplorerVisibilityFilter(
+                  explorerStateScope,
+                  visibilityFilterDraft.parentNodeId,
+                );
+                setVisibilityFilterDraft(null);
+              }}
+            >
+              Clear all
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setVisibilityFilterDraft(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                if (!visibilityFilterDraft) return;
+                setExplorerVisibilityPatterns(
+                  explorerStateScope,
+                  visibilityFilterDraft.parentNodeId,
+                  parseExplorerVisibilityPatterns(
+                    visibilityFilterDraft.includePatterns,
+                  ),
+                  parseExplorerVisibilityPatterns(
+                    visibilityFilterDraft.excludePatterns,
+                  ),
+                );
+                setVisibilityFilterDraft(null);
+              }}
+            >
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={Boolean(pendingDataSourceRemoval)}
         onOpenChange={(open) => {

@@ -32,11 +32,14 @@ describe("app settings workbench layout", () => {
 
   it("assigns discoverable shortcuts to every title-bar tool", () => {
     expect(DEFAULT_APP_SETTINGS.keymap).toMatchObject({
-      "workbench.toggleDatabaseExplorer": ["mod+1"],
+      "workbench.toggleDatabaseExplorer": ["mod+1", "alt+1"],
       "workbench.toggleAssistant": ["mod+2"],
-      "workbench.openProjectFiles": ["mod+4"],
+      "workbench.openProjectFiles": ["mod+4", "alt+2"],
       "workbench.toggleCommit": ["mod+5"],
       "workbench.toggleVersionControl": ["mod+6"],
+      "workbench.hideActiveToolWindow": ["shift+escape"],
+      "workbench.toggleAllToolWindows": ["mod+shift+f12"],
+      "workbench.jumpToLastToolWindow": ["f12"],
       "editor.insertLineBelow": ["shift+enter"],
     });
   });
@@ -235,6 +238,22 @@ describe("app settings workbench layout", () => {
         databaseExplorer: { showHoverTooltips: "off" },
       }).databaseExplorer.showHoverTooltips,
     ).toBe(true);
+  });
+
+  it("keeps horizontal Explorer scrolling opt-in and type-safe", () => {
+    expect(DEFAULT_APP_SETTINGS.databaseExplorer.allowHorizontalScroll).toBe(
+      false,
+    );
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { allowHorizontalScroll: true },
+      }).databaseExplorer.allowHorizontalScroll,
+    ).toBe(true);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { allowHorizontalScroll: "yes" },
+      }).databaseExplorer.allowHorizontalScroll,
+    ).toBe(false);
   });
 
   it("keeps blank-line full-document execution explicitly opt-in", () => {

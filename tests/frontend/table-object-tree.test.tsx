@@ -33,6 +33,13 @@ const mocks = vi.hoisted(() => ({
         referenced_table: "customers",
         referenced_columns: ["id"],
       },
+      {
+        name: "orders_total_check",
+        constraint_type: "CHECK",
+        columns: ["total"],
+        referenced_columns: [],
+        definition: "total >= 0",
+      },
     ],
     ddl: null,
     viewDefinition: null,
@@ -94,7 +101,9 @@ describe("table object metadata tree", () => {
     expect(container.textContent).toContain("id");
     expect(container.textContent).toContain("Indexes");
     expect(container.textContent).toContain("Constraints");
-    expect(container.querySelector('[data-metadata-source="cache"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-metadata-source="cache"]'),
+    ).not.toBeNull();
   });
 
   it("keeps cached metadata visible and can explicitly refresh it from the data source", async () => {
@@ -178,7 +187,7 @@ describe("table object metadata tree", () => {
     expect(container.textContent).not.toContain("Metadata unavailable");
   });
 
-  it("renders the foreign-key target in the expanded constraints group", async () => {
+  it("separates foreign keys from other constraints and opens their target", async () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -201,12 +210,13 @@ describe("table object metadata tree", () => {
       await Promise.resolve();
     });
 
-    const constraints = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Constraints"),
+    const foreignKeys = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Foreign Keys"),
     );
-    await act(async () => constraints?.click());
+    await act(async () => foreignKeys?.click());
 
     expect(container.textContent).toContain("public.customers");
+    expect(container.textContent).not.toContain("orders_total_check");
     expect(
       container.querySelector('[title*="references public.customers"]'),
     ).not.toBeNull();
@@ -219,5 +229,59 @@ describe("table object metadata tree", () => {
       schema: "public",
       table: "customers",
     });
+
+    const constraints = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Constraints"),
+    );
+    await act(async () => constraints?.click());
+    expect(container.textContent).toContain("orders_total_check");
+  });
+
+  it("shows table-scoped triggers as a dedicated child directory", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onTriggerOpen = vi.fn();
+
+    await act(async () => {
+      root?.render(
+        <TableObjectTree
+          identity={{
+            connectionId: "postgres-1",
+            driver: "postgres",
+            schema: "public",
+            table: "orders",
+          }}
+          includeIndexes
+          includeConstraints
+          triggers={[
+            {
+              name: "orders_audit_trigger",
+              objectType: "TRIGGER",
+              parentName: "orders",
+            },
+          ]}
+          onTriggerOpen={onTriggerOpen}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const triggers = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Triggers"),
+    );
+    expect(triggers).toBeDefined();
+    await act(async () => triggers?.click());
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[title="Trigger on orders"]',
+    );
+    expect(trigger).toBeDefined();
+    await act(async () =>
+      trigger?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
+    );
+    expect(onTriggerOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "orders_audit_trigger" }),
+    );
   });
 });

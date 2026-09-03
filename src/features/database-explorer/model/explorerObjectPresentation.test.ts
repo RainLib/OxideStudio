@@ -12,6 +12,15 @@ describe("database Explorer object presentation", () => {
     expect(new Set(classes).size).toBe(classes.length);
     expect(classes[0]).toContain("amber");
     expect(classes[1]).toContain("emerald");
-    expect(classes[2]).toContain("sky");
+    expect(classes[2]).toContain("violet");
+  });
+
+  it("matches the DBX semantic palette for specialized objects", () => {
+    expect(explorerObjectIconClass("procedure")).toContain("sky");
+    expect(explorerObjectIconClass("function")).toContain("amber");
+    expect(explorerObjectIconClass("sequence")).toContain("emerald");
+    expect(explorerObjectIconClass("trigger")).toContain("orange");
+    expect(explorerObjectIconClass("key")).toContain("red");
+    expect(explorerObjectIconClass("package")).toContain("cyan");
   });
 });

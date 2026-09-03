@@ -80,6 +80,52 @@ describe("Database Explorer settings", () => {
       }).databaseExplorer.activationMode,
     ).toBe("single");
   });
+
+  it("persists the shared object browser presentation", () => {
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { objectBrowserViewMode: "grid" },
+      }).databaseExplorer.objectBrowserViewMode,
+    ).toBe("grid");
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { objectBrowserViewMode: "cards" },
+      }).databaseExplorer.objectBrowserViewMode,
+    ).toBe("list");
+  });
+
+  it("normalizes horizontal Explorer scrolling as an explicit opt-in", () => {
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { allowHorizontalScroll: true },
+      }).databaseExplorer.allowHorizontalScroll,
+    ).toBe(true);
+    expect(
+      normalizeAppSettings({
+        databaseExplorer: { allowHorizontalScroll: "true" },
+      }).databaseExplorer.allowHorizontalScroll,
+    ).toBe(false);
+  });
+});
+
+describe("data grid header settings", () => {
+  it("shows DBX-style type and comment lines by default and preserves opt-outs", () => {
+    expect(normalizeAppSettings({}).dataGrid).toMatchObject({
+      showColumnTypesInHeader: true,
+      showColumnCommentsInHeader: true,
+    });
+    expect(
+      normalizeAppSettings({
+        dataGrid: {
+          showColumnTypesInHeader: false,
+          showColumnCommentsInHeader: false,
+        },
+      }).dataGrid,
+    ).toMatchObject({
+      showColumnTypesInHeader: false,
+      showColumnCommentsInHeader: false,
+    });
+  });
 });
 
 describe("data grid formatter settings", () => {

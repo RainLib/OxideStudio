@@ -458,7 +458,26 @@
   }
 
   .wb-tree-row {
-    @apply flex h-6 min-w-0 items-center rounded-[3px] text-left transition-colors;
+    @apply flex h-7 min-w-0 items-center rounded-[3px] text-left transition-colors;
+  }
+
+  [data-explorer-view-mode="flat"] [role="treeitem"] {
+    min-height: 22px;
+    height: 22px;
+  }
+
+  [data-explorer-view-mode="flat"] [role="treeitem"] :where(.text-\[8px\], .text-\[9px\]) {
+    display: none;
+  }
+
+  [data-explorer-view-mode="flat"] [data-postgres-database-tree],
+  [data-explorer-view-mode="flat"] [data-postgres-remote-database] {
+    contain: layout style;
+  }
+
+  .wb-explorer-connection-region {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 320px;
   }
 
   .wb-toolbar {
@@ -555,6 +574,18 @@
   .wb-tree-row-selected {
     background: hsl(var(--wb-active-strong));
     color: hsl(var(--wb-text));
+  }
+
+  /* Opt-in natural-width mode mirrors professional database navigators while
+     keeping the default tree layout cheap and stable for narrow panels. */
+  .wb-explorer-natural-width [data-explorer-node-id] {
+    min-width: max-content;
+  }
+
+  .wb-explorer-natural-width [data-explorer-node-id] .truncate {
+    max-width: none !important;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   .wb-panel-header {

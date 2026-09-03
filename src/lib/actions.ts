@@ -62,6 +62,9 @@ export type WorkbenchActionId =
   | "workbench.focusCommit"
   | "workbench.focusVersionControl"
   | "workbench.focusResults"
+  | "workbench.hideActiveToolWindow"
+  | "workbench.toggleAllToolWindows"
+  | "workbench.jumpToLastToolWindow"
   | "workbench.moveActiveToolWindowLeft"
   | "workbench.moveActiveToolWindowRight"
   | "workbench.moveCommitLeft"
@@ -346,6 +349,24 @@ export function workbenchActions(): WorkbenchAction[] {
       group: "Workbench",
       run: () =>
         useWorkbenchLayoutStore.getState().setActiveToolWindow("results"),
+    },
+    {
+      id: "workbench.hideActiveToolWindow",
+      title: "Hide Active Tool Window",
+      group: "Workbench",
+      run: () => useWorkbenchLayoutStore.getState().hideActiveToolWindow(),
+    },
+    {
+      id: "workbench.toggleAllToolWindows",
+      title: "Hide or Restore All Tool Windows",
+      group: "Workbench",
+      run: () => useWorkbenchLayoutStore.getState().toggleAllToolWindows(),
+    },
+    {
+      id: "workbench.jumpToLastToolWindow",
+      title: "Jump to Last Tool Window",
+      group: "Workbench",
+      run: () => useWorkbenchLayoutStore.getState().jumpToLastToolWindow(),
     },
     {
       id: "workbench.moveActiveToolWindowLeft",

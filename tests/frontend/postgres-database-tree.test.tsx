@@ -10,8 +10,9 @@ import {
   postgresConnectionDatabaseName,
 } from "@/components/workspace/PostgresDatabaseTree";
 
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
-  true;
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("PostgresDatabaseTree", () => {
   let container: HTMLDivElement;
@@ -41,11 +42,11 @@ describe("PostgresDatabaseTree", () => {
         >
           <div data-schema="public">public</div>
           <div data-schema="audit">audit</div>
-        </PostgresDatabaseTree>
+        </PostgresDatabaseTree>,
       );
     });
 
-    expect(container.textContent).toContain("Databases");
+    expect(container.textContent).not.toContain("Databases");
     expect(container.textContent).toContain("default");
     expect(container.textContent).not.toContain("connected");
     expect(container.textContent).toContain("analytics");
@@ -53,18 +54,18 @@ describe("PostgresDatabaseTree", () => {
     expect(container.querySelectorAll("[data-schema]")).toHaveLength(0);
 
     const currentDatabase = container.querySelector(
-      '[data-postgres-database="app"]'
+      '[data-postgres-database="app"]',
     );
     const otherDatabase = container.querySelector(
-      '[data-postgres-database="analytics"]'
+      '[data-postgres-database="analytics"]',
     );
     expect(currentDatabase?.getAttribute("data-connected")).toBe("true");
-    expect(currentDatabase?.querySelector("button")?.getAttribute("aria-expanded")).toBe(
-      "false"
-    );
-    expect(otherDatabase?.querySelector("button")?.getAttribute("aria-expanded")).toBe(
-      "false"
-    );
+    expect(
+      currentDatabase?.querySelector("button")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(
+      otherDatabase?.querySelector("button")?.getAttribute("aria-expanded"),
+    ).toBe("false");
 
     await act(async () => {
       currentDatabase
@@ -73,10 +74,10 @@ describe("PostgresDatabaseTree", () => {
     });
 
     expect(container.querySelectorAll("[data-schema]")).toHaveLength(2);
-    expect(container.textContent).toContain("Schemas");
-    expect(currentDatabase?.querySelector("button")?.getAttribute("aria-expanded")).toBe(
-      "true"
-    );
+    expect(container.textContent).not.toContain("Schemas");
+    expect(
+      currentDatabase?.querySelector("button")?.getAttribute("aria-expanded"),
+    ).toBe("true");
 
     await act(async () => {
       currentDatabase
@@ -100,18 +101,18 @@ describe("PostgresDatabaseTree", () => {
           filterText="WARE"
         >
           <div data-schema="public">public</div>
-        </PostgresDatabaseTree>
+        </PostgresDatabaseTree>,
       );
     });
 
     expect(
-      container.querySelector('[data-postgres-database="warehouse"]')
+      container.querySelector('[data-postgres-database="warehouse"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-postgres-database="analytics"]')
+      container.querySelector('[data-postgres-database="analytics"]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-postgres-database="app"]')
+      container.querySelector('[data-postgres-database="app"]'),
     ).toBeNull();
     expect(container.querySelector("[aria-expanded='true']")).toBeNull();
     expect(container.querySelector("[data-schema]")).toBeNull();
@@ -134,7 +135,7 @@ describe("PostgresDatabaseTree", () => {
             }
           >
             <div>users</div>
-          </PostgresDatabaseTree>
+          </PostgresDatabaseTree>,
         );
       });
     };
@@ -148,10 +149,10 @@ describe("PostgresDatabaseTree", () => {
     await renderTree("users");
 
     expect(
-      container.querySelector('[data-postgres-database="app"]')
+      container.querySelector('[data-postgres-database="app"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-postgres-database="analytics"]')
+      container.querySelector('[data-postgres-database="analytics"]'),
     ).toBeNull();
     expect(container.querySelector("[aria-expanded='true']")).toBeNull();
   });
@@ -169,15 +170,15 @@ describe("PostgresDatabaseTree", () => {
           connectionColor="#5b8dd6"
         >
           <div data-schema="public">public</div>
-        </PostgresDatabaseTree>
+        </PostgresDatabaseTree>,
       );
     });
 
     expect(
-      container.querySelector('[data-postgres-database="warehouse"]')
+      container.querySelector('[data-postgres-database="warehouse"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-postgres-database="app"]')
+      container.querySelector('[data-postgres-database="app"]'),
     ).toBeNull();
     expect(container.querySelector("[aria-expanded='true']")).toBeNull();
   });
@@ -190,7 +191,7 @@ describe("PostgresDatabaseTree", () => {
         () =>
           new Promise<void>((_resolve, reject) => {
             rejectFirstLoad = reject;
-          })
+          }),
       )
       .mockResolvedValueOnce(undefined);
     const renderDatabaseChildren = vi.fn((database: string) => (
@@ -210,14 +211,14 @@ describe("PostgresDatabaseTree", () => {
           renderDatabaseChildren={renderDatabaseChildren}
         >
           <div data-schema="public">public</div>
-        </PostgresDatabaseTree>
+        </PostgresDatabaseTree>,
       );
     });
 
     expect(renderDatabaseChildren).not.toHaveBeenCalled();
 
     const analytics = container.querySelector(
-      '[data-postgres-database="analytics"]'
+      '[data-postgres-database="analytics"]',
     );
     act(() => {
       analytics
@@ -226,7 +227,7 @@ describe("PostgresDatabaseTree", () => {
     });
 
     expect(
-      container.querySelector('[aria-label="Loading database analytics"]')
+      container.querySelector('[aria-label="Loading database analytics"]'),
     ).not.toBeNull();
     expect(onLoadDatabase).toHaveBeenCalledWith("analytics");
     expect(renderDatabaseChildren).not.toHaveBeenCalled();
@@ -237,10 +238,10 @@ describe("PostgresDatabaseTree", () => {
     });
 
     expect(container.querySelector("[role='alert']")?.textContent).toContain(
-      "permission denied"
+      "permission denied",
     );
     expect(
-      container.querySelector('[data-database-children="analytics"]')
+      container.querySelector('[data-database-children="analytics"]'),
     ).toBeNull();
 
     await act(async () => {
@@ -253,7 +254,7 @@ describe("PostgresDatabaseTree", () => {
     expect(onLoadDatabase).toHaveBeenCalledTimes(2);
     expect(container.querySelector("[role='alert']")).toBeNull();
     expect(
-      container.querySelector('[data-database-children="analytics"]')
+      container.querySelector('[data-database-children="analytics"]'),
     ).not.toBeNull();
     expect(renderDatabaseChildren).toHaveBeenCalledWith("analytics");
   });
@@ -286,11 +287,13 @@ describe("PostgresDatabaseTree", () => {
       );
     });
 
-    const analytics = container.querySelector<HTMLButtonElement>(
-      '[data-postgres-database="analytics"] > [data-radix-popper-content-wrapper] button',
-    ) ?? container.querySelector<HTMLButtonElement>(
-      '[data-postgres-database="analytics"] button',
-    );
+    const analytics =
+      container.querySelector<HTMLButtonElement>(
+        '[data-postgres-database="analytics"] > [data-radix-popper-content-wrapper] button',
+      ) ??
+      container.querySelector<HTMLButtonElement>(
+        '[data-postgres-database="analytics"] button',
+      );
     await act(async () => {
       analytics?.dispatchEvent(
         new MouseEvent("contextmenu", {
@@ -322,7 +325,7 @@ describe("PostgresDatabaseTree", () => {
       () =>
         new Promise<void>((resolve) => {
           resolveLoad = resolve;
-        })
+        }),
     );
 
     await act(async () => {
@@ -337,12 +340,12 @@ describe("PostgresDatabaseTree", () => {
           onLoadDatabase={onLoadDatabase}
         >
           <div>public</div>
-        </PostgresDatabaseTree>
+        </PostgresDatabaseTree>,
       );
     });
 
     const button = container.querySelector(
-      '[data-postgres-database="analytics"] button'
+      '[data-postgres-database="analytics"] button',
     );
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -366,16 +369,16 @@ describe("PostgresDatabaseTree", () => {
       postgresConnectionDatabaseName({
         database: "configured_db",
         connectionUrl: "postgres://localhost/url_db",
-      })
+      }),
     ).toBe("url_db");
     expect(
       postgresConnectionDatabaseName({
         connectionUrl: "postgres://localhost/customer%20data",
-      })
+      }),
     ).toBe("customer data");
-    expect(
-      postgresConnectionDatabaseName({ database: "configured_db" })
-    ).toBe("configured_db");
+    expect(postgresConnectionDatabaseName({ database: "configured_db" })).toBe(
+      "configured_db",
+    );
     expect(postgresConnectionDatabaseName({})).toBe("postgres");
   });
 

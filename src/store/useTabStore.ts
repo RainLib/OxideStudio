@@ -191,6 +191,7 @@ export type TabType =
   | "schema_diagram"
   | "data_compare"
   | "database_browser"
+  | "object_browser"
   | "rocketmq_workspace";
 export type QueryLanguage = "elasticsearch-dsl" | "elasticsearch-eql";
 
@@ -1070,6 +1071,12 @@ interface TabState {
   ) => string;
   createTableTab: (connectionId: string, schemaName: string) => string;
   openDatabaseBrowser: (connectionId: string, connectionName: string) => string;
+  openObjectBrowser: (
+    connectionId: string,
+    connectionName: string,
+    databaseName?: string,
+    schemaName?: string,
+  ) => string;
   openRocketMqWorkspace: (
     connectionId: string,
     connectionName: string,
@@ -1648,6 +1655,31 @@ export const useTabStore = create<TabState>((set, get) => ({
       "",
       { connectionId },
     );
+  },
+
+  openObjectBrowser: (
+    connectionId,
+    connectionName,
+    databaseName,
+    schemaName,
+  ) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.type === "object_browser" &&
+        tab.connectionId === connectionId &&
+        tab.databaseName === databaseName &&
+        tab.schemaName === schemaName,
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return existing.id;
+    }
+    const scopeName = schemaName || databaseName || connectionName;
+    return get().createTab("object_browser", scopeName, "", {
+      connectionId,
+      databaseName,
+      schemaName,
+    });
   },
 
   openRocketMqWorkspace: (connectionId, connectionName) => {

@@ -5,6 +5,7 @@ import { useProjectStore } from "@/store/useProjectStore";
 import { useTabStore } from "@/store/useTabStore";
 import { tableService } from "@/services/tauri";
 import type {
+  DatabaseDriver,
   TableExportFormat,
   TableExportEncoding,
   TableImportFormat,
@@ -18,6 +19,12 @@ import {
   loadTableDdl,
   loadViewDefinition,
 } from "@/services/tableMetadataCache";
+
+export interface TableOperationTarget {
+  connectionId: string;
+  schema: string;
+  driver?: DatabaseDriver;
+}
 
 export function useTableOperations() {
   const { activeConnectionId, connections } = useConnectionStore();
@@ -42,7 +49,8 @@ export function useTableOperations() {
     void tableService
       .listenTableExportProgress((progress) => {
         const activeExport = activeTableExportRef.current;
-        if (!activeExport || activeExport.exportId !== progress.exportId) return;
+        if (!activeExport || activeExport.exportId !== progress.exportId)
+          return;
         useTaskStore.getState().updateTask(activeExport.taskId, {
           detail: progress.message
             ? `${progress.rowsExported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches · ${progress.message}`
@@ -69,9 +77,10 @@ export function useTableOperations() {
       .listenTableImportProgress((progress) => {
         const taskId = activeTableImportsRef.current.get(progress.importId);
         if (!taskId) return;
-        const total = progress.totalRows != null
-          ? ` / ${progress.totalRows.toLocaleString()} total`
-          : "";
+        const total =
+          progress.totalRows != null
+            ? ` / ${progress.totalRows.toLocaleString()} total`
+            : "";
         useTaskStore.getState().updateTask(taskId, {
           detail: `${progress.rowsImported.toLocaleString()} rows in ${progress.batches.toLocaleString()} batches${total}${progress.message ? ` · ${progress.message}` : ""}`,
         });
@@ -89,26 +98,31 @@ export function useTableOperations() {
     };
   }, []);
 
-  const getDriver = () => {
-    const conn = connections.find((c) => c.id === activeConnectionId);
+  const getDriver = (connectionId = activeConnectionId) => {
+    const conn = connections.find((c) => c.id === connectionId);
     return conn?.driver || DEFAULT_DATABASE_DRIVER;
   };
 
-  const truncateTable = async (tableName: string) => {
-    if (!activeConnectionId || !currentSchema) return;
-    const driver = getDriver();
+  const resolveTarget = (target?: TableOperationTarget) => ({
+    connectionId: target?.connectionId || activeConnectionId,
+    schema: target?.schema || currentSchema,
+    driver:
+      target?.driver || getDriver(target?.connectionId || activeConnectionId),
+  });
+
+  const truncateTable = async (
+    tableName: string,
+    target?: TableOperationTarget,
+  ) => {
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return;
 
     try {
-      await tableService.truncateTable(
-        activeConnectionId,
-        driver,
-        currentSchema,
-        tableName
-      );
-      await loadTables(activeConnectionId, currentSchema, true);
+      await tableService.truncateTable(connectionId, driver, schema, tableName);
+      await loadTables(connectionId, schema, true);
       await useTabStore
         .getState()
-        .refreshTableTabs(activeConnectionId, currentSchema, tableName, false);
+        .refreshTableTabs(connectionId, schema, tableName, false);
       // toast.success(`Table ${tableName} truncated successfully`);
       console.log(`Table ${tableName} truncated successfully`);
     } catch (e: any) {
@@ -120,75 +134,74 @@ export function useTableOperations() {
   const renameTable = async (
     oldName: string,
     newName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    target?: TableOperationTarget,
   ) => {
-    if (!activeConnectionId || !currentSchema) return;
-    const driver = getDriver();
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return;
 
     try {
       await tableService.renameTable(
-        activeConnectionId,
+        connectionId,
         driver,
-        currentSchema,
+        schema,
         oldName,
         newName,
-        objectType
+        objectType,
       );
       await Promise.all([
         invalidateTableMetadata({
-          connectionId: activeConnectionId,
+          connectionId,
           driver,
-          schema: currentSchema,
+          schema,
           table: oldName,
         }),
         invalidateTableMetadata({
-          connectionId: activeConnectionId,
+          connectionId,
           driver,
-          schema: currentSchema,
+          schema,
           table: newName,
         }),
       ]);
       console.log(`Table renamed from ${oldName} to ${newName}`);
-      await loadTables(activeConnectionId, currentSchema, true);
+      await loadTables(connectionId, schema, true);
       useTabStore
         .getState()
-        .retargetTableTabs(
-          activeConnectionId,
-          currentSchema,
-          oldName,
-          newName,
-          objectType
-        );
+        .retargetTableTabs(connectionId, schema, oldName, newName, objectType);
       await useTabStore
         .getState()
-        .refreshTableTabs(activeConnectionId, currentSchema, newName);
+        .refreshTableTabs(connectionId, schema, newName);
     } catch (e: any) {
       console.error(e);
       throw e; // Let dialog handle error
     }
   };
 
-  const dropTable = async (tableName: string, objectType?: string | null) => {
-    if (!activeConnectionId || !currentSchema) return;
-    const driver = getDriver();
+  const dropTable = async (
+    tableName: string,
+    objectType?: string | null,
+    target?: TableOperationTarget,
+  ) => {
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return;
 
     try {
       await tableService.dropTable(
-        activeConnectionId,
+        connectionId,
         driver,
-        currentSchema,
+        schema,
         tableName,
         true,
-        objectType
+        objectType,
       );
       await invalidateTableMetadata({
-        connectionId: activeConnectionId,
+        connectionId,
         driver,
-        schema: currentSchema,
+        schema,
         table: tableName,
       });
-      await loadTables(activeConnectionId, currentSchema, true);
-      closeOpenTableTabs(activeConnectionId, currentSchema, tableName);
+      await loadTables(connectionId, schema, true);
+      closeOpenTableTabs(connectionId, schema, tableName);
       console.log(`Table ${tableName} dropped successfully`);
     } catch (e: any) {
       console.error(e);
@@ -199,9 +212,10 @@ export function useTableOperations() {
     tableName: string,
     format: TableExportFormat = "csv",
     encoding: TableExportEncoding = "utf8",
+    target?: TableOperationTarget,
   ) => {
-    if (!activeConnectionId || !currentSchema || activeTableExportRef.current) return;
-    const driver = getDriver();
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema || activeTableExportRef.current) return;
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
       kind: "export",
@@ -215,19 +229,19 @@ export function useTableOperations() {
 
     try {
       const exported = await tableService.exportTableData(
-        activeConnectionId,
+        connectionId,
         driver,
-        currentSchema,
+        schema,
         tableName,
         format,
         { exportId, projectId: activeProjectId, encoding },
       );
       console.log(
-        `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`
+        `Exported ${exported.rowsExported} rows from ${tableName} to ${exported.filePath}`,
       );
       taskStore.finishTask(
         taskId,
-        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`
+        `${exported.rowsExported.toLocaleString()} rows to ${format.toUpperCase()}`,
       );
       await revealItemInDir(exported.filePath);
     } catch (error) {
@@ -274,8 +288,10 @@ export function useTableOperations() {
   const importTableData = async (
     tableName: string,
     format: TableImportFormat,
+    target?: TableOperationTarget,
   ) => {
-    if (!activeConnectionId || !currentSchema) return;
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return;
     const selected = await open({
       multiple: false,
       directory: false,
@@ -291,7 +307,6 @@ export function useTableOperations() {
     );
     if (!confirmed) return;
 
-    const driver = getDriver();
     const taskStore = useTaskStore.getState();
     const taskId = taskStore.startTask({
       kind: "import",
@@ -303,9 +318,9 @@ export function useTableOperations() {
 
     try {
       const imported = await tableService.importTableData(
-        activeConnectionId,
+        connectionId,
         driver,
-        currentSchema,
+        schema,
         tableName,
         selected,
         format,
@@ -321,15 +336,13 @@ export function useTableOperations() {
       );
       await useTabStore
         .getState()
-        .refreshTableTabs(
-          activeConnectionId,
-          currentSchema,
-          tableName,
-          false,
-        );
+        .refreshTableTabs(connectionId, schema, tableName, false);
     } catch (error: any) {
       if (error?.code === "TABLE_IMPORT_CANCELLED") {
-        taskStore.cancelTask(taskId, "Import cancelled; transaction rolled back");
+        taskStore.cancelTask(
+          taskId,
+          "Import cancelled; transaction rolled back",
+        );
       } else {
         taskStore.failTask(taskId, error?.message || String(error));
         throw error;
@@ -341,20 +354,21 @@ export function useTableOperations() {
 
   const getTableDdl = async (
     tableName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    target?: TableOperationTarget,
   ): Promise<string> => {
-    if (!activeConnectionId || !currentSchema) return "";
-    const driver = getDriver();
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return "";
 
     try {
       return await loadTableDdl(
         {
-          connectionId: activeConnectionId,
+          connectionId,
           driver,
-          schema: currentSchema,
+          schema,
           table: tableName,
         },
-        objectType
+        objectType,
       );
     } catch (e) {
       console.error(e);
@@ -364,35 +378,37 @@ export function useTableOperations() {
 
   const getViewDefinition = async (
     viewName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    target?: TableOperationTarget,
   ): Promise<string> => {
-    if (!activeConnectionId || !currentSchema) return "";
-    const driver = getDriver();
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return "";
 
     return loadViewDefinition(
       {
-        connectionId: activeConnectionId,
+        connectionId,
         driver,
-        schema: currentSchema,
+        schema,
         table: viewName,
       },
-      objectType
+      objectType,
     );
   };
 
   const refreshMaterializedView = async (
     viewName: string,
-    objectType?: string | null
+    objectType?: string | null,
+    target?: TableOperationTarget,
   ) => {
-    if (!activeConnectionId || !currentSchema) return;
-    const driver = getDriver();
+    const { connectionId, schema, driver } = resolveTarget(target);
+    if (!connectionId || !schema) return;
 
     await tableService.refreshMaterializedView(
-      activeConnectionId,
+      connectionId,
       driver,
-      currentSchema,
+      schema,
       viewName,
-      objectType
+      objectType,
     );
   };
 
@@ -413,7 +429,7 @@ export function useTableOperations() {
 function closeOpenTableTabs(
   connectionId: string,
   schema: string,
-  tableName: string
+  tableName: string,
 ) {
   const tabStore = useTabStore.getState();
   for (const tab of tabStore.tabs) {

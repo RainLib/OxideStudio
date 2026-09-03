@@ -160,6 +160,8 @@ export type AppSettings = {
     tableTabReuseMode: TableTabReuseMode;
     copyIncludeHeaders: boolean;
     showTypeIcons: boolean;
+    showColumnTypesInHeader: boolean;
+    showColumnCommentsInHeader: boolean;
     columnFormatters: Record<string, ColumnFormatterConfig>;
   };
   databaseExplorer: {
@@ -170,6 +172,10 @@ export type AppSettings = {
     showConnectionNotes: boolean;
     /** Disable object-detail hover popups without removing keyboard labels. */
     showHoverTooltips: boolean;
+    /** Let long tree labels use their natural width and expose horizontal scrolling. */
+    allowHorizontalScroll: boolean;
+    /** Shared presentation for database and schema object browser tabs. */
+    objectBrowserViewMode: "list" | "grid";
   };
   drivers: {
     /** HTTPS URL for the optional, signed external-driver discovery catalog. */
@@ -266,29 +272,34 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     },
   },
   keymap: {
-    "commandPalette.open": ["mod+p"],
-    "settings.open": ["mod+,"],
+    "commandPalette.open": ["mod+p", "mod+shift+a", "mod+o"],
+    "settings.open": ["mod+,", "mod+alt+s"],
     "window.new": ["mod+shift+n"],
     "editor.splitRight": ["mod+\\"],
     "editor.splitDown": ["mod+shift+\\"],
-    "query.newConsole": ["mod+t"],
+    "query.newConsole": ["mod+t", "f4"],
     "query.reopenClosed": ["mod+shift+t"],
     "query.closeTab": ["mod+w"],
     "query.run": ["mod+enter"],
     "query.runCurrentStatement": ["mod+shift+enter"],
     "query.format": ["mod+l"],
+    "query.searchDatabase": ["mod+alt+shift+f"],
     "editor.insertLineBelow": ["shift+enter"],
     "editor.inlineCompletion.trigger": ["alt+\\"],
     "editor.inlineCompletion.accept": ["tab"],
     "editor.inlineCompletion.acceptNextWord": ["mod+arrowright"],
     "editor.inlineCompletion.hide": ["escape"],
     "file.save": ["mod+s"],
-    "workbench.toggleDatabaseExplorer": ["mod+1"],
+    "workbench.toggleDatabaseExplorer": ["mod+1", "alt+1"],
     "workbench.toggleAssistant": ["mod+2"],
-    "workbench.toggleResults": ["mod+3"],
-    "workbench.openProjectFiles": ["mod+4"],
+    "workbench.toggleResults": ["mod+3", "alt+4"],
+    "workbench.openProjectFiles": ["mod+4", "alt+2"],
     "workbench.toggleCommit": ["mod+5"],
     "workbench.toggleVersionControl": ["mod+6"],
+    "workbench.focusDatabaseExplorer": ["alt+shift+b"],
+    "workbench.hideActiveToolWindow": ["shift+escape"],
+    "workbench.toggleAllToolWindows": ["mod+shift+f12"],
+    "workbench.jumpToLastToolWindow": ["f12"],
     "workbench.focusEditor": ["escape"],
     "workbench.resizeActiveToolWindowLeft": ["mod+alt+arrowleft"],
     "workbench.resizeActiveToolWindowRight": ["mod+alt+arrowright"],
@@ -344,6 +355,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     tableTabReuseMode: "same-table",
     copyIncludeHeaders: true,
     showTypeIcons: true,
+    showColumnTypesInHeader: true,
+    showColumnCommentsInHeader: true,
     columnFormatters: {},
   },
   databaseExplorer: {
@@ -353,6 +366,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     showCacheBadges: true,
     showConnectionNotes: true,
     showHoverTooltips: true,
+    allowHorizontalScroll: false,
+    objectBrowserViewMode: "list",
   },
   drivers: {
     catalogUrl: "",
@@ -785,6 +800,16 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         ["dataGrid", "showTypeIcons"],
         defaults.dataGrid.showTypeIcons,
       ),
+      showColumnTypesInHeader: boolAt(
+        raw,
+        ["dataGrid", "showColumnTypesInHeader"],
+        defaults.dataGrid.showColumnTypesInHeader,
+      ),
+      showColumnCommentsInHeader: boolAt(
+        raw,
+        ["dataGrid", "showColumnCommentsInHeader"],
+        defaults.dataGrid.showColumnCommentsInHeader,
+      ),
       columnFormatters: normalizeColumnFormatterRecord(
         getAt(raw, ["dataGrid", "columnFormatters"]),
       ),
@@ -821,6 +846,17 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         raw,
         ["databaseExplorer", "showHoverTooltips"],
         defaults.databaseExplorer.showHoverTooltips,
+      ),
+      allowHorizontalScroll: boolAt(
+        raw,
+        ["databaseExplorer", "allowHorizontalScroll"],
+        defaults.databaseExplorer.allowHorizontalScroll,
+      ),
+      objectBrowserViewMode: enumAt(
+        raw,
+        ["databaseExplorer", "objectBrowserViewMode"],
+        ["list", "grid"],
+        defaults.databaseExplorer.objectBrowserViewMode,
       ),
     },
     drivers: {

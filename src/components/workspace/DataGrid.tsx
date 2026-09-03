@@ -26,6 +26,7 @@ import {
   type GridKeyEventArgs,
   type GridMouseEventArgs,
   type HeaderClickedEventArgs,
+  type DrawHeaderCallback,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { useTabStore } from "@/store/useTabStore";
@@ -236,6 +237,32 @@ function cssHslVarAlpha(name: string, alpha: number, fallback: string) {
   return value ? `hsl(${value} / ${alpha})` : fallback;
 }
 
+function drawTruncatedHeaderText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maximumWidth: number,
+) {
+  if (!text || maximumWidth <= 0) return;
+  if (context.measureText(text).width <= maximumWidth) {
+    context.fillText(text, x, y);
+    return;
+  }
+  const ellipsis = "…";
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (context.measureText(`${text.slice(0, middle)}${ellipsis}`).width <= maximumWidth) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  context.fillText(`${text.slice(0, low)}${ellipsis}`, x, y);
+}
+
 export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
   function DataGrid(
     {
@@ -347,6 +374,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const updateSettings = useSettingsStore((state) => state.updateSettings);
     const copyIncludeHeaders = dataGridSettings.copyIncludeHeaders;
     const showTypeIcons = dataGridSettings.showTypeIcons;
+    const showColumnTypesInHeader = dataGridSettings.showColumnTypesInHeader;
+    const showColumnCommentsInHeader = dataGridSettings.showColumnCommentsInHeader;
     const viewMetrics = dataGridMetrics(
       dataGridSettings.fontSize,
       dataGridSettings.rowHeight,
@@ -667,12 +696,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               tableColumnType: metadata?.data_type,
               resultColumnType: col.data_type,
             });
-            const titleBase = dataType
-              ? `${col.name || "Unknown"} (${compactResultColumnType(dataType)})`
-              : col.name || "Unknown";
-            const title = formatterForResultColumn(index)
-              ? `${titleBase} · formatted`
-              : titleBase;
+            const title = col.name || "Unknown";
             const columnIcon = dataType
               ? columnIconForType(dataType, metadata?.is_primary_key)
               : undefined;
@@ -725,7 +749,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             const meta = metaMap.get(col.name);
             let columnIcon: GridColumnIcon | undefined;
             if (meta) {
-              title = `${col.name} (${meta.data_type})`;
+              title = col.name;
               columnIcon = columnIconForType(
                 meta.data_type,
                 meta.is_primary_key,
@@ -755,6 +779,36 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       isTransposed,
       formatterForResultColumn,
     ]);
+
+    const visibleHeaderMetadata = useMemo(
+      () =>
+        columns.map((column) => {
+          const resultIndex = result
+            ? resultColumnIndexByGridId(result.columns, column.id)
+            : overrideColumns?.findIndex((candidate) => candidate.name === column.id) ?? -1;
+          const resultColumn = resultIndex >= 0 ? result?.columns[resultIndex] : undefined;
+          const name = resultColumn?.name || String(column.id);
+          const metadata = tableColumnsByName.get(name);
+          return {
+            name,
+            type: resolveHeaderColumnType({
+              tableColumnType: metadata?.data_type,
+              resultColumnType: resultColumn?.data_type,
+            }),
+            comment: metadata?.comment?.trim() || "",
+            metadata,
+          };
+        }),
+      [columns, overrideColumns, result, tableColumnsByName],
+    );
+    const reserveHeaderTypeLine =
+      !isTransposed &&
+      showColumnTypesInHeader &&
+      visibleHeaderMetadata.some((column) => Boolean(column.type));
+    const reserveHeaderCommentLine =
+      !isTransposed &&
+      showColumnCommentsInHeader &&
+      visibleHeaderMetadata.some((column) => Boolean(column.comment));
 
     const columnLookupItems = useMemo<DataGridColumnLookupItem[]>(() => {
       if (isTransposed) return [];
@@ -2823,6 +2877,157 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       }),
       [gridFontSize, gridScale, mode],
     );
+    const headerIndexPalette = useMemo(
+      () => ({
+        primaryBackground: cssHslVarAlpha(
+          "--wb-warning",
+          0.2,
+          "rgba(245, 158, 11, 0.2)",
+        ),
+        primaryForeground: cssHslVar("--wb-warning", "#d97706"),
+        indexBackground: cssHslVarAlpha(
+          "--wb-accent",
+          0.18,
+          "rgba(59, 130, 246, 0.18)",
+        ),
+        indexForeground: cssHslVar("--wb-accent", "#3b82f6"),
+      }),
+      [mode],
+    );
+    const drawColumnHeader = useCallback<DrawHeaderCallback>(
+      (args, drawContent) => {
+        if (isTransposed || (!reserveHeaderTypeLine && !reserveHeaderCommentLine)) {
+          drawContent();
+          return;
+        }
+        const metadata = visibleHeaderMetadata[args.columnIndex];
+        if (!metadata) {
+          drawContent();
+          return;
+        }
+
+        const { ctx, rect, theme, column, isSelected, isHovered } = args;
+        const background = isSelected
+          ? theme.bgHeaderHasFocus
+          : isHovered
+            ? theme.bgHeaderHovered
+            : theme.bgHeader;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rect.x, rect.y, rect.width, rect.height);
+        ctx.clip();
+        ctx.fillStyle = background;
+        ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+        ctx.strokeStyle = theme.borderColor;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(rect.x + rect.width - 0.5, rect.y);
+        ctx.lineTo(rect.x + rect.width - 0.5, rect.y + rect.height);
+        ctx.moveTo(rect.x, rect.y + rect.height - 0.5);
+        ctx.lineTo(rect.x + rect.width, rect.y + rect.height - 0.5);
+        ctx.stroke();
+
+        const padding = Math.max(8, Math.round(8 * gridScale));
+        const actionWidth = column.hasMenu ? Math.max(18, Math.round(20 * gridScale)) : 0;
+        let textX = rect.x + padding;
+        const textWidth = Math.max(0, rect.width - padding * 2 - actionWidth);
+        const indexKind = metadata.metadata?.is_primary_key
+          ? "PK"
+          : metadata.metadata?.is_unique
+            ? "U"
+            : metadata.metadata?.is_indexed
+              ? "I"
+              : "";
+        if (showTypeIcons && indexKind) {
+          ctx.font = `600 ${Math.max(8, Math.round(9 * gridScale))}px Inter, system-ui, sans-serif`;
+          const badgeWidth = Math.ceil(ctx.measureText(indexKind).width + 7 * gridScale);
+          const badgeHeight = Math.max(13, Math.round(14 * gridScale));
+          const badgeY = rect.y + Math.max(4, Math.round(5 * gridScale));
+          ctx.fillStyle = indexKind === "PK"
+            ? headerIndexPalette.primaryBackground
+            : headerIndexPalette.indexBackground;
+          ctx.fillRect(textX, badgeY, badgeWidth, badgeHeight);
+          ctx.fillStyle = indexKind === "PK"
+            ? headerIndexPalette.primaryForeground
+            : headerIndexPalette.indexForeground;
+          ctx.textBaseline = "middle";
+          ctx.fillText(indexKind, textX + Math.round(3.5 * gridScale), badgeY + badgeHeight / 2);
+          textX += badgeWidth + Math.max(5, Math.round(6 * gridScale));
+        }
+
+        const sorted = gridState?.sortColumn === String(column.id);
+        const sortMark = sorted
+          ? gridState?.sortDirection === "desc"
+            ? " ↓"
+            : " ↑"
+          : "";
+        ctx.font = `600 ${gridFontSize}px Inter, system-ui, sans-serif`;
+        ctx.fillStyle = theme.textHeader;
+        ctx.textBaseline = "alphabetic";
+        const nameBaseline = rect.y + Math.max(15, Math.round(16 * gridScale));
+        drawTruncatedHeaderText(
+          ctx,
+          `${metadata.name}${sortMark}`,
+          textX,
+          nameBaseline,
+          Math.max(0, textWidth - (textX - rect.x - padding)),
+        );
+
+        let detailBaseline = nameBaseline;
+        if (reserveHeaderTypeLine) {
+          detailBaseline += Math.max(12, Math.round(13 * gridScale));
+          ctx.font = `500 ${Math.max(9, gridFontSize - 2)}px Inter, system-ui, sans-serif`;
+          ctx.fillStyle = theme.textMedium;
+          drawTruncatedHeaderText(
+            ctx,
+            metadata.type ? compactResultColumnType(metadata.type) : "",
+            textX,
+            detailBaseline,
+            Math.max(0, textWidth - (textX - rect.x - padding)),
+          );
+        }
+        if (reserveHeaderCommentLine) {
+          detailBaseline += Math.max(11, Math.round(12 * gridScale));
+          ctx.font = `400 ${Math.max(9, gridFontSize - 2)}px Inter, system-ui, sans-serif`;
+          ctx.fillStyle = theme.textLight;
+          drawTruncatedHeaderText(
+            ctx,
+            metadata.comment,
+            textX,
+            detailBaseline,
+            Math.max(0, textWidth - (textX - rect.x - padding)),
+          );
+        }
+
+        if (column.hasMenu) {
+          ctx.font = `600 ${Math.max(12, Math.round(13 * gridScale))}px Inter, system-ui, sans-serif`;
+          ctx.fillStyle = theme.textMedium;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("⋮", rect.x + rect.width - actionWidth / 2, rect.y + rect.height / 2);
+        }
+        ctx.restore();
+      },
+      [
+        gridFontSize,
+        gridScale,
+        gridState?.sortColumn,
+        gridState?.sortDirection,
+        headerIndexPalette,
+        isTransposed,
+        reserveHeaderCommentLine,
+        reserveHeaderTypeLine,
+        showTypeIcons,
+        visibleHeaderMetadata,
+      ],
+    );
+    const dataGridHeaderHeight = Math.max(
+      viewMetrics.headerHeight,
+      Math.round(
+        (27 + (reserveHeaderTypeLine ? 13 : 0) + (reserveHeaderCommentLine ? 12 : 0)) *
+          gridScale,
+      ),
+    );
 
     if (error && errorPresentation) {
       return (
@@ -3095,6 +3300,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 ref={dataEditorRef}
                 getCellContent={getCellContent}
                 columns={columns}
+                drawHeader={drawColumnHeader}
                 freezeColumns={frozenColumnCount}
                 rows={visualRows.length}
                 onHeaderMenuClick={isTransposed ? undefined : onHeaderMenuClick}
@@ -3114,7 +3320,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 height="100%"
                 theme={gridTheme}
                 rowHeight={viewMetrics.rowHeight}
-                headerHeight={viewMetrics.headerHeight}
+                headerHeight={dataGridHeaderHeight}
                 rowMarkerWidth={viewMetrics.rowMarkerWidth}
                 getCellsForSelection={true}
                 rowMarkers="clickable-number"

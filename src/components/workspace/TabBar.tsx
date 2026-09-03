@@ -70,6 +70,9 @@ const TabIcon = ({
   if (type === "database_browser") {
     return <DatabaseZap size={12} className="text-emerald-400" />;
   }
+  if (type === "object_browser") {
+    return <TableIcon size={12} className="text-emerald-400" />;
+  }
   if (type === "rocketmq_workspace") {
     return <Network size={12} className="text-orange-300" />;
   }

@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronUp,
+  Check,
   Code2,
   Database,
   LocateFixed,
@@ -12,6 +13,7 @@ import {
   ShieldCheck,
   SquareTerminal,
   Table2,
+  FolderPlus,
 } from "lucide-react";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import {
@@ -33,6 +35,11 @@ import { databaseService, type DatabaseDriver, type DatabaseDriverInstallation }
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useI18n } from "@/i18n";
+import type {
+  ExplorerFilterScope,
+  ExplorerConnectionSortMode,
+  ExplorerViewMode,
+} from "@/store/useDatabaseExplorerStore";
 
 const menuContentClass =
   "min-w-[238px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
@@ -46,6 +53,12 @@ interface DatabaseExplorerHeaderProps {
   onCollapseAll: () => void;
   onRefresh: () => void;
   onHide: () => void;
+  viewMode: ExplorerViewMode;
+  filterScope: ExplorerFilterScope;
+  connectionSortMode: ExplorerConnectionSortMode;
+  onViewModeChange: (mode: ExplorerViewMode) => void;
+  onFilterScopeChange: (scope: ExplorerFilterScope) => void;
+  onConnectionSortModeChange: (mode: ExplorerConnectionSortMode) => void;
 }
 
 export function DatabaseExplorerHeader({
@@ -55,6 +68,12 @@ export function DatabaseExplorerHeader({
   onCollapseAll,
   onRefresh,
   onHide,
+  viewMode,
+  filterScope,
+  connectionSortMode,
+  onViewModeChange,
+  onFilterScopeChange,
+  onConnectionSortModeChange,
 }: DatabaseExplorerHeaderProps) {
   const { t } = useI18n();
   const [revealFeedback, setRevealFeedback] = useState(0);
@@ -126,6 +145,95 @@ export function DatabaseExplorerHeader({
               <ChevronUp size={13} className="mr-2" />
               {t("databaseExplorer.collapseAll")}
             </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={menuItemClass}>
+                Sort Data Sources
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className={menuContentClass}>
+                {(
+                  [
+                    ["manual", "Manual Order"],
+                    ["asc", "Name (A–Z)"],
+                    ["desc", "Name (Z–A)"],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <DropdownMenuItem
+                    key={mode}
+                    className={menuItemClass}
+                    onClick={() => onConnectionSortModeChange(mode)}
+                  >
+                    <Check
+                      size={12}
+                      className={cn(
+                        "mr-2",
+                        connectionSortMode !== mode && "opacity-0",
+                      )}
+                    />
+                    {label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={menuItemClass}>
+                Display Mode
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className={menuContentClass}>
+                <DropdownMenuItem
+                  className={menuItemClass}
+                  onClick={() => onViewModeChange("hierarchical")}
+                >
+                  <Check
+                    size={12}
+                    className={cn(
+                      "mr-2",
+                      viewMode !== "hierarchical" && "opacity-0",
+                    )}
+                  />
+                  Hierarchical
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className={menuItemClass}
+                  onClick={() => onViewModeChange("flat")}
+                >
+                  <Check
+                    size={12}
+                    className={cn("mr-2", viewMode !== "flat" && "opacity-0")}
+                  />
+                  Compact
+                </DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={menuItemClass}>
+                Filter Scope
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className={menuContentClass}>
+                {(
+                  [
+                    ["all", "Data Sources and Objects"],
+                    ["connections", "Data Sources"],
+                    ["objects", "Database Objects"],
+                  ] as const
+                ).map(([scope, label]) => (
+                  <DropdownMenuItem
+                    key={scope}
+                    className={menuItemClass}
+                    onClick={() => onFilterScopeChange(scope)}
+                  >
+                    <Check
+                      size={12}
+                      className={cn(
+                        "mr-2",
+                        filterScope !== scope && "opacity-0",
+                      )}
+                    />
+                    {label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           </DropdownMenuContent>
         </DropdownMenu>
         <button
@@ -150,6 +258,7 @@ interface DatabaseExplorerToolbarProps {
   isFilterVisible: boolean;
   onNewQueryConsole: () => void;
   onNewDataSource: (driver: DatabaseDriver) => void;
+  onNewConnectionGroup: () => void;
   onCreateNamespace: () => void;
   onCreateTable: () => void;
   onCreateView: () => void;
@@ -168,6 +277,7 @@ export function DatabaseExplorerToolbar({
   isFilterVisible,
   onNewQueryConsole,
   onNewDataSource,
+  onNewConnectionGroup,
   onCreateNamespace,
   onCreateTable,
   onCreateView,
@@ -334,6 +444,13 @@ export function DatabaseExplorerToolbar({
               </div>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+          <DropdownMenuItem
+            className={menuItemClass}
+            onClick={onNewConnectionGroup}
+          >
+            <FolderPlus size={13} className="mr-2 text-amber-400" />
+            Connection Group
+          </DropdownMenuItem>
           {(canCreateNamespace || canCreateTable || canCreateView) && (
             <DropdownMenuSeparator className="bg-[hsl(var(--wb-border-subtle))]" />
           )}

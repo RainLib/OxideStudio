@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { isExplorerRefreshShortcut } from "./keybindings";
+import {
+  isExplorerRefreshShortcut,
+  keybindingMatchesEvent,
+} from "./keybindings";
 
 const event = (
   overrides: Partial<Parameters<typeof isExplorerRefreshShortcut>[0]> = {},
@@ -59,5 +62,32 @@ describe("Database Explorer refresh shortcut", () => {
     expect(
       isExplorerRefreshShortcut(event({ key: "x", ctrlKey: true }), "Win32"),
     ).toBe(false);
+  });
+});
+
+describe("DataGrip-compatible workbench shortcuts", () => {
+  it("maps Mod+1 to Command on macOS and Ctrl on Windows", () => {
+    expect(
+      keybindingMatchesEvent("mod+1", event({ key: "1", metaKey: true })),
+    ).toBe(true);
+    expect(
+      keybindingMatchesEvent("mod+1", event({ key: "1", ctrlKey: true })),
+    ).toBe(true);
+  });
+
+  it("recognizes function keys and modifier alternatives", () => {
+    expect(keybindingMatchesEvent("f12", event({ key: "F12" }))).toBe(true);
+    expect(
+      keybindingMatchesEvent(
+        "mod+shift+f12",
+        event({ key: "F12", metaKey: true, shiftKey: true }),
+      ),
+    ).toBe(true);
+    expect(
+      keybindingMatchesEvent(
+        "alt+shift+b",
+        event({ key: "b", altKey: true, shiftKey: true }),
+      ),
+    ).toBe(true);
   });
 });
