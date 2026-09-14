@@ -6,6 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TableObjectTree } from "@/features/database-explorer/ui/TableObjectTree";
 
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
 const mocks = vi.hoisted(() => ({
   loadTableMetadata: vi.fn(async () => ({
     columns: [
@@ -185,6 +187,57 @@ describe("table object metadata tree", () => {
       ),
     ).not.toBeNull();
     expect(container.textContent).not.toContain("Metadata unavailable");
+  });
+
+  it("retains visible columns throughout a pending refresh and its failure", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <TableObjectTree
+          identity={{
+            connectionId: "pg",
+            driver: "postgres",
+            schema: "public",
+            table: "users",
+          }}
+          includeIndexes
+          includeConstraints
+        />,
+      );
+    });
+    let rejectRefresh!: (reason: Error) => void;
+    mocks.loadTableMetadata.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRefresh = reject;
+        }),
+    );
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[aria-label="Refresh table metadata"]',
+        )!
+        .click(),
+    );
+    expect(container.textContent).toContain("Columns");
+    expect(container.textContent).toContain("id");
+    expect(container.textContent).not.toContain("Loading metadata");
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Refresh table metadata"]',
+      )!.disabled,
+    ).toBe(true);
+    await act(async () => rejectRefresh(new Error("Permission denied")));
+    expect(container.textContent).toContain("Columns");
+    expect(
+      container
+        .querySelector(
+          '[aria-label="Showing cached metadata after refresh failure"]',
+        )
+        ?.getAttribute("title"),
+    ).toContain("Permission denied");
   });
 
   it("separates foreign keys from other constraints and opens their target", async () => {

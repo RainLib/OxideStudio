@@ -694,7 +694,7 @@ export function PostgresRemoteDatabaseContents({
               <div key={table.name}>
                 <ExplorerSharedContextMenu nodeId={relationNodeId}>
                   <ContextMenuTrigger asChild>
-                    <div className="flex h-7 min-w-0 items-center rounded-[3px] hover:bg-[hsl(var(--wb-hover))]">
+                    <div className="ml-4 flex h-7 min-w-0 items-center rounded-[3px] pl-1.5 hover:bg-[hsl(var(--wb-hover))]">
                       <button
                         type="button"
                         className="-ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] wb-muted hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]"
@@ -936,7 +936,7 @@ export function PostgresRemoteDatabaseContents({
                       }
                       tabIndex={isObjectSelected ? 0 : -1}
                       className={cn(
-                        "flex h-7 min-w-0 items-center gap-1.5 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
+                        "ml-4 flex h-7 min-w-0 items-center gap-1.5 rounded-[3px] px-2 text-[11px] text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))] hover:text-[hsl(var(--wb-text))]",
                         isObjectSelected && "wb-tree-row-selected",
                       )}
                       onClick={(event) => selectNode(objectNodeId, event)}
@@ -1205,7 +1205,7 @@ export function PostgresRemoteDatabaseContents({
               </ExplorerSharedContextMenu>
 
               {isExpanded && (
-                <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pl-2">
+                <div className="wb-explorer-children">
                   {loadState.status === "loading" && (
                     <ExplorerTreeStateRow
                       state="loading"

@@ -34,8 +34,8 @@ export function ExplorerTreeStateRow({
       aria-label={ariaLabel}
       title={title}
       className={cn(
-        "flex min-h-7 min-w-0 items-center gap-1.5 px-1.5 py-0.5 text-[10px]",
-        isError ? "text-destructive" : "wb-muted",
+        "wb-tree-state-row flex h-7 min-w-0 items-center gap-1.5 px-1.5 text-[11px]",
+        isError ? "text-[hsl(var(--wb-error-text))]" : "wb-muted",
         className,
       )}
     >

@@ -108,6 +108,52 @@ describe("ExplorerVirtualList", () => {
     expect(host.querySelectorAll("[data-row]")).toHaveLength(600);
   });
 
+  it("inherits compact row height for nested metadata directories", async () => {
+    const items = Array.from({ length: 600 }, (_, index) => `column-${index}`);
+    await act(async () => {
+      root.render(
+        <ExplorerVirtualizationHost rowHeight={22}>
+          <ExplorerVirtualList
+            items={items}
+            getKey={(item) => item}
+            renderItem={(item) => <button>{item}</button>}
+          />
+        </ExplorerVirtualizationHost>,
+      );
+    });
+    expect(
+      host.querySelector<HTMLElement>('[data-virtualized="true"]')!.style
+        .height,
+    ).toBe("13200px");
+    expect(
+      host.querySelector<HTMLElement>("[data-explorer-virtual-index]")!.style
+        .height,
+    ).toBe("22px");
+  });
+
+  it("recomputes the window when an earlier subtree collapses without scrolling", async () => {
+    const items = Array.from({ length: 600 }, (_, index) => `table-${index}`);
+    await act(async () => {
+      root.render(
+        <ExplorerVirtualList
+          items={items}
+          getKey={(item) => item}
+          renderItem={(item) => <button data-row={item}>{item}</button>}
+        />,
+      );
+    });
+    const directory = host.querySelector<HTMLElement>(
+      '[data-virtualized="true"]',
+    )!;
+    directory.getBoundingClientRect = () => ({ top: -5600 }) as DOMRect;
+    await act(async () => {
+      host.insertBefore(document.createElement("div"), directory);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(host.querySelector('[data-row="table-200"]')).not.toBeNull();
+    expect(host.querySelector('[data-row="table-0"]')).toBeNull();
+  });
+
   it("keeps expanded rows in flow while windowing fixed runs around them", async () => {
     const items = Array.from({ length: 600 }, (_, index) => `table-${index}`);
     await act(async () => {

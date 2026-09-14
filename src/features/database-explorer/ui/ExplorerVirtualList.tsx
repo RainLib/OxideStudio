@@ -1,5 +1,6 @@
 import {
   createContext,
+  Fragment,
   type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
@@ -41,6 +42,7 @@ interface ViewportMetrics {
 }
 
 interface ExplorerVirtualizationContextValue {
+  readonly rowHeight: number;
   readonly windowAllDirectories: boolean;
   readonly registerDirectory: (id: string, rowCount: number) => void;
   readonly unregisterDirectory: (id: string) => void;
@@ -56,8 +58,10 @@ const ExplorerVirtualizationContext =
  */
 export function ExplorerVirtualizationHost({
   children,
+  rowHeight = EXPLORER_TREE_ROW_HEIGHT,
 }: {
   children: ReactNode;
+  rowHeight?: number;
 }) {
   const [directoryCounts, setDirectoryCounts] = useState<
     ReadonlyMap<string, number>
@@ -94,11 +98,12 @@ export function ExplorerVirtualizationHost({
   }, []);
   const value = useMemo(
     () => ({
+      rowHeight,
       windowAllDirectories,
       registerDirectory,
       unregisterDirectory,
     }),
-    [registerDirectory, unregisterDirectory, windowAllDirectories],
+    [rowHeight, registerDirectory, unregisterDirectory, windowAllDirectories],
   );
   return (
     <ExplorerVirtualizationContext.Provider value={value}>
@@ -121,12 +126,14 @@ export function ExplorerVirtualList<T>({
   items,
   getKey,
   renderItem,
-  rowHeight = EXPLORER_TREE_ROW_HEIGHT,
+  rowHeight: requestedRowHeight,
   disabled = false,
   className,
 }: ExplorerVirtualListProps<T>) {
   const directoryId = useId();
   const virtualization = useContext(ExplorerVirtualizationContext);
+  const rowHeight =
+    requestedRowHeight ?? virtualization?.rowHeight ?? EXPLORER_TREE_ROW_HEIGHT;
   const registerDirectory = virtualization?.registerDirectory;
   const unregisterDirectory = virtualization?.unregisterDirectory;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -187,16 +194,28 @@ export function ExplorerVirtualList<T>({
         : new ResizeObserver(updateMetrics);
     observer?.observe(scroller);
     observer?.observe(host);
+    // A preceding subtree can change this directory's offset without resizing
+    // either this host or the viewport. Observe tree structure as well as size.
+    const mutationObserver = new MutationObserver(updateMetrics);
+    mutationObserver.observe(scroller, { childList: true, subtree: true });
+    for (const child of scroller.children) observer?.observe(child);
     return () => {
       scroller.removeEventListener("scroll", updateMetrics);
       observer?.disconnect();
+      mutationObserver.disconnect();
     };
-  }, [shouldWindow, updateMetrics]);
+  }, [shouldWindow, updateMetrics, rowHeight, items.length]);
+
+  useLayoutEffect(() => {
+    if (shouldWindow) updateMetrics();
+  });
 
   if (!shouldWindow) {
     return (
       <div ref={hostRef} className={className} data-virtualized="false">
-        {items.map(renderItem)}
+        {items.map((item, index) => (
+          <Fragment key={getKey(item, index)}>{renderItem(item, index)}</Fragment>
+        ))}
       </div>
     );
   }

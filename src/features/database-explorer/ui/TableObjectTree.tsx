@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Clipboard,
@@ -56,7 +56,10 @@ function GroupRow(props: ExplorerDirectoryRowProps) {
   return (
     <ExplorerDirectoryRow
       {...props}
-      className="pl-7 pr-2 text-[10px] text-[hsl(var(--wb-text-muted))]"
+      className={cn(
+        "pl-[38px] pr-2 text-[10px] text-[hsl(var(--wb-text-muted))]",
+        props.className,
+      )}
     />
   );
 }
@@ -93,6 +96,15 @@ export function TableObjectTree({
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const retainedMetadata = useRef<{
+    key: string;
+    snapshot: TableMetadataSnapshot;
+  } | null>(null);
+  const identityKey = JSON.stringify([
+    scopedIdentity,
+    includeIndexes,
+    includeConstraints,
+  ]);
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<MetadataGroup>>(
     () => new Set(["columns"]),
@@ -100,7 +112,10 @@ export function TableObjectTree({
 
   useEffect(() => {
     let active = true;
-    setMetadata(null);
+    const retained = retainedMetadata.current?.key === identityKey
+      ? retainedMetadata.current.snapshot
+      : null;
+    setMetadata(retained);
     setError(null);
     setRefreshWarning(null);
     setIsRefreshing(refreshVersion > 0);
@@ -112,6 +127,7 @@ export function TableObjectTree({
     })
       .then((snapshot) => {
         if (active) {
+          retainedMetadata.current = { key: identityKey, snapshot };
           setMetadata(snapshot);
           setIsRefreshing(false);
         }
@@ -120,6 +136,11 @@ export function TableObjectTree({
         if (!active) return;
         const message =
           reason instanceof Error ? reason.message : String(reason);
+        if (retained) {
+          setRefreshWarning(message);
+          setIsRefreshing(false);
+          return;
+        }
         // A force refresh must never make an already cached object tree disappear.
         // Reload without force so a complete persisted snapshot remains browseable
         // while clearly communicating that the remote refresh did not succeed.
@@ -132,6 +153,7 @@ export function TableObjectTree({
             });
             if (!active) return;
             setMetadata(cached);
+            retainedMetadata.current = { key: identityKey, snapshot: cached };
             setRefreshWarning(message);
             setIsRefreshing(false);
             return;
@@ -158,6 +180,7 @@ export function TableObjectTree({
     includeConstraints,
     includeIndexes,
     refreshVersion,
+    identityKey,
   ]);
 
   const refresh = () => {
@@ -302,10 +325,10 @@ export function TableObjectTree({
   return (
     <ExplorerContextMenuHost>
       <div
-        className="group/tree-metadata pb-0.5"
+        className="group/tree-metadata relative"
         data-metadata-source={metadata.source}
       >
-      <div className="flex h-4 items-center justify-end px-2">
+      <div className="absolute right-2 top-0 flex h-[var(--explorer-row-height,28px)] items-center justify-end">
         {refreshWarning && (
           <span
             className="mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
@@ -337,6 +360,7 @@ export function TableObjectTree({
         </button>
       </div>
       <GroupRow
+        className="pr-20"
         expanded={expandedGroups.has("columns")}
         icon={<Columns3 size={10} />}
         label="Columns"

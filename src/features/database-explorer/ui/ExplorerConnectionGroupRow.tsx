@@ -141,7 +141,7 @@ export function ExplorerConnectionGroupRow({
             dropPlacement === "after" &&
               "border-b border-[hsl(var(--wb-accent))]",
           )}
-          style={{ paddingLeft: `${Math.min(depth, 6) * 12 + 4}px` }}
+          style={{ paddingLeft: `${Math.min(depth, 6) * 16 + 4}px` }}
           draggable
           onDragStart={(event) => {
             event.dataTransfer.effectAllowed = "move";

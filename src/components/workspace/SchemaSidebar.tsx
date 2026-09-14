@@ -234,6 +234,7 @@ import {
   EXPLORER_MENU_SEPARATOR_CLASS,
 } from "@/features/database-explorer/ui/explorerStyles";
 import { ExplorerDirectoryRow as ExplorerDirectoryGroupRow } from "@/features/database-explorer/ui/ExplorerDirectoryRow";
+import { ExplorerTreeStateRow } from "@/features/database-explorer/ui/ExplorerTreeStateRow";
 import {
   ExplorerSegmentedVirtualList,
   ExplorerVirtualizationHost,
@@ -1387,11 +1388,6 @@ export function SchemaSidebar() {
   const collectionLabelPlural =
     collectionPreviewProvider.objectPluralLabel ||
     `${collectionPreviewProvider.objectLabel}s`;
-  const objectSectionLabel = canBrowseTables
-    ? "Tables"
-    : canBrowseCollections
-      ? collectionLabelPlural
-      : "Objects";
   const namespaceLabel = activeCapabilities.namespaceLabel || "database";
   const namespaceLabelPlural = pluralizeNamespaceLabel(namespaceLabel);
   const schemaVisibilityStorageKey = activeConnectionId
@@ -1801,15 +1797,6 @@ export function SchemaSidebar() {
     canBrowseDatabaseCatalogs,
     postgresDatabaseRefreshVersion,
   ]);
-
-  useEffect(() => {
-    // Project switches select and hydrate the first cached data source. Reveal
-    // it immediately so users do not need a click before cached metadata is
-    // visible. A manual collapse remains respected until the scope changes.
-    setExpandedConnectionIds(activeConnectionId ? [activeConnectionId] : []);
-    setExpandedSchemaKeys([]);
-    setExpandedObjectGroupKeys([]);
-  }, [activeConnectionId, activeProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4606,7 +4593,24 @@ export function SchemaSidebar() {
     driver: string | null | undefined,
     schema: string,
     _connectionColor: string,
+    activeCapabilities: DatabaseCapabilities,
   ) => {
+    // Cached subtrees retain their own driver's hierarchy when another
+    // connection becomes active.
+    const canBrowseTables = supportsTableWorkspace(activeCapabilities);
+    const canBrowseCollections =
+      activeCapabilities.supportsCollectionBrowsing ||
+      activeCapabilities.supportsKeyValueBrowsing;
+    const collectionPreviewProvider =
+      databaseObjectPreviewProvider(activeCapabilities);
+    const collectionLabel = collectionPreviewProvider.objectLabel;
+    const collectionLabelPlural =
+      collectionPreviewProvider.objectPluralLabel || `${collectionLabel}s`;
+    const objectSectionLabel = canBrowseTables
+      ? "Tables"
+      : canBrowseCollections
+        ? collectionLabelPlural
+        : "Objects";
     const isCurrentSchema =
       connectionId === activeConnectionId && schema === currentSchema;
     const objectConnection = connections.find(
@@ -6516,7 +6520,7 @@ export function SchemaSidebar() {
     return (
       <ExplorerContextMenuHost>
         <div
-          className="ml-4 pb-1 pl-2"
+          className="wb-explorer-children"
           onMouseEnter={() => setIsTablesHovered(true)}
           onMouseLeave={() => setIsTablesHovered(false)}
         >
@@ -6710,6 +6714,18 @@ export function SchemaSidebar() {
 
         {isObjectGroupExpanded && (
           <>
+            {schemaNodeState?.status === "error" && (
+              <ExplorerTreeStateRow
+                state="error"
+                title={
+                  schemaNodeState.message || "Schema metadata could not be loaded"
+                }
+                onRetry={() => void handleRefreshSchema(connectionId, schema)}
+                retryAriaLabel={`Retry loading objects in ${schema}`}
+              >
+                {schemaNodeState.message || "Objects unavailable"}
+              </ExplorerTreeStateRow>
+            )}
             {activeCapabilities.dataModel === "keyValue" && isCurrentSchema && (
               <div className="relative mx-1 mb-1 mt-0.5">
                 <Search
@@ -7020,7 +7036,8 @@ export function SchemaSidebar() {
                   <RefreshCw size={11} className="animate-spin" />
                   Loading {collectionLabelPlural.toLowerCase()}...
                 </div>
-              ) : schemaObjects.collections.length === 0 ? (
+              ) : schemaObjects.collections.length === 0 &&
+                schemaNodeState?.status === "error" ? null : schemaObjects.collections.length === 0 ? (
                 <div className="px-2 py-1.5 text-[11px] wb-muted">
                   <div className="italic">
                     {collectionNextCursor
@@ -7095,7 +7112,8 @@ export function SchemaSidebar() {
               <div className="px-2 py-1.5 text-[11px] italic wb-muted">
                 Loading tables...
               </div>
-            ) : tableRelations.length === 0 ? (
+            ) : tableRelations.length === 0 &&
+              schemaNodeState?.status === "error" ? null : tableRelations.length === 0 ? (
               <div className="flex min-h-7 items-center gap-1 px-2 py-1.5 text-[11px] italic wb-muted">
                 <span>
                   {filterText
@@ -7288,7 +7306,7 @@ export function SchemaSidebar() {
                             aria-expanded={isTableExpanded}
                             aria-label={`${relationObjectLabel(table.type)} ${schema}.${table.name}. ${explorerActivationLabel(explorerActivationMode)} to open data; right-click for actions; expand for columns and indexes.`}
                             className={cn(
-                              "group flex h-7 cursor-pointer select-none items-center gap-2 rounded-[3px] px-2 text-[11px] transition-colors",
+                              "group ml-4 flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-[3px] px-0.5 text-[11px] transition-colors",
                               selectedTableBatchSet.has(table.name) ||
                                 isSelectedTable ||
                                 isExplorerRelationSelected
@@ -8626,7 +8644,7 @@ export function SchemaSidebar() {
         </button>
       </div>
 
-      <ExplorerVirtualizationHost>
+      <ExplorerVirtualizationHost rowHeight={explorerTreeRowHeight}>
         <ExplorerContextMenuHost>
           <div
           ref={explorerScrollRef}
@@ -9122,11 +9140,18 @@ export function SchemaSidebar() {
                   key={connection.id}
                   data-database-connection-id={connection.id}
                   className={cn(
-                    "wb-explorer-connection-region rounded-[3px] border border-transparent transition-colors",
+                    "wb-explorer-connection-region rounded-[3px] transition-colors",
                     assignedGroup && !isConnectionGroupExpanded && "hidden",
-                    assignedGroup && "ml-3",
                   )}
-                  style={connectionRegionStyle(connection.color, isActive)}
+                  style={{
+                    ...connectionRegionStyle(connection.color, isActive),
+                    marginLeft: assignedGroup
+                      ? (explorerConnectionGroupDepth(
+                          assignedGroup,
+                          explorerConnectionGroupById,
+                        ) + 1) * 16
+                      : undefined,
+                  }}
                 >
                   <ExplorerSharedContextMenu
                     nodeId={explorerNodeId("connection", connection.id)}
@@ -9821,7 +9846,7 @@ export function SchemaSidebar() {
                   </ExplorerSharedContextMenu>
 
                   {isConnectionExpanded ? (
-                    <div className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pb-1 pl-2 pr-1">
+                    <div className="wb-explorer-children">
                       <PostgresDatabaseTree
                         explorerScopeId={explorerStateScope}
                         connectionId={connection.id}
@@ -9830,9 +9855,7 @@ export function SchemaSidebar() {
                             ? postgresDatabaseRefreshVersion
                             : 0
                         }:${isActive ? "active" : "inactive"}`}
-                        enabled={
-                          isActive && connectionCanBrowseDatabaseCatalogs
-                        }
+                        enabled={connectionCanBrowseDatabaseCatalogs}
                         databases={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
@@ -9840,11 +9863,16 @@ export function SchemaSidebar() {
                             : []
                         }
                         currentDatabase={connectedPostgresDatabase}
+                        onRetryDiscovery={() =>
+                          void handleRefreshConnection(connection.id)
+                        }
                         status={
                           postgresDatabaseDiscovery.connectionId ===
                           connection.id
                             ? postgresDatabaseDiscovery.status
-                            : "idle"
+                            : isActive
+                              ? "idle"
+                              : "success"
                         }
                         error={
                           postgresDatabaseDiscovery.connectionId ===
@@ -10260,6 +10288,21 @@ export function SchemaSidebar() {
                           <div className="px-1.5 py-1 text-[11px] italic wb-muted">
                             Loading {namespaceLabelPlural}...
                           </div>
+                        ) : renderedConnectionSchemas.length === 0 &&
+                          connectionMetadata.nodeState?.status === "error" ? (
+                          <ExplorerTreeStateRow
+                            state="error"
+                            title={
+                              connectionMetadata.nodeState.message ||
+                              "Namespace metadata could not be loaded"
+                            }
+                            onRetry={() =>
+                              void handleRefreshConnection(connection.id)
+                            }
+                            retryAriaLabel={`Retry loading ${namespaceLabelPlural} for ${connection.name}`}
+                          >
+                            {connectionMetadata.nodeState.message || `${namespaceLabelPlural} unavailable`}
+                          </ExplorerTreeStateRow>
                         ) : renderedConnectionSchemas.length === 0 ? (
                           <div className="flex min-h-7 items-center gap-1 px-1.5 py-1 text-[11px] italic wb-muted">
                             <span>
@@ -10976,6 +11019,7 @@ export function SchemaSidebar() {
                                     connection.driver,
                                     schema,
                                     connectionColor,
+                                    connectionCapabilities,
                                   )}
                               </div>
                             );

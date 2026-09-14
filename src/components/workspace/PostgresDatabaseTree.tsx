@@ -58,6 +58,7 @@ export interface PostgresDatabaseTreeProps {
   currentDatabase: string;
   status: PostgresDatabaseDiscoveryStatus;
   error?: string | null;
+  onRetryDiscovery?: () => void;
   schemaCount: string;
   connectionColor: string;
   children: ReactNode;
@@ -167,6 +168,7 @@ export function PostgresDatabaseTree({
   currentDatabase,
   status,
   error,
+  onRetryDiscovery,
   schemaCount: _schemaCount,
   connectionColor,
   children,
@@ -245,7 +247,7 @@ export function PostgresDatabaseTree({
     setLoadStates({});
     requestVersionsRef.current = {};
     inFlightDatabasesRef.current.clear();
-  }, [currentDatabase]);
+  }, [connectionId, currentDatabase]);
 
   const rows =
     visibleDatabases === undefined
@@ -314,7 +316,7 @@ export function PostgresDatabaseTree({
         }
       }
     },
-    [currentDatabase, onLoadDatabase],
+    [connectionId, currentDatabase, onLoadDatabase],
   );
 
   const toggleDatabase = useCallback(
@@ -488,7 +490,7 @@ export function PostgresDatabaseTree({
             {isExpanded && (
               <div
                 id={childrenId}
-                className="ml-[11px] border-l border-[hsl(var(--wb-border-subtle))] pl-2"
+                className="wb-explorer-children"
               >
                 {isDatabaseLoading && (
                   <ExplorerTreeStateRow
@@ -545,6 +547,8 @@ export function PostgresDatabaseTree({
         <ExplorerTreeStateRow
           state="error"
           title={error || "Database discovery failed"}
+          onRetry={onRetryDiscovery}
+          retryAriaLabel="Retry database discovery"
         >
           Database list unavailable
         </ExplorerTreeStateRow>
