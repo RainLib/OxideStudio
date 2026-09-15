@@ -674,7 +674,10 @@ mod tests {
         assert_eq!(encoded["kind"], "queryPage");
         assert_eq!(encoded["value"]["sessionId"], "opaque-session");
         assert_eq!(encoded["value"]["hasMore"], true);
-        assert_eq!(serde_json::from_value::<DriverResult>(encoded).unwrap(), page);
+        assert_eq!(
+            serde_json::from_value::<DriverResult>(encoded).unwrap(),
+            page
+        );
     }
 
     #[test]
