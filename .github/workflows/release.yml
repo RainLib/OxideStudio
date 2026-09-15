@@ -131,24 +131,24 @@ jobs:
             console.warn(`::warning title=GitHub Release fallback::${detail} Publishing unsigned bundles to GitHub Release without OTA metadata.`);
           }
           const signingGroups = [
-            ["apple_signing_enabled", ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID", "KEYCHAIN_PASSWORD"]],
-            ["windows_signing_enabled", ["WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD", "WINDOWS_CERTIFICATE_THUMBPRINT"]],
+            ["apple_signing_enabled", "ready-apple-signing-v1", ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID", "KEYCHAIN_PASSWORD"]],
+            ["windows_signing_enabled", "ready-windows-signing-v1", ["WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD", "WINDOWS_CERTIFICATE_THUMBPRINT"]],
           ];
-          const outputs = [`oss_enabled=${ossEnabled}`];
-          for (const [output, names] of signingGroups) {
+          const outputs = [`oss_enabled=${ossEnabled ? "ready-oss-publish-v1" : "disabled"}`];
+          for (const [output, readyValue, names] of signingGroups) {
             const present = names.filter((name) => process.env[name]?.trim());
             const enabled = present.length === names.length;
             if (present.length > 0 && !enabled) {
               const groupMissing = names.filter((name) => !process.env[name]?.trim());
               console.warn(`::warning title=Unsigned platform bundle::${output} is partial; skipping signing because ${groupMissing.join(", ")} is missing.`);
             }
-            outputs.push(`${output}=${enabled}`);
+            outputs.push(`${output}=${enabled ? readyValue : "disabled"}`);
           }
           require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `${outputs.join("\n")}\n`);
           NODE
 
       - name: Configure Aliyun updater endpoint
-        if: steps.distribution.outputs.oss_enabled == 'true'
+        if: steps.distribution.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
@@ -401,14 +401,14 @@ jobs:
           NODE
 
       - name: Configure Aliyun updater endpoint
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ matrix.family == 'windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
         run: node scripts/write-tauri-release-config.mjs
 
       - name: Import Apple Developer ID certificate
-        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -452,7 +452,7 @@ jobs:
           lipo src-tauri/binaries/sql-lsp -verify_arch "${{ matrix.mac_arch }}"
 
       - name: Sign target-specific macOS runtime binaries
-        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1'
         shell: bash
         run: |
           set -euo pipefail
@@ -481,7 +481,7 @@ jobs:
           node scripts/smoke-agent-host.mjs --binary "$AGENT_HOST"
 
       - name: Import Windows Authenticode certificate
-        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'ready-windows-signing-v1'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -524,7 +524,7 @@ jobs:
             -Append
 
       - name: Build and sign Windows runtime binaries
-        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'ready-windows-signing-v1'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -556,17 +556,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ (matrix.family == 'macos' || (matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true')) && '1' || '' }}
+          OXIDE_SKIP_SQL_LSP_PREPARE: ${{ (matrix.family == 'macos' || (matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'ready-windows-signing-v1')) && '1' || '' }}
           OXIDE_SKIP_AGENT_HOST_PACKAGE: "1"
           OXIDE_SKIP_OXIDE_AGENT_PREPARE: "1"
-          APPLE_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1' && secrets.APPLE_TEAM_ID || '' }}
         with:
-          args: ${{ matrix.args }} ${{ needs.validate.outputs.oss_enabled == 'true' && '--config src-tauri/tauri.release.conf.json' || '' }}
+          args: ${{ matrix.args }} ${{ needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1' && '--config src-tauri/tauri.release.conf.json' || '' }}
 
       - name: Verify macOS Developer ID signature and notarization ticket
-        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'true'
+        if: matrix.family == 'macos' && needs.validate.outputs.apple_signing_enabled == 'ready-apple-signing-v1'
         shell: bash
         run: |
           set -euo pipefail
@@ -586,7 +586,7 @@ jobs:
           spctl --assess --type execute --verbose=2 "$APP_PATH"
 
       - name: Verify Windows Authenticode signatures
-        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'true'
+        if: matrix.family == 'windows' && needs.validate.outputs.windows_signing_enabled == 'ready-windows-signing-v1'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -654,7 +654,7 @@ jobs:
           path: release-input
 
       - name: Build static updater manifest and checksums
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           RELEASE_NOTES: ""
         run: |
@@ -666,7 +666,7 @@ jobs:
             --base-url "$OXIDE_RELEASE_BASE_URL"
 
       - name: Install pinned minisign
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         shell: bash
         run: |
           set -euo pipefail
@@ -682,7 +682,7 @@ jobs:
             /usr/local/bin/minisign
 
       - name: Verify Tauri updater signatures locally
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OXIDE_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         shell: bash
@@ -703,7 +703,7 @@ jobs:
           test "$SIGNATURE_COUNT" -gt 0
 
       - name: Install pinned ossutil
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         shell: bash
         run: |
           set -euo pipefail
@@ -720,7 +720,7 @@ jobs:
           ossutil version
 
       - name: Upload immutable version assets
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -745,14 +745,14 @@ jobs:
           ossutil stat "$DESTINATION/$RELEASE_TAG/release.json"
 
       - name: Verify immutable version assets from the public endpoint
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OXIDE_VERIFY_VERSIONED_ASSETS: "1"
           OXIDE_EXPECTED_RELEASE_INDEX: release-output/${{ needs.validate.outputs.tag }}/release.json
         run: node scripts/verify-oss-release.mjs
 
       - name: Publish latest manifest after immutable assets pass verification
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -771,7 +771,7 @@ jobs:
           ossutil stat "$DESTINATION/latest.json"
 
       - name: Verify public update downloads use Aliyun OSS
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         run: node scripts/verify-oss-release.mjs
 
       - name: Publish GitHub Release assets
@@ -783,7 +783,7 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Preserve release index
-        if: needs.validate.outputs.oss_enabled == 'true'
+        if: needs.validate.outputs.oss_enabled == 'ready-oss-publish-v1'
         uses: actions/upload-artifact@v7
         with:
           name: oxide-studio-${{ needs.validate.outputs.tag }}-release-index

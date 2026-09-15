@@ -15,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { targetBinding } from "./print-enterprise-target-binding.mjs";
@@ -53,7 +53,7 @@ export function parseEnvFile(source) {
 
 export function defaultDesktopConfigDirectory(environment = process.env, platform = process.platform) {
   if (platform === "win32" && environment.APPDATA) {
-    return join(environment.APPDATA, "com.houshuai.oxide-studio", "enterprise");
+    return win32.join(environment.APPDATA, "com.houshuai.oxide-studio", "enterprise");
   }
   if (platform === "darwin") {
     return join(homedir(), "Library", "Application Support", "com.houshuai.oxide-studio", "enterprise");

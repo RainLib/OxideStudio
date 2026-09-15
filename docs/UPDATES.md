@@ -121,6 +121,48 @@ Public macOS builds must use a paid Apple Developer Program account, a
 certificate and private key from Keychain Access as a password-protected
 `.p12`, then add these repository secrets:
 
+#### Create or reuse the certificate
+
+For direct `.app` / `.dmg` distribution, choose **Developer ID Application**.
+`Developer ID Installer` is for `.pkg` installers; `Apple Distribution` is for
+App Store distribution. A Developer ID Application certificate identifies the
+publisher and can sign multiple applications from the same team, so a new
+certificate is not needed for each application.
+
+First check the build Mac:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+If the intended team's `Developer ID Application: ... (TEAM_ID)` appears as a
+valid identity, reuse it. In Keychain Access, open **My Certificates**, expand
+that certificate to confirm its private key is present, and export only that
+identity as a password-protected `.p12`. A downloaded `.cer` alone does not
+contain the private key needed by CI. Keep the export outside the checkout.
+
+If no usable identity exists:
+
+1. In Keychain Access, choose **Certificate Assistant → Request a Certificate
+   From a Certificate Authority**, enter the account email and a descriptive
+   common name, and select **Saved to disk** to create a CSR.
+2. In Apple Developer **Certificates, Identifiers & Profiles → Certificates →
+   +**, select **Developer ID Application** and follow the prompts to upload
+   the CSR. Apple requires the Account Holder role for this creation flow.
+3. Download the issued `.cer` and import it on the Mac that generated the CSR,
+   where the matching private key resides. Repeat the identity check above,
+   then export the identity as `.p12` for CI.
+
+For the current app's direct distribution, a separate provisioning profile is
+not required unless restricted capabilities that require one are introduced.
+Do not reuse another app's provisioning profile merely because it uses the
+same signing certificate.
+
+See [Apple's certificate creation guide](https://developer.apple.com/help/account/certificates/create-developer-id-certificates)
+and [Tauri's macOS signing guide](https://tauri.app/distribute/sign/macos/).
+
+#### Configure GitHub Actions
+
 | Secret | Value |
 | --- | --- |
 | `APPLE_CERTIFICATE` | Single-line base64 of the exported `.p12` (`openssl base64 -A -in certificate.p12`) |
@@ -130,18 +172,41 @@ certificate and private key from Keychain Access as a password-protected
 | `APPLE_TEAM_ID` | Ten-character Apple Developer Team ID |
 | `KEYCHAIN_PASSWORD` | Random CI-only password used for the ephemeral runner keychain |
 
+Configure these under **RainLib/OxideStudio → Settings → Secrets and variables
+→ Actions → Repository secrets**. Generate an app-specific password in the
+signing account's Apple Account security settings for `APPLE_PASSWORD`.
+Never paste the normal Apple Account login password into this secret.
+
+To upload the `.p12` without printing its base64 payload, use the GitHub CLI
+from a trusted terminal (replace the file path with your protected export):
+
+```bash
+openssl base64 -A -in /absolute/path/to/developer-id.p12 \
+  | gh secret set APPLE_CERTIFICATE --repo RainLib/OxideStudio
+```
+
+Use the GitHub UI or interactive `gh secret set SECRET_NAME --repo
+RainLib/OxideStudio` for the other values. Secret names being present does not
+prove their contents are valid; a signed and notarized build is the final check.
+
 When all six values are present, the macOS runner imports the certificate into
-an ephemeral keychain, lets Tauri sign and notarize the universal app, and then
+an ephemeral keychain, lets Tauri sign and notarize each architecture's app, and then
 validates the Developer ID signature, stapled notarization ticket, and
 Gatekeeper assessment before uploading any artifact. The bundled SQL LSP
-executable is built for both Apple Silicon and Intel, merged with `lipo`, and
-signed separately with hardened runtime before Tauri seals the application
-bundle.
+executable is built separately for Apple Silicon and Intel and signed with
+hardened runtime before Tauri seals each application bundle.
 
 When none of the Apple secrets exist, macOS signing and notarization are
-skipped and the unsigned/ad-hoc test bundle is still built. If only part of the
-group is configured, validation fails and lists the missing names; this avoids
-silently publishing a bundle that was expected to be signed.
+skipped and an unsigned/ad-hoc bundle is still built. The current release
+workflow also warns and skips signing if only part of the group is configured.
+A successful Release job alone therefore does not prove macOS signing occurred:
+check that **Import Apple Developer ID certificate** and **Verify macOS
+Developer ID signature and notarization ticket** both ran successfully.
+
+The workflow starts when a matching `v*` tag is pushed; it builds both macOS
+architectures. All other release prerequisites still apply, including
+`DRIVER_MINISIGN_PUBLIC_KEY_B64`, which validation requires independently of
+Apple signing. Complete the secrets before triggering a release tag.
 
 An ad-hoc signature (`signingIdentity: "-"`) is only suitable for local tests.
 It does not remove the Gatekeeper warning for downloaded software.

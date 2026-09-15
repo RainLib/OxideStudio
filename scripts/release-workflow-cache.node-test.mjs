@@ -66,3 +66,20 @@ test("tag CI reuses the same credential-free Rust compilation cache", async () =
   assert.match(rust, /run: sccache --show-stats/u);
   assert.doesNotMatch(rust, /SCCACHE_(?:S3|AZURE|REDIS)|AWS_(?:ACCESS|SECRET)/u);
 });
+
+test("release readiness outputs do not reuse secret-shaped boolean values", async () => {
+  const source = (await readFile(releaseWorkflowPath, "utf8")).replace(/\r\n/gu, "\n");
+
+  for (const readinessValue of [
+    "ready-oss-publish-v1",
+    "ready-apple-signing-v1",
+    "ready-windows-signing-v1",
+  ]) {
+    assert.match(source, new RegExp(readinessValue, "u"));
+  }
+  assert.doesNotMatch(
+    source,
+    /(?:apple_signing_enabled|windows_signing_enabled|oss_enabled)[^\n]*== 'true'/u,
+    "job outputs must not equal the ALIYUN_OSS_ENABLED secret value, or GitHub masks them",
+  );
+});
