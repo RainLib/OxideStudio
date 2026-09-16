@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, FileSpreadsheet, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -22,17 +22,12 @@ import type {
   TableImportMode,
 } from "@/services/tauri/types";
 import {
-  buildCsvImportPlan,
   createCsvColumnMapping,
-  csvSourceColumns,
-  decodeCsvBytes,
-  inferCsvDelimiter,
-  parseCsv,
-  selectCsvDataRecords,
-  validateCsvRowSelection,
   type CsvColumnMapping,
   type CsvEncoding,
 } from "@/lib/csvImport";
+import { useCsvAnalysis } from "@/features/table-import/useCsvAnalysis";
+import { CSV_PREVIEW_ROWS as PREVIEW_ROW_LIMIT } from "@/features/table-import/csvImportSession";
 
 interface CsvImportDialogProps {
   open: boolean;
@@ -55,9 +50,7 @@ interface CsvImportDialogProps {
 
 type DelimiterChoice = "auto" | "comma" | "semicolon" | "tab" | "pipe" | "custom";
 
-const PREVIEW_ROW_LIMIT = 50;
 const MAX_IMPORT_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_IMPORT_ROWS = 100_000;
 const fieldClass =
   "h-7 w-full rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] px-2 text-[11px] text-[hsl(var(--wb-text))] outline-none focus:border-[hsl(var(--wb-accent))]";
 const selectClass = `${fieldClass} focus:ring-0 focus:ring-offset-0`;
@@ -91,7 +84,11 @@ export function CsvImportDialog({
   const hasHeader = titleRow > 0;
 
   useEffect(() => {
-    if (!open || !file) return;
+    if (!open || !file) {
+      setBytes(null);
+      setIsLoading(false);
+      return;
+    }
     let cancelled = false;
     setBytes(null);
     setLoadError(null);
@@ -133,96 +130,39 @@ export function CsvImportDialog({
     };
   }, [file, open]);
 
-  const decoded = useMemo(() => {
-    if (!bytes) return { text: "", encoding: "utf-8" as const, error: null };
-    try {
-      return { ...decodeCsvBytes(bytes, encoding), error: null };
-    } catch (error) {
-      return {
-        text: "",
-        encoding: "utf-8" as const,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }, [bytes, encoding]);
-
-  const delimiter = useMemo(() => {
-    switch (delimiterChoice) {
-      case "comma":
-        return ",";
-      case "semicolon":
-        return ";";
-      case "tab":
-        return "\t";
-      case "pipe":
-        return "|";
-      case "custom":
-        return customDelimiter;
-      default:
-        return inferCsvDelimiter(decoded.text);
-    }
-  }, [customDelimiter, decoded.text, delimiterChoice]);
-
-  const parsed = useMemo(
-    () => parseCsv(
-      decoded.text,
-      delimiter,
-      MAX_IMPORT_ROWS + Math.max(titleRow, dataStartRow) + 2,
-    ),
-    [dataStartRow, decoded.text, delimiter, titleRow],
-  );
-  const sourceColumns = useMemo(
-    () => csvSourceColumns(
-      parsed.records,
-      hasHeader,
-      titleRow,
-      dataStartRow,
-      lastDataRow,
-    ),
-    [dataStartRow, hasHeader, lastDataRow, parsed.records, titleRow],
-  );
+  const analysis = useCsvAnalysis(open ? bytes : null, {
+    encoding,
+    delimiter: delimiterChoice === "auto" ? "auto"
+      : delimiterChoice === "custom" ? customDelimiter
+        : ({ comma: ",", semicolon: ";", tab: "\t", pipe: "|" }[delimiterChoice]),
+    titleRow, dataStartRow, lastDataRow, mapping, columns, emptyAsNull, trimValues,
+  });
+  const decoded = { encoding: analysis.analysis?.encoding ?? "utf-8" };
+  const delimiter = analysis.analysis?.delimiter ?? ",";
+  const sourceColumns = analysis.analysis?.sourceColumns ?? [];
+  const previewRecords = analysis.analysis?.previewRecords ?? [];
+  const dataRowCount = analysis.analysis?.dataRowCount ?? 0;
+  const plan = analysis.analysis ?? { rowCount: 0, issues: [], errorCount: 0 };
   const mappingSignature = useMemo(
     () => `${titleRow}:${dataStartRow}:${lastDataRow}:${sourceColumns.join("\u0000")}:${columns.map((column) => column.name).join("\u0000")}`,
     [columns, dataStartRow, lastDataRow, sourceColumns, titleRow],
   );
-
   useEffect(() => {
-    setMapping(createCsvColumnMapping(sourceColumns, columns, hasHeader));
+    if (analysis.analysis) setMapping(createCsvColumnMapping(sourceColumns, columns, hasHeader));
   }, [mappingSignature]);
-
-  const plan = useMemo(
-    () => buildCsvImportPlan({
-      records: parsed.records,
-      parseIssues: parsed.issues,
-      hasHeader,
-      titleRow,
-      dataStartRow,
-      lastDataRow,
-      mapping,
-      columns,
-      emptyAsNull,
-      trimValues,
-    }),
-    [columns, dataStartRow, emptyAsNull, hasHeader, lastDataRow, mapping, parsed.issues, parsed.records, titleRow, trimValues],
-  );
-  const rowSelection = { hasHeader, titleRow, dataStartRow, lastDataRow };
-  const rowRangeError = validateCsvRowSelection(rowSelection);
-  const dataRecords = selectCsvDataRecords(parsed.records, rowSelection);
-  const previewRecords = dataRecords.slice(0, PREVIEW_ROW_LIMIT);
-  const rowLimitError = dataRecords.length > MAX_IMPORT_ROWS
-    ? `The selected range contains more than ${MAX_IMPORT_ROWS.toLocaleString()} rows. Use Database Explorer → Import/Export → Import delimited text (streaming)… for a larger source.`
-    : null;
+  const [isPreparing, setIsPreparing] = useState(false);
+  const preparingRef = useRef(false);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const nativePreviewError = nativePreviewTruncated
     ? "This source is larger than the 32 MiB review limit. Use Import delimited text (streaming)… or split the file before using custom column mapping."
     : null;
-  const blockingError = loadError || decoded.error || rowRangeError || rowLimitError || nativePreviewError;
-  const canImport =
-    !isLoading &&
-    !isSubmitting &&
-    !blockingError &&
-    plan.errorCount === 0 &&
-    plan.rows.length > 0 &&
-    (importMode === "append" || isNativeSource);
+  const blockingError = loadError || analysis.error || analysis.analysis?.error || nativePreviewError;
+  const canImport = !isLoading && !analysis.isAnalyzing && !isPreparing &&
+    !isSubmitting && !blockingError && plan.errorCount === 0 && plan.rowCount > 0;
 
   const updateMapping = (sourceIndex: number, value: string) => {
     setMapping((current) => current.map((item) =>
@@ -260,6 +200,7 @@ export function CsvImportDialog({
         </DialogHeader>
 
         <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
+          <fieldset disabled={isSubmitting || isPreparing} className="contents">
           <aside className="flex min-h-0 flex-col border-r border-[hsl(var(--wb-border-subtle))]">
             <section className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-[hsl(var(--wb-border-subtle))] p-3">
               <label className="pt-1.5 text-[10px] wb-muted">Write mode</label>
@@ -272,7 +213,7 @@ export function CsvImportDialog({
               </Select>
 
               <label className="pt-1.5 text-[10px] wb-muted">Encoding</label>
-              <Select value={encoding} onValueChange={(value) => setEncoding(value as CsvEncoding)} disabled={isLoading}>
+              <Select value={encoding} onValueChange={(value) => setEncoding(value as CsvEncoding)} disabled={isLoading || isSubmitting || isPreparing}>
                 <SelectTrigger className={selectClass}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Auto ({decoded.encoding.toUpperCase()})</SelectItem>
@@ -285,7 +226,7 @@ export function CsvImportDialog({
 
               <label className="pt-1.5 text-[10px] wb-muted">Delimiter</label>
               <div className="flex gap-1.5">
-                <Select value={delimiterChoice} onValueChange={(value) => setDelimiterChoice(value as DelimiterChoice)} disabled={isLoading}>
+                <Select value={delimiterChoice} onValueChange={(value) => setDelimiterChoice(value as DelimiterChoice)} disabled={isLoading || isSubmitting || isPreparing}>
                   <SelectTrigger className={selectClass}><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">Auto ({delimiter === "\t" ? "Tab" : delimiter})</SelectItem>
@@ -392,14 +333,15 @@ export function CsvImportDialog({
             <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3 text-[10px]">
               <span className="font-medium">Data preview</span>
               <span className="wb-muted">
-                {dataRecords.length.toLocaleString()} rows · {sourceColumns.length.toLocaleString()} columns
-                {dataRecords.length > PREVIEW_ROW_LIMIT ? ` · first ${PREVIEW_ROW_LIMIT} shown` : ""}
+                {dataRowCount.toLocaleString()} rows · {sourceColumns.length.toLocaleString()} columns
+                {dataRowCount > PREVIEW_ROW_LIMIT ? ` · first ${PREVIEW_ROW_LIMIT} shown` : ""}
               </span>
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
-              {isLoading ? (
+              {isLoading || analysis.isAnalyzing ? (
                 <div className="flex h-full items-center justify-center gap-2 text-[11px] wb-muted">
-                  <Loader2 size={14} className="animate-spin" /> Reading {file?.name}
+                  <Loader2 size={14} className="animate-spin" />
+                  {isLoading ? `Reading ${file?.name}` : "Validating CSV…"}
                 </div>
               ) : (
                 <table className="min-w-full border-collapse font-mono text-[10px]">
@@ -453,6 +395,7 @@ export function CsvImportDialog({
               </section>
             )}
           </main>
+          </fieldset>
         </div>
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
@@ -479,27 +422,43 @@ export function CsvImportDialog({
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"
               disabled={!canImport}
-              onClick={() => void onImport(
-                plan.rows,
-                {
-                  delimiter,
-                  firstRowHeader: hasHeader,
-                  titleRow,
-                  dataStartRow,
-                  lastDataRow,
-                  columnMapping: mapping.map((item) => ({
-                    sourceIndex: item.sourceIndex,
-                    targetColumn: item.targetColumn,
-                  })),
-                  emptyFieldsAsNull: emptyAsNull,
-                  trimValues,
-                  encoding: decoded.encoding,
-                },
-                decoded.encoding,
-                importMode,
-              )}
+              onClick={async () => {
+                if (!canImport || preparingRef.current) return;
+                preparingRef.current = true;
+                setIsPreparing(true);
+                try {
+                  const rows = await analysis.rows();
+                  await onImport(
+                    rows,
+                    {
+                      delimiter,
+                      firstRowHeader: hasHeader,
+                      titleRow,
+                      dataStartRow,
+                      lastDataRow,
+                      columnMapping: mapping.map((item) => ({
+                        sourceIndex: item.sourceIndex,
+                        targetColumn: item.targetColumn,
+                      })),
+                      emptyFieldsAsNull: emptyAsNull,
+                      trimValues,
+                      encoding: decoded.encoding,
+                    },
+                    decoded.encoding,
+                    importMode,
+                  );
+                } catch (error) {
+                  if (mountedRef.current) setLoadError(error instanceof Error ? error.message : String(error));
+                } finally {
+                  preparingRef.current = false;
+                  if (mountedRef.current) setIsPreparing(false);
+                }
+              }}
             >
-              {isSubmitting ? <Loader2 size={12} className="animate-spin" /> : `${importMode === "truncate" ? "Replace with" : "Import"} ${plan.rows.length.toLocaleString()} row${plan.rows.length === 1 ? "" : "s"}`}
+              {isSubmitting || isPreparing || analysis.isAnalyzing ? <>
+                <Loader2 size={12} className="animate-spin" />
+                {isSubmitting ? "Importing…" : isPreparing ? "Preparing…" : "Validating…"}
+              </> : `${importMode === "truncate" ? "Replace with" : "Import"} ${plan.rowCount.toLocaleString()} row${plan.rowCount === 1 ? "" : "s"}`}
             </button>
           </div>
         </DialogFooter>

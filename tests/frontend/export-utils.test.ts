@@ -5,6 +5,7 @@ import {
   serializeQueryResultSelectionToTsv,
   serializeQueryResultToCsv,
   serializeQueryResultToJson,
+  serializeQueryResultToJsonLines,
 } from "@/lib/exportUtils";
 
 describe("query result export helpers", () => {
@@ -42,6 +43,16 @@ describe("query result export helpers", () => {
     expect(JSON.parse(serializeQueryResultToJson(result))).toEqual([
       { id: 1, id_2: 2, column_3: "anonymous" },
     ]);
+  });
+
+  it("preserves every value when generated duplicate keys collide with real labels", () => {
+    const result: QueryResult = {
+      columns: ["id", "id", "id_2", "id", "id_3"].map((name) => ({ name, data_type: "int4" })),
+      rows: [[1, 2, 3, 4, 5]],
+    };
+    const expected = { id: 1, id_4: 2, id_2: 3, id_5: 4, id_3: 5 };
+    expect(JSON.parse(serializeQueryResultToJson(result))).toEqual([expected]);
+    expect(JSON.parse(serializeQueryResultToJsonLines(result))).toEqual(expected);
   });
 
   it("serializes selected rows and columns to TSV in caller-provided order", () => {

@@ -16,7 +16,7 @@ import {
   type GraphPendingWrite,
   type GraphTypedBlob,
 } from "@oxide/agent-contract";
-import type { TurnExecution } from "./runtime.js";
+import type { TurnExecution } from "./runtime/execution.js";
 
 const STORAGE_RPC_TIMEOUT_MS = 5_000;
 const MAX_LIST_RECORDS = 1_000;

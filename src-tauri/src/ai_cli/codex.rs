@@ -18,7 +18,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
     sync::Mutex,
 };
 
@@ -314,9 +313,8 @@ async fn discover_models_inner(
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<CliModelInfo>> {
     let cwd = isolated_working_directory()?;
-    let mut process = Command::new(&command.program);
+    let mut process = command.command();
     process
-        .args(&command.prefix_args)
         .arg("app-server")
         .envs(environment)
         .current_dir(cwd.path())

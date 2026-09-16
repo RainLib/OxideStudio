@@ -1,4 +1,4 @@
-use super::{EnterpriseClient, ManagedAccessSessionRequest};
+use super::models::{EnterpriseClient, ManagedAccessSession, ManagedAccessSessionRequest};
 use crate::core::{
     dialect::{database_capabilities_for_driver, DatabaseCapabilities},
     driver::DatabaseDriver,
@@ -97,11 +97,7 @@ impl ManagedGatewayDriver {
         &self,
         action: AccessAction,
         resource_path: Vec<String>,
-    ) -> Result<(
-        DataPlaneClient<Channel>,
-        super::ManagedAccessSession,
-        RequestScope,
-    )> {
+    ) -> Result<(DataPlaneClient<Channel>, ManagedAccessSession, RequestScope)> {
         let session = self
             .enterprise
             .create_access_session(ManagedAccessSessionRequest {

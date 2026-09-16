@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod codebuddy;
 pub mod codex;
+mod codex_protocol;
+mod executable;
 pub mod runtime;
 pub mod setup;
 

@@ -4,9 +4,10 @@
 //! the live bundled driver, event identity and current metadata before it
 //! returns or executes one generated statement.
 
-use super::{
-    confirmed_admin_kind, database_admin_error_response, mysql_identifier, primary_result,
-    result_row, sql_string, validate_text, value_string,
+use super::identity::confirmed_admin_kind;
+use super::support::{
+    database_admin_error_response, mysql_identifier, primary_result, result_row, sql_string,
+    validate_text, value_string,
 };
 use crate::core::{
     dialect::DatabaseKind,

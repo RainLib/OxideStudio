@@ -154,7 +154,10 @@ fn lsp_manifest_version(manifest: &LspBinaryManifest) -> String {
 }
 
 fn binary_manifest_info(binary_path: &Path) -> (Option<LspBinaryManifest>, Option<bool>) {
-    let manifest_path = binary_path.with_file_name("sql-lsp.manifest.json");
+    let Some(binary_name) = binary_path.file_name().and_then(|name| name.to_str()) else {
+        return (None, None);
+    };
+    let manifest_path = binary_path.with_file_name(format!("{binary_name}.manifest.json"));
     let manifest = std::fs::read_to_string(manifest_path)
         .ok()
         .and_then(|contents| serde_json::from_str::<LspBinaryManifest>(&contents).ok());
@@ -240,6 +243,24 @@ mod tests {
         );
 
         std::fs::write(&binary_path, b"changed").expect("change binary");
+        assert_eq!(binary_manifest_info(&binary_path).1, Some(false));
+
+        // Each platform keeps its own proof. Updating one bundle must not
+        // invalidate the other platform's binary in the same checkout.
+        let windows_binary_path = directory.join("sql-lsp.exe");
+        std::fs::write(&windows_binary_path, b"sql-lsp.exe").expect("write Windows binary");
+        let windows_sha256 = binary_sha256(&windows_binary_path).expect("hash Windows binary");
+        std::fs::write(
+            directory.join("sql-lsp.exe.manifest.json"),
+            serde_json::json!({
+                "sourceRevision": "fedcba9876543210",
+                "sourceDirty": false,
+                "sha256": windows_sha256,
+            })
+            .to_string(),
+        )
+        .expect("write Windows manifest");
+        assert_eq!(binary_manifest_info(&windows_binary_path).1, Some(true));
         assert_eq!(binary_manifest_info(&binary_path).1, Some(false));
         let _ = std::fs::remove_dir_all(directory);
     }

@@ -113,7 +113,7 @@ describe("LspConnectionSyncer render integration", () => {
     localStorage.clear();
 
     mocks.getDatabaseCapabilities.mockResolvedValue(
-      defaultDatabaseCapabilities("postgres")
+      defaultDatabaseCapabilities("postgres"),
     );
     mocks.getServerVersion.mockResolvedValue("16.2");
     mocks.getConnectionDatabaseCapabilityContext.mockImplementation(
@@ -275,7 +275,7 @@ describe("LspConnectionSyncer render integration", () => {
     expect(mocks.getColumns).toHaveBeenCalledWith(
       "postgres-1",
       "public",
-      "users"
+      "users",
     );
     expect(mocks.updateConfiguration).toHaveBeenCalledTimes(1);
 
@@ -304,7 +304,7 @@ describe("LspConnectionSyncer render integration", () => {
       ],
     });
     expect(
-      config.fileSchemas["oxide://query/query-1.postgres.postgres"]
+      config.fileSchemas["oxide://query/query-1.postgres.postgres"],
     ).toEqual(config.schemas[0].id);
   });
 
@@ -378,9 +378,9 @@ describe("LspConnectionSyncer render integration", () => {
       expectedRoot: "/workspace/project",
     });
     const config = mocks.updateConfiguration.mock.calls.at(-1)?.[0];
-    expect(config.fileDialects["oxide://project/project-1/queries/report.sql"]).toBe(
-      "postgres",
-    );
+    expect(
+      config.fileDialects["oxide://project/project-1/queries/report.sql"],
+    ).toBe("postgres");
     expect(mocks.didOpen).toHaveBeenCalledWith(
       "oxide://project/project-1/queries/report.sql",
       "SELECT * FROM users;",
@@ -443,6 +443,62 @@ describe("LspConnectionSyncer render integration", () => {
     );
   });
 
+  it("closes a project document whose open finishes after the root is removed", async () => {
+    let finishOpen!: () => void;
+    const opening = new Promise<void>((resolve) => {
+      finishOpen = resolve;
+    });
+    mocks.didOpen.mockImplementationOnce(() => opening);
+    mocks.getLspDocuments.mockResolvedValue([
+      { relativePath: "queries/report.sql", content: "SELECT * FROM users;" },
+    ]);
+    useProjectStore.setState({
+      projects: [
+        {
+          id: "project-1",
+          name: "project",
+          root_path: "/workspace/project",
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+      activeProjectId: "project-1",
+      activeProjectName: "project",
+    });
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<LspConnectionSyncer />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      await flushAsyncWork();
+    });
+    expect(mocks.didOpen).toHaveBeenCalledOnce();
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [
+          {
+            id: "project-1",
+            name: "project",
+            root_path: null,
+            created_at: 0,
+            updated_at: 0,
+          },
+        ],
+      });
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      finishOpen();
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(mocks.didClose).toHaveBeenCalledWith(
+      "oxide://project/project-1/queries/report.sql",
+    );
+    expect(mocks.didOpen).toHaveBeenCalledOnce();
+  });
+
   it("closes project SQL virtual documents after the final connection query tab closes", async () => {
     mocks.getLspDocuments.mockResolvedValue([
       { relativePath: "queries/report.sql", content: "SELECT * FROM users;" },
@@ -487,7 +543,7 @@ describe("LspConnectionSyncer render integration", () => {
         schema: "public",
         type: "BASE TABLE",
         comment: null,
-      }))
+      })),
     );
     mocks.getFunctions.mockResolvedValue(
       Array.from({ length: 230 }, (_, index) => ({
@@ -496,7 +552,7 @@ describe("LspConnectionSyncer render integration", () => {
         parameters: [],
         return_type: "integer",
         description: null,
-      }))
+      })),
     );
 
     await act(async () => {
@@ -549,13 +605,13 @@ describe("LspConnectionSyncer render integration", () => {
     expect(mocks.getDatabaseTables).toHaveBeenCalledWith(
       "postgres-1",
       "analytics",
-      "public"
+      "public",
     );
     expect(mocks.getDatabaseColumns).toHaveBeenCalledWith(
       "postgres-1",
       "analytics",
       "public",
-      "events"
+      "events",
     );
     expect(mocks.getTables).not.toHaveBeenCalled();
 
@@ -573,22 +629,20 @@ describe("LspConnectionSyncer render integration", () => {
       }),
     ]);
     expect(
-      config.fileSchemas[
-        "oxide://query/analytics-query.postgres.postgres"
-      ]
+      config.fileSchemas["oxide://query/analytics-query.postgres.postgres"],
     ).toBe(config.schemas[0].id);
     expect(config.schemas[0].id).toBe(
       localStorage.getItem(
         `oxide-lsp-schema-id:v2:${encodeURIComponent(
-          JSON.stringify(["postgres-1", "postgres", "analytics", "public"])
-        )}`
-      )
+          JSON.stringify(["postgres-1", "postgres", "analytics", "public"]),
+        )}`,
+      ),
     );
   });
 
   it("publishes every collection instead of truncating document catalogs", async () => {
     mocks.getDatabaseCapabilities.mockResolvedValue(
-      defaultDatabaseCapabilities("mongodb")
+      defaultDatabaseCapabilities("mongodb"),
     );
     mocks.getServerVersion.mockResolvedValue("5.0.14");
     mocks.getCollections.mockResolvedValue(
@@ -596,7 +650,7 @@ describe("LspConnectionSyncer render integration", () => {
         name: `collection_${index}`,
         type: "collection",
         documentCount: index,
-      }))
+      })),
     );
     useConnectionStore.setState({
       connections: [
@@ -647,8 +701,8 @@ describe("LspConnectionSyncer render integration", () => {
     expect(firstConfig.schemas[0].tables).toHaveLength(505);
     expect(
       firstConfig.schemas[0].tables.some(
-        (table: { name: string }) => table.name === "collection_504"
-      )
+        (table: { name: string }) => table.name === "collection_504",
+      ),
     ).toBe(true);
     // The bundled Mongo service gates aggregation stages by server version;
     // the version has to travel with the schema config rather than live only
@@ -658,7 +712,7 @@ describe("LspConnectionSyncer render integration", () => {
 
   it("does not introspect Redis when no query tab targets the connection", async () => {
     mocks.getDatabaseCapabilities.mockResolvedValue(
-      defaultDatabaseCapabilities("redis")
+      defaultDatabaseCapabilities("redis"),
     );
     useConnectionStore.setState({
       connections: [
@@ -689,7 +743,7 @@ describe("LspConnectionSyncer render integration", () => {
 
   it("syncs a bounded Redis key page into the active LSP session", async () => {
     mocks.getDatabaseCapabilities.mockResolvedValue(
-      defaultDatabaseCapabilities("redis")
+      defaultDatabaseCapabilities("redis"),
     );
     mocks.getCollections.mockResolvedValue([
       {
@@ -774,7 +828,7 @@ describe("LspConnectionSyncer render integration", () => {
       ],
     });
     expect(config.schemas[0].tables[0].source_location[0]).toContain(
-      "oxide://database-object/object"
+      "oxide://database-object/object",
     );
   });
 });

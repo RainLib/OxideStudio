@@ -17,7 +17,7 @@ const lspSourceDir = join(repoRoot, "vendor", "sql-lsp");
 const binariesDir = join(repoRoot, "src-tauri", "binaries");
 const binaryName = process.platform === "win32" ? "sql-lsp.exe" : "sql-lsp";
 const targetBinary = join(binariesDir, binaryName);
-const targetManifest = join(binariesDir, "sql-lsp.manifest.json");
+const targetManifest = join(binariesDir, `${binaryName}.manifest.json`);
 const digest = (path) =>
   createHash("sha256").update(readFileSync(path)).digest("hex");
 

@@ -4,9 +4,9 @@
 //! binds the live driver identity, negotiated server version and exact target.
 //! Execution recomputes that plan before issuing one host-generated statement.
 
-use super::{
-    confirmed_admin_kind, database_admin_error_response, mysql_identifier, postgres_identifier,
-    validate_text,
+use super::identity::confirmed_admin_kind;
+use super::support::{
+    database_admin_error_response, mysql_identifier, postgres_identifier, validate_text,
 };
 use crate::core::{
     dialect::DatabaseKind,

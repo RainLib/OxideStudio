@@ -1,143 +1,53 @@
 import { AppBar } from "@/components/AppBar";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
-import { ToolWindowPanel } from "@/components/workspace/ToolWindowPanel";
 import { TabBar } from "@/components/workspace/TabBar";
-import { SideToolWindow } from "@/components/workspace/SideToolWindow";
-import { ElasticsearchResponseView } from "@/components/workspace/ElasticsearchResponseView";
 import {
   WorkbenchGlobalTools,
   WorkbenchStatusBar,
   WorkbenchTitleTools,
 } from "@/components/workspace/WorkbenchChrome";
-import { useTabStore } from "@/store/useTabStore";
-import { useShallow } from "zustand/react/shallow";
-import { useConnectionStore } from "@/store/useConnectionStore";
-import { useSchemaStore } from "@/store/useSchemaStore";
-import { useSettingsStore } from "@/store/useSettingsStore";
-import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
-import { useEditorGroupStore } from "@/store/useEditorGroupStore";
-import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
 import { useSqliteBackupScheduler } from "@/features/database-admin/model/useSqliteBackupScheduler";
-import { useProjectStore } from "@/store/useProjectStore";
-import { useSavedQueryStore } from "@/store/useSavedQueryStore";
-import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
-import { useShortcuts } from "@/hooks/useShortcuts";
-import { APP_EVENT_OPEN_PROJECT_FILES } from "@/lib/projectFilesNavigation";
+import { useWorkbenchSessionLifecycle } from "@/features/workbench/hooks/useWorkbenchSessionLifecycle";
+import { useWorkbenchSurfaceEvents } from "@/features/workbench/hooks/useWorkbenchSurfaceEvents";
+import { useWorkbenchWindowNavigation } from "@/features/workbench/hooks/useWorkbenchWindowNavigation";
+import { createWorkbenchResizeActions } from "@/features/workbench/model/createWorkbenchResizeActions";
+import { createSideToolWindowRenderer } from "@/features/workbench/ui/createSideToolWindowRenderer";
+import { DeferredCommandPalette } from "@/features/workbench/ui/DeferredCommandPalette";
+import { DeferredDatabaseSearch } from "@/features/workbench/ui/DeferredDatabaseSearch";
+import { DeferredQueryHistorySync } from "@/features/workbench/ui/DeferredQueryHistorySync";
+import { WorkbenchSurfaceFallback } from "@/features/workbench/ui/WorkbenchFallbacks";
 import {
-  APP_EVENT_OPEN_COMMAND_PALETTE,
-  APP_EVENT_OPEN_COMMIT,
-  APP_EVENT_OPEN_DATABASE_SEARCH,
-  APP_EVENT_OPEN_VERSION_CONTROL,
-  type DatabaseSearchRequest,
-} from "@/lib/actionEvents";
-import { APP_EVENT_OPEN_ASSISTANT } from "@/store/useAssistantComposerStore";
-import { subscribeStartupIntents } from "@/startup/startupIntents";
-import { startWorkspaceHydration } from "@/startup/startupProgress";
-import { cn } from "@/lib/utils";
+  CreateTableTab,
+  DatabaseBrowser,
+  DataCompareView,
+  LspConnectionSyncer,
+  ObjectBrowser,
+  QueryEditor,
+  RocketMqWorkspace,
+  SchemaDiagramView,
+  SchemaDiffView,
+  SplitEditor,
+  TableDataView,
+} from "@/features/workbench/ui/WorkbenchLazySurfaces";
+import { WorkbenchQueryResults } from "@/features/workbench/ui/WorkbenchQueryResults";
+import { WorkspaceStartupHydration } from "@/features/workbench/ui/WorkspaceStartupHydration";
+import { useShortcuts } from "@/hooks/useShortcuts";
+import { useUnsavedChangesGuard } from "@/hooks/useUnsavedChangesGuard";
 import { presentQueryError } from "@/lib/queryErrorPresentation";
 import { tabPlacementFlexDirection } from "@/lib/tabOrganization";
-import type { WorkbenchSide } from "@/lib/appSettings";
-import { toolWindowAtSide, type SideToolWindowId } from "@/lib/workbenchLayout";
-import {
-  APP_EVENT_VIM_WINDOW_NAVIGATE,
-  type VimWindowNavigation,
-} from "@/lib/vimMode";
-import { ChevronDown, ChevronRight, LineChart, Pin, X } from "lucide-react";
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useLayoutEffect,
-  useState,
-  type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
-} from "react";
-
-const DataGrid = lazy(() =>
-  import("@/components/workspace/DataGrid").then((module) => ({
-    default: module.DataGrid,
-  })),
-);
-const LeftPanel = lazy(() =>
-  import("@/components/workspace/LeftPanel").then((module) => ({
-    default: module.LeftPanel,
-  })),
-);
-const QueryEditor = lazy(() =>
-  import("@/components/workspace/QueryEditor").then((module) => ({
-    default: module.QueryEditor,
-  })),
-);
-const SplitEditor = lazy(() =>
-  import("@/components/workspace/SplitEditor").then((module) => ({
-    default: module.SplitEditor,
-  })),
-);
-const TableDataView = lazy(() =>
-  import("@/components/workspace/TableDataView").then((module) => ({
-    default: module.TableDataView,
-  })),
-);
-const CreateTableTab = lazy(() =>
-  import("@/components/workspace/CreateTableTab").then((module) => ({
-    default: module.CreateTableTab,
-  })),
-);
-const ExplainPlanView = lazy(() =>
-  import("@/components/workspace/ExplainPlanView").then((module) => ({
-    default: module.ExplainPlanView,
-  })),
-);
-const SchemaDiffView = lazy(() =>
-  import("@/components/workspace/SchemaDiffView").then((module) => ({
-    default: module.SchemaDiffView,
-  })),
-);
-const SchemaDiagramView = lazy(() =>
-  import("@/components/workspace/SchemaDiagramView").then((module) => ({
-    default: module.SchemaDiagramView,
-  })),
-);
-const DataCompareView = lazy(() =>
-  import("@/components/workspace/DataCompareView").then((module) => ({
-    default: module.DataCompareView,
-  })),
-);
-const DatabaseBrowser = lazy(() =>
-  import("@/components/workspace/DatabaseBrowser").then((module) => ({
-    default: module.DatabaseBrowser,
-  })),
-);
-const ObjectBrowser = lazy(() =>
-  import("@/components/workspace/ObjectBrowser").then((module) => ({
-    default: module.ObjectBrowser,
-  })),
-);
-const RocketMqWorkspace = lazy(() =>
-  import("@/components/workspace/RocketMqWorkspace").then((module) => ({
-    default: module.RocketMqWorkspace,
-  })),
-);
-const LspConnectionSyncer = lazy(() =>
-  import("@/components/lsp/LspConnectionSyncer").then((module) => ({
-    default: module.LspConnectionSyncer,
-  })),
-);
-const CommandPalette = lazy(() =>
-  import("@/components/workspace/CommandPalette").then((module) => ({
-    default: module.CommandPalette,
-  })),
-);
-const DatabaseSearchDialog = lazy(() =>
-  import("@/features/database-search/DatabaseSearchDialog").then((module) => ({
-    default: module.DatabaseSearchDialog,
-  })),
-);
-const QueryHistorySync = lazy(() =>
-  import("@/components/workspace/QueryHistorySync").then((module) => ({
-    default: module.QueryHistorySync,
-  })),
-);
+import { cn } from "@/lib/utils";
+import { toolWindowAtSide } from "@/lib/workbenchLayout";
+import { useConnectionStore } from "@/store/useConnectionStore";
+import { useEditorGroupStore } from "@/store/useEditorGroupStore";
+import { useProjectStore } from "@/store/useProjectStore";
+import { useSavedQueryStore } from "@/store/useSavedQueryStore";
+import { useSchemaStore } from "@/store/useSchemaStore";
+import { useSettingsStore } from "@/store/useSettingsStore";
+import { useTabStore } from "@/store/useTabStore";
+import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
+import { ChevronRight } from "lucide-react";
+import { Suspense, type CSSProperties } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 export function WorkspaceRuntime() {
   useShortcuts();
@@ -277,366 +187,49 @@ export function WorkspaceRuntime() {
     !layout.visibility.results;
   const activePanelClass = "wb-panel-active";
 
-  useEffect(() => {
-    void loadSavedSqlProject(activeProjectId);
-  }, [activeProjectId, loadSavedSqlProject]);
-
-  useEffect(() => {
-    if (!queryTabSignature && splitDirection) {
-      resetEditorGroups();
-    }
-  }, [queryTabSignature, resetEditorGroups, splitDirection]);
-
-  useLayoutEffect(() => {
-    if (hasQueryResultSurface && toolWindows.results.enabled) {
-      setToolWindowVisible("results", true);
-    }
-  }, [
+  useWorkbenchSessionLifecycle({
+    loadSavedSqlProject,
+    activeProjectId,
+    queryTabSignature,
+    splitDirection,
+    resetEditorGroups,
     hasQueryResultSurface,
+    toolWindows,
     setToolWindowVisible,
-    toolWindows.results.enabled,
-  ]);
+  });
 
-  useEffect(() => {
-    const focusSurface = (
-      selector: string,
-      surface: "editor" | "results" | SideToolWindowId,
-    ) => {
-      const container = document.querySelector<HTMLElement>(selector);
-      if (!container) return false;
-      setActiveToolWindow(surface);
-      window.requestAnimationFrame(() => {
-        const focusTarget = container.querySelector<HTMLElement>(
-          'textarea:not([disabled]), input:not([disabled]), button:not([disabled]), [tabindex="0"]',
-        );
-        (focusTarget || container).focus();
-      });
-      return true;
-    };
-    const handleVimWindowNavigation = (event: Event) => {
-      const direction = (
-        event as CustomEvent<{ direction?: VimWindowNavigation }>
-      ).detail?.direction;
-      if (!direction) return;
-      if (direction === "close") {
-        const tabId = useTabStore.getState().activeTabId;
-        if (tabId) useTabStore.getState().closeTab(tabId);
-        return;
-      }
-      if (
-        direction === "left" &&
-        leftToolWindow &&
-        focusSurface('[data-tool-window-side="left"]', leftToolWindow)
-      ) {
-        return;
-      }
-      if (
-        direction === "right" &&
-        rightToolWindow &&
-        focusSurface('[data-tool-window-side="right"]', rightToolWindow)
-      ) {
-        return;
-      }
-      if (
-        direction === "down" &&
-        showQueryResultPanel &&
-        focusSurface("[data-workbench-results]", "results")
-      ) {
-        return;
-      }
-      if (direction === "next") {
-        if (
-          rightToolWindow &&
-          focusSurface('[data-tool-window-side="right"]', rightToolWindow)
-        ) {
-          return;
-        }
-        if (showQueryResultPanel) {
-          focusSurface("[data-workbench-results]", "results");
-        }
-      }
-    };
-    let awaitingWindowKey = false;
-    let prefixTimer: number | null = null;
-    const clearPrefix = () => {
-      awaitingWindowKey = false;
-      if (prefixTimer !== null) window.clearTimeout(prefixTimer);
-      prefixTimer = null;
-    };
-    const handleWorkbenchVimKey = (event: KeyboardEvent) => {
-      if (appSettings.editor.keybindingMode !== "vim") return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest(".monaco-editor")) return;
-      const editingText =
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        Boolean(target?.isContentEditable);
-      if (!awaitingWindowKey) {
-        if (editingText || !event.ctrlKey || event.key.toLowerCase() !== "w") {
-          return;
-        }
-        event.preventDefault();
-        awaitingWindowKey = true;
-        prefixTimer = window.setTimeout(clearPrefix, 900);
-        return;
-      }
-
-      const key = event.key;
-      const direction =
-        key === "h" || key === "ArrowLeft"
-          ? "left"
-          : key === "l" || key === "ArrowRight"
-            ? "right"
-            : key === "k" || key === "ArrowUp"
-              ? "up"
-              : key === "j" || key === "ArrowDown"
-                ? "down"
-                : key === "w"
-                  ? "next"
-                  : key === "W"
-                    ? "previous"
-                    : key === "q" || key === "c"
-                      ? "close"
-                      : null;
-      clearPrefix();
-      if (!direction) return;
-      event.preventDefault();
-      const activeSurface = layout.activeToolWindow;
-      if (direction === "close") {
-        if (activeSurface === "results") {
-          setToolWindowVisible("results", false);
-        } else if (activeSurface !== "editor") {
-          setToolWindowVisible(activeSurface, false);
-        }
-        return;
-      }
-      if (
-        (activeSurface === leftToolWindow &&
-          (direction === "right" || direction === "next")) ||
-        (activeSurface === rightToolWindow && direction === "left") ||
-        (activeSurface === "results" && direction === "up")
-      ) {
-        focusSurface(".wb-query-editor", "editor");
-        return;
-      }
-      handleVimWindowNavigation(
-        new CustomEvent(APP_EVENT_VIM_WINDOW_NAVIGATE, {
-          detail: { direction, source: activeSurface },
-        }),
-      );
-    };
-    window.addEventListener(
-      APP_EVENT_VIM_WINDOW_NAVIGATE,
-      handleVimWindowNavigation,
-    );
-    window.addEventListener("keydown", handleWorkbenchVimKey, true);
-    return () => {
-      clearPrefix();
-      window.removeEventListener(
-        APP_EVENT_VIM_WINDOW_NAVIGATE,
-        handleVimWindowNavigation,
-      );
-      window.removeEventListener("keydown", handleWorkbenchVimKey, true);
-    };
-  }, [
-    appSettings.editor.keybindingMode,
-    layout.activeToolWindow,
+  useWorkbenchWindowNavigation({
+    setActiveToolWindow,
     leftToolWindow,
     rightToolWindow,
-    setActiveToolWindow,
-    setToolWindowVisible,
     showQueryResultPanel,
-  ]);
+    appSettings,
+    layout,
+    setToolWindowVisible,
+  });
 
-  useEffect(() => {
-    const openProjectFiles = () => {
-      setToolWindowVisible("projectFiles", true);
-      setActiveToolWindow("projectFiles");
-    };
-    window.addEventListener(APP_EVENT_OPEN_PROJECT_FILES, openProjectFiles);
-    return () =>
-      window.removeEventListener(
-        APP_EVENT_OPEN_PROJECT_FILES,
-        openProjectFiles,
-      );
-  }, [setActiveToolWindow, setToolWindowVisible]);
+  useWorkbenchSurfaceEvents({
+    setToolWindowVisible,
+    setActiveToolWindow,
+    resetEditorGroups,
+    activeConnectionId,
+    currentSchema,
+  });
 
-  useEffect(() => {
-    const openAssistant = () => {
-      setToolWindowVisible("assistant", true);
-      setActiveToolWindow("assistant");
-    };
-    window.addEventListener(APP_EVENT_OPEN_ASSISTANT, openAssistant);
-    return () =>
-      window.removeEventListener(APP_EVENT_OPEN_ASSISTANT, openAssistant);
-  }, [setActiveToolWindow, setToolWindowVisible]);
-
-  useEffect(
-    () =>
-      subscribeStartupIntents((intent) => {
-        if (typeof intent !== "string") {
-          setToolWindowVisible("databaseExplorer", true);
-          setActiveToolWindow("databaseExplorer");
-          void startWorkspaceHydration({
-            loadProjects: useProjectStore.getState().loadProjects,
-            loadSettings: useSettingsStore.getState().loadSettings,
-            loadConnections: useConnectionStore.getState().loadConnections,
-          }).then(async () => {
-            const connectionStore = useConnectionStore.getState();
-            await connectionStore.loadConnections();
-            const error = await connectionStore.setActiveConnection(
-              intent.connectionId,
-            );
-            if (error) {
-              console.warn(
-                `Unable to open startup data source ${intent.connectionId}: ${error}`,
-              );
-            }
-          });
-          return;
-        }
-        if (intent === "new-query") {
-          resetEditorGroups();
-          useTabStore.getState().createTab("query", "New Query", "", {
-            connectionId: activeConnectionId || undefined,
-            schemaName: currentSchema || undefined,
-          });
-          return;
-        }
-        if (intent === "project-files") {
-          setToolWindowVisible("projectFiles", true);
-          setActiveToolWindow("projectFiles");
-          return;
-        }
-        window.queueMicrotask(() => {
-          window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE));
-        });
-      }),
-    [
-      activeConnectionId,
-      currentSchema,
-      resetEditorGroups,
-      setActiveToolWindow,
+  const { handleSideDragStart, handleVerticalDragStart } =
+    createWorkbenchResizeActions({
+      layout,
       setToolWindowVisible,
-    ],
-  );
+      setLeftWidth,
+      setRightWidth,
+      setBottomHeight,
+    });
 
-  useEffect(() => {
-    const openCommit = () => setToolWindowVisible("commit", true);
-    const openVersionControl = () =>
-      setToolWindowVisible("versionControl", true);
-    window.addEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
-    window.addEventListener(APP_EVENT_OPEN_VERSION_CONTROL, openVersionControl);
-    return () => {
-      window.removeEventListener(APP_EVENT_OPEN_COMMIT, openCommit);
-      window.removeEventListener(
-        APP_EVENT_OPEN_VERSION_CONTROL,
-        openVersionControl,
-      );
-    };
-  }, [setToolWindowVisible]);
-
-  const handleSideDragStart = (
-    event: ReactMouseEvent,
-    side: WorkbenchSide,
-    id: SideToolWindowId,
-  ) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = side === "left" ? layout.leftWidth : layout.rightWidth;
-
-    const handleDrag = (moveEvent: MouseEvent) => {
-      const nextWidth =
-        side === "left"
-          ? startWidth + moveEvent.clientX - startX
-          : startWidth + startX - moveEvent.clientX;
-      if (nextWidth < 160) {
-        setToolWindowVisible(id, false);
-      } else if (side === "left") {
-        setLeftWidth(nextWidth);
-      } else {
-        setRightWidth(nextWidth);
-      }
-    };
-
-    const handleDragEnd = () => {
-      document.removeEventListener("mousemove", handleDrag);
-      document.removeEventListener("mouseup", handleDragEnd);
-      document.body.style.cursor = "default";
-    };
-
-    document.addEventListener("mousemove", handleDrag);
-    document.addEventListener("mouseup", handleDragEnd);
-    document.body.style.cursor = "col-resize";
-  };
-
-  const handleVerticalDragStart = (event: ReactMouseEvent) => {
-    event.preventDefault();
-    const startY = event.clientY;
-    const startHeight = layout.bottomHeight;
-
-    const handleDrag = (moveEvent: MouseEvent) => {
-      setBottomHeight(startHeight + startY - moveEvent.clientY);
-    };
-
-    const handleDragEnd = () => {
-      document.removeEventListener("mousemove", handleDrag);
-      document.removeEventListener("mouseup", handleDragEnd);
-      document.body.style.cursor = "default";
-    };
-
-    document.addEventListener("mousemove", handleDrag);
-    document.addEventListener("mouseup", handleDragEnd);
-    document.body.style.cursor = "row-resize";
-  };
-
-  const renderSideToolWindow = (
-    id: SideToolWindowId | null,
-    side: WorkbenchSide,
-  ) => {
-    const width = side === "left" ? layout.leftWidth : layout.rightWidth;
-    const isOpen = id !== null;
-    if (!id) {
-      return <ToolWindowFallback side={side} isOpen={false} width={width} />;
-    }
-    const isActive = layout.activeToolWindow === id;
-    const handleDragStart = (event: ReactMouseEvent) =>
-      handleSideDragStart(event, side, id);
-
-    if (id === "databaseExplorer") {
-      return (
-        <Suspense
-          key={id}
-          fallback={
-            <ToolWindowFallback side={side} isOpen={isOpen} width={width} />
-          }
-        >
-          <LeftPanel
-            side={side}
-            isDrawerOpen={isOpen}
-            sidebarWidth={width}
-            onDragStart={handleDragStart}
-            isActive={isActive}
-            onFocusPanel={() => setActiveToolWindow(id)}
-          />
-        </Suspense>
-      );
-    }
-
-    return (
-      <SideToolWindow
-        key={id}
-        side={side}
-        isOpen={isOpen}
-        width={width}
-        isActive={isActive}
-        onFocus={() => setActiveToolWindow(id)}
-        onDragStart={handleDragStart}
-      >
-        {isOpen ? <ToolWindowPanel id={id} /> : null}
-      </SideToolWindow>
-    );
-  };
+  const { renderSideToolWindow } = createSideToolWindowRenderer({
+    layout,
+    handleSideDragStart,
+    setActiveToolWindow,
+  });
 
   return (
     <div
@@ -754,318 +347,28 @@ export function WorkspaceRuntime() {
                                 className="wb-resizer-y relative z-50"
                                 onMouseDown={handleVerticalDragStart}
                               />
-                              <div
-                                className={cn(
-                                  "min-h-[140px] shrink-0 overflow-hidden rounded-b-[6px] border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-grid))]",
-                                  layout.activeToolWindow === "results" &&
-                                    activePanelClass,
-                                )}
-                                style={{ height: `${layout.bottomHeight}px` }}
-                                onFocus={() => setActiveToolWindow("results")}
-                                data-workbench-results
-                                tabIndex={-1}
-                              >
-                                <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-2 text-[11px] text-[hsl(var(--wb-text-muted))]">
-                                  <div className="flex min-w-0 items-center gap-1.5">
-                                    {(!isPlanView ||
-                                      queryResults.length > 0) && (
-                                      <button
-                                        type="button"
-                                        className={cn(
-                                          "mr-1 flex h-5 items-center rounded-[3px] px-2 font-medium",
-                                          !isPlanView
-                                            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                            : "hover:bg-[hsl(var(--wb-hover))]",
-                                        )}
-                                        onClick={() =>
-                                          activeTab &&
-                                          setQueryOutputView(
-                                            activeTab.id,
-                                            "results",
-                                          )
-                                        }
-                                      >
-                                        Results
-                                      </button>
-                                    )}
-                                    {(activeTab?.explainPlan || isPlanView) && (
-                                      <button
-                                        type="button"
-                                        className={cn(
-                                          "mr-1 flex h-5 items-center gap-1.5 rounded-[3px] px-2 font-medium",
-                                          isPlanView
-                                            ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                            : "hover:bg-[hsl(var(--wb-hover))]",
-                                        )}
-                                        onClick={() =>
-                                          activeTab &&
-                                          setQueryOutputView(
-                                            activeTab.id,
-                                            "plan",
-                                          )
-                                        }
-                                      >
-                                        <LineChart size={11} />
-                                        Explain Plan
-                                      </button>
-                                    )}
-                                    {!isPlanView &&
-                                      queryResultRuns.length > 1 && (
-                                        <div className="flex min-w-0 items-center gap-0.5 border-l border-[hsl(var(--wb-border-subtle))] pl-1">
-                                          {queryResultRuns.map((run, index) => (
-                                            <div
-                                              key={run.id}
-                                              className={cn(
-                                                "group/run flex h-5 max-w-[122px] items-center rounded-[3px]",
-                                                run.id ===
-                                                  activeTab?.activeResultRunId
-                                                  ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                                  : "text-[hsl(var(--wb-text-muted))] hover:bg-[hsl(var(--wb-hover))]",
-                                              )}
-                                            >
-                                              <button
-                                                type="button"
-                                                className="min-w-0 truncate px-2 text-[10px]"
-                                                onClick={() =>
-                                                  activeTab &&
-                                                  setActiveResultRun(
-                                                    activeTab.id,
-                                                    run.id,
-                                                  )
-                                                }
-                                                title={`Execution ${index + 1}: ${run.results
-                                                  .reduce(
-                                                    (count, result) =>
-                                                      count +
-                                                      result.rows.length,
-                                                    0,
-                                                  )
-                                                  .toLocaleString()} rows`}
-                                              >
-                                                {run.pinned && (
-                                                  <Pin
-                                                    size={9}
-                                                    className="mr-1 inline-block -translate-y-px text-[hsl(var(--wb-accent))]"
-                                                  />
-                                                )}
-                                                Run {index + 1}
-                                              </button>
-                                              <button
-                                                type="button"
-                                                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-35"
-                                                title={
-                                                  run.pinned
-                                                    ? "Unpin result run"
-                                                    : pinnedQueryResultRunCount >=
-                                                        3
-                                                      ? "Only three result runs can be pinned"
-                                                      : "Pin result run"
-                                                }
-                                                disabled={
-                                                  !run.pinned &&
-                                                  pinnedQueryResultRunCount >= 3
-                                                }
-                                                onClick={() =>
-                                                  activeTab &&
-                                                  toggleResultRunPin(
-                                                    activeTab.id,
-                                                    run.id,
-                                                  )
-                                                }
-                                              >
-                                                <Pin size={9} />
-                                              </button>
-                                              <button
-                                                type="button"
-                                                className="mr-1 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] group-hover/run:opacity-100 focus-visible:opacity-100"
-                                                title="Close result run"
-                                                onClick={() =>
-                                                  activeTab &&
-                                                  closeResultRun(
-                                                    activeTab.id,
-                                                    run.id,
-                                                  )
-                                                }
-                                              >
-                                                <X size={10} />
-                                              </button>
-                                            </div>
-                                          ))}
-                                        </div>
-                                      )}
-                                    {!isPlanView && queryResults.length > 1 ? (
-                                      <div className="flex min-w-0 items-center gap-0.5">
-                                        {queryResults.map((result, index) => (
-                                          <button
-                                            key={`${activeTab?.id}:result:${index}`}
-                                            type="button"
-                                            className={cn(
-                                              "group/result flex h-5 max-w-[150px] items-center gap-1 rounded-[3px] pl-2 pr-1 text-[10px] hover:bg-[hsl(var(--wb-hover))]",
-                                              index === activeResultIndex
-                                                ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-text))]"
-                                                : "text-[hsl(var(--wb-text-muted))]",
-                                            )}
-                                            onClick={() =>
-                                              activeTab &&
-                                              setActiveResultIndex(
-                                                activeTab.id,
-                                                index,
-                                              )
-                                            }
-                                            title={`${result.rows.length.toLocaleString()} rows`}
-                                          >
-                                            <span className="truncate">
-                                              {result.responseMeta
-                                                ?.requestPath ||
-                                                `Result ${index + 1}`}
-                                            </span>
-                                            <span
-                                              role="button"
-                                              tabIndex={0}
-                                              className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
-                                              title="Close result"
-                                              onClick={(event) => {
-                                                event.stopPropagation();
-                                                if (activeTab) {
-                                                  closeResultAt(
-                                                    activeTab.id,
-                                                    index,
-                                                  );
-                                                }
-                                              }}
-                                              onKeyDown={(event) => {
-                                                if (
-                                                  event.key === "Enter" ||
-                                                  event.key === " "
-                                                ) {
-                                                  event.preventDefault();
-                                                  event.stopPropagation();
-                                                  if (activeTab) {
-                                                    closeResultAt(
-                                                      activeTab.id,
-                                                      index,
-                                                    );
-                                                  }
-                                                }
-                                              }}
-                                            >
-                                              <X size={10} />
-                                            </span>
-                                          </button>
-                                        ))}
-                                      </div>
-                                    ) : !isPlanView &&
-                                      queryResults.length === 1 ? (
-                                      <button
-                                        type="button"
-                                        className="group/result flex h-5 items-center gap-1 rounded-[3px] bg-[hsl(var(--wb-active-strong))] pl-2 pr-1 text-[10px] text-[hsl(var(--wb-text))]"
-                                        onClick={() =>
-                                          activeTab &&
-                                          setActiveResultIndex(activeTab.id, 0)
-                                        }
-                                      >
-                                        <span>Result</span>
-                                        {currentResult && (
-                                          <span
-                                            role="button"
-                                            tabIndex={0}
-                                            className="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] opacity-0 transition-opacity hover:bg-[hsl(var(--wb-hover))] hover:opacity-100 group-hover/result:opacity-100 focus-visible:opacity-100"
-                                            title="Close result"
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              if (activeTab) {
-                                                closeResultAt(activeTab.id, 0);
-                                              }
-                                            }}
-                                            onKeyDown={(event) => {
-                                              if (
-                                                event.key === "Enter" ||
-                                                event.key === " "
-                                              ) {
-                                                event.preventDefault();
-                                                event.stopPropagation();
-                                                if (activeTab) {
-                                                  closeResultAt(
-                                                    activeTab.id,
-                                                    0,
-                                                  );
-                                                }
-                                              }
-                                            }}
-                                          >
-                                            <X size={10} />
-                                          </span>
-                                        )}
-                                      </button>
-                                    ) : null}
-                                    {!isPlanView && currentResult && (
-                                      <>
-                                        <span className="whitespace-nowrap text-[10px]">
-                                          {currentResult.rows.length.toLocaleString()}{" "}
-                                          rows
-                                        </span>
-                                        {currentResult.responseMeta && (
-                                          <span className="whitespace-nowrap text-[10px] text-emerald-400">
-                                            HTTP{" "}
-                                            {currentResult.responseMeta.status}
-                                            {" · "}
-                                            {currentResult.responseMeta.durationMs.toLocaleString()}{" "}
-                                            ms
-                                          </span>
-                                        )}
-                                      </>
-                                    )}
-                                    {activeTab?.isExecuting && (
-                                      <span className="whitespace-nowrap">
-                                        Running...
-                                      </span>
-                                    )}
-                                    {activeTab?.error && (
-                                      <span className="truncate text-[hsl(var(--destructive))]">
-                                        {queryErrorPresentation?.title ||
-                                          "Query failed"}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="wb-icon-button h-6 w-6"
-                                    onClick={() =>
-                                      setToolWindowVisible("results", false)
-                                    }
-                                    title="Hide Results"
-                                  >
-                                    <ChevronDown size={14} />
-                                  </button>
-                                </div>
-                                <div className="h-[calc(100%-2rem)] min-h-0">
-                                  <Suspense fallback={<QueryResultsFallback />}>
-                                    {isPlanView ? (
-                                      activeTab?.explainPlan ? (
-                                        <ExplainPlanView
-                                          tabId={activeTab.id}
-                                          plan={activeTab.explainPlan}
-                                        />
-                                      ) : (
-                                        <div className="flex h-full items-center justify-center px-6 text-center text-[11px] text-[hsl(var(--wb-text-muted))]">
-                                          {activeTab?.isExecuting
-                                            ? "Generating Explain Plan…"
-                                            : activeTab?.error ||
-                                              "No Explain Plan is available."}
-                                        </div>
-                                      )
-                                    ) : currentResult ? (
-                                      <ElasticsearchResponseView
-                                        result={currentResult}
-                                      >
-                                        <DataGrid readOnly />
-                                      </ElasticsearchResponseView>
-                                    ) : (
-                                      <DataGrid readOnly />
-                                    )}
-                                  </Suspense>
-                                </div>
-                              </div>
+                              <WorkbenchQueryResults
+                                layout={layout}
+                                activePanelClass={activePanelClass}
+                                setActiveToolWindow={setActiveToolWindow}
+                                isPlanView={isPlanView}
+                                queryResults={queryResults}
+                                activeTab={activeTab}
+                                setQueryOutputView={setQueryOutputView}
+                                queryResultRuns={queryResultRuns}
+                                setActiveResultRun={setActiveResultRun}
+                                pinnedQueryResultRunCount={
+                                  pinnedQueryResultRunCount
+                                }
+                                toggleResultRunPin={toggleResultRunPin}
+                                closeResultRun={closeResultRun}
+                                activeResultIndex={activeResultIndex}
+                                setActiveResultIndex={setActiveResultIndex}
+                                closeResultAt={closeResultAt}
+                                currentResult={currentResult}
+                                queryErrorPresentation={queryErrorPresentation}
+                                setToolWindowVisible={setToolWindowVisible}
+                              />
                             </>
                           )}
 
@@ -1119,192 +422,5 @@ export function WorkspaceRuntime() {
       <DeferredCommandPalette />
       <DeferredDatabaseSearch />
     </div>
-  );
-}
-
-function DeferredDatabaseSearch() {
-  const [request, setRequest] = useState<DatabaseSearchRequest | null>(null);
-  const [requestVersion, setRequestVersion] = useState(0);
-
-  useEffect(() => {
-    const openSearch = (event: Event) => {
-      const detail = (event as CustomEvent<DatabaseSearchRequest>).detail;
-      setRequest(detail || {});
-      setRequestVersion((version) => version + 1);
-    };
-    window.addEventListener(APP_EVENT_OPEN_DATABASE_SEARCH, openSearch);
-    return () =>
-      window.removeEventListener(APP_EVENT_OPEN_DATABASE_SEARCH, openSearch);
-  }, []);
-
-  if (!request) return null;
-  return (
-    <Suspense fallback={null}>
-      <DatabaseSearchDialog request={request} requestVersion={requestVersion} />
-    </Suspense>
-  );
-}
-
-function DeferredCommandPalette() {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    const requestMount = () => setMounted(true);
-    window.addEventListener(APP_EVENT_OPEN_COMMAND_PALETTE, requestMount);
-    window.addEventListener("oxide:command-palette-open", requestMount);
-    return () => {
-      window.removeEventListener(APP_EVENT_OPEN_COMMAND_PALETTE, requestMount);
-      window.removeEventListener("oxide:command-palette-open", requestMount);
-    };
-  }, []);
-
-  if (!mounted) return null;
-  return (
-    <Suspense fallback={null}>
-      <CommandPalette initiallyOpen />
-    </Suspense>
-  );
-}
-
-function DeferredQueryHistorySync() {
-  const [enabled, setEnabled] = useState(false);
-
-  useEffect(() => {
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (
-        callback: IdleRequestCallback,
-        options?: IdleRequestOptions,
-      ) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    if (idleWindow.requestIdleCallback) {
-      const handle = idleWindow.requestIdleCallback(() => setEnabled(true), {
-        timeout: 1_500,
-      });
-      return () => idleWindow.cancelIdleCallback?.(handle);
-    }
-    const handle = window.setTimeout(() => setEnabled(true), 1_000);
-    return () => window.clearTimeout(handle);
-  }, []);
-
-  if (!enabled) return null;
-  return (
-    <Suspense fallback={null}>
-      <QueryHistorySync />
-    </Suspense>
-  );
-}
-
-function WorkspaceStartupHydration() {
-  const loadSettings = useSettingsStore((state) => state.loadSettings);
-  const loadProjects = useProjectStore((state) => state.loadProjects);
-  const loadConnections = useConnectionStore((state) => state.loadConnections);
-  const loadDatabaseDriverCatalog = useDatabaseDriverCatalogStore(
-    (state) => state.load,
-  );
-
-  useEffect(() => {
-    let disposed = false;
-    let idleHandle: number | null = null;
-    let timerHandle: number | null = null;
-
-    const loadDeferredDriverCatalog = () => {
-      if (disposed) return;
-      const idleWindow = window as Window & {
-        requestIdleCallback?: (
-          callback: IdleRequestCallback,
-          options?: IdleRequestOptions,
-        ) => number;
-        cancelIdleCallback?: (handle: number) => void;
-      };
-      if (idleWindow.requestIdleCallback) {
-        idleHandle = idleWindow.requestIdleCallback(
-          () => void loadDatabaseDriverCatalog(),
-          { timeout: 2_000 },
-        );
-        return;
-      }
-      timerHandle = window.setTimeout(
-        () => void loadDatabaseDriverCatalog(),
-        750,
-      );
-    };
-
-    const start = () => {
-      void startWorkspaceHydration({
-        loadProjects,
-        loadSettings,
-        loadConnections,
-      }).finally(loadDeferredDriverCatalog);
-    };
-    const frame = window.requestAnimationFrame(start);
-    return () => {
-      disposed = true;
-      window.cancelAnimationFrame(frame);
-      if (idleHandle !== null) {
-        (
-          window as Window & {
-            cancelIdleCallback?: (handle: number) => void;
-          }
-        ).cancelIdleCallback?.(idleHandle);
-      }
-      if (timerHandle !== null) window.clearTimeout(timerHandle);
-    };
-  }, [loadConnections, loadDatabaseDriverCatalog, loadProjects, loadSettings]);
-
-  useEffect(() => {
-    const reloadExternalSettings = () => {
-      if (document.visibilityState === "visible") {
-        void loadSettings();
-      }
-    };
-    window.addEventListener("focus", reloadExternalSettings);
-    document.addEventListener("visibilitychange", reloadExternalSettings);
-    return () => {
-      window.removeEventListener("focus", reloadExternalSettings);
-      document.removeEventListener("visibilitychange", reloadExternalSettings);
-    };
-  }, [loadSettings]);
-
-  return null;
-}
-
-function ToolWindowFallback({
-  side,
-  isOpen,
-  width,
-}: {
-  side: WorkbenchSide;
-  isOpen: boolean;
-  width: number;
-}) {
-  if (!isOpen) return null;
-  return (
-    <div
-      className="wb-tool-window h-full shrink-0 rounded-[6px]"
-      style={{ width }}
-      data-tool-window-side={side}
-      aria-hidden="true"
-    >
-      <div className="h-8 border-b border-[hsl(var(--wb-border-subtle))]" />
-    </div>
-  );
-}
-
-function QueryResultsFallback() {
-  return (
-    <div
-      className="h-full bg-[linear-gradient(to_right,hsl(var(--wb-border-subtle))_1px,transparent_1px),linear-gradient(to_bottom,hsl(var(--wb-border-subtle))_1px,transparent_1px)] bg-[size:160px_28px] opacity-45"
-      aria-label="Loading query results"
-    />
-  );
-}
-
-function WorkbenchSurfaceFallback() {
-  return (
-    <div
-      className="h-full min-h-0 bg-[hsl(var(--wb-editor))]"
-      aria-hidden="true"
-    />
   );
 }

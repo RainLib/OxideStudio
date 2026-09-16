@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 1430",
-    "build": "tsc && vite build",
+    "build": "tsc && node ../../scripts/verify-enterprise-admin-boundaries.mjs && vite build",
     "preview": "vite preview --port 1430"
   },
   "dependencies": {

@@ -169,6 +169,28 @@ describe("AI settings", () => {
     expect(document.body.textContent).toContain("save failed");
   });
 
+  it("loads assistant and inline credentials from their own scopes", async () => {
+    useAiSettingsStore.setState({
+      apiKey: "", inlineApiKey: "", baseUrl: "https://assistant.example/v1",
+      inlineBaseUrl: "https://inline.example/v1",
+    });
+    mocks.hasProviderSecret.mockImplementation(async (_url: string, scope: string) => scope === "inline");
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <ThemeContext.Provider value={themeContext}>
+          <SettingsDialog open initialSection="ai" onOpenChange={vi.fn()} />
+        </ThemeContext.Provider>,
+      );
+      await flushAsyncWork();
+    });
+    expect(mocks.hasProviderSecret).toHaveBeenCalledWith("https://assistant.example/v1", "assistant");
+    expect(mocks.hasProviderSecret).toHaveBeenCalledWith("https://inline.example/v1", "inline");
+    const passwords = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="password"]'));
+    expect(passwords.map((input) => input.placeholder)).toEqual(["sk-...", "Stored in local credential file"]);
+    expect(document.body.textContent).toContain("independently of the CLI");
+  });
+
   it("pins the editor live preview above the scrolling settings body", async () => {
     await act(async () => {
       root = createRoot(container);

@@ -12,6 +12,7 @@ import { useTaskStore } from "@/store/useTaskStore";
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({
+  gridRender: vi.fn(),
   mutateTableRows: vi.fn(async () => ({
     inserted: 1,
     updated: 0,
@@ -70,7 +71,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 vi.mock("@/components/workspace/DataGrid", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
   return {
-    DataGrid: React.forwardRef(() => <div data-testid="data-grid" />),
+    DataGrid: React.forwardRef(() => {
+      mocks.gridRender();
+      return <div data-testid="data-grid" />;
+    }),
   };
 });
 
@@ -213,6 +217,33 @@ describe("TableDataView CSV import", () => {
     expect(tab.error).toContain("Rows were imported");
     expect(tab.error).toContain("Click Refresh");
     expect(tab.error).toContain("refresh offline");
+  });
+
+  it("isolates the table surface from unrelated tab and task updates", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<TableDataView />);
+    });
+    const table = useTabStore.getState().tabs[0]!;
+    await act(async () => {
+      useTabStore.setState({ tabs: [table, { ...table, id: "other", type: "query" }] });
+    });
+    mocks.gridRender.mockClear();
+    for (let index = 0; index < 20; index += 1) {
+      await act(async () => {
+        useTabStore.setState((state) => ({
+          tabs: state.tabs.map((tab) => tab.id === "other" ? { ...tab, sql: `SELECT ${index}` } : tab),
+        }));
+        useTaskStore.setState({ tasks: [] });
+      });
+    }
+    expect(mocks.gridRender).not.toHaveBeenCalled();
+    await act(async () => {
+      useTabStore.setState((state) => ({
+        tabs: state.tabs.map((tab) => tab.id === table.id ? { ...tab, error: "visible failure" } : tab),
+      }));
+    });
+    expect(mocks.gridRender).toHaveBeenCalled();
   });
 
   it("maps case-insensitive CSV headers to the canonical table column name", async () => {

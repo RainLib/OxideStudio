@@ -14,13 +14,20 @@ function columnLabel(result: QueryResult, index: number) {
 }
 
 function jsonColumnKeys(result: QueryResult) {
-  const seen = new Map<string, number>();
+  const labels = result.columns.map((_, index) => columnLabel(result, index));
+  const reserved = new Set(labels);
+  const used = new Set<string>();
+  const suffixes = new Map<string, number>();
 
-  return result.columns.map((_, index) => {
-    const base = columnLabel(result, index);
-    const count = (seen.get(base) || 0) + 1;
-    seen.set(base, count);
-    return count === 1 ? base : `${base}_${count}`;
+  return labels.map((base) => {
+    let key = base;
+    if (used.has(key)) {
+      let suffix = suffixes.get(base) ?? 2;
+      do { key = `${base}_${suffix++}`; } while (used.has(key) || reserved.has(key));
+      suffixes.set(base, suffix);
+    }
+    used.add(key);
+    return key;
   });
 }
 

@@ -1,7 +1,5 @@
-import {
-  parseElasticsearchConsoleRequests,
-  validateElasticsearchConsole,
-} from "@/lib/elasticsearchConsole";
+import { parseElasticsearchConsoleRequests } from "@/features/query-languages/elasticsearch/requests";
+import { validateElasticsearchConsole } from "@/features/query-languages/elasticsearch/validation";
 
 export interface ElasticsearchAnalysisRequest {
   requestId: number;
@@ -14,9 +12,7 @@ export interface ElasticsearchAnalysisResponse {
   requestStartOffsets: number[];
 }
 
-globalThis.onmessage = (
-  event: MessageEvent<ElasticsearchAnalysisRequest>,
-) => {
+globalThis.onmessage = (event: MessageEvent<ElasticsearchAnalysisRequest>) => {
   const { requestId, source } = event.data;
   const response: ElasticsearchAnalysisResponse = {
     requestId,

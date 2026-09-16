@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { invokeCommand } from "@/services/tauri/client";
+import { invokeCommand, invokeRawCommand } from "@/services/tauri/client";
 import { ApiError } from "@/services/tauri/types";
 
 const mocks = vi.hoisted(() => ({
@@ -137,6 +137,27 @@ describe("tauri api client", () => {
     await expect(invokeCommand<string[]>("get_schemas")).resolves.toEqual([
       "public",
     ]);
+  });
+
+  it("preserves direct command results and normalizes their rejections", async () => {
+    mocks.invoke.mockResolvedValueOnce({ sessionId: "session-1" });
+
+    await expect(
+      invokeRawCommand<{ sessionId: string }>("agent_start_turn", {
+        projectId: "project-1",
+      }),
+    ).resolves.toEqual({ sessionId: "session-1" });
+
+    mocks.invoke.mockRejectedValueOnce(new Error("agent host unavailable"));
+
+    await expect(
+      invokeRawCommand("agent_start_turn", { projectId: "project-1" }),
+    ).rejects.toMatchObject({
+      name: "ApiError",
+      code: "INVOKE_ERROR",
+      category: "application",
+      context: { projectId: "project-1" },
+    });
   });
 
   it("throws ApiError instances for typed backend failures", async () => {

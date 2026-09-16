@@ -1,46 +1,75 @@
+export { useCachedSqlCompletionSource } from "./hooks/useCachedSqlCompletionSource";
 export {
-  enqueueLspDocumentSync,
-  syncLspModelBeforeCompletion,
-  type LspDocumentSyncChains,
-  type LspDocumentSyncClient,
-  type LspTextModel,
-} from "./model/lspDocumentSync";
+  attachConsoleAutoSuggest,
+  useConsoleAutoSuggest,
+  type ConsoleAutoSuggestOptions,
+  type UseConsoleAutoSuggestOptions,
+} from "./hooks/useConsoleAutoSuggest";
+export {
+  useConsoleFileController,
+  type ConsoleFileOperation,
+} from "./hooks/useConsoleFileController";
+export {
+  attachCurrentStatementDecoration,
+  useCurrentStatementDecoration,
+  type CurrentStatementDecorationOptions,
+  type UseCurrentStatementDecorationOptions,
+} from "./hooks/useCurrentStatementDecoration";
+export {
+  registerLspCompletionProvider,
+  useLspCompletionProviderCoordinator,
+  type LspCompletionProviderCoordinatorOptions,
+  type MonacoCompletionProvider,
+  type MonacoCompletionResolver,
+} from "./hooks/useLspCompletionProviderCoordinator";
+export {
+  registerLspCoreProviders,
+  useLspCoreProviderCoordinator,
+  type LspCoreProviderCoordinatorOptions,
+} from "./hooks/useLspCoreProviderCoordinator";
+export {
+  useLspDocumentLifecycle,
+  type LspDocumentLifecycleClient,
+} from "./hooks/useLspDocumentLifecycle";
+export {
+  registerLspHoverProvider,
+  useLspHoverProviderCoordinator,
+  type LspHoverProviderCoordinatorOptions,
+  type LspHoverProviderRuntime,
+} from "./hooks/useLspHoverProviderCoordinator";
+export {
+  attachMonacoEditorViewState,
+  normalizedEditorViewSelection,
+  useMonacoEditorViewState,
+  type MonacoEditorViewStateOptions,
+  type UseMonacoEditorViewStateOptions,
+} from "./hooks/useMonacoEditorViewState";
+export {
+  captureQueryExecutionSnapshot,
+  useQueryExecutionController,
+  type ParameterExecutionRequest,
+  type QueryExecutionEditor,
+} from "./hooks/useQueryExecutionController";
+export {
+  useQueryTransactionController,
+  type QueryTransactionMode,
+  type QueryTransactionOperation,
+  type QueryTransactionState,
+} from "./hooks/useQueryTransactionController";
+export {
+  boundedSqlCompletionTextBeforeCursor,
+  cachedRelationCompletionSuggestions,
+  createCachedSqlCompletionRequest,
+  type CachedSqlCompletionRequest,
+  type CachedSqlCompletionRequestOptions,
+  type CachedSqlCompletionSourceOptions,
+} from "./model/cachedSqlCompletion";
 export { mergeCatalogNames } from "./model/catalogSelection";
 export {
   completionSuggestionsOrCached,
   limitCompletionSuggestions,
   mergeCompletionFallbackSuggestions,
 } from "./model/completionFallback";
-export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";
-export {
-  buildOracleSyntaxDiagnostics,
-  supportsOracleSyntaxDiagnostics,
-  type OracleSyntaxDiagnostic,
-} from "./model/oracleSyntaxDiagnostics";
-export {
-  analyzeMysqlRoutineSyntax,
-  isMysqlRoutineParserDiagnostic,
-  supportsMysqlRoutineSyntaxDiagnostics,
-  type MysqlRoutineSyntaxAnalysis,
-  type MysqlRoutineSyntaxDiagnostic,
-} from "./model/mysqlRoutineSyntaxDiagnostics";
-export {
-  DEFAULT_SQL_COMMAND_SNIPPETS,
-  MANTICORE_SQL_COMMAND_SNIPPETS,
-  sqlCommandSnippetCompletions,
-  type SqlCommandSnippetOptions,
-  type SqlSnippetSetting,
-} from "./model/sqlCommandSnippets";
-export {
-  editorDocumentIdentity,
-  type EditorDocumentIdentity,
-  type EditorDocumentTab,
-} from "./model/editorDocumentIdentity";
-export { buildQueryEditorOptions } from "./model/editorOptions";
-export {
-  insertLineBelow,
-  type EditorLineActionTarget,
-} from "./model/editorLineActions";
 export {
   completionFilterTextForQuery,
   completionMatchScore,
@@ -50,11 +79,51 @@ export {
   pinyinInitials,
 } from "./model/completionMatch";
 export {
-  sqlCompletionIdentifierPrefix,
-  sqlCompletionTriggerDecision,
-  type SqlCompletionTriggerDecision,
-  type SqlCompletionTriggerMode,
-} from "./model/sqlCompletionTriggerPolicy";
+  cachedCurrentStatementRangeAtOffset,
+  currentStatementLineFrames,
+  type CurrentStatementLineFrame,
+  type CurrentStatementRange,
+  type CurrentStatementRangeCache,
+  type OffsetPositionModel,
+} from "./model/currentStatementDecoration";
+export { shouldRetriggerDocumentCompletion } from "./model/documentCompletionRefresh";
+export {
+  editorDocumentIdentity,
+  type EditorDocumentIdentity,
+  type EditorDocumentTab,
+} from "./model/editorDocumentIdentity";
+export {
+  insertLineBelow,
+  type EditorLineActionTarget,
+} from "./model/editorLineActions";
+export { buildQueryEditorOptions } from "./model/editorOptions";
+export {
+  elasticsearchJsonStringCompletionRange,
+  elasticsearchPathCompletionRange,
+} from "./model/elasticsearchCompletionRange";
+export { parseElasticsearchConsoleServerVersion } from "./model/elasticsearchConsoleVersion";
+export {
+  queryTransactionExecutionId,
+  selectedOrFullEditorText,
+  type QueryEditorTextModel,
+} from "./model/executionTarget";
+export {
+  applyResolvedLspCompletionItem,
+  completionLabelForMonaco,
+  completionResolveRequestContext,
+  lspCompletionItemsToMonacoSuggestions,
+  markResolvableLspCompletionItems,
+  sourceLspCompletionItem,
+  type LspCompletionPresentationOptions,
+  type LspCompletionResolveContext,
+} from "./model/lspCompletionPresentation";
+export {
+  enqueueLspDocumentSync,
+  syncLspModelBeforeCompletion,
+  type LspDocumentSyncChains,
+  type LspDocumentSyncClient,
+  type LspTextModel,
+} from "./model/lspDocumentSync";
 export {
   flattenLspSelectionRanges,
   isPublishDiagnosticsParams,
@@ -66,28 +135,43 @@ export {
   toMonacoWorkspaceEdit,
 } from "./model/lspMonacoAdapter";
 export {
-  applyResolvedLspCompletionItem,
-  completionResolveRequestContext,
-  completionLabelForMonaco,
-  lspCompletionItemsToMonacoSuggestions,
-  markResolvableLspCompletionItems,
-  sourceLspCompletionItem,
-  type LspCompletionPresentationOptions,
-  type LspCompletionResolveContext,
-} from "./model/lspCompletionPresentation";
+  mongodbCommandRangeAtCursor,
+  mongodbCommandRanges,
+  type MongoDbCommandRange,
+} from "./model/mongodbCommandRanges";
+export {
+  analyzeMysqlRoutineSyntax,
+  isMysqlRoutineParserDiagnostic,
+  supportsMysqlRoutineSyntaxDiagnostics,
+  type MysqlRoutineSyntaxAnalysis,
+  type MysqlRoutineSyntaxDiagnostic,
+} from "./model/mysqlRoutineSyntaxDiagnostics";
+export {
+  buildOracleSyntaxDiagnostics,
+  supportsOracleSyntaxDiagnostics,
+  type OracleSyntaxDiagnostic,
+} from "./model/oracleSyntaxDiagnostics";
+export {
+  resolveQueryExecutionTarget,
+  type QueryExecutionKind,
+  type QueryExecutionMode,
+  type QueryExecutionSnapshot,
+  type QueryExecutionTarget,
+} from "./model/queryExecutionTarget";
+export {
+  DEFAULT_SQL_COMMAND_SNIPPETS,
+  MANTICORE_SQL_COMMAND_SNIPPETS,
+  sqlCommandSnippetCompletions,
+  type SqlCommandSnippetOptions,
+  type SqlSnippetSetting,
+} from "./model/sqlCommandSnippets";
 export {
   appendSqlCompletionSpace,
   shouldChainSqlCompletionAfterAccept,
-  sqlFunctionCompletionInsertion,
   sqlCompletionItemType,
+  sqlFunctionCompletionInsertion,
   type SqlCompletionItemType,
 } from "./model/sqlCompletionInsertion";
-export {
-  sqlForeignKeyJoinCompletions,
-  sqlJoinConstraintsFromRelationshipIndex,
-  type SqlForeignKeyJoinCompletion,
-  type SqlForeignKeyJoinCompletionOptions,
-} from "./model/sqlJoinCompletion";
 export {
   recordSqlCompletionTelemetry,
   resetSqlCompletionTelemetryForTests,
@@ -97,104 +181,20 @@ export {
   type SqlCompletionTelemetrySnapshot,
 } from "./model/sqlCompletionTelemetry";
 export {
-  queryTransactionExecutionId,
-  selectedOrFullEditorText,
-  type QueryEditorTextModel,
-} from "./model/executionTarget";
-export {
-  mongodbCommandRangeAtCursor,
-  mongodbCommandRanges,
-  type MongoDbCommandRange,
-} from "./model/mongodbCommandRanges";
-export {
-  cachedCurrentStatementRangeAtOffset,
-  currentStatementLineFrames,
-  type CurrentStatementLineFrame,
-  type CurrentStatementRange,
-  type CurrentStatementRangeCache,
-  type OffsetPositionModel,
-} from "./model/currentStatementDecoration";
-export {
-  elasticsearchJsonStringCompletionRange,
-  elasticsearchPathCompletionRange,
-} from "./model/elasticsearchCompletionRange";
-export { parseElasticsearchConsoleServerVersion } from "./model/elasticsearchConsoleVersion";
+  sqlCompletionIdentifierPrefix,
+  sqlCompletionTriggerDecision,
+  type SqlCompletionTriggerDecision,
+  type SqlCompletionTriggerMode,
+} from "./model/sqlCompletionTriggerPolicy";
 export {
   quoteSqlIdentifierSelection,
   sqlInListFromClipboard,
   unquoteSqlIdentifierSelection,
 } from "./model/sqlEditorIntentions";
 export {
-  useQueryTransactionController,
-  type QueryTransactionMode,
-  type QueryTransactionOperation,
-  type QueryTransactionState,
-} from "./hooks/useQueryTransactionController";
-export {
-  captureQueryExecutionSnapshot,
-  useQueryExecutionController,
-  type ParameterExecutionRequest,
-  type QueryExecutionEditor,
-} from "./hooks/useQueryExecutionController";
-export {
-  useConsoleFileController,
-  type ConsoleFileOperation,
-} from "./hooks/useConsoleFileController";
-export {
-  useLspDocumentLifecycle,
-  type LspDocumentLifecycleClient,
-} from "./hooks/useLspDocumentLifecycle";
-export {
-  registerLspCoreProviders,
-  useLspCoreProviderCoordinator,
-  type LspCoreProviderCoordinatorOptions,
-} from "./hooks/useLspCoreProviderCoordinator";
-export {
-  registerLspHoverProvider,
-  useLspHoverProviderCoordinator,
-  type LspHoverProviderCoordinatorOptions,
-  type LspHoverProviderRuntime,
-} from "./hooks/useLspHoverProviderCoordinator";
-export {
-  registerLspCompletionProvider,
-  useLspCompletionProviderCoordinator,
-  type LspCompletionProviderCoordinatorOptions,
-  type MonacoCompletionProvider,
-  type MonacoCompletionResolver,
-} from "./hooks/useLspCompletionProviderCoordinator";
-export {
-  boundedSqlCompletionTextBeforeCursor,
-  cachedRelationCompletionSuggestions,
-  createCachedSqlCompletionRequest,
-  useCachedSqlCompletionSource,
-  type CachedSqlCompletionRequest,
-  type CachedSqlCompletionRequestOptions,
-  type CachedSqlCompletionSourceOptions,
-} from "./hooks/useCachedSqlCompletionSource";
-export {
-  attachMonacoEditorViewState,
-  normalizedEditorViewSelection,
-  useMonacoEditorViewState,
-  type MonacoEditorViewStateOptions,
-  type UseMonacoEditorViewStateOptions,
-} from "./hooks/useMonacoEditorViewState";
-export {
-  attachCurrentStatementDecoration,
-  useCurrentStatementDecoration,
-  type CurrentStatementDecorationOptions,
-  type UseCurrentStatementDecorationOptions,
-} from "./hooks/useCurrentStatementDecoration";
-export {
-  attachConsoleAutoSuggest,
-  useConsoleAutoSuggest,
-  type ConsoleAutoSuggestOptions,
-  type UseConsoleAutoSuggestOptions,
-} from "./hooks/useConsoleAutoSuggest";
-export {
-  resolveQueryExecutionTarget,
-  type QueryExecutionKind,
-  type QueryExecutionMode,
-  type QueryExecutionSnapshot,
-  type QueryExecutionTarget,
-} from "./model/queryExecutionTarget";
-export { shouldRetriggerDocumentCompletion } from "./model/documentCompletionRefresh";
+  sqlForeignKeyJoinCompletions,
+  sqlJoinConstraintsFromRelationshipIndex,
+  type SqlForeignKeyJoinCompletion,
+  type SqlForeignKeyJoinCompletionOptions,
+} from "./model/sqlJoinCompletion";
+export { sqlSyntaxFallbackCompletions } from "./model/sqlSyntaxFallback";

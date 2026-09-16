@@ -1,3 +1,4 @@
+import { maskSqlNoise } from "@/lib/sqlAnalysis";
 import type {
   AiInlineCompletionRequest,
   InlineLspContext,
@@ -5,6 +6,9 @@ import type {
 
 export type InlineCompletionStatus =
   | "off"
+  | "ready"
+  | "unconfigured"
+  | "error"
   | "local"
   | "thinking"
   | "ai"
@@ -176,13 +180,19 @@ export function shouldRequestAiInlineCompletion(options: {
   hasSelection: boolean;
   automatic: boolean;
   explicit: boolean;
+  dialect?: string;
 }) {
   if (options.hasSelection) return false;
   if (!options.explicit && !options.automatic) return false;
   const lines = options.prefix.split(/\r?\n/);
   const line = lines[lines.length - 1] || "";
-  if (!options.explicit && /['"`]([^'"`]*)$/.test(line)) return false;
   if (/^\s*--/.test(line)) return options.explicit || line.trim().length >= 8;
+  // A closing quote is not an open string. Reuse the SQL scanner so escaped
+  // quotes, dollar quotes and quoted identifiers follow the editor's rules.
+  if (
+    !options.explicit &&
+    !maskSqlNoise(`${options.prefix}x`, options.dialect).endsWith("x")
+  ) return false;
   return options.explicit || options.prefix.trim().length >= 2;
 }
 
@@ -192,6 +202,7 @@ export function inlineCompletionCacheKey(
   return stableHash(
     JSON.stringify({
       protocol: request.protocol,
+      provider: request.config.baseUrl.trim(),
       model: request.config.model,
       prefix: request.prefix,
       suffix: request.suffix,

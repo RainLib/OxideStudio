@@ -7,7 +7,7 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "build": "tsc --noEmit && node scripts/build.mjs",
+    "build": "tsc --noEmit && node ../scripts/verify-agent-host-boundaries.mjs && node scripts/build.mjs",
     "package": "npm run build && node scripts/package.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -1,5 +1,7 @@
 # OxideStudio 文档索引
 
+- [数据库工作台完整架构、运行链路与外部平台](intro/README.md)：桌面查询、云上/SSH、外部只读 MCP、驱动/迁移、LSP 方言、企业 Casdoor–Control Plane–mTLS Gateway、AI/Agent、Project Files/Git 和部署平台的图片化总览。
+- [从需求到成品的交付链路](intro/delivery-lifecycle.md)：以 GPT Image 2 图示说明技术规划、风险优先垂直切片、人工校准、策略转向、发布门禁和交付验收。
 - [当前架构](architecture.md)：前后端分层、状态域、驱动边界、关键数据流与架构债务。
 - [DataGrip 能力差距与路线图](datagrip-gap-analysis.md)：2026.1 对标矩阵、P0/P1/P2 优先级和验收标准。
 - [DBX 源码实施地图与迁移导航](dbx-implementation-migration-map.md)：DBX 各领域源码入口、设计原则、OxideStudio 对应模块与可验证迁移清单。

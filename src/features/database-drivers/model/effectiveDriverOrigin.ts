@@ -1,4 +1,4 @@
-import { normalizeDatabaseDriverName } from "@/lib/databaseDialect";
+import { normalizeDatabaseDriverName } from "./runtimeCatalog";
 import type {
   DatabaseDriver,
   DatabaseDriverInstallation,

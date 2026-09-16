@@ -1,27 +1,3 @@
-import Editor from "@monaco-editor/react";
-import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  Binary,
-  Braces,
-  CalendarClock,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  CircleSlash2,
-  Clipboard,
-  FileText,
-  Hash,
-  Image,
-  LoaderCircle,
-  ListTree,
-  Code2,
-  ToggleLeft,
-  Type,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,155 +8,44 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  formatJsonDraft,
-  inferValueEditorKind,
-  kindLabel,
-  parseValueEditorDraft,
-  valueEditorDraft,
-  valueEditorState,
-  valueEditorSupportsEmpty,
-  parseJsonPreview,
-  parseArrayPreview,
-  parseMapPreview,
-  parseXmlPreview,
-  parseImagePreview,
-  parseGeometryPreview,
-  type ValueEditorKind,
-  type ValueEditorState,
-} from "@/lib/valueEditor";
+  dataGridDetailNavigationDelta,
+  dataGridDetailNavigationUsesNativeKeys,
+  type DataGridDetailNavigationAxis,
+  type DataGridDetailNavigationDelta,
+} from "@/features/data-grid/model/dataGridDetailNavigation";
+import { useValueEditorDraft } from "@/features/value-editor/hooks/useValueEditorDraft";
+import { createValueEditorActions } from "@/features/value-editor/model/createValueEditorActions";
+import { type ValueEditorDialogProps } from "@/features/value-editor/model/valueEditorTypes";
+import { JsonTreePreview } from "@/features/value-editor/ui/JsonTreePreview";
 import {
-  tableCellExpression,
-  validateTableCellExpression,
-} from "@/lib/tableCellExpression";
+  editorOptions,
+  initialValueDescription,
+  kindIcon,
+  stateIcon,
+  stateLabel,
+  StatePlaceholder,
+} from "@/features/value-editor/ui/valueEditorPresentation";
+import { kindLabel } from "@/lib/valueEditor";
 import { cn } from "@/styles/utils";
 import {
   toolbarButtonVariants,
   valueEditorStateButtonVariants,
 } from "@/styles/variants";
 import { useTheme } from "@/theme/useTheme";
+import Editor from "@monaco-editor/react";
 import {
-  dataGridDetailNavigationDelta,
-  dataGridDetailNavigationUsesNativeKeys,
-  type DataGridDetailNavigationAxis,
-  type DataGridDetailNavigationDelta,
-} from "@/features/data-grid/model/dataGridDetailNavigation";
-
-export interface ValueEditorTarget {
-  key: string;
-  columnName: string;
-  columnType?: string | null;
-  rowLabel: string;
-  value: unknown;
-  originalValue: unknown;
-  editable: boolean;
-  nullable: boolean;
-  pending: boolean;
-  defaultValue?: string | null;
-  expression?: string | null;
-  expressionAllowed?: boolean;
-  readOnlyReason?:
-    | "query-result"
-    | "generated-column"
-    | "hidden-column"
-    | "unclassified-column";
-}
-
-interface ValueEditorDialogProps {
-  open: boolean;
-  target: ValueEditorTarget | null;
-  onOpenChange: (open: boolean) => void;
-  onStageValue: (value: unknown) => void;
-  navigation?: Partial<Record<"up" | "down" | "left" | "right", boolean>>;
-  onNavigate?: (
-    axis: DataGridDetailNavigationAxis,
-    delta: DataGridDetailNavigationDelta,
-  ) => void;
-}
-
-const editorOptions = {
-  automaticLayout: true,
-  minimap: { enabled: false },
-  fontSize: 12,
-  fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
-  lineHeight: 20,
-  glyphMargin: false,
-  folding: true,
-  scrollBeyondLastLine: false,
-  wordWrap: "on" as const,
-  overviewRulerBorder: false,
-  hideCursorInOverviewRuler: true,
-  padding: { top: 12, bottom: 18 },
-  scrollbar: {
-    verticalScrollbarSize: 10,
-    horizontalScrollbarSize: 10,
-    useShadows: false,
-  },
-};
-
-function kindIcon(kind: ValueEditorKind) {
-  const props = { size: 13, "aria-hidden": true };
-  switch (kind) {
-    case "json":
-    case "map":
-      return <Braces {...props} />;
-    case "xml":
-      return <Code2 {...props} />;
-    case "image":
-      return <Image {...props} />;
-    case "geometry":
-      return <ListTree {...props} />;
-    case "array":
-      return <ListTree {...props} />;
-    case "binary":
-      return <Binary {...props} />;
-    case "date":
-      return <CalendarClock {...props} />;
-    case "number":
-      return <Hash {...props} />;
-    case "boolean":
-      return <ToggleLeft {...props} />;
-    default:
-      return <FileText {...props} />;
-  }
-}
-
-function stateIcon(state: ValueEditorState): ReactNode {
-  switch (state) {
-    case "unloaded":
-      return <LoaderCircle size={14} />;
-    case "null":
-      return <CircleSlash2 size={14} />;
-    case "empty":
-      return <Type size={14} />;
-    default:
-      return <FileText size={14} />;
-  }
-}
-
-function stateLabel(state: ValueEditorState) {
-  switch (state) {
-    case "unloaded":
-      return "Not loaded";
-    case "null":
-      return "NULL";
-    case "empty":
-      return "Empty string";
-    default:
-      return "Value";
-  }
-}
-
-function initialValueDescription(value: unknown) {
-  const state = valueEditorState(value);
-  if (state === "unloaded") return "Not loaded / database default";
-  if (state === "null") return "NULL";
-  if (state === "empty") return "Empty string (0 characters)";
-  if (typeof value === "string")
-    return `${value.length.toLocaleString()} characters`;
-  if (Array.isArray(value)) return `${value.length.toLocaleString()} items`;
-  if (typeof value === "object") return "Structured value";
-  return String(value);
-}
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  CalendarClock,
+  Check,
+  CircleSlash2,
+  Clipboard,
+  Code2,
+  LoaderCircle,
+  Type,
+} from "lucide-react";
 
 export function ValueEditorDialog({
   open,
@@ -191,117 +56,32 @@ export function ValueEditorDialog({
   onNavigate,
 }: ValueEditorDialogProps) {
   const { mode } = useTheme();
-  const kind = useMemo(
-    () => inferValueEditorKind(target?.columnType, target?.value),
-    [target?.columnType, target?.value],
-  );
-  const [semanticState, setSemanticState] =
-    useState<ValueEditorState>("unloaded");
-  const [draft, setDraft] = useState("");
-  const [editMode, setEditMode] = useState<"value" | "expression">("value");
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [jsonPresentation, setJsonPresentation] = useState<"text" | "tree">(
-    "text",
-  );
-
-  useEffect(() => {
-    if (!open || !target) return;
-    const isExpression = Boolean(target.expression);
-    setSemanticState(isExpression ? "value" : valueEditorState(target.value));
-    setDraft(isExpression ? target.expression || "" : valueEditorDraft(target.value, kind));
-    setEditMode(isExpression ? "expression" : "value");
-    setError(null);
-    setCopied(false);
-    setJsonPresentation("text");
-  }, [kind, open, target]);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timeout = window.setTimeout(() => setCopied(false), 1_600);
-    return () => window.clearTimeout(timeout);
-  }, [copied]);
-
-  const binaryBytes = useMemo(() => {
-    if (
-      kind !== "binary" ||
-      (!draft.startsWith("\\x") && !draft.startsWith("0x")) ||
-      (draft.length - 2) % 2 !== 0
-    ) {
-      return null;
-    }
-    return (draft.length - 2) / 2;
-  }, [draft, kind]);
-  const textBytes = useMemo(
-    () =>
-      draft.length <= 1_000_000 ? new TextEncoder().encode(draft).length : null,
-    [draft],
-  );
-  const canUseEmpty = valueEditorSupportsEmpty(kind);
-  const editorLanguage = kind === "json" ? "json" : kind === "xml" ? "xml" : "plaintext";
-  const jsonPreview = useMemo(
-    () =>
-      kind === "json" && semanticState === "value"
-        ? parseJsonPreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const arrayPreview = useMemo(
-    () =>
-      kind === "array" && semanticState === "value"
-        ? parseArrayPreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const mapPreview = useMemo(
-    () =>
-      kind === "map" && semanticState === "value"
-        ? parseMapPreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const xmlPreview = useMemo(
-    () =>
-      kind === "xml" && semanticState === "value"
-        ? parseXmlPreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const geometryPreview = useMemo(
-    () =>
-      kind === "geometry" && semanticState === "value"
-        ? parseGeometryPreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const imagePreview = useMemo(
-    () =>
-      kind === "image" && semanticState === "value"
-        ? parseImagePreview(draft)
-        : null,
-    [draft, kind, semanticState],
-  );
-  const structuredPreview =
-    kind === "array"
-      ? arrayPreview
-      : kind === "map"
-        ? mapPreview
-        : kind === "xml"
-          ? xmlPreview
-          : kind === "geometry"
-            ? geometryPreview
-          : jsonPreview;
-  const canShowStructuredTree = structuredPreview?.ok === true;
-  const canShowPreview = kind === "image"
-    ? imagePreview?.ok === true
-    : canShowStructuredTree;
-  const previewError = kind === "image"
-    ? imagePreview && !imagePreview.ok
-      ? imagePreview.error
-      : undefined
-    : structuredPreview && !structuredPreview.ok
-      ? structuredPreview.error
-      : undefined;
+  const {
+    canUseEmpty,
+    setEditMode,
+    setSemanticState,
+    setError,
+    semanticState,
+    draft,
+    setCopied,
+    setDraft,
+    editMode,
+    kind,
+    binaryBytes,
+    textBytes,
+    jsonPresentation,
+    canShowPreview,
+    previewError,
+    setJsonPresentation,
+    copied,
+    imagePreview,
+    structuredPreview,
+    editorLanguage,
+    error,
+  } = useValueEditorDraft({
+    target,
+    open,
+  });
 
   if (!target) return null;
 
@@ -309,7 +89,16 @@ export function ValueEditorDialog({
   const canNavigate = (
     axis: DataGridDetailNavigationAxis,
     delta: DataGridDetailNavigationDelta,
-  ) => navigation?.[axis === "row" ? (delta < 0 ? "up" : "down") : delta < 0 ? "left" : "right"] === true;
+  ) =>
+    navigation?.[
+      axis === "row"
+        ? delta < 0
+          ? "up"
+          : "down"
+        : delta < 0
+          ? "left"
+          : "right"
+    ] === true;
   const navigate = (
     axis: DataGridDetailNavigationAxis,
     delta: DataGridDetailNavigationDelta,
@@ -324,64 +113,24 @@ export function ValueEditorDialog({
         ? "Hidden database columns cannot be edited here."
         : target.readOnlyReason === "unclassified-column"
           ? "Column write metadata is unavailable, so editing is disabled."
-        : "Query results are read-only.";
+          : "Query results are read-only.";
 
-  const selectState = (next: ValueEditorState) => {
-    if (next === "empty" && !canUseEmpty) return;
-    if (next === "null" && !target.nullable) return;
-    if (next !== "value") setEditMode("value");
-    setSemanticState(next);
-    setError(null);
-  };
-
-  const copyValue = async () => {
-    const text =
-      semanticState === "null"
-        ? "NULL"
-        : semanticState === "unloaded"
-          ? ""
-          : semanticState === "empty"
-            ? ""
-            : draft;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-  };
-
-  const formatJson = (compact: boolean) => {
-    const result = formatJsonDraft(draft, compact);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setDraft(String(result.value));
-    setError(null);
-  };
-
-  const stageValue = () => {
-    if (editMode === "expression") {
-      const result = validateTableCellExpression(draft);
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      onStageValue(tableCellExpression(result.value));
-      onOpenChange(false);
-      return;
-    }
-    const result = parseValueEditorDraft({
-      state: semanticState,
+  const { stageValue, selectState, formatJson, copyValue } =
+    createValueEditorActions({
+      canUseEmpty,
+      target,
+      setEditMode,
+      setSemanticState,
+      setError,
+      semanticState,
       draft,
+      setCopied,
+      setDraft,
+      editMode,
+      onStageValue,
+      onOpenChange,
       kind,
-      columnType: target.columnType,
-      nullable: target.nullable,
     });
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    onStageValue(result.value);
-    onOpenChange(false);
-  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -436,19 +185,24 @@ export function ValueEditorDialog({
               </span>
             )}
             {isReadOnly && navigation && onNavigate && (
-              <div className="ml-auto mr-5 flex shrink-0 items-center gap-0.5" aria-label="Navigate result details">
-                {([
-                  ["row", -1, ArrowUp, "Previous row"],
-                  ["row", 1, ArrowDown, "Next row"],
-                  ["column", -1, ArrowLeft, "Previous column"],
-                  ["column", 1, ArrowRight, "Next column"],
-                ] as const).map(([axis, delta, Icon, label]) => (
+              <div
+                className="ml-auto mr-5 flex shrink-0 items-center gap-0.5"
+                aria-label="Navigate result details"
+              >
+                {(
+                  [
+                    ["row", -1, ArrowUp, "Previous row"],
+                    ["row", 1, ArrowDown, "Next row"],
+                    ["column", -1, ArrowLeft, "Previous column"],
+                    ["column", 1, ArrowRight, "Next column"],
+                  ] as const
+                ).map(([axis, delta, Icon, label]) => (
                   <button
                     key={label}
                     type="button"
                     className={toolbarButtonVariants({ size: "sm" })}
                     disabled={!canNavigate(axis, delta)}
-                    title={`${label} · ${axis === "row" ? delta < 0 ? "↑" : "↓" : delta < 0 ? "←" : "→"}`}
+                    title={`${label} · ${axis === "row" ? (delta < 0 ? "↑" : "↓") : delta < 0 ? "←" : "→"}`}
                     aria-label={label}
                     onClick={() => navigate(axis, delta)}
                   >
@@ -523,7 +277,9 @@ export function ValueEditorDialog({
                   <Code2 size={14} />
                 </span>
                 <span>
-                  <span className="block text-[11px] font-medium">Expression</span>
+                  <span className="block text-[11px] font-medium">
+                    Expression
+                  </span>
                   <span className="mt-0.5 block text-[9px] leading-3 opacity-70">
                     Explicit SQL only
                   </span>
@@ -587,7 +343,11 @@ export function ValueEditorDialog({
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-2">
               <span className="flex items-center gap-1.5 text-[10px] font-medium text-[hsl(var(--wb-text))]">
-                {editMode === "expression" ? <Code2 size={13} /> : kindIcon(kind)}
+                {editMode === "expression" ? (
+                  <Code2 size={13} />
+                ) : (
+                  kindIcon(kind)
+                )}
                 {editMode === "expression" ? "SQL expression" : kindLabel(kind)}
               </span>
               <span className="h-3 w-px bg-[hsl(var(--wb-border-subtle))]" />
@@ -606,25 +366,33 @@ export function ValueEditorDialog({
                 </span>
               )}
               <div className="ml-auto flex items-center gap-1">
-                {editMode === "value" && kind === "json" && semanticState === "value" && (
-                  <>
-                    <button
-                      type="button"
-                      className={toolbarButtonVariants({ size: "sm" })}
-                      onClick={() => formatJson(false)}
-                    >
-                      Format
-                    </button>
-                    <button
-                      type="button"
-                      className={toolbarButtonVariants({ size: "sm" })}
-                      onClick={() => formatJson(true)}
-                    >
-                      Compact
-                    </button>
-                  </>
-                )}
-                {editMode === "value" && (kind === "json" || kind === "xml" || kind === "array" || kind === "map" || kind === "geometry" || kind === "image") &&
+                {editMode === "value" &&
+                  kind === "json" &&
+                  semanticState === "value" && (
+                    <>
+                      <button
+                        type="button"
+                        className={toolbarButtonVariants({ size: "sm" })}
+                        onClick={() => formatJson(false)}
+                      >
+                        Format
+                      </button>
+                      <button
+                        type="button"
+                        className={toolbarButtonVariants({ size: "sm" })}
+                        onClick={() => formatJson(true)}
+                      >
+                        Compact
+                      </button>
+                    </>
+                  )}
+                {editMode === "value" &&
+                  (kind === "json" ||
+                    kind === "xml" ||
+                    kind === "array" ||
+                    kind === "map" ||
+                    kind === "geometry" ||
+                    kind === "image") &&
                   semanticState === "value" && (
                     <button
                       type="button"
@@ -751,7 +519,9 @@ export function ValueEditorDialog({
                     </span>
                   </label>
                 </div>
-              ) : kind === "image" && jsonPresentation === "tree" && imagePreview?.ok ? (
+              ) : kind === "image" &&
+                jsonPresentation === "tree" &&
+                imagePreview?.ok ? (
                 <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-[hsl(var(--wb-panel))] p-6">
                   <img
                     src={imagePreview.dataUrl}
@@ -759,7 +529,11 @@ export function ValueEditorDialog({
                     className="max-h-full max-w-full rounded-[4px] object-contain"
                   />
                 </div>
-              ) : (kind === "json" || kind === "xml" || kind === "array" || kind === "map" || kind === "geometry") &&
+              ) : (kind === "json" ||
+                  kind === "xml" ||
+                  kind === "array" ||
+                  kind === "map" ||
+                  kind === "geometry") &&
                 jsonPresentation === "tree" &&
                 structuredPreview?.ok ? (
                 <JsonTreePreview value={structuredPreview.value} />
@@ -839,347 +613,6 @@ export function ValueEditorDialog({
   );
 }
 
-function StatePlaceholder({
-  icon,
-  title,
-  detail,
-}: {
-  icon: ReactNode;
-  title: string;
-  detail: string;
-}) {
-  return (
-    <div className="flex h-full items-center justify-center px-8 text-center">
-      <div className="max-w-[360px]">
-        <span className="mx-auto flex h-9 w-9 items-center justify-center rounded-full border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] text-[hsl(var(--wb-accent))]">
-          {icon}
-        </span>
-        <div className="mt-3 text-[12px] font-medium text-[hsl(var(--wb-text))]">
-          {title}
-        </div>
-        <div className="mt-1 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
-          {detail}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const JSON_TREE_ROW_HEIGHT = 24;
-const JSON_TREE_OVERSCAN_ROWS = 20;
-const JSON_TREE_MAX_ROWS = 100_000;
-const JSON_TREE_SUMMARY_COUNT_LIMIT = 10_000;
-
-type JsonTreeParentKind = "root" | "array" | "object";
-
-export interface JsonTreeRow {
-  path: string;
-  label: string;
-  value: unknown;
-  depth: number;
-  parentKind: JsonTreeParentKind;
-  closing?: boolean;
-  truncated?: boolean;
-}
-
-function isJsonTreeContainer(value: unknown): value is unknown[] | Record<string, unknown> {
-  return value !== null && typeof value === "object";
-}
-
-function escapeJsonPointerSegment(segment: string) {
-  return segment.replace(/~/g, "~0").replace(/\//g, "~1");
-}
-
-function appendJsonPointer(path: string, segment: string | number) {
-  return `${path}/${escapeJsonPointerSegment(String(segment))}`;
-}
-
-/**
- * Iterative traversal avoids recursive call-stack growth. Only expanded
- * containers enumerate children; the hard row bound prevents a hostile JSON
- * cell from turning the tree preview into an unbounded renderer allocation.
- */
-export function flattenJsonTreeRows(
-  value: unknown,
-  expandedPaths: ReadonlySet<string>,
-  maxRows = JSON_TREE_MAX_ROWS,
-): JsonTreeRow[] {
-  const rows: JsonTreeRow[] = [];
-  const pending: JsonTreeRow[] = [
-    { path: "", label: "$", value, depth: 0, parentKind: "root" },
-  ];
-  const boundedMaxRows = Math.max(1, Math.floor(maxRows));
-  let omittedRows = false;
-
-  while (pending.length > 0 && rows.length < boundedMaxRows) {
-    const row = pending.pop();
-    if (!row) break;
-    rows.push(row);
-    if (
-      row.closing ||
-      row.truncated ||
-      !isJsonTreeContainer(row.value) ||
-      !expandedPaths.has(row.path)
-    ) {
-      continue;
-    }
-    pending.push({
-      ...row,
-      path: `${row.path}/$close\u0000`,
-      label: "",
-      closing: true,
-    });
-    // Account for rows already rendered and queued before enumerating a wide
-    // container. This bounds both the returned list and the traversal stack;
-    // virtualization alone would not protect memory from a million-key object.
-    const availableChildren = boundedMaxRows - rows.length - pending.length;
-    if (availableChildren <= 0) {
-      omittedRows = true;
-      continue;
-    }
-    if (Array.isArray(row.value)) {
-      const visibleLength = Math.min(row.value.length, availableChildren);
-      omittedRows ||= visibleLength < row.value.length;
-      for (let index = visibleLength - 1; index >= 0; index -= 1) {
-        pending.push({
-          path: appendJsonPointer(row.path, index),
-          label: String(index),
-          value: row.value[index],
-          depth: row.depth + 1,
-          parentKind: "array",
-        });
-      }
-    } else {
-      const entries: Array<[string, unknown]> = [];
-      for (const label in row.value) {
-        if (!Object.prototype.hasOwnProperty.call(row.value, label)) continue;
-        if (entries.length >= availableChildren) {
-          omittedRows = true;
-          break;
-        }
-        entries.push([label, row.value[label]]);
-      }
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const [label, child] = entries[index]!;
-        pending.push({
-          path: appendJsonPointer(row.path, label),
-          label,
-          value: child,
-          depth: row.depth + 1,
-          parentKind: "object",
-        });
-      }
-    }
-  }
-  if (pending.length > 0 || omittedRows) {
-    rows.push({
-      path: "/$truncated\u0000",
-      label: "",
-      value: pending.length,
-      depth: 0,
-      parentKind: "root",
-      truncated: true,
-    });
-  }
-  return rows;
-}
-
-function JsonTreePreview({ value }: { value: unknown }) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
-    () => new Set([""]),
-  );
-  const [viewport, setViewport] = useState({ scrollTop: 0, height: 480 });
-  const rows = useMemo(
-    () => flattenJsonTreeRows(value, expandedPaths),
-    [expandedPaths, value],
-  );
-  const start = Math.max(
-    0,
-    Math.floor(viewport.scrollTop / JSON_TREE_ROW_HEIGHT) -
-      JSON_TREE_OVERSCAN_ROWS,
-  );
-  const end = Math.min(
-    rows.length,
-    Math.ceil((viewport.scrollTop + viewport.height) / JSON_TREE_ROW_HEIGHT) +
-      JSON_TREE_OVERSCAN_ROWS,
-  );
-
-  useEffect(() => {
-    setExpandedPaths(new Set([""]));
-    setViewport((current) => ({ ...current, scrollTop: 0 }));
-    scrollRef.current?.scrollTo({ top: 0 });
-  }, [value]);
-
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    const updateHeight = () => {
-      if (element.clientHeight > 0) {
-        setViewport((current) => ({
-          ...current,
-          height: element.clientHeight,
-        }));
-      }
-    };
-    updateHeight();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  const togglePath = (path: string) => {
-    setExpandedPaths((current) => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
-  return (
-    <div
-      ref={scrollRef}
-      className="h-full overflow-auto px-3 py-3 font-mono text-[11px] text-[hsl(var(--wb-text))]"
-      data-json-tree-virtualized="true"
-      onScroll={(event) =>
-        setViewport({
-          scrollTop: event.currentTarget.scrollTop,
-          height: event.currentTarget.clientHeight || viewport.height,
-        })
-      }
-    >
-      <div
-        className="relative min-w-max"
-        style={{ height: rows.length * JSON_TREE_ROW_HEIGHT }}
-      >
-        {rows.slice(start, end).map((row, index) => (
-          <JsonTreeVirtualRow
-            key={row.path}
-            row={row}
-            expanded={expandedPaths.has(row.path)}
-            top={(start + index) * JSON_TREE_ROW_HEIGHT}
-            onToggle={togglePath}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function JsonTreeVirtualRow({
-  row,
-  expanded,
-  top,
-  onToggle,
-}: {
-  row: JsonTreeRow;
-  expanded: boolean;
-  top: number;
-  onToggle: (path: string) => void;
-}) {
-  if (row.truncated) {
-    return (
-      <div
-        className="absolute left-0 flex h-6 items-center text-[hsl(var(--wb-text-muted))]"
-        style={{ top }}
-      >
-        Tree preview reached its {JSON_TREE_MAX_ROWS.toLocaleString()} row safety
-        limit. Use the text view to inspect the complete value.
-      </div>
-    );
-  }
-  const expandable = isJsonTreeContainer(row.value);
-  const summary = expandable ? jsonTreeContainerSummary(row.value) : "";
-  return (
-    <div
-      className="absolute left-0 flex h-6 min-w-full items-center gap-1 whitespace-nowrap rounded-[3px] hover:bg-[hsl(var(--wb-hover))]"
-      data-json-path={row.path}
-      style={{ top, paddingLeft: row.depth * 14 }}
-    >
-      {row.closing ? (
-        <span className="text-[hsl(var(--wb-text-secondary))]">
-          {Array.isArray(row.value) ? "]" : "}"}
-        </span>
-      ) : (
-        <>
-          {expandable ? (
-            <button
-              type="button"
-              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[3px] text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-accent))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--wb-accent))]"
-              aria-expanded={expanded}
-              aria-label={row.path || "$"}
-              onClick={() => onToggle(row.path)}
-            >
-              {expanded ? (
-                <ChevronDown size={12} aria-hidden="true" />
-              ) : (
-                <ChevronRight size={12} aria-hidden="true" />
-              )}
-            </button>
-          ) : (
-            <span className="inline-block w-5 shrink-0" aria-hidden="true" />
-          )}
-          {row.parentKind !== "root" && (
-            <span className="text-[hsl(var(--wb-text-muted))]">
-              {row.parentKind === "array" ? `[${row.label}]` : row.label}:
-            </span>
-          )}
-          {row.parentKind === "root" && (
-            <span className="text-[hsl(var(--wb-text-muted))]">{row.label}</span>
-          )}
-          {expandable ? (
-            <>
-              <span className="text-[hsl(var(--wb-text-secondary))]">
-                {Array.isArray(row.value) ? "[" : "{"}
-              </span>
-              {!expanded && (
-                <>
-                  <span className="text-[hsl(var(--wb-text-muted))]">{summary}</span>
-                  <span className="text-[hsl(var(--wb-text-secondary))]">
-                    {Array.isArray(row.value) ? "]" : "}"}
-                  </span>
-                </>
-              )}
-            </>
-          ) : (
-            <span className={jsonPrimitiveClass(row.value)} title={jsonPrimitiveText(row.value)}>
-              {jsonPrimitiveText(row.value)}
-            </span>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function jsonTreeContainerSummary(value: unknown) {
-  if (Array.isArray(value)) {
-    return `[${value.length}${value.length === 1 ? " item" : " items"}]`;
-  }
-  if (!value || typeof value !== "object") return "";
-  const object = value as Record<string, unknown>;
-  let count = 0;
-  for (const label in object) {
-    if (!Object.prototype.hasOwnProperty.call(object, label)) continue;
-    count += 1;
-    if (count > JSON_TREE_SUMMARY_COUNT_LIMIT) {
-      return `{${JSON_TREE_SUMMARY_COUNT_LIMIT.toLocaleString()}+ properties}`;
-    }
-  }
-  return `{${count}${count === 1 ? " property" : " properties"}}`;
-}
-
-function jsonPrimitiveText(value: unknown) {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (value === null) return "null";
-  return String(value);
-}
-
-function jsonPrimitiveClass(value: unknown) {
-  if (value === null) return "text-[hsl(var(--wb-text-muted))]";
-  if (typeof value === "string") return "text-[hsl(var(--wb-accent))]";
-  if (typeof value === "boolean") return "text-[hsl(var(--wb-success))]";
-  return "text-[hsl(var(--wb-warning))]";
-}
+export { flattenJsonTreeRows } from "@/features/value-editor/model/jsonTree";
+export type { JsonTreeRow } from "@/features/value-editor/model/jsonTree";
+export type { ValueEditorTarget } from "@/features/value-editor/model/valueEditorTypes";

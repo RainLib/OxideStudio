@@ -51,6 +51,27 @@ describe("task store", () => {
     ]);
   });
 
+  it("retains live imports and approval waits when completed history exceeds capacity", () => {
+    const store = useTaskStore.getState();
+    const running = store.startTask({ kind: "import", title: "Long import" });
+    const waiting = store.startTask({ kind: "agent", title: "Await approval" });
+    store.setTaskWaiting(waiting);
+    for (let index = 0; index < 40; index += 1) {
+      const id = store.startTask({ kind: "introspection", title: `Metadata ${index}` });
+      store.finishTask(id);
+    }
+    let tasks = useTaskStore.getState().tasks;
+    expect(tasks).toHaveLength(32);
+    expect(tasks.find((task) => task.id === running)?.status).toBe("running");
+    expect(tasks.find((task) => task.id === waiting)?.status).toBe("waiting");
+    expect(tasks.some((task) => task.title === "Metadata 0")).toBe(false);
+    store.finishTask(running, "Imported");
+    tasks = useTaskStore.getState().tasks;
+    expect(tasks.filter((task) => task.status === "success")).toHaveLength(30);
+    expect(tasks.find((task) => task.id === running)?.detail).toBe("Imported");
+    expect(tasks.find((task) => task.id === waiting)?.status).toBe("waiting");
+  });
+
   it("replaces project-scoped persistent agent history without removing local tasks", () => {
     const queryId = useTaskStore.getState().startTask({
       kind: "query",

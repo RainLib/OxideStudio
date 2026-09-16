@@ -3,6 +3,7 @@ import {
   boundedInlineContext,
   cleanInlineSuggestion,
   InlineCompletionCache,
+  inlineCompletionCacheKey,
   localInlineSuggestion,
   mergeInlineCompletionCandidates,
   shouldRequestAiInlineCompletion,
@@ -153,5 +154,30 @@ describe("inline completion helpers", () => {
     cache.set("c", "C", 1);
     expect(cache.get("b", 1)).toBeUndefined();
     expect(cache.get("a", 11)).toBeUndefined();
+  });
+
+  it.each([
+    ["SELECT * FROM users WHERE name = 'Alice' AND ", true],
+    ["SELECT 'it''s complete' AS ", true],
+    ["SELECT 'it''s incomplete", false],
+    ["SELECT $$complete$$ AS ", true],
+    ["SELECT $body$incomplete", false],
+    ["SELECT /* incomplete", false],
+    ["-- list the user's recent orders", true],
+  ])("checks the cursor context after quoted SQL: %s", (prefix, expected) => {
+    expect(shouldRequestAiInlineCompletion({
+      prefix, hasSelection: false, automatic: true, explicit: false, dialect: "postgres",
+    })).toBe(expected);
+  });
+
+  it("does not reuse another endpoint's suggestion for the same model", () => {
+    const request = {
+      protocol: "chat-completions" as const,
+      config: { kind: "openai-compatible" as const, baseUrl: "https://one.example/v1", model: "sql" },
+      prefix: "SELECT ", suffix: "", languageId: "sql", dialect: "postgres", lspContext: {},
+    };
+    expect(inlineCompletionCacheKey(request)).not.toBe(inlineCompletionCacheKey({
+      ...request, config: { ...request.config, baseUrl: "https://two.example/v1" },
+    }));
   });
 });

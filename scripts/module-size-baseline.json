@@ -1,0 +1,20 @@
+{
+  "roots": [
+    "src",
+    "src-tauri/src",
+    "vendor/sql-lsp/src",
+    "agent-contract/src",
+    "agent-host/src",
+    "agent-host/tests",
+    "enterprise/admin-web/src",
+    "enterprise/control-plane/src",
+    "enterprise/gateway/src",
+    "tests"
+  ],
+  "limits": {
+    ".ts": 1000,
+    ".tsx": 1000,
+    ".rs": 1200
+  },
+  "legacy": {}
+}

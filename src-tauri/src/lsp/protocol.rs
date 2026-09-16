@@ -8,6 +8,7 @@ pub struct LspRequest {
     pub jsonrpc: String,
     pub id: u64,
     pub method: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub params: serde_json::Value,
 }
 
@@ -16,6 +17,7 @@ pub struct LspRequest {
 pub struct LspNotification {
     pub jsonrpc: String,
     pub method: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub params: serde_json::Value,
 }
 
@@ -92,4 +94,47 @@ pub struct Diagnostic {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LspNotification, LspRequest};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn omits_null_params_for_parameterless_lsp_methods() {
+        let request = LspRequest {
+            jsonrpc: "2.0".to_string(),
+            id: 1,
+            method: "shutdown".to_string(),
+            params: Value::Null,
+        };
+        let notification = LspNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "exit".to_string(),
+            params: Value::Null,
+        };
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({"jsonrpc":"2.0","id":1,"method":"shutdown"})
+        );
+        assert_eq!(
+            serde_json::to_value(notification).unwrap(),
+            json!({"jsonrpc":"2.0","method":"exit"})
+        );
+    }
+
+    #[test]
+    fn preserves_non_empty_lsp_params() {
+        let request = LspRequest {
+            jsonrpc: "2.0".to_string(),
+            id: 2,
+            method: "textDocument/hover".to_string(),
+            params: json!({"textDocument":{"uri":"file:///query.sql"},"position":{"line":0,"character":1}}),
+        };
+        assert!(serde_json::to_value(request)
+            .unwrap()
+            .get("params")
+            .is_some());
+    }
 }
