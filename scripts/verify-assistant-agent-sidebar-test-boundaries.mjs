@@ -45,8 +45,8 @@ for (const scenario of scenarios) {
   }
   testCount += [...source.matchAll(/\bit\(/g)].length;
 }
-if (testCount !== 56) {
-  throw new Error(`Expected 56 AssistantSidebar regression tests; found ${testCount}.`);
+if (testCount !== 57) {
+  throw new Error(`Expected 57 AssistantSidebar regression tests; found ${testCount}.`);
 }
 
 console.log(

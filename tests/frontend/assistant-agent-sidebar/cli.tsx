@@ -27,7 +27,7 @@ import {
 } from "./harness";
 
 describe("AssistantSidebar Agent Host path: cli", () => {
-  it("confirms Ultra access and automatically revokes Full access outside Agent mode", async () => {
+  it("changes Ultra without changing the saved access preference", async () => {
     useAiSettingsStore.setState({
       provider: "codex-cli",
       enabled: true,
@@ -66,34 +66,38 @@ describe("AssistantSidebar Agent Host path: cli", () => {
 
     await setRangeValue(reasoningTrack!, "2");
     expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe(
-      "default",
+      "ultra",
     );
     expect(
       document.body.querySelector(
         '[data-assistant-ultra-access-dialog="true"]',
       ),
-    ).not.toBeNull();
-    await clickButton(document.body, "Continue");
-    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("ultra");
+    ).toBeNull();
     expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("restricted");
 
     await act(async () => {
-      useAiSettingsStore.getState().updateSettings({
-        codexCliReasoningEffort: "default",
-      });
+      document.body
+        .querySelector<HTMLButtonElement>("[data-assistant-access-trigger]")!
+        .click();
       await flushAsyncWork();
-      if (modelTrigger.getAttribute("aria-expanded") !== "true") {
-        modelTrigger.click();
-        await flushAsyncWork();
-      }
     });
-    reasoningTrack = document.body.querySelector<HTMLInputElement>(
-      '[data-assistant-reasoning-track="true"]',
-    );
-    await setRangeValue(reasoningTrack!, "2");
-    await clickButton(document.body, "Use Full access");
-
-    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("ultra");
+    const fullAccessOption = [...document.body.querySelectorAll<HTMLButtonElement>(
+      "button",
+    )].find((button) => button.textContent?.startsWith("Full access"));
+    expect(fullAccessOption).toBeDefined();
+    await act(async () => {
+      fullAccessOption!.click();
+      await flushAsyncWork();
+    });
+    expect(document.body.textContent).toContain("Enable Full access?");
+    const confirmFullAccess = [...document.body.querySelectorAll<HTMLButtonElement>(
+      "button",
+    )].find((button) => button.textContent === "Full access");
+    expect(confirmFullAccess).toBeDefined();
+    await act(async () => {
+      confirmFullAccess!.click();
+      await flushAsyncWork();
+    });
     expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("full");
     expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
       expect.objectContaining({
@@ -102,13 +106,18 @@ describe("AssistantSidebar Agent Host path: cli", () => {
       }),
     );
 
-    await act(async () => {
-      useAiSettingsStore.getState().updateSettings({
-        codexCliAssistantMode: "plan",
+    if (modelTrigger.getAttribute("aria-expanded") !== "true") {
+      await act(async () => {
+        modelTrigger.click();
+        await flushAsyncWork();
       });
-      await flushAsyncWork();
-    });
-    expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("restricted");
+    }
+    reasoningTrack = document.body.querySelector<HTMLInputElement>(
+      '[data-assistant-reasoning-track="true"]',
+    );
+    expect(reasoningTrack).not.toBeNull();
+    await setRangeValue(reasoningTrack!, "1");
+    expect(useAiSettingsStore.getState().codexCliAccessMode).toBe("full");
     expect(useAiSettingsStore.getState().assistantProviderConfig()).toEqual(
       expect.objectContaining({ accessMode: "restricted" }),
     );
@@ -260,7 +269,6 @@ describe("AssistantSidebar Agent Host path: cli", () => {
         '[data-assistant-model-catalog-status="ready"]',
       )?.textContent,
     ).toContain("Some provider capabilities could not refresh");
-    await clickButton(modelPopover, "Advanced");
     await clickButtonByAria(modelPopover, "Toggle model list");
     expect(
       modelPopover.querySelector('input[aria-label="Codex Sol"]'),
@@ -296,6 +304,41 @@ describe("AssistantSidebar Agent Host path: cli", () => {
     expect(
       modelPopover.querySelector('input[placeholder="Model identifier"]'),
     ).toBeNull();
+  });
+
+  it("blocks a retired CLI model after a confirmed catalog refresh", async () => {
+    useAiSettingsStore.setState({
+      provider: "codex-cli",
+      enabled: true,
+      codexCliModel: "codex-retired",
+    });
+    mocks.listCliModels.mockResolvedValue([
+      {
+        id: "codex-current",
+        label: "Codex Current",
+        isDefault: true,
+      },
+    ]);
+
+    await act(async () => {
+      fixture.root = createRoot(fixture.container);
+      fixture.root!.render(<AssistantSidebar />);
+      await flushAsyncWork();
+    });
+
+    await clickButtonByAria(fixture.container, "Assistant model: codex-retired");
+    const modelPopover = document.body.querySelector<HTMLElement>(
+      "[data-assistant-model-popover]",
+    )!;
+    expect(modelPopover.textContent).toContain("Model unavailable");
+    expect(mocks.startTurn).not.toHaveBeenCalled();
+
+    const submitButton = fixture.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send"]',
+    );
+    expect(submitButton?.disabled).toBe(true);
+    submitButton?.click();
+    expect(mocks.startTurn).not.toHaveBeenCalled();
   });
 
   it("ignores a late catalog result after the CLI provider identity changes", async () => {
@@ -443,25 +486,19 @@ describe("AssistantSidebar Agent Host path: cli", () => {
     );
     expect(reasoningTrack?.max).toBe("2");
     expect(modelPopover.textContent).not.toContain("Enabled");
-    await act(async () => {
-      modelPopover
-        .querySelector<HTMLButtonElement>("[data-assistant-advanced-toggle]")
-        ?.click();
-      await flushAsyncWork();
-    });
     await setRangeValue(reasoningTrack!, "2");
     expect(useAiSettingsStore.getState().codeBuddyCliReasoningEffort).toBe(
       "max",
     );
     expect(
       modelPopover.querySelector(
-        '[data-assistant-reasoning-animation="maximum"] [data-assistant-animation-speed="standard"]',
+        '[data-assistant-reasoning-animation="standard"] [data-assistant-animation-speed="standard"]',
       ),
     ).not.toBeNull();
     expect(
       modelPopover.querySelector<HTMLElement>(".wb-assistant-fast-particle")
         ?.style.animationDuration,
-    ).toBe("1200ms");
+    ).toBe("1680ms");
     expect(
       modelPopover.querySelector('[data-assistant-reasoning-stop="true"]'),
     ).toBeNull();
@@ -778,7 +815,6 @@ describe("AssistantSidebar Agent Host path: cli", () => {
       "[data-assistant-model-popover]",
     );
     expect(modelPanel).not.toBeNull();
-    await clickButton(modelPanel!, "Advanced");
     await clickButtonByAria(modelPanel!, "Toggle model list");
     const modelInput = modelPanel!.querySelector<HTMLInputElement>(
       'input[placeholder="Model identifier"]',
@@ -797,10 +833,7 @@ describe("AssistantSidebar Agent Host path: cli", () => {
         "Assistant model: agent-model-v2",
       ).getAttribute("aria-expanded"),
     ).toBe("true");
-    await clickButtonByAria(modelPanel!, "Toggle model list");
-    expect(
-      modelPanel!.querySelector('button[aria-label="Settings"]'),
-    ).toBeNull();
+    expect(modelPanel!.querySelector('button[aria-label="Settings"]')).toBeNull();
   });
 
   it("blocks tool modes when the model cannot call tools but keeps Chat usable", async () => {

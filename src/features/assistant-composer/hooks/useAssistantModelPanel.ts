@@ -35,10 +35,7 @@ export function useAssistantModelPanel({
 }: AssistantModelPanelOptions) {
   const modelInputId = useId();
   const effortGroupName = useId();
-  const [view, setView] = useState<"quick" | "advanced">("quick");
-  const [activeMenu, setActiveMenu] = useState<
-    "model" | "effort" | "speed" | null
-  >(null);
+  const [view, setView] = useState<"compact" | "models">("compact");
   const [modelSearch, setModelSearch] = useState("");
   const [customModel, setCustomModel] = useState(model);
   const normalizedModel = model.trim();
@@ -100,21 +97,10 @@ export function useAssistantModelPanel({
     normalizedModel !== "default" ||
     normalizedEffort !== "default" ||
     serviceTier !== "default";
-  const catalogPrimaryMessage =
-    catalogStatus === "loading"
-      ? t("assistant.model.catalogLoading")
-      : catalogStatus === "empty"
-        ? t("assistant.model.catalogEmpty")
-        : catalogStatus === "error"
-          ? t("assistant.model.catalogUnavailable")
-          : catalogWarning
-            ? t("assistant.model.catalogRefreshWarning")
-            : null;
-
   useEffect(() => setCustomModel(model), [model]);
   useEffect(() => {
-    if (activeMenu !== "model" || view !== "advanced") setModelSearch("");
-  }, [activeMenu, view]);
+    if (view !== "models") setModelSearch("");
+  }, [view]);
   useEffect(() => {
     if (
       priorityCapabilityKnown &&
@@ -143,7 +129,14 @@ export function useAssistantModelPanel({
     if (!option.serviceTiers?.some((tier) => tier.id === "priority")) {
       onServiceTierChange?.("default");
     }
-    setActiveMenu(null);
+  };
+
+  const applyCustomModel = () => {
+    const nextModel = customModel.trim();
+    if (!nextModel || nextModel === normalizedModel || disabled) return;
+    onModelChange(nextModel);
+    if (normalizedEffort !== "default") onReasoningEffortChange?.("default");
+    if (serviceTier !== "default") onServiceTierChange?.("default");
   };
 
   const resetDefaults = () => {
@@ -172,8 +165,6 @@ export function useAssistantModelPanel({
     effortGroupName,
     view,
     setView,
-    activeMenu,
-    setActiveMenu,
     modelSearch,
     setModelSearch,
     customModel,
@@ -189,8 +180,8 @@ export function useAssistantModelPanel({
     supportsPriority,
     canRetry,
     canReset,
-    catalogPrimaryMessage,
     selectModel,
+    applyCustomModel,
     resetDefaults,
     toggleFast,
   };

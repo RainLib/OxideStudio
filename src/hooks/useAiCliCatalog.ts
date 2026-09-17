@@ -28,6 +28,8 @@ export interface AiCliCatalogSnapshot {
   loadedAt?: number;
   /** Last known provider capabilities remain selectable while a refresh fails. */
   stale?: boolean;
+  /** A user-requested catalog refresh is in progress. */
+  refreshing?: boolean;
 }
 
 export interface AiCliCatalogController extends AiCliCatalogSnapshot {
@@ -372,6 +374,17 @@ export function useAiCliCatalog(
   const handledCatalogRefreshRef = useRef<string | null>(null);
   const handledEffortRefreshRef = useRef<string | null>(null);
 
+  const requestRefresh = useCallback(() => {
+    const current = configRef.current;
+    const currentSignature = signatureRef.current;
+    if (!current || !currentSignature) return;
+    setRefreshRequest((request) => ({
+      signature: currentSignature,
+      revision:
+        request?.signature === currentSignature ? request.revision + 1 : 1,
+    }));
+  }, []);
+
   useEffect(() => {
     if (!enabled || !config || !signature) {
       setSnapshot(EMPTY_CATALOG);
@@ -388,6 +401,12 @@ export function useAiCliCatalog(
       refreshToken && handledCatalogRefreshRef.current !== refreshToken,
     );
     if (refreshToken) handledCatalogRefreshRef.current = refreshToken;
+    const cached = catalogSnapshot(signature);
+    setSnapshot(
+      force && (cached.models.length > 0 || cached.commands.length > 0)
+        ? { ...cached, refreshing: true }
+        : cached,
+    );
     void loadCatalog(config, signature, runtimeVersion, force).then((next) => {
       if (disposed || signatureRef.current !== signature) return;
       setSnapshot(next);
@@ -395,7 +414,7 @@ export function useAiCliCatalog(
     return () => {
       disposed = true;
     };
-  }, [enabled, refreshRequest, signature]);
+  }, [enabled, refreshRequest, requestRefresh, signature]);
 
   useEffect(() => {
     if (!enabled || !config || !signature || config.kind !== "codebuddy-cli") {
@@ -440,15 +459,8 @@ export function useAiCliCatalog(
   }, [config?.kind, config?.model, enabled, refreshRequest, signature]);
 
   const refresh = useCallback(() => {
-    const current = configRef.current;
-    const currentSignature = signatureRef.current;
-    if (!current || !currentSignature) return;
-    setRefreshRequest((request) => ({
-      signature: currentSignature,
-      revision:
-        request?.signature === currentSignature ? request.revision + 1 : 1,
-    }));
-  }, []);
+    requestRefresh();
+  }, [requestRefresh]);
 
   return {
     ...snapshot,

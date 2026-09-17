@@ -474,6 +474,11 @@ export function AssistantSidebarView({
                 ? cliCatalogWarning || undefined
                 : undefined
             }
+            modelCatalogRefreshing={
+              aiProvider === "codex-cli" || aiProvider === "codebuddy-cli"
+                ? cliCatalog.refreshing
+                : undefined
+            }
             reasoningEffort={displayedReasoningEffort}
             serviceTier={
               aiProvider === "codex-cli" ? codexCliServiceTier : undefined

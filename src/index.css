@@ -883,13 +883,48 @@
   }
 }
 
+@keyframes wb-assistant-energy-sheen {
+  from {
+    opacity: 0.2;
+    transform: translate3d(-42%, 0, 0);
+  }
+
+  to {
+    opacity: 0.72;
+    transform: translate3d(42%, 0, 0);
+  }
+}
+
 .wb-assistant-energy-track {
+  isolation: isolate;
   background: linear-gradient(
     90deg,
     hsl(var(--wb-accent) / 0.92),
     hsl(var(--wb-brand) / 0.92)
   );
   box-shadow: inset 0 0 0 1px hsl(var(--wb-text) / 0.08);
+}
+
+.wb-assistant-energy-track::before {
+  position: absolute;
+  z-index: 0;
+  inset: -50% -20%;
+  content: "";
+  background: radial-gradient(
+    ellipse at center,
+    hsl(var(--wb-text) / 0.28),
+    transparent 56%
+  );
+  animation: wb-assistant-energy-sheen 2600ms ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.wb-assistant-energy-track-fast {
+  filter: saturate(1.16) brightness(1.08);
+}
+
+.wb-assistant-energy-track-fast::before {
+  animation-duration: 1080ms;
 }
 
 .wb-assistant-fast-particle {
@@ -902,6 +937,13 @@
   box-shadow: 0 0 4px hsl(var(--wb-text) / 0.72);
   animation: wb-assistant-fast-particle 1200ms linear infinite;
   will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-assistant-energy-track::before,
+  .wb-assistant-fast-particle {
+    animation: none;
+  }
 }
 
 .monaco-editor .oxide-current-statement-line {

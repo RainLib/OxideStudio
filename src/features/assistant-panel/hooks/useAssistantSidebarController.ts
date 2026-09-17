@@ -437,22 +437,6 @@ export function useAssistantSidebarController() {
             codeBuddyCliReasoningEffort,
           )
         : undefined;
-  useEffect(() => {
-    if (
-      codexCliAccessMode === "full" &&
-      (aiProvider !== "codex-cli" ||
-        assistantMode !== "agent" ||
-        displayedReasoningEffort?.trim().toLowerCase() !== "ultra")
-    ) {
-      updateAiSettings({ codexCliAccessMode: "restricted" });
-    }
-  }, [
-    aiProvider,
-    assistantMode,
-    codexCliAccessMode,
-    displayedReasoningEffort,
-    updateAiSettings,
-  ]);
   const cliModelOptions = useMemo(() => {
     if (aiProvider !== "codebuddy-cli") return cliCatalog.models;
     const selectedModel = displayedModel.trim() || "default";
@@ -465,6 +449,17 @@ export function useAssistantSidebarController() {
   const cliCatalogWarning = [cliCatalog.warning, cliCatalog.effortWarning]
     .filter((warning): warning is string => Boolean(warning))
     .join(" ");
+  const selectedCliModelUnavailable =
+    (aiProvider === "codex-cli" || aiProvider === "codebuddy-cli") &&
+    cliCatalog.status !== "loading" &&
+    !cliCatalog.stale &&
+    displayedModel.trim() !== "" &&
+    displayedModel.trim() !== "default" &&
+    (cliCatalog.status === "empty" ||
+      (cliCatalog.status === "ready" &&
+        !cliCatalog.models.some(
+          (option) => option.id === displayedModel.trim(),
+        )));
   const { modelStatus, submissionBlockReason } = resolveModelUiState({
     enabled: aiEnabled,
     providerKind: aiProvider,
@@ -477,6 +472,7 @@ export function useAssistantSidebarController() {
     hostInstalledTools: session.hostStatus?.installedTools ?? null,
     authenticationError: activeAuthIssueId ? providerError : null,
     cliSetup: cliSetupForCurrentIdentity,
+    selectedCliModelUnavailable,
     t,
   });
   const assistantSubmissionBlockReason =

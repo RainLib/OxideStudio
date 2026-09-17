@@ -16,6 +16,7 @@ import { useI18n } from "@/i18n";
 import { ArrowUp, Paperclip, Square } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { AssistantModelControl } from "./AssistantModelControl";
+import { AssistantAccessControl } from "./AssistantAccessControl";
 import { AssistantProviderCommandList } from "./AssistantProviderCommandList";
 
 export function AssistantPromptBox({
@@ -42,6 +43,7 @@ export function AssistantPromptBox({
   modelOptions,
   modelCatalogStatus,
   modelCatalogWarning,
+  modelCatalogRefreshing,
   reasoningEffort,
   serviceTier,
   accessMode,
@@ -209,6 +211,13 @@ export function AssistantPromptBox({
               </div>
 
               <div className="flex min-w-0 items-center gap-0.5">
+                {mode === "agent" && accessMode && onAccessModeChange && (
+                  <AssistantAccessControl
+                    accessMode={accessMode}
+                    disabled={isSubmitting || isToolRunning}
+                    onAccessModeChange={onAccessModeChange}
+                  />
+                )}
                 <AssistantModelControl
                   triggerRef={modelTriggerRef}
                   model={model}
@@ -220,10 +229,9 @@ export function AssistantPromptBox({
                   modelOptions={modelOptions}
                   catalogStatus={modelCatalogStatus}
                   catalogWarning={modelCatalogWarning}
+                  catalogRefreshing={modelCatalogRefreshing}
                   reasoningEffort={reasoningEffort}
                   serviceTier={serviceTier}
-                  accessMode={accessMode}
-                  fullAccessAvailable={mode === "agent"}
                   onOpenChange={(open) => {
                     setModelPanelOpen(open);
                     if (open) {
@@ -233,7 +241,6 @@ export function AssistantPromptBox({
                   onModelChange={onModelChange}
                   onReasoningEffortChange={onReasoningEffortChange}
                   onServiceTierChange={onServiceTierChange}
-                  onAccessModeChange={onAccessModeChange}
                   onRetry={onRetryModel}
                 />
 

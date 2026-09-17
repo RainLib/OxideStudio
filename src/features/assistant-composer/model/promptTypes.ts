@@ -41,6 +41,7 @@ export interface AssistantPromptBoxProps {
   modelOptions?: readonly AiCliModelInfo[];
   modelCatalogStatus?: AssistantModelCatalogStatus;
   modelCatalogWarning?: string;
+  modelCatalogRefreshing?: boolean;
   reasoningEffort?: string;
   serviceTier?: "default" | "priority";
   accessMode?: "restricted" | "full";

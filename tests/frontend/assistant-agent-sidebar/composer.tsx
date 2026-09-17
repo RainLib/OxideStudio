@@ -405,7 +405,7 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     expect(document.body.textContent).toContain("/review");
   });
 
-  it("opens one Codex-style model popover with quick reasoning and an advanced model view", async () => {
+  it("opens one unified model-and-reasoning popover with compact and picker views", async () => {
     mocks.listCliModels.mockResolvedValue([
       {
         id: "default",
@@ -498,22 +498,21 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     expect(modelTrigger.querySelector(".lucide-zap")).toBeNull();
     expect(modelTrigger.querySelector(".lucide-sliders-horizontal")).toBeNull();
 
-    const quickView = modelPopover!.querySelector<HTMLElement>(
-      '[data-assistant-model-view="quick"]',
+    const compactView = modelPopover!.querySelector<HTMLElement>(
+      '[data-assistant-model-view="compact"]',
     );
-    expect(quickView).not.toBeNull();
-    expect(quickView?.className).toMatch(/transition|animate/);
+    expect(compactView).not.toBeNull();
+    expect(compactView?.className).toMatch(/transition|animate/);
     expect(
       modelPopover!.querySelectorAll('[data-assistant-model-panel="true"]'),
     ).toHaveLength(1);
     expect(modelPopover!.className).toContain("bg-transparent");
-    const quickAdvancedToggle = quickView?.querySelector<HTMLButtonElement>(
+    const compactPickerToggle = compactView?.querySelector<HTMLButtonElement>(
       '[data-assistant-quick-advanced-toggle="true"]',
     );
-    expect(quickAdvancedToggle).not.toBeNull();
-    expect(quickAdvancedToggle?.className).not.toContain("hover:bg-");
-    expect(quickAdvancedToggle?.className).not.toContain("rounded-");
-    const reasoningTrack = quickView?.querySelector<HTMLInputElement>(
+    expect(compactPickerToggle).not.toBeNull();
+    expect(compactPickerToggle?.className).toContain("rounded-");
+    const reasoningTrack = compactView?.querySelector<HTMLInputElement>(
       'input[type="range"][data-assistant-reasoning-track]',
     );
     expect(reasoningTrack).not.toBeNull();
@@ -521,8 +520,8 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     expect(reasoningTrack?.max).toBe("4");
     expect(reasoningTrack?.getAttribute("aria-label")).toBe("Reasoning effort");
     expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("Default");
-    expect(quickView?.textContent).not.toContain("GPT-5.6 Terra");
-    const fastToggle = quickView?.querySelector<HTMLButtonElement>(
+    expect(compactView?.textContent).not.toContain("GPT-5.6 Terra");
+    const fastToggle = compactView?.querySelector<HTMLButtonElement>(
       '[data-assistant-fast-toggle="true"]',
     );
     expect(fastToggle).not.toBeNull();
@@ -534,32 +533,38 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("priority");
     expect(fastToggle?.getAttribute("aria-pressed")).toBe("true");
     expect(
-      quickView?.querySelector('[data-assistant-speed-tier="priority"]'),
+      compactView?.querySelector('[data-assistant-speed-tier="priority"]'),
     ).not.toBeNull();
     expect(
-      quickView?.querySelector('[data-assistant-fast-particles="true"]'),
-    ).not.toBeNull();
+      compactView?.querySelector('[data-assistant-fast-particles="true"]'),
+    ).toBeNull();
+
+    await setRangeValue(reasoningTrack!, "3");
+    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("high");
+    expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("High");
     expect(
-      quickView
+      compactView
         ?.querySelector('[data-assistant-fast-particles="true"]')
         ?.getAttribute("data-assistant-animation-speed"),
-    ).toBe("1.5x");
+    ).toBe("2.2x");
     expect(
-      quickView?.querySelector<HTMLElement>(".wb-assistant-fast-particle")
+      compactView?.querySelector<HTMLElement>(".wb-assistant-fast-particle")
         ?.style.animationDuration,
-    ).toBe("800ms");
+    ).toBe("760ms");
     await act(async () => {
       fastToggle!.click();
       await flushAsyncWork();
     });
     expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("default");
     expect(
-      quickView?.querySelector('[data-assistant-fast-particles="true"]'),
-    ).toBeNull();
-
-    await setRangeValue(reasoningTrack!, "3");
-    expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("high");
-    expect(reasoningTrack?.getAttribute("aria-valuetext")).toBe("High");
+      compactView
+        ?.querySelector('[data-assistant-fast-particles="true"]')
+        ?.getAttribute("data-assistant-animation-speed"),
+    ).toBe("standard");
+    expect(
+      compactView?.querySelector<HTMLElement>(".wb-assistant-fast-particle")
+        ?.style.animationDuration,
+    ).toBe("1680ms");
     expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
     expect(document.body.querySelector("[data-assistant-model-popover]")).toBe(
       modelPopover,
@@ -572,66 +577,48 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     await setRangeValue(reasoningTrack!, "4");
     expect(useAiSettingsStore.getState().codexCliReasoningEffort).toBe("xhigh");
     expect(
-      quickView
-        ?.querySelector('[data-assistant-reasoning-animation="maximum"]')
+      compactView
+        ?.querySelector('[data-assistant-reasoning-animation="standard"]')
         ?.querySelector('[data-assistant-animation-speed="standard"]'),
     ).not.toBeNull();
     expect(
-      quickView?.querySelector('[data-assistant-reasoning-stop="true"]'),
+      compactView?.querySelector('[data-assistant-reasoning-stop="true"]'),
     ).toBeNull();
 
-    await clickButton(modelPopover!, "Advanced");
+    await act(async () => {
+      compactPickerToggle!.click();
+      await flushAsyncWork();
+    });
 
-    const advancedView = modelPopover!.querySelector<HTMLElement>(
-      '[data-assistant-model-view="advanced"]',
+    const modelsView = modelPopover!.querySelector<HTMLElement>(
+      '[data-assistant-model-view="models"]',
     );
-    expect(advancedView).not.toBeNull();
-    expect(advancedView?.className).toMatch(/transition|animate/);
+    expect(modelsView).not.toBeNull();
+    expect(modelsView?.className).toMatch(/transition|animate/);
     expect(
       document.body.querySelectorAll("[data-assistant-model-popover]"),
     ).toHaveLength(1);
     expect(document.body.querySelector("[data-assistant-model-popover]")).toBe(
       modelPopover,
     );
-    expect(advancedView?.textContent).not.toContain("GPT-5.6 Terra");
-
-    const modelListToggle = advancedView!.querySelector<HTMLButtonElement>(
-      'button[aria-label="Toggle model list"]',
-    );
-    expect(modelListToggle).not.toBeNull();
-    expect(modelListToggle?.getAttribute("aria-expanded")).toBe("false");
-    await act(async () => {
-      modelListToggle!.dispatchEvent(
-        new PointerEvent("pointerover", {
-          bubbles: true,
-          pointerType: "mouse",
-        }),
-      );
-      await flushAsyncWork();
-    });
-    expect(modelListToggle?.getAttribute("aria-expanded")).toBe("true");
-    expect(
-      advancedView!.querySelector('[data-assistant-submenu="model"]'),
-    ).not.toBeNull();
-
-    const modelSearch = advancedView!.querySelector<HTMLInputElement>(
+    const modelSearch = modelsView!.querySelector<HTMLInputElement>(
       'input[placeholder="Search models"]',
     );
     expect(modelSearch).not.toBeNull();
     expect(
-      advancedView!.querySelectorAll(
+      modelsView!.querySelectorAll(
         '[role="radiogroup"][aria-label="Assistant model"] input[type="radio"]',
       ),
     ).toHaveLength(100);
-    expect(advancedView!.textContent).toContain("Showing 100 of 123");
+    expect(modelsView!.textContent).toContain("Showing 100 of 123");
     await setInputValue(modelSearch!, "terra");
     expect(
-      advancedView!.querySelectorAll(
+      modelsView!.querySelectorAll(
         '[role="radiogroup"][aria-label="Assistant model"] input[type="radio"]',
       ),
     ).toHaveLength(1);
 
-    const terraModel = advancedView!.querySelector<HTMLInputElement>(
+    const terraModel = modelsView!.querySelector<HTMLInputElement>(
       'input[type="radio"][aria-label="GPT-5.6 Terra"]',
     );
     expect(terraModel).not.toBeNull();
@@ -640,16 +627,13 @@ describe("AssistantSidebar Agent Host path: composer", () => {
       await flushAsyncWork();
     });
     expect(useAiSettingsStore.getState().codexCliModel).toBe("gpt-5.6-terra");
-    await clickButtonByAria(advancedView!, "Reasoning effort");
-    const terraReasoning = advancedView!.querySelector<HTMLInputElement>(
-      'input[type="radio"][aria-label="Default"]',
+    const terraReasoning = modelsView!.querySelector<HTMLInputElement>(
+      'input[type="range"][data-assistant-reasoning-track]',
     );
     expect(terraReasoning).not.toBeNull();
-    expect(terraReasoning?.checked).toBe(true);
+    expect(terraReasoning?.value).toBe("0");
     expect(
-      advancedView!.querySelector(
-        'button[data-assistant-menu-trigger="speed"]',
-      ),
+      modelsView!.querySelector("[data-assistant-fast-toggle]"),
     ).toBeNull();
     expect(useAiSettingsStore.getState().codexCliServiceTier).toBe("default");
     expect(modelTrigger.getAttribute("aria-expanded")).toBe("true");
@@ -680,13 +664,10 @@ describe("AssistantSidebar Agent Host path: composer", () => {
     expect(reopenedPopover).not.toBeNull();
     expect(
       reopenedPopover
-        ?.querySelector('[data-assistant-model-view="quick"]')
-        ?.getAttribute("aria-hidden"),
-    ).toBe("false");
+        ?.querySelector('[data-assistant-model-view="compact"]'),
+    ).not.toBeNull();
     expect(
-      reopenedPopover
-        ?.querySelector('[data-assistant-model-view="advanced"]')
-        ?.getAttribute("aria-hidden"),
-    ).toBe("true");
+      reopenedPopover?.querySelector('[data-assistant-model-view="models"]'),
+    ).toBeNull();
   });
 });

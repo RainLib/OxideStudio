@@ -19,6 +19,7 @@ export function resolveModelUiState({
   hostInstalledTools,
   authenticationError,
   cliSetup,
+  selectedCliModelUnavailable = false,
   t,
 }: {
   enabled: boolean;
@@ -32,6 +33,7 @@ export function resolveModelUiState({
   hostInstalledTools: string[] | null;
   authenticationError: string | null;
   cliSetup: AssistantCliSetupState | null;
+  selectedCliModelUnavailable?: boolean;
   t: ReturnType<typeof useI18n>["t"];
 }): {
   modelStatus: AssistantModelStatus;
@@ -87,6 +89,20 @@ export function resolveModelUiState({
       modelStatus: {
         kind: "authentication-error",
         label: t("assistant.status.authenticationFailed"),
+        detail,
+      },
+      submissionBlockReason: detail,
+    };
+  }
+
+  if (selectedCliModelUnavailable) {
+    const detail = t("assistant.status.cliModelNoLongerAvailable", {
+      model: model.trim(),
+    });
+    return {
+      modelStatus: {
+        kind: "incompatible",
+        label: t("assistant.status.cliModelUnavailable"),
         detail,
       },
       submissionBlockReason: detail,

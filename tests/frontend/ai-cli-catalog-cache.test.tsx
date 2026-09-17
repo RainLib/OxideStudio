@@ -115,6 +115,7 @@ describe("useAiCliCatalog cache", () => {
     }
     container.remove();
     resetAiCliCatalogForTests();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -188,6 +189,21 @@ describe("useAiCliCatalog cache", () => {
       expect.any(Object),
       { runtimeVersion: "codex 1.0.0", forceRefresh: true },
     );
+  });
+
+  it("keeps an active catalog stable until the user requests a refresh", async () => {
+    vi.useFakeTimers();
+    root = createRoot(container);
+    await render(root, <CatalogProbe config={BASE_CONFIG} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await flushAsyncWork();
+    });
+
+    expect(currentCatalog?.refreshing).not.toBe(true);
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
+    expect(mocks.listCliCommands).toHaveBeenCalledTimes(1);
   });
 
   it("does not let refresh during initial discovery reuse the non-forced in-flight requests", async () => {

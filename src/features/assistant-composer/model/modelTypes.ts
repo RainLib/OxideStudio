@@ -33,14 +33,12 @@ export interface AssistantModelControlProps {
   modelOptions?: readonly AiCliModelInfo[];
   catalogStatus?: AssistantModelCatalogStatus;
   catalogWarning?: string;
+  catalogRefreshing?: boolean;
   reasoningEffort?: string;
   serviceTier?: "default" | "priority";
-  accessMode?: "restricted" | "full";
-  fullAccessAvailable?: boolean;
   onOpenChange: (open: boolean) => void;
   onReasoningEffortChange?: (effort: string) => void;
   onServiceTierChange?: (tier: "default" | "priority") => void;
-  onAccessModeChange?: (mode: "restricted" | "full") => void;
   onModelChange: (model: string) => void;
   onRetry: () => void;
 }
@@ -52,6 +50,7 @@ export interface AssistantModelPanelProps {
   modelOptions?: readonly AiCliModelInfo[];
   catalogStatus?: AssistantModelCatalogStatus;
   catalogWarning?: string;
+  catalogRefreshing?: boolean;
   reasoningEffort?: string;
   serviceTier?: "default" | "priority";
   onReasoningEffortChange?: (effort: string) => void;

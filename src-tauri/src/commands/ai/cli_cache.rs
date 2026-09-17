@@ -5,7 +5,10 @@ use super::{
 
 pub(super) const CLI_CAPABILITY_CACHE_SCHEMA_VERSION: &str = "1";
 pub(super) const CLI_CAPABILITY_CACHE_NAMESPACE: &str = "cli-capability-catalog-v1";
-pub(super) const CLI_CAPABILITY_CACHE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+// CLI providers can add, rename, or retire models independently of an
+// OxideStudio release. Keep the cross-restart snapshot short-lived; the
+// renderer immediately uses it and then verifies it in the background.
+pub(super) const CLI_CAPABILITY_CACHE_TTL_MS: i64 = 5 * 60 * 1000;
 pub(super) fn cli_capability_cache_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
