@@ -7,7 +7,7 @@ import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/drivers/external.rs";
 const facade = readSourceText(path.join(root, entry));
-const expectedModules = ["conversions", "driver", "migration", "lookup_context", "models", "runtime"];
+const expectedModules = ["conversions", "driver", "lookup_context", "migration", "models", "runtime"];
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
   .filter((name) => name !== "tests");

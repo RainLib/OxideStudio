@@ -2,7 +2,7 @@
 
 创建日期：2026-10-23；最新验收日期：2026-10-25。按用户确认，对标对象为 `sources/dbx`，不是 DBChart。
 参考源码为 `b160d130560f71c5c429be15cec6147f677a4b3a`；本批未重新 fetch。
-Oxide LSP 基于 `vendor/sql-lsp@8c80923` 加本批未提交改动。
+原第九十五批验收基于 `vendor/sql-lsp@8c80923` 加当时未提交改动。发布源码现为 `941dc0b91fe3fb5c97b17de1d9144a7c306482eb`，已通过 [LSP PR #6](https://github.com/RainLib/lsp_sqls/pull/6) 合并；新制品复验与发布检查见 [发布校验](PUBLISH_VALIDATION_2026-10-25.md)。
 
 ## 当前结论（第九十五批）
 
