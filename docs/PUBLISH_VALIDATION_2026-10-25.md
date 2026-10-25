@@ -31,3 +31,5 @@
 企业工作区跟进同步了 `oxide-studio` 路径依赖对应的锁文件，并使 CI 的企业 Clippy/测试使用 `--locked`。四个现有持久化接口保留其显式字段与调用契约，仅逐函数说明 `too_many_arguments` 例外；Gateway 的嵌套测试模块改名，消除 module-inception。未关闭工作区严格警告检查，也未更改授权逻辑。企业工作区格式、严格 all-targets Clippy、全量单元测试及 API/store/Gateway 模块边界检查已在本机重新通过；数据库与网络部署验证需要另行执行。
 
 新增 [后端部署与完整流程验证](ENTERPRISE_VALIDATION_DEPLOYMENT.md)，区分桌面本地后端、企业本机 Compose 联调和远程环境，列出身份、票据、mTLS、数据源及部署验证的实际配置。
+
+按用户指定补充 Zeabur 服务拆分、Dockerfile 路径、变量、TCP/mTLS 和挂载文件权限说明，并为三个现有镜像声明与程序一致的容器端口。此项为部署元数据与文档变更，尚未在 Zeabur 构建或运行，不能视为平台验收通过。
