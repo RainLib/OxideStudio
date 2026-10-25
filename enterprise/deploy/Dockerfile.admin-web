@@ -5,6 +5,8 @@ COPY agent-contract ./agent-contract
 COPY agent-host ./agent-host
 COPY enterprise/admin-web ./enterprise/admin-web
 RUN npm ci --ignore-scripts
+COPY scripts/verify-enterprise-admin-boundaries.mjs ./scripts/verify-enterprise-admin-boundaries.mjs
+COPY scripts/lib/runtime-import-graph.mjs ./scripts/lib/runtime-import-graph.mjs
 ARG VITE_OXIDE_CONTROL_PLANE_URL
 ARG VITE_OXIDE_OIDC_ISSUER
 ARG VITE_OXIDE_OIDC_CLIENT_ID=oxide-enterprise-admin
