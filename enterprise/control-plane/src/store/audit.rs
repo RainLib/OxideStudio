@@ -2,6 +2,10 @@ use anyhow::Result;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transactional audit helper mirrors the management event fields"
+)]
 pub(super) async fn write_management_audit(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,

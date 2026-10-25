@@ -8,6 +8,10 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 impl ControlPlaneStore {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Store boundary keeps registration fields and the audit actor explicit for existing callers"
+    )]
     pub async fn register_data_source(
         &self,
         organization_id: Uuid,

@@ -569,7 +569,7 @@ jobs:
           cargo clean --manifest-path src-tauri/Cargo.toml
           cargo clippy --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml --all-targets -- -D warnings
           cargo clean --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
-          cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets --locked -- -D warnings
           cargo clean --manifest-path enterprise/Cargo.toml
 
       - name: Test Rust workspaces
@@ -583,7 +583,7 @@ jobs:
           cargo clean --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
           cargo clean --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
-          cargo test --manifest-path enterprise/Cargo.toml --workspace
+          cargo test --manifest-path enterprise/Cargo.toml --workspace --locked
 
       - name: Show sccache stats
         if: always()

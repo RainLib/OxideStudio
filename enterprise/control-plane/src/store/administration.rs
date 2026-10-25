@@ -174,6 +174,10 @@ impl ControlPlaneStore {
         }))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Audit row fields remain explicit at the existing persistence boundary"
+    )]
     pub async fn write_audit(
         &self,
         organization_id: Uuid,

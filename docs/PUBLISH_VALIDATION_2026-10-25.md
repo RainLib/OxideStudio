@@ -27,3 +27,7 @@
 主仓库跟进修复了 rustfmt 模块顺序与边界检查的冲突、Linux shell helper 缺少 PathBuf 导入，以及 Unix 可执行权限检查中的多余 return。CI 百万行迁移测试已把证据输出到日志；遇到 GitHub 附件存储配额时，可选附件上传不再阻止后续依赖检查和 Clippy，测试本身仍保持失败即阻断。
 
 完整 SQL 方言与复杂表达式、更多真实数据库版本、性能基准及安装包/系统 picker/跨平台产品验收仍有未完成项目。合并本次代码不表示这些范围已经全部实现。
+
+企业工作区跟进同步了 `oxide-studio` 路径依赖对应的锁文件，并使 CI 的企业 Clippy/测试使用 `--locked`。四个现有持久化接口保留其显式字段与调用契约，仅逐函数说明 `too_many_arguments` 例外；Gateway 的嵌套测试模块改名，消除 module-inception。未关闭工作区严格警告检查，也未更改授权逻辑。企业工作区格式、严格 all-targets Clippy、全量单元测试及 API/store/Gateway 模块边界检查已在本机重新通过；数据库与网络部署验证需要另行执行。
+
+新增 [后端部署与完整流程验证](ENTERPRISE_VALIDATION_DEPLOYMENT.md)，区分桌面本地后端、企业本机 Compose 联调和远程环境，列出身份、票据、mTLS、数据源及部署验证的实际配置。
