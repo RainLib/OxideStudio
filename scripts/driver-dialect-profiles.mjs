@@ -52,9 +52,9 @@ export const JDBC_DIALECT_PROFILES = Object.freeze({
     supportsDatabaseCatalogs: true,
   },
   sqlserver: {
-    // `sqlserver` is a reviewed compatibility identity backed by the generic
-    // PostgreSQL parser today. Keeping the vendor id lets the server replace
-    // that alias with a dedicated parser without changing package manifests.
+    // SQL Server has its own parser profile for bracket identifiers and source
+    // coordinates, using the shared SQL grammar. Keep the stable vendor id;
+    // broader T-SQL grammar and session-specific rules remain separate work.
     lspLanguageId: "sql",
     lspServerDialect: "sqlserver",
     namespaceLabel: "schema",

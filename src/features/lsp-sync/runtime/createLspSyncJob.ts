@@ -4,6 +4,7 @@ import {
   LSP_PROGRESS_PUBLISH_INTERVAL_MS,
 } from "@/features/lsp-sync/model/syncPolicy";
 import { collectionToLspTableDefinitionWithMetadata } from "@/features/lsp-sync/runtime/collectionMetadata";
+import { loadSqlLookupContexts } from "./loadSqlLookupContexts";
 import { loadLspCatalogs } from "@/features/lsp-sync/runtime/loadLspCatalogs";
 import {
   lspLanguageIdForCapabilities,
@@ -33,6 +34,9 @@ import type { DatabaseCapabilities } from "@/services/tauri/types/database";
 import type { LspSemanticCompletionStatus } from "@/store/useLspSemanticStatusStore";
 
 interface LspSyncJobOptions {
+  verifyContext?:()=>Promise<boolean>;
+  onConfigurationPublished?: (totalObjects:number,analysisToken?:string|null) => void;
+  lastAnalysisTokenRef?:React.RefObject<string|null>;
   capabilitiesPromise: Promise<DatabaseCapabilities>;
   serverVersionPromise: Promise<string | null>;
   isCancelled: () => boolean;
@@ -105,6 +109,9 @@ interface LspSyncJobOptions {
 }
 
 export function createLspSyncJob({
+  verifyContext,
+  onConfigurationPublished,
+  lastAnalysisTokenRef,
   capabilitiesPromise,
   serverVersionPromise,
   isCancelled,
@@ -135,6 +142,7 @@ export function createLspSyncJob({
   recordSemanticTelemetry,
   metadataStats,
 }: LspSyncJobOptions) {
+  const analysisTokenRef=lastAnalysisTokenRef||{current:null};
   const buildTableDefinitions = async () => {
     const [capabilities, serverVersion] = await Promise.all([
       capabilitiesPromise,
@@ -142,6 +150,8 @@ export function createLspSyncJob({
     ]);
     const isStale = () =>
       isCancelled() || syncGenerationRef.current !== syncGeneration;
+    const contextValid=async()=>!isStale()&&(!verifyContext||await verifyContext())&&!isStale();
+    if(!await contextValid())return;
     if (!supportsLspCapabilities(capabilities)) {
       if (!isStale()) {
         setSemanticStatus(activeConnectionId, {
@@ -185,12 +195,24 @@ export function createLspSyncJob({
             return [];
           })
       : [];
+    const lookup = await loadSqlLookupContexts({
+      connectionId: activeConnectionId,
+      dialect: canSyncTableMetadata ? lspDialect : "",
+      targetCatalogs,
+      preferredTablesByCatalog,
+    });
+    if (isStale()) return;
+    metadataStats.failedObjects += lookup.failures;
+    const effectiveDefaultCatalog = lookup.bindCatalog(defaultCatalog);
+    const effectiveCatalogByTabId = Object.fromEntries(
+      Object.entries(catalogByTabId).map(([id, catalog]) => [id, lookup.bindCatalog(catalog)]),
+    );
     const { fileSchemas, fileDialects } = buildLspFileMappings({
       queryTabs,
       schemaByTabId,
-      catalogByTabId,
+      catalogByTabId: effectiveCatalogByTabId,
       defaultSchema,
-      defaultCatalog,
+      defaultCatalog: effectiveDefaultCatalog,
       driver: connection.driver,
       lspDialect,
       documentLanguageId,
@@ -198,7 +220,7 @@ export function createLspSyncJob({
     });
     const projectSchemaId = getSchemaId(
       defaultSchema,
-      defaultCatalog.catalogName,
+      effectiveDefaultCatalog.catalogName,
     );
     for (const document of projectLspDocuments) {
       const uri = getLspProjectDocumentUri(
@@ -210,12 +232,12 @@ export function createLspSyncJob({
       fileDialects[uri] = lspDialect;
     }
     const { catalogs } = await loadLspCatalogs({
-      targetCatalogs,
+      targetCatalogs: lookup.targetCatalogs,
       canSyncTableMetadata,
       activeConnectionId,
       canSyncCollectionMetadata,
       capabilities,
-      preferredTablesByCatalog,
+      preferredTablesByCatalog: lookup.preferredTablesByCatalog,
       useOnDemandColumnMetadata,
     });
 
@@ -228,6 +250,7 @@ export function createLspSyncJob({
       (catalog) => ({
         id: getSchemaId(catalog.schemaName, catalog.catalogName),
         catalog: catalog.catalogName,
+        namespace: lookup.namespaceFor(catalog),
         database: catalog.schemaName,
         driver: connection.driver,
         server_version: serverVersion,
@@ -301,6 +324,7 @@ export function createLspSyncJob({
     );
     const publishConfiguration = async () => {
       try {
+        if(!await contextValid())return false;
         const dispatchResult = await dispatchLspConfiguration({
           connectionId: activeConnectionId,
           driver: connection.driver,
@@ -318,20 +342,25 @@ export function createLspSyncJob({
             fileDialects,
           },
           lastConfigKey: lastConfigRef.current,
+          lastAnalysisToken:analysisTokenRef.current,
           syncGeneration,
           getCurrentGeneration: () => syncGenerationRef.current,
           isCancelled: isStale,
+          confirmConfiguration: token => lspClient.confirmAnalysisConfiguration(token),
           updateConfiguration: (nextConfig) =>
             lspClient.updateConfiguration(nextConfig),
         });
 
+        if(!await contextValid())return false;
         if (dispatchResult.status === "sent") {
           lastConfigRef.current = dispatchResult.lastConfigKey;
+          analysisTokenRef.current=dispatchResult.analysisToken||null;
         }
         if (
           dispatchResult.status !== "stale" &&
           dispatchResult.status !== "sent-stale"
         ) {
+          if (!isStale()) onConfigurationPublished?.(metadataWork.length,dispatchResult.analysisToken);
           await synchronizeProjectDocuments(
             projectLspDocuments,
             documentLanguageId,
@@ -461,19 +490,23 @@ export function createLspSyncJob({
     };
 
     try {
+      if(!await contextValid())return;
       const dispatchResult = await dispatchLspConfiguration({
         connectionId: activeConnectionId,
         driver: connection.driver,
         lspDialect,
         config,
         lastConfigKey: lastConfigRef.current,
+        lastAnalysisToken:analysisTokenRef.current,
         syncGeneration,
         getCurrentGeneration: () => syncGenerationRef.current,
         isCancelled: isStale,
-        updateConfiguration: (nextConfig) =>
+        confirmConfiguration: token => lspClient.confirmAnalysisConfiguration(token),
+          updateConfiguration: (nextConfig) =>
           lspClient.updateConfiguration(nextConfig),
       });
 
+      if(!await contextValid())return;
       if (dispatchResult.status === "stale") {
         recordSemanticTelemetry(activeConnectionId, "stale");
         console.log("[LSP] Skipping stale schema configuration");
@@ -481,6 +514,7 @@ export function createLspSyncJob({
       }
 
       if (dispatchResult.status === "duplicate") {
+        if (!isStale()) onConfigurationPublished?.(metadataWork.length,dispatchResult.analysisToken);
         console.log("[LSP] Skipping duplicate configuration send");
         await synchronizeProjectDocuments(
           projectLspDocuments,
@@ -500,6 +534,8 @@ export function createLspSyncJob({
       }
 
       lastConfigRef.current = dispatchResult.lastConfigKey;
+      analysisTokenRef.current=dispatchResult.analysisToken||null;
+      if (!isStale()) onConfigurationPublished?.(metadataWork.length,dispatchResult.analysisToken);
       await synchronizeProjectDocuments(
         projectLspDocuments,
         documentLanguageId,

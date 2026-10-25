@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from "@/features/connections/model/types";
+import type { ConnectionConfig, ConnectionRuntimeState } from "@/features/connections/model/types";
 import {
   DEFAULT_DATABASE_DRIVER,
   defaultDatabaseCapabilities,
@@ -9,30 +9,57 @@ import { useEffect, useMemo, useState } from "react";
 
 interface LspCapabilityContextOptions {
   activeConnection: ConnectionConfig | undefined;
+  activeConnectionRuntime?: ConnectionRuntimeState;
+  semanticSession?: string;
   driverCatalogStatus: DatabaseDriverCatalogStatus;
 }
 
 export function useLspCapabilityContext({
   activeConnection,
+  activeConnectionRuntime,
+  semanticSession,
   driverCatalogStatus,
 }: LspCapabilityContextOptions) {
-  const [resolvedCapabilityContext, setResolvedCapabilityContext] = useState<{
+  type Context = {
     connectionId: string;
     capabilities: DatabaseCapabilities;
     serverVersion: string | null;
+  };
+  const [resolved, setResolved] = useState<{
+    context: Context;
+    runtime: ConnectionRuntimeState | undefined;
+    driver: string;
+    packageVersion: string | undefined;
+    catalogStatus: DatabaseDriverCatalogStatus;
+    semanticSession: string|undefined;
   } | null>(null);
+  // A render for the replacement session must not expose the previous value
+  // while waiting for the effect cleanup and the new network response.
+  const resolvedCapabilityContext = resolved && activeConnection &&
+    resolved.context.connectionId === activeConnection.id &&
+    resolved.runtime === activeConnectionRuntime &&
+    resolved.semanticSession === semanticSession &&
+    resolved.driver === activeConnection.driver &&
+    resolved.packageVersion === activeConnection.driverPackageVersion &&
+    resolved.catalogStatus === driverCatalogStatus
+      ? resolved.context : null;
   useEffect(() => {
-    if (!activeConnection) {
-      setResolvedCapabilityContext(null);
+    if (!activeConnection || activeConnectionRuntime && activeConnectionRuntime.status !== "connected") {
+      setResolved(null);
       return;
     }
     let cancelled = false;
-    setResolvedCapabilityContext(null);
+    setResolved(null);
+    const publish = (context: Context) => {
+      if (cancelled) return;
+      setResolved({context, runtime: activeConnectionRuntime, driver: activeConnection.driver,
+        packageVersion: activeConnection.driverPackageVersion, catalogStatus: driverCatalogStatus,semanticSession});
+    };
     void databaseService
       .getConnectionDatabaseCapabilityContext(activeConnection.id)
       .then((context) => {
         if (!cancelled) {
-          setResolvedCapabilityContext({
+          publish({
             connectionId: activeConnection.id,
             capabilities: context.capabilities,
             serverVersion: context.serverVersion || null,
@@ -54,7 +81,7 @@ export function useLspCapabilityContext({
           capabilities = defaultDatabaseCapabilities(activeConnection.driver);
         }
         if (!cancelled) {
-          setResolvedCapabilityContext({
+          publish({
             connectionId: activeConnection.id,
             capabilities,
             serverVersion: null,
@@ -68,6 +95,8 @@ export function useLspCapabilityContext({
     activeConnection?.driver,
     activeConnection?.driverPackageVersion,
     activeConnection?.id,
+    activeConnectionRuntime,
+    semanticSession,
     driverCatalogStatus,
   ]);
   const lspCapabilities = useMemo<DatabaseCapabilities>(() => {

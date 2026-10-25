@@ -36,6 +36,7 @@ interface LspTableLoaderOptions {
   };
   tableMetadataCacheRef: React.RefObject<Map<string, CachedLspTableDefinition>>;
   recordMetadataCacheStatus: (status: "hit" | "miss") => void;
+  forceMetadata?: boolean;
 }
 
 export function createLspTableLoader({
@@ -48,6 +49,7 @@ export function createLspTableLoader({
   metadataStats,
   tableMetadataCacheRef,
   recordMetadataCacheStatus,
+  forceMetadata = false,
 }: LspTableLoaderOptions) {
   const assignSourceLocations = (
     catalog: LspCatalogTarget,
@@ -85,6 +87,7 @@ export function createLspTableLoader({
         includeIndexes: capabilities.supportsTableIndexes,
         includeConstraints: capabilities.supportsTableConstraints,
         priority: "background",
+        force: forceMetadata,
       });
       const { columns, indexes, constraints } = metadata;
       // New metadata makes the extra catalog query unnecessary. Keep the

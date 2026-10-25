@@ -26,6 +26,27 @@ const SOFT_STATEMENT_KEYWORDS = new Set([
   "vacuum",
 ]);
 export const NON_ALIAS_KEYWORDS = new Set([
+  "as",
+  "except",
+  "intersect",
+  "minus",
+  "qualify",
+  "window",
+  "fetch",
+  "for",
+  "using",
+  "natural",
+  "tablesample",
+  "pivot",
+  "unpivot",
+  "connect",
+  "start",
+  "model",
+  "match_recognize",
+  "prewhere",
+  "settings",
+  "format",
+  "sample",
   "select",
   "with",
   "where",
@@ -102,7 +123,7 @@ export function maskSqlCommentsAndLiterals(source: string) {
       const preserveIdentifier = quote !== "'";
       output += current === "\n"
         ? "\n"
-        : preserveIdentifier && current !== ";"
+        : preserveIdentifier
           ? current
           : " ";
       if (quote === "[") {
@@ -209,21 +230,46 @@ function isSetOperationContinuation(previousNonEmptyLine: string, candidate: str
  * boundary, matching the Rust query selection and LSP parser behaviour when
  * users type several console queries without semicolons.
  */
-export function currentTopLevelStatementBeforeCursor(source: string) {
+function structureWithoutQuotedIdentifiers(masked: string) {
+  let output = "", quote: string | undefined;
+  for (let index = 0; index < masked.length; index++) {
+    const character = masked[index]!;
+    if (quote) {
+      output += character === "\n" ? "\n" : " ";
+      if (character === quote) {
+        if (masked[index + 1] === quote) { output += " "; index++; }
+        else quote = undefined;
+      }
+    } else if (character === '"' || character === '`' || character === '[') {
+      quote = character === '[' ? ']' : character;
+      output += " ";
+    } else output += character;
+  }
+  return output;
+}
+
+export type CachedSqlStatement = { source: string; masked: string; cursorOffset: number };
+
+/** Select one statement from a complete document. Quoted identifier contents
+ * must not change parentheses, semicolon or blank-line statement boundaries. */
+export function currentTopLevelStatementAtCursor(source: string, cursorOffset: number): CachedSqlStatement {
   const masked = maskSqlCommentsAndLiterals(source);
+  const structure = structureWithoutQuotedIdentifiers(masked);
   let parentheses = 0;
   let semicolonStart = 0;
-  for (let index = 0; index < masked.length; index += 1) {
-    const character = masked[index];
+  let end = source.length;
+  for (let index = 0; index < structure.length; index += 1) {
+    const character = structure[index];
     if (character === "(") {
       parentheses += 1;
     } else if (character === ")") {
       parentheses = Math.max(0, parentheses - 1);
     } else if (character === ";" && parentheses === 0) {
-      semicolonStart = index + 1;
+      if (index < cursorOffset) semicolonStart = index + 1;
+      else { end = index; break; }
     }
   }
-  const segment = masked.slice(semicolonStart);
+  const segment = structure.slice(semicolonStart, end);
   let initialKeyword: string | undefined;
   let previousNonEmptyLine = "";
   let blankLines = 0;
@@ -245,14 +291,23 @@ export function currentTopLevelStatementBeforeCursor(source: string) {
         !isWrappedStatementContinuation(initialKeyword, keyword) &&
         !isSetOperationContinuation(previousNonEmptyLine, keyword)
       ) {
-        candidateStart = semicolonStart + lineOffset + line.length - line.trimStart().length;
+        const candidate = semicolonStart + lineOffset + line.length - line.trimStart().length;
+        if (candidate > cursorOffset) { end = candidate; break; }
+        candidateStart = candidate;
         initialKeyword = keyword;
       }
     }
 
-    for (const character of line) {
+    for (let index = 0; index < line.length; index++) {
+      const character = line[index];
       if (character === "(") parentheses += 1;
       else if (character === ")") parentheses = Math.max(0, parentheses - 1);
+      else if (parentheses === 0 && /[A-Za-z_]/u.test(character!)) {
+        const start = index;
+        while (index + 1 < line.length && /[A-Za-z0-9_]/u.test(line[index + 1]!)) index++;
+        const word = line.slice(start, index + 1).toLowerCase();
+        if (initialKeyword && isWrappedStatementContinuation(initialKeyword, word)) initialKeyword = word;
+      }
     }
     if (trimmed) {
       previousNonEmptyLine = trimmed;
@@ -264,9 +319,15 @@ export function currentTopLevelStatementBeforeCursor(source: string) {
   }
   const start = candidateStart ?? semicolonStart;
   return {
-    source: source.slice(start),
-    masked: masked.slice(start),
+    source: source.slice(start, end),
+    masked: masked.slice(start, end),
+    cursorOffset: cursorOffset - start,
   };
+}
+
+export function currentTopLevelStatementBeforeCursor(source: string) {
+  const { source: statement, masked } = currentTopLevelStatementAtCursor(source, source.length);
+  return { source: statement, masked };
 }
 
 /**
@@ -328,10 +389,12 @@ export function splitQualifiedIdentifier(value: string) {
   const finalPart = unquoteIdentifier(current);
   if (!finalPart) return null;
   parts.push(finalPart);
+  if (parts.length > 4) return null;
   const relation = {
     table: parts[parts.length - 1]!,
     schema: parts.length > 1 ? parts[parts.length - 2] || undefined : undefined,
   };
   const database = parts.length > 2 ? parts[parts.length - 3] : undefined;
-  return database ? { ...relation, database } : relation;
+  const qualified = database ? { ...relation, database } : relation;
+  return { ...qualified, ...(parts.length === 4 ? {server:parts[0] || undefined} : {}), ...(parts.length >= 3 && !parts[parts.length - 2] ? {schemaOmitted:true as const} : {}) };
 }

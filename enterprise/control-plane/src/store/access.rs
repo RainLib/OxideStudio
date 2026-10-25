@@ -62,6 +62,10 @@ impl ControlPlaneStore {
         Ok(expires_at)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Store boundary keeps the grant fields and audit actor explicit for existing callers"
+    )]
     pub async fn create_access_grant(
         &self,
         organization_id: Uuid,

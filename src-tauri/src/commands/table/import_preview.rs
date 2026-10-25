@@ -1,36 +1,24 @@
 //! Import preview for table operations.
-use serde::Deserialize;
 
-use super::import_json::is_json_lines_path;
+use super::import_json_stream::is_json_lines_path;
 use super::import_types::{
     TableCsvImportPreview, TableImportFormat, TableJsonImportPreview, TableXlsxImportPreview,
 };
 use super::limits::{
-    MAX_CSV_IMPORT_FILE_BYTES, MAX_CSV_IMPORT_PREVIEW_BYTES, MAX_IMPORT_ROWS,
-    MAX_JSON_IMPORT_FILE_BYTES, MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS,
-    MAX_JSON_IMPORT_PREVIEW_COLUMNS, MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS,
-    MAX_JSON_IMPORT_PREVIEW_ROWS, MAX_JSON_IMPORT_PREVIEW_STRING_CHARS,
-    MAX_JSON_LINES_IMPORT_FILE_BYTES, MAX_XLSX_IMPORT_FILE_BYTES, TABLE_IMPORT_CANCELLED,
+    MAX_CSV_IMPORT_FILE_BYTES, MAX_CSV_IMPORT_PREVIEW_BYTES, MAX_JSON_IMPORT_FILE_BYTES,
+    MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS, MAX_JSON_IMPORT_PREVIEW_COLUMNS,
+    MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS, MAX_JSON_IMPORT_PREVIEW_ROWS,
+    MAX_JSON_IMPORT_PREVIEW_STRING_CHARS, MAX_JSON_LINES_IMPORT_FILE_BYTES,
+    MAX_XLSX_IMPORT_FILE_BYTES,
 };
 use crate::core::protocol::Response;
-use calamine::open_workbook_auto;
-use calamine::Data;
-use calamine::Reader;
-use serde::de::value::MapAccessDeserializer;
-use serde::de::Error as DeError;
-use serde::de::MapAccess;
-use serde::de::SeqAccess;
-use serde::de::Visitor;
 use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashSet;
 use std::fs::metadata;
 use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
@@ -127,6 +115,15 @@ pub(super) fn import_file_name(path: &Path, fallback: &str) -> String {
 
 pub(super) fn bounded_json_import_preview_value(value: &Value) -> Value {
     match value {
+        Value::Number(number)
+            if number.as_i64().is_some_and(|value| {
+                !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value)
+            }) || number
+                .as_u64()
+                .is_some_and(|value| value > 9_007_199_254_740_991) =>
+        {
+            Value::String(number.to_string())
+        }
         Value::String(value) => {
             let mut bounded = value
                 .chars()
@@ -159,105 +156,64 @@ pub(super) fn bounded_json_import_preview_value(value: &Value) -> Value {
     }
 }
 
-/// Streams top-level JSON objects or array elements without first copying the
-/// complete document into a `String`/`Value`. The callback owns the only row
-/// retention policy, so preview and import can keep their existing bounded
-/// memory contracts. JSON lines intentionally keeps its separate line reader.
-pub(super) struct JsonImportRowVisitor<'a> {
-    pub(super) is_cancelled: &'a dyn Fn() -> bool,
-    pub(super) on_row: &'a mut dyn FnMut(u64, BTreeMap<String, Value>) -> Result<(), String>,
-    pub(super) next_row_number: u64,
-}
+pub(super) use super::import_json_stream::stream_json_document_rows;
 
-impl<'de> Visitor<'de> for JsonImportRowVisitor<'_> {
-    type Value = ();
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON object or an array of JSON objects")
+/// Bound the whole review payload as well as each nested display value.
+fn append_json_preview_row(
+    row: BTreeMap<String, Value>,
+    columns: &mut BTreeSet<String>,
+    samples: &mut Vec<BTreeMap<String, Value>>,
+    sample_bytes: &mut usize,
+) -> Result<bool, String> {
+    columns.extend(row.keys().cloned());
+    if columns.len() > MAX_JSON_IMPORT_PREVIEW_COLUMNS {
+        return Err("JSON source exceeds 256 distinct fields".into());
     }
-
-    fn visit_seq<A>(mut self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while let Some(row) = sequence.next_element::<BTreeMap<String, Value>>()? {
-            self.next_row_number += 1;
-            if (self.is_cancelled)() {
-                return Err(A::Error::custom(TABLE_IMPORT_CANCELLED));
-            }
-            (self.on_row)(self.next_row_number, row).map_err(A::Error::custom)?;
-        }
-        Ok(())
+    let sample = row
+        .into_iter()
+        .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
+        .collect::<BTreeMap<_, _>>();
+    let bytes = serde_json::to_vec(&sample)
+        .map_err(|e| e.to_string())?
+        .len();
+    if *sample_bytes + bytes > 2 * 1024 * 1024 {
+        return Ok(false);
     }
-
-    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        if (self.is_cancelled)() {
-            return Err(A::Error::custom(TABLE_IMPORT_CANCELLED));
-        }
-        let row = BTreeMap::<String, Value>::deserialize(MapAccessDeserializer::new(map))?;
-        (self.on_row)(1, row).map_err(A::Error::custom)
-    }
-}
-
-pub(super) fn stream_json_document_rows(
-    path: &Path,
-    is_cancelled: &dyn Fn() -> bool,
-    on_row: &mut dyn FnMut(u64, BTreeMap<String, Value>) -> Result<(), String>,
-) -> Result<(), String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
-    serde::de::Deserializer::deserialize_any(
-        &mut deserializer,
-        JsonImportRowVisitor {
-            is_cancelled,
-            on_row,
-            next_row_number: 0,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    if is_cancelled() {
-        return Err(TABLE_IMPORT_CANCELLED.to_string());
-    }
-    Ok(())
+    *sample_bytes += bytes;
+    samples.push(sample);
+    Ok(true)
 }
 
 pub(super) fn read_json_lines_import_preview(
     path: &Path,
 ) -> Result<TableJsonImportPreview, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let reader = BufReader::new(file);
     let mut source_columns = BTreeSet::new();
     let mut sample_rows = Vec::new();
+    let mut sample_bytes = 0;
     let mut seen_rows = 0_u64;
     let mut has_more_rows = false;
-
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<Value>(&line)
-            .map_err(|error| format!("Invalid JSON object on line {}: {error}", line_index + 1))?;
-        let Value::Object(values) = value else {
-            return Err(format!("JSON row {} is not an object", line_index + 1));
-        };
+    const SAMPLE_DONE: &str = "JSON_PREVIEW_SAMPLE_COMPLETE";
+    let result = super::import_json_stream::stream_json_rows(path, &|| false, &mut |_, row| {
         seen_rows += 1;
         if sample_rows.len() >= MAX_JSON_IMPORT_PREVIEW_ROWS {
             has_more_rows = true;
-            break;
+            return Err(SAMPLE_DONE.into());
         }
-        for column in values.keys().take(MAX_JSON_IMPORT_PREVIEW_COLUMNS) {
-            source_columns.insert(column.clone());
+        if !append_json_preview_row(
+            row,
+            &mut source_columns,
+            &mut sample_rows,
+            &mut sample_bytes,
+        )? {
+            has_more_rows = true;
+            return Err(SAMPLE_DONE.into());
         }
-        sample_rows.push(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
-                .collect(),
-        );
+        Ok(())
+    });
+    if let Err(error) = result {
+        if error != SAMPLE_DONE {
+            return Err(error);
+        }
     }
 
     if seen_rows == 0 {
@@ -281,16 +237,18 @@ pub(super) fn read_json_import_preview(path: &Path) -> Result<TableJsonImportPre
     }
     let mut source_columns = BTreeSet::new();
     let mut sample_rows = Vec::new();
+    let mut sample_bytes = 0;
     let mut total_rows = 0_u64;
+    let mut sample_full = false;
     let mut collect_row = |_row_number: u64, row: BTreeMap<String, Value>| {
         total_rows += 1;
-        if sample_rows.len() < MAX_JSON_IMPORT_PREVIEW_ROWS {
-            source_columns.extend(row.keys().take(MAX_JSON_IMPORT_PREVIEW_COLUMNS).cloned());
-            sample_rows.push(
-                row.into_iter()
-                    .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
-                    .collect(),
-            );
+        if !sample_full && sample_rows.len() < MAX_JSON_IMPORT_PREVIEW_ROWS {
+            sample_full = !append_json_preview_row(
+                row,
+                &mut source_columns,
+                &mut sample_rows,
+                &mut sample_bytes,
+            )?;
         }
         Ok(())
     };
@@ -303,55 +261,14 @@ pub(super) fn read_json_import_preview(path: &Path) -> Result<TableJsonImportPre
         total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
         content_digest: import_file_digest(path)?,
         source_columns: source_columns.into_iter().collect(),
+        truncated: total_rows > sample_rows.len() as u64,
         sample_rows,
         total_rows: Some(total_rows),
-        truncated: total_rows > MAX_JSON_IMPORT_PREVIEW_ROWS as u64,
     })
 }
 
-pub(super) fn xlsx_cell_value(cell: &Data) -> Value {
-    match cell {
-        Data::Empty => Value::Null,
-        Data::Int(value) => Value::Number((*value).into()),
-        Data::Float(value) => serde_json::Number::from_f64(*value)
-            .map(Value::Number)
-            .unwrap_or_else(|| Value::String(value.to_string())),
-        Data::String(value) | Data::DateTimeIso(value) | Data::DurationIso(value) => {
-            Value::String(value.clone())
-        }
-        Data::Bool(value) => Value::Bool(*value),
-        // Calamine retains Excel's native serial/date metadata. Rendering it
-        // as text avoids quietly applying a timezone or epoch conversion in
-        // the import layer; the target driver can still coerce it explicitly.
-        Data::DateTime(value) => Value::String(value.to_string()),
-        Data::Error(value) => Value::String(format!("Excel cell error: {value}")),
-    }
-}
-
-pub(super) fn xlsx_header_value(cell: &Data) -> String {
-    match cell {
-        Data::Empty => String::new(),
-        Data::String(value) => value.trim().to_string(),
-        _ => cell.to_string().trim().to_string(),
-    }
-}
-
-pub(super) fn validate_xlsx_headers(headers: &[String]) -> Result<(), String> {
-    if headers.is_empty() {
-        return Err("The XLSX worksheet does not contain any columns".to_string());
-    }
-    let mut normalized_headers = HashSet::new();
-    for header in headers {
-        let normalized = header.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            return Err("XLSX column names cannot be empty".to_string());
-        }
-        if !normalized_headers.insert(normalized) {
-            return Err("XLSX column names must be unique".to_string());
-        }
-    }
-    Ok(())
-}
+#[cfg(test)]
+pub(super) use super::import_xlsx_values::{validate_xlsx_headers, xlsx_cell_value};
 
 /// Hash the complete source incrementally so the UI can bind an approved
 /// preview to the exact file it later imports without placing a large file in
@@ -389,97 +306,36 @@ pub(super) fn verify_import_file_digest(path: &Path, expected: Option<&str>) -> 
     Ok(())
 }
 
-pub(super) type XlsxImportRows = (String, Vec<String>, Vec<BTreeMap<String, Value>>);
-
-pub(super) fn xlsx_import_rows_with_cancel(
-    path: &Path,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<XlsxImportRows, String> {
-    if is_cancelled() {
-        return Err(TABLE_IMPORT_CANCELLED.to_string());
-    }
-    let mut workbook = open_workbook_auto(path)
-        .map_err(|error| format!("Unable to read XLSX workbook: {error}"))?;
-    if is_cancelled() {
-        return Err(TABLE_IMPORT_CANCELLED.to_string());
-    }
-    let sheet_name = workbook
-        .sheet_names()
-        .into_iter()
-        .next()
-        .ok_or_else(|| "The XLSX workbook does not contain a worksheet".to_string())?;
-    let range = workbook
-        .worksheet_range(&sheet_name)
-        .map_err(|error| format!("Unable to read worksheet '{sheet_name}': {error}"))?;
-    if is_cancelled() {
-        return Err(TABLE_IMPORT_CANCELLED.to_string());
-    }
-    let mut rows = range.rows();
-    let headers = rows
-        .find(|row| row.iter().any(|cell| !matches!(cell, Data::Empty)))
-        .map(|row| row.iter().map(xlsx_header_value).collect::<Vec<_>>())
-        .ok_or_else(|| "The XLSX worksheet does not contain a header row".to_string())?;
-    validate_xlsx_headers(&headers)?;
-
-    let mut values = Vec::new();
-    for row in rows.filter(|row| row.iter().any(|cell| !matches!(cell, Data::Empty))) {
-        if is_cancelled() {
-            return Err(TABLE_IMPORT_CANCELLED.to_string());
-        }
-        if row
-            .get(headers.len()..)
-            .is_some_and(|extra| extra.iter().any(|cell| !matches!(cell, Data::Empty)))
-        {
-            return Err("An XLSX row contains values beyond the header columns".to_string());
-        }
-        values.push(
-            headers
-                .iter()
-                .enumerate()
-                .map(|(index, header)| {
-                    (
-                        header.clone(),
-                        row.get(index).map(xlsx_cell_value).unwrap_or(Value::Null),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        );
-    }
-    Ok((sheet_name, headers, values))
-}
-
-pub(super) fn xlsx_import_rows(path: &Path) -> Result<XlsxImportRows, String> {
-    xlsx_import_rows_with_cancel(path, &|| false)
-}
-
 pub(super) fn read_xlsx_import_preview(path: &Path) -> Result<TableXlsxImportPreview, String> {
     validate_import_file(path, TableImportFormat::Xlsx)?;
-    let (sheet_name, source_columns, rows) = xlsx_import_rows(path)?;
-    if rows.len() > MAX_IMPORT_ROWS {
-        return Err(format!(
-            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
-        ));
-    }
-    let total_rows = rows.len() as u64;
-    let truncated = rows.len() > MAX_JSON_IMPORT_PREVIEW_ROWS;
-    let sample_rows = rows
-        .into_iter()
-        .take(MAX_JSON_IMPORT_PREVIEW_ROWS)
-        .map(|row| {
-            row.into_iter()
+    let mut sample_rows = Vec::new();
+    let mut bytes = 0;
+    let mut sample_full = false;
+    let info = super::import_xlsx_stream::stream_xlsx_rows(path, &|| false, &mut |_, row| {
+        if !sample_full && sample_rows.len() < MAX_JSON_IMPORT_PREVIEW_ROWS {
+            let row = row
+                .into_iter()
                 .map(|(key, value)| (key, bounded_json_import_preview_value(&value)))
-                .collect()
-        })
-        .collect();
+                .collect::<BTreeMap<_, _>>();
+            let size = serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
+            if bytes + size > 1024 * 1024 {
+                sample_full = true;
+            } else {
+                bytes += size;
+                sample_rows.push(row);
+            }
+        }
+        Ok(())
+    })?;
     Ok(TableXlsxImportPreview {
         file_name: import_file_name(path, "XLSX data"),
-        total_bytes: metadata(path).map_err(|error| error.to_string())?.len(),
+        total_bytes: metadata(path).map_err(|e| e.to_string())?.len(),
         content_digest: import_file_digest(path)?,
-        sheet_name,
-        source_columns,
+        sheet_name: info.sheet_name,
+        source_columns: info.source_columns,
+        truncated: info.total_rows > sample_rows.len() as u64,
         sample_rows,
-        total_rows,
-        truncated,
+        total_rows: info.total_rows,
     })
 }
 

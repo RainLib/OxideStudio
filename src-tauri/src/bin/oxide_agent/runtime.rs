@@ -1,25 +1,23 @@
 use crate::oxide_agent::{
     catalog,
-    policy::{reject_self_reported_approval, Grant},
+    policy::{database_names_match, reject_self_reported_approval, Grant},
     store::{HeadlessStore, MetadataFilter, StoredConnection},
 };
 use anyhow::{anyhow, Context, Result};
-use oxide_studio_lib::{
-    core::{
-        config::SavedConnection as ConfigSavedConnection,
-        dialect::{database_capabilities_for_driver, DatabaseKind},
-        explain::{build_explain_statement, parse_explain_results},
-        manager::ConnectionManager,
-        parser::{SqlParser, SuggestionType},
-        protocol::{ExplainPlanMode, QueryResult},
-        query_scope::sql_references_disallowed_database,
-        ssh::SshTunnel,
-        statement::{
-            execution_statement_kind, split_leading_execution_hint, split_sql_statements,
-            validate_read_only_sql, StatementKind, StatementScanDialect,
-        },
+use oxide_studio_lib::core::{
+    config::SavedConnection as ConfigSavedConnection,
+    connection_url::connection_url_with_capabilities,
+    dialect::{database_capabilities_for_driver, DatabaseKind},
+    driver_package::DatabaseDriverPackageRegistry,
+    explain::{build_explain_statement, parse_explain_results},
+    manager::ConnectionManager,
+    parser::{SqlParser, SuggestionType},
+    protocol::{ExplainPlanMode, QueryResult},
+    query_scope::{sql_references_disallowed_database_with_namespace, RelationNamespace},
+    statement::{
+        execution_statement_kind, split_leading_execution_hint, split_sql_statements,
+        validate_read_only_sql, StatementKind, StatementScanDialect,
     },
-    drivers::connect_agent_read_only_driver,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -27,6 +25,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
+
+mod connection;
+mod documents;
+mod live;
+use connection::{driver_identity, SelectedDriver};
 
 const MAX_SQL_CHARS: usize = 200_000;
 const MAX_CELL_BYTES: usize = 16 * 1024;
@@ -37,6 +40,7 @@ pub struct ToolRuntime {
     grant: Grant,
     next_query_id: AtomicU64,
     query_timeout: Option<Duration>,
+    driver_packages: std::result::Result<DatabaseDriverPackageRegistry, String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -109,6 +113,7 @@ impl ToolRuntime {
             }
         }
         Ok(Self {
+            driver_packages: store.driver_packages().map_err(|error| error.to_string()),
             store,
             grant,
             next_query_id: AtomicU64::new(1),
@@ -122,7 +127,11 @@ impl ToolRuntime {
 
     pub async fn invoke(&self, tool_name: &str, input: Value) -> Result<Value> {
         self.grant.require_tool(tool_name)?;
-        reject_self_reported_approval(&input)?;
+        if tool_name == catalog::DOCUMENT_FIND {
+            documents::reject_document_approval_claims(&input)?;
+        } else {
+            reject_self_reported_approval(&input)?;
+        }
         let data = match tool_name {
             catalog::CONNECTION_SUMMARIES => {
                 parse_input::<EmptyInput>(input)?;
@@ -133,7 +142,9 @@ impl ToolRuntime {
                 )?
             }
             catalog::METADATA_LIST => self.list_metadata(parse_input(input)?).await?,
+            catalog::METADATA_LIVE => self.inspect_live_metadata(parse_input(input)?).await?,
             catalog::QUERY_READ_ONLY => self.run_read_only(parse_input(input)?).await?,
+            catalog::DOCUMENT_FIND => self.find_documents(parse_input(input)?).await?,
             catalog::QUERY_EXPLAIN_ESTIMATE => self.explain_estimate(parse_input(input)?).await?,
             catalog::LSP_SQL_CONTEXT => self.lsp_context(parse_input(input)?).await?,
             _ => return Err(anyhow!("unknown OxideStudio tool: {tool_name}")),
@@ -158,11 +169,14 @@ impl ToolRuntime {
                     kind: input.kind.as_deref(),
                     prefix: Some(&input.prefix),
                     limit: input.limit.clamp(1, 200),
+                    database_scope: self.grant.allowed_databases(),
+                    namespace_is_database: self.legacy_namespace_is_database(&connection.stored),
                 },
             )
             .await?;
         Ok(json!({
             "connectionId": connection.stored.id,
+            "source": "cache",
             "objects": resources,
         }))
     }
@@ -174,10 +188,12 @@ impl ToolRuntime {
         let connection = self
             .resolve_connection(input.connection_id.as_deref())
             .await?;
-        let dialect = dialect_for_driver(&connection.stored.driver)?;
+        let selected = self.select_driver(&connection)?;
+        let dialect = selected.query_dialect()?;
         validate_read_only_sql(&input.sql, dialect).map_err(anyhow::Error::msg)?;
-        let database = self.resolve_query_database(&connection, input.database.as_deref())?;
-        self.enforce_query_database_scope(&input.sql, dialect, database.as_deref())?;
+        let database =
+            self.resolve_query_database(&connection, &selected, input.database.as_deref())?;
+        self.enforce_query_database_scope(&input.sql, dialect, &selected, database.as_deref())?;
         let statement = split_sql_statements(&input.sql, dialect)
             .into_iter()
             .next()
@@ -200,7 +216,8 @@ impl ToolRuntime {
         // SQLite is opened by the shared Agent connection factory with the
         // engine's read-only flag. It does not accept PostgreSQL/MySQL's
         // transaction syntax, so the bounded SELECT is sent directly.
-        let uses_engine_read_only = is_file_agent_driver(&connection.stored.driver)?;
+        let uses_engine_read_only =
+            selected.package_version.is_some() || selected.is_single_database();
         let script = if uses_engine_read_only {
             bounded_statement
         } else {
@@ -209,6 +226,7 @@ impl ToolRuntime {
         let mut results = self
             .execute_sql(
                 &connection,
+                &selected,
                 &script,
                 database.as_deref(),
                 input.schema.as_deref(),
@@ -233,6 +251,7 @@ impl ToolRuntime {
         Ok(json!({
             "connectionId": connection.stored.id,
             "database": database,
+            "driverPackageVersion": selected.package_version,
             "rowCount": original_rows.min(max_rows),
             "truncated": truncated,
             "results": results,
@@ -246,14 +265,20 @@ impl ToolRuntime {
         let connection = self
             .resolve_connection(input.connection_id.as_deref())
             .await?;
-        let dialect = dialect_for_driver(&connection.stored.driver)?;
+        let selected = self.select_driver(&connection)?;
+        if !selected.capabilities.supports_explain_plan {
+            return Err(anyhow!("estimated EXPLAIN is not supported by this driver"));
+        }
+        let dialect = selected.query_dialect()?;
         validate_read_only_sql(&input.sql, dialect).map_err(anyhow::Error::msg)?;
-        let database = self.resolve_query_database(&connection, input.database.as_deref())?;
-        self.enforce_query_database_scope(&input.sql, dialect, database.as_deref())?;
+        let database =
+            self.resolve_query_database(&connection, &selected, input.database.as_deref())?;
+        self.enforce_query_database_scope(&input.sql, dialect, &selected, database.as_deref())?;
         let kind = kind_for_dialect(dialect)?;
         let (statement, format) =
             build_explain_statement(&input.sql, kind, ExplainPlanMode::Estimate)?;
-        let uses_engine_read_only = is_file_agent_driver(&connection.stored.driver)?;
+        let uses_engine_read_only =
+            selected.package_version.is_some() || selected.is_single_database();
         let script = if uses_engine_read_only {
             statement.to_string()
         } else {
@@ -263,6 +288,7 @@ impl ToolRuntime {
         let mut results = self
             .execute_sql(
                 &connection,
+                &selected,
                 &script,
                 database.as_deref(),
                 input.schema.as_deref(),
@@ -318,6 +344,13 @@ impl ToolRuntime {
                         kind,
                         prefix: context.match_string.as_deref(),
                         limit: candidate_limit,
+                        database_scope: self.grant.allowed_databases(),
+                        namespace_is_database: connections
+                            .iter()
+                            .find(|connection| connection.id == connection_id)
+                            .is_some_and(|connection| {
+                                self.legacy_namespace_is_database(connection)
+                            }),
                     },
                 )
                 .await?;
@@ -357,9 +390,7 @@ impl ToolRuntime {
                 "saved connection identity does not match its project-scoped record"
             ));
         }
-        let stored_driver = database_capabilities_for_driver(&stored.driver)?;
-        let configured_driver = database_capabilities_for_driver(&config.driver)?;
-        if stored_driver.driver != configured_driver.driver {
+        if driver_identity(&stored.driver)? != driver_identity(&config.driver)? {
             return Err(anyhow!(
                 "saved connection driver does not match its project-scoped record"
             ));
@@ -370,10 +401,30 @@ impl ToolRuntime {
     fn resolve_query_database(
         &self,
         connection: &ResolvedConnection,
+        selected: &SelectedDriver,
         requested: Option<&str>,
     ) -> Result<Option<String>> {
+        if selected.is_single_database() {
+            let selected = self.grant.resolve_database(requested, Some("main"))?;
+            if !selected
+                .as_deref()
+                .is_some_and(|database| database_names_match(database, "main"))
+            {
+                return Err(anyhow!(
+                    "headless file queries require the saved main database"
+                ));
+            }
+            return Ok(Some("main".to_string()));
+        }
         self.grant
-            .resolve_database(requested, connection.config.database.as_deref())
+            .resolve_database(
+                requested,
+                if selected.is_file() {
+                    None
+                } else {
+                    connection.config.database.as_deref()
+                },
+            )
             .map_err(anyhow::Error::from)
     }
 
@@ -381,6 +432,7 @@ impl ToolRuntime {
         &self,
         sql: &str,
         dialect: StatementScanDialect,
+        selected: &SelectedDriver,
         active_database: Option<&str>,
     ) -> Result<()> {
         let Some(allowed_databases) = self.grant.allowed_databases() else {
@@ -389,7 +441,17 @@ impl ToolRuntime {
         let active_database = active_database.ok_or_else(|| {
             anyhow!("database selection is required by the restricted database grant")
         })?;
-        if sql_references_disallowed_database(sql, dialect, active_database, allowed_databases) {
+        let namespace = if selected.is_single_database() {
+            RelationNamespace::Database
+        } else {
+            dialect.into()
+        };
+        if sql_references_disallowed_database_with_namespace(
+            sql,
+            namespace,
+            active_database,
+            allowed_databases,
+        ) {
             return Err(anyhow!(
                 "SQL references a database outside the granted scope or contains an ambiguous relation target"
             ));
@@ -400,37 +462,36 @@ impl ToolRuntime {
     async fn execute_sql(
         &self,
         connection: &ResolvedConnection,
+        selected: &SelectedDriver,
         sql: &str,
         database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<QueryResult>> {
-        let manager = ConnectionManager::new();
-        let connection_url =
-            connection_url_from_config(&connection.stored.driver, &connection.config)?;
-        let (connection_url, tunnel) = SshTunnel::prepare(
-            &connection.stored.driver,
-            &connection_url,
-            connection.config.ssh_tunnel.as_ref(),
-        )
-        .await
-        .context("failed to prepare the saved connection")?;
-        let driver = connect_agent_read_only_driver(&connection.stored.driver, &connection_url)
-            .await
-            .context("failed to connect to the saved database")?;
-        if let Err(error) = driver.ping().await {
-            let _ = driver.disconnect().await;
-            if let Some(tunnel) = tunnel {
-                tunnel.shutdown().await;
-            }
-            return Err(anyhow!("saved database connection is unavailable: {error}"));
+        let file = selected.is_single_database();
+        if file && schema.is_some_and(|schema| !database_names_match(schema, "main")) {
+            return Err(anyhow!(
+                "headless file queries require the saved main database"
+            ));
         }
+        let schema = if file { Some("main") } else { schema };
+        let manager = ConnectionManager::new();
+        let deadline = self
+            .query_timeout
+            .map(|duration| tokio::time::Instant::now() + duration);
+        let connect = self.connect_read_only(connection, selected);
+        let (driver, tunnel) = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, connect)
+                .await
+                .map_err(|_| anyhow!("database connection exceeded its configured deadline"))??,
+            None => connect.await?,
+        };
         manager
             .replace_connection_with_tunnel(connection.stored.id.clone(), driver, tunnel)
             .await?;
 
         let query_id = self.query_id("read");
         let execute = async {
-            if let Some(database) = database.filter(|value| !value.trim().is_empty()) {
+            if let Some(database) = database.filter(|value| !file && !value.trim().is_empty()) {
                 manager
                     .query_database_with_context(
                         &connection.stored.id,
@@ -455,22 +516,33 @@ impl ToolRuntime {
             }
         };
         let result = match self.query_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, execute).await {
-                Ok(result) => result,
-                Err(_) => {
-                    let _ = manager.cancel_query(&connection.stored.id, &query_id).await;
-                    Err(anyhow!(
-                        "database tool exceeded its {} second deadline",
-                        timeout.as_secs()
-                    ))
+            Some(timeout) => {
+                match tokio::time::timeout_at(deadline.expect("configured deadline"), execute).await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            manager.cancel_query(&connection.stored.id, &query_id),
+                        )
+                        .await;
+                        Err(anyhow!(
+                            "database tool exceeded its {} second deadline",
+                            timeout.as_secs()
+                        ))
+                    }
                 }
-            },
+            }
             None => execute.await,
         };
-        let cleanup = manager.disconnect_connection(&connection.stored.id).await;
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.disconnect_connection(&connection.stored.id),
+        )
+        .await;
         match (result, cleanup) {
-            (Ok(results), Ok(())) => Ok(results),
-            (Ok(_), Err(error)) => Err(error).context("failed to close database connection"),
+            (Ok(results), Ok(Ok(()))) => Ok(results),
+            (Ok(_), _) => Err(anyhow!("failed to close database connection")),
             (Err(error), _) => Err(error),
         }
     }
@@ -478,6 +550,25 @@ impl ToolRuntime {
     fn query_id(&self, prefix: &str) -> String {
         let sequence = self.next_query_id.fetch_add(1, Ordering::Relaxed);
         format!("oxide-agent-{prefix}-{}-{sequence}", std::process::id())
+    }
+
+    async fn runtime_connection_config(
+        &self,
+        connection: &ResolvedConnection,
+    ) -> Result<ConfigSavedConnection> {
+        let config: ConfigSavedConnection =
+            serde_json::from_value(self.store.runtime_config(&connection.stored).await?)
+                .context("saved connection configuration is invalid")?;
+        if config.id != connection.stored.id
+            || config.project_id != connection.stored.project_id
+            || config.driver != connection.config.driver
+            || config.driver_package_version != connection.config.driver_package_version
+        {
+            return Err(anyhow!(
+                "restored connection identity does not match its granted record"
+            ));
+        }
+        Ok(config)
     }
 }
 
@@ -545,6 +636,7 @@ fn dialect_for_driver(driver: &str) -> Result<StatementScanDialect> {
     }
 }
 
+#[cfg(test)]
 fn is_file_agent_driver(driver: &str) -> Result<bool> {
     Ok(matches!(
         database_capabilities_for_driver(driver)?.connection_mode,
@@ -669,106 +761,58 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     format!("{}…", &value[..end])
 }
 
+#[cfg(test)]
 fn connection_url_from_config(driver: &str, config: &ConfigSavedConnection) -> Result<String> {
-    if let Some(value) = config
-        .connection_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            let value = config.url.trim();
-            (!value.is_empty()).then_some(value)
-        })
-    {
-        let value = value.strip_prefix("jdbc:").unwrap_or(value);
-        if is_file_agent_driver(driver)? {
-            return Ok(value.to_string());
-        }
-        let parsed = url::Url::parse(value).context("saved connection URL is invalid")?;
-        if parsed.host_str().is_none() && parsed.scheme() != "redis" {
-            return Err(anyhow!("saved connection URL must include a host"));
-        }
-        return Ok(value.to_string());
-    }
-
-    let capabilities = database_capabilities_for_driver(driver)?;
-    if is_file_agent_driver(driver)? {
-        return config
-            .database
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                config
-                    .host
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("saved file database is required"));
-    }
-    let host = config
-        .host
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("saved connection host is required"))?;
-    let ssl_enabled = config
-        .ssl_mode
-        .as_deref()
-        .is_some_and(|value| !value.eq_ignore_ascii_case("disable"));
-    let scheme = match capabilities.driver.as_str() {
-        "postgres" => "postgres",
-        "mysql" => "mysql",
-        _ => return Err(anyhow!("external SQL tool does not support this driver")),
-    };
-    let mut connection_url = url::Url::parse(&format!("{scheme}://{host}"))
-        .context("failed to construct saved connection URL")?;
-    connection_url
-        .set_port(Some(config.port.unwrap_or(capabilities.default_port)))
-        .map_err(|_| anyhow!("saved connection port is invalid"))?;
-    if let Some(user) = config.user.as_deref().filter(|value| !value.is_empty()) {
-        connection_url
-            .set_username(user)
-            .map_err(|_| anyhow!("saved connection username is invalid"))?;
-    }
-    if let Some(password) = config.password.as_deref().filter(|value| !value.is_empty()) {
-        connection_url
-            .set_password(Some(password))
-            .map_err(|_| anyhow!("saved connection password is invalid"))?;
-    }
-    if let Some(database) = config
-        .database
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        connection_url.set_path(database);
-    }
-    if let Some(ssl_mode) = config
-        .ssl_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("disable"))
-    {
-        let parameter = match capabilities.driver.as_str() {
-            "postgres" => "sslmode",
-            "mysql" => "ssl-mode",
-            _ => "sslmode",
-        };
-        connection_url
-            .query_pairs_mut()
-            .append_pair(parameter, ssl_mode);
-    } else if ssl_enabled {
-        connection_url.query_pairs_mut().append_pair("ssl", "true");
-    }
-    Ok(connection_url.to_string())
+    connection_url_with_capabilities(
+        driver,
+        config,
+        &database_capabilities_for_driver(driver)?,
+        false,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_native_connections_keep_driver_specific_transport_and_credentials() {
+        for (driver, expected_scheme, database) in [
+            ("mongodb", "mongodb", "app"),
+            ("redis", "rediss", "0"),
+            ("elasticsearch", "https", ""),
+        ] {
+            let config: ConfigSavedConnection = serde_json::from_value(json!({
+                "id":"fixture", "projectId":"project", "name":"fixture", "driver":driver, "url":"",
+                "host":"db.example.test", "user":"reader", "password":"p@ss", "database":database, "sslMode":"require",
+            })).unwrap();
+            let built = connection_url_from_config(driver, &config).unwrap();
+            let parsed = url::Url::parse(&built).unwrap();
+            assert_eq!(parsed.scheme(), expected_scheme);
+            assert_eq!(parsed.username(), "reader");
+            assert!(built.contains("p%40ss"));
+            if driver == "mongodb" {
+                assert!(parsed
+                    .query_pairs()
+                    .any(|(key, value)| key == "tls" && value == "true"));
+            }
+        }
+    }
+
+    #[test]
+    fn http_metadata_connections_do_not_inherit_a_stale_database_path() {
+        let config: ConfigSavedConnection = serde_json::from_value(json!({
+            "id":"fixture", "name":"fixture", "driver":"elasticsearch", "url":"",
+            "host":"127.0.0.1", "port":9200, "database":"old-database", "sslMode":"disable",
+        }))
+        .unwrap();
+        let parsed =
+            url::Url::parse(&connection_url_from_config("elasticsearch", &config).unwrap())
+                .unwrap();
+        assert_eq!(parsed.scheme(), "http");
+        assert_eq!(parsed.port(), Some(9200));
+        assert_eq!(parsed.path(), "/");
+    }
 
     #[test]
     fn query_timeout_resolves_default_override_and_unlimited() {

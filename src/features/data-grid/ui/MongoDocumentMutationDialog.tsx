@@ -212,7 +212,7 @@ export function MongoDocumentMutationDialog({
         if (!busy) onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="flex max-h-[86vh] max-w-[820px] flex-col overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="flex max-h-[86vh] max-w-[820px] flex-col overflow-hidden p-0">
         <DialogHeader className="shrink-0 border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[13px]">
             {mode === "edit" ? <Pencil size={15} /> : <Trash2 size={15} />}

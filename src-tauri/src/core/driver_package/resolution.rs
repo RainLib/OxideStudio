@@ -1,5 +1,5 @@
 use super::catalog_binding::read_catalog_receipt;
-use super::manifest_io::read_active_version;
+use super::manifest_io::{read_active_version, read_active_version_strict};
 use super::package_identity::{
     is_safe_token, protocol_is_compatible, supports_current_target, validate_package_boundary,
     verify_entrypoint_digest, verify_runtime_dependencies,
@@ -10,6 +10,25 @@ use super::types::{DatabaseDriverPackageRegistry, DriverPackageStatus, Installed
 use std::fs;
 
 impl DatabaseDriverPackageRegistry {
+    /// Freeze an explicit pin or the selected version before connecting. Only
+    /// the absence of both selection records permits bundled fallback.
+    pub fn resolve_preferred(
+        &self,
+        driver_id: &str,
+        package_version: Option<&str>,
+    ) -> Result<Option<InstalledDriverPackage>, String> {
+        if !is_safe_token(driver_id) {
+            return Err("Invalid driver identifier".into());
+        }
+        let version = match package_version {
+            Some(version) => Some(version.to_string()),
+            None => read_active_version_strict(&self.root.join(driver_id))?,
+        };
+        version
+            .map(|version| self.resolve_version(driver_id, &version))
+            .transpose()
+    }
+
     pub fn list_installed(&self) -> Vec<InstalledDriverPackage> {
         let Ok(driver_directories) = fs::read_dir(&self.root) else {
             return Vec::new();

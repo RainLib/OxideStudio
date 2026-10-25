@@ -210,7 +210,7 @@ export function EnterpriseAccountMenu() {
         <PopoverContent
           align="end"
           sideOffset={6}
-          className="w-[286px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_18px_44px_rgba(0,0,0,0.46)]"
+          className="w-[286px] p-1 text-[12px]"
         >
           <div className="px-2 py-2">
             <div className="truncate text-[12px] font-semibold">
@@ -318,7 +318,7 @@ export function EnterpriseAccountMenu() {
         open={configurationOpen}
         onOpenChange={setConfigurationOpen}
       >
-        <DialogContent className="w-[520px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogContent layout="custom" className="w-[520px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
           <form onSubmit={saveConfiguration}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3 text-left">
               <DialogTitle className="text-[13px]">

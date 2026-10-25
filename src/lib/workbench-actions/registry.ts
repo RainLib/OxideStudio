@@ -1,6 +1,6 @@
 import type { WorkbenchAction } from "./contracts";
 import { createEditorLineAction, createEditorSplitActions, createInlineCompletionActions } from "./editor";
-import { createFileSaveAction, createOpenProjectFilesAction } from "./files";
+import { createFileSaveAction, createOpenFileQueryAction, createOpenProjectFilesAction } from "./files";
 import { createGlobalWorkbenchActions } from "./global";
 import { createQueryCommandActions, createQueryLifecycleActions } from "./query";
 import {
@@ -16,6 +16,7 @@ export function workbenchActions(): WorkbenchAction[] {
     ...createGlobalWorkbenchActions(),
     ...createQueryLifecycleActions(),
     createFileSaveAction(),
+    createOpenFileQueryAction(),
     ...createEditorSplitActions(),
     ...createQueryCommandActions(),
     createEditorLineAction(),

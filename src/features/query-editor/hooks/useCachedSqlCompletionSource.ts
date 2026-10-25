@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import {
   createCachedSqlCompletionRequest,
   type CachedSqlCompletionCaches,
@@ -24,23 +24,19 @@ export type {
 export function useCachedSqlCompletionSource(
   options: CachedSqlCompletionSourceOptions,
 ) {
-  const runtimeRef = useRef(options);
-  runtimeRef.current = options;
-  const cachesRef = useRef<CachedSqlCompletionCaches>({
+  const caches = useMemo<CachedSqlCompletionCaches>(()=>({
     fields: new Map(),
     joinConstraints: new Map(),
-  });
-
-  useEffect(() => {
-    cachesRef.current.fields.clear();
-    cachesRef.current.joinConstraints.clear();
-  }, [options.connectionId, options.driver, options.metadataRevision]);
+  }),[options.activeProjectId,options.connectionId,options.driver,options.metadataRevision,
+    options.cacheScope,options.databaseName,options.targetSchema,options.currentSchema]);
+  const runtimeRef = useRef({options,caches});
+  runtimeRef.current = {options,caches};
 
   return useCallback(
     (request: CachedSqlCompletionRequestOptions) =>
       createCachedSqlCompletionRequest(
-        runtimeRef.current,
-        cachesRef.current,
+        runtimeRef.current.options,
+        runtimeRef.current.caches,
         request,
       ),
     [],

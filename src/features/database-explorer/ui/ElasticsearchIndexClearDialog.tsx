@@ -94,7 +94,7 @@ export function ElasticsearchIndexClearDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && !executing && onClose()}>
-      <DialogContent className="w-[min(560px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="w-[min(560px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border))] px-5 py-4">
           <DialogTitle className="flex items-center gap-2 text-[13px] font-semibold tracking-normal">
             {result && !partial ? (

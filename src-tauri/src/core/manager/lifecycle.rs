@@ -26,6 +26,7 @@ impl Default for ConnectionManager {
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
+            semantic_context: Default::default(),
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_schemas: Arc::new(Mutex::new(HashMap::new())),
             external_runtime_telemetry: Arc::new(Mutex::new(BTreeMap::new())),
@@ -98,6 +99,41 @@ impl ConnectionManager {
             .get(id)
             .map(|connection| connection.driver.clone())
             .ok_or_else(|| anyhow!("Connection not found: {}", id))
+    }
+
+    pub(super) async fn get_observed_driver(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Arc<dyn DatabaseDriver>,
+        crate::core::semantic_context::SemanticOperation,
+    )> {
+        let connections = self.connections.lock().await;
+        let connection = connections
+            .get(id)
+            .ok_or_else(|| anyhow!("Connection not found: {}", id))?;
+        let operation = self
+            .semantic_context
+            .begin(id, &connection.semantic_session)?;
+        Ok((connection.driver.clone(), operation))
+    }
+
+    pub fn semantic_state(
+        &self,
+        id: &str,
+    ) -> Option<crate::core::semantic_context::ConnectionSemanticState> {
+        self.semantic_context.snapshot(id)
+    }
+
+    pub fn semantic_states(&self) -> Vec<crate::core::semantic_context::ConnectionSemanticState> {
+        self.semantic_context.snapshots()
+    }
+
+    pub fn subscribe_semantic_states(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::core::semantic_context::ConnectionSemanticState>
+    {
+        self.semantic_context.subscribe()
     }
 
     /// Exact package versions owned by live connections. Cache maintenance
@@ -218,6 +254,10 @@ impl ConnectionManager {
     async fn remove_connection(&self, id: &str) -> Option<ManagedConnection> {
         let mut conns = self.connections.lock().await;
         let removed = conns.remove(id);
+        if let Some(connection) = &removed {
+            self.semantic_context
+                .close(id, &connection.semantic_session);
+        }
         drop(conns);
         self.clear_schema_context(id).await;
         self.record_external_runtime_replacement(id, None).await;
@@ -252,20 +292,24 @@ impl ConnectionManager {
         let external_package_identity = driver
             .external_package_identity()
             .map(|(driver, version)| (driver.to_string(), version.to_string()));
-        let old_driver = {
+        let (old_driver, initialization) = {
             let mut conns = self.connections.lock().await;
-            conns.insert(
+            let (session, initialization) = self.semantic_context.open_observed(&id);
+            let old = conns.insert(
                 id.clone(),
                 ManagedConnection {
+                    semantic_session: session,
                     driver: Arc::from(driver),
                     ssh_tunnel,
                     driver_id: driver_id
                         .map(|value| value.trim().to_ascii_lowercase())
                         .filter(|value| !value.is_empty()),
                 },
-            )
+            );
+            (old, initialization)
         };
 
+        initialization.run(async {
         self.clear_schema_context(&id).await;
         self.record_external_runtime_replacement(&id, external_package_identity)
             .await;
@@ -284,6 +328,7 @@ impl ConnectionManager {
         }
 
         Ok(())
+        }).await
     }
 
     pub async fn disconnect_connection(&self, id: &str) -> Result<()> {

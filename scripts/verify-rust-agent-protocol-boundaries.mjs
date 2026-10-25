@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "src-tauri/src/agent/protocol";
-const facade = fs.readFileSync(path.join(root, `${base}.rs`), "utf8");
+const facade = readSourceText(path.join(root, `${base}.rs`));
 
 for (const required of [
   "mod artifacts;",
@@ -40,14 +41,14 @@ const ownership = {
 };
 
 for (const [module, symbols] of Object.entries(ownership)) {
-  const source = fs.readFileSync(path.join(root, `${base}/${module}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/${module}.rs`));
   if (/\buse\s+super::\*/.test(source) || symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`${module} must retain direct Agent protocol ownership.`);
   }
 }
 
 for (const module of ["turns", "invocation", "graph", "artifacts"]) {
-  const source = fs.readFileSync(path.join(root, `${base}/${module}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/${module}.rs`));
   if (!/use\s+super(?:::\{[^}]*\bRequestMetadata\b[^}]*\}|::RequestMetadata);/.test(source)) {
     throw new Error(`${module} must import provider metadata through the stable protocol facade.`);
   }

@@ -47,7 +47,7 @@ export function ExplorerVisibilityFilterDialog({
         if (!open) setVisibilityFilterDraft(null);
       }}
     >
-      <DialogContent className="w-[460px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+      <DialogContent className="w-[460px] max-w-[calc(100vw-32px)] gap-4 p-5">
         <DialogHeader>
           <DialogTitle className="text-[15px]">
             Configure object filter

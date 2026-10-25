@@ -66,13 +66,13 @@ describe("CommandPalette", () => {
       window.dispatchEvent(new CustomEvent(APP_EVENT_OPEN_COMMAND_PALETTE));
     });
 
-    expect(container.textContent).toContain("Active data source");
-    expect(container.textContent).toContain("users");
-    expect(container.textContent).toContain("Project files");
-    expect(container.textContent).toContain("report.sql");
+    expect(document.body.textContent).toContain("Active data source");
+    expect(document.body.textContent).toContain("users");
+    expect(document.body.textContent).toContain("Project files");
+    expect(document.body.textContent).toContain("report.sql");
 
     const connectionOption = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="option"]')
+      document.body.querySelectorAll<HTMLElement>('[role="option"]')
     ).find((option) => option.textContent?.includes("Local Postgres"));
     expect(connectionOption).toBeDefined();
 

@@ -157,14 +157,16 @@ describe("LSP configuration dispatch", () => {
       lspDialect: "postgres",
       config: changed,
       lastConfigKey,
+      lastAnalysisToken: "previous-token",
       syncGeneration: 1,
       getCurrentGeneration: () => 1,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
     expect(result.status).toBe("sent");
     expect(result.configKey).not.toBe(lastConfigKey);
-    expect(updateConfiguration).toHaveBeenCalledWith(changed);
+    expect(updateConfiguration).toHaveBeenCalledWith(expect.objectContaining({...changed,oxideAnalysisToken:result.analysisToken}));
   });
 
   it("skips stale sync generations before sending", async () => {
@@ -179,7 +181,8 @@ describe("LSP configuration dispatch", () => {
         lastConfigKey: "previous",
         syncGeneration: 1,
         getCurrentGeneration: () => 2,
-        updateConfiguration,
+        confirmConfiguration: vi.fn().mockResolvedValue(true),
+      updateConfiguration,
       })
     ).resolves.toEqual({
       status: "stale",
@@ -208,12 +211,15 @@ describe("LSP configuration dispatch", () => {
       lspDialect: "postgres",
       config: payload,
       lastConfigKey,
+      lastAnalysisToken: "previous-token",
       syncGeneration: 1,
       getCurrentGeneration: () => 1,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
     expect(result).toEqual({
+      analysisToken: "previous-token",
       status: "duplicate",
       configKey: lastConfigKey,
       lastConfigKey,
@@ -247,14 +253,16 @@ describe("LSP configuration dispatch", () => {
       lspDialect: "postgres",
       config: changed,
       lastConfigKey,
+      lastAnalysisToken: "previous-token",
       syncGeneration: 1,
       getCurrentGeneration: () => 1,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
     expect(result.status).toBe("sent");
     expect(result.configKey).not.toBe(lastConfigKey);
-    expect(updateConfiguration).toHaveBeenCalledWith(changed);
+    expect(updateConfiguration).toHaveBeenCalledWith(expect.objectContaining({...changed,oxideAnalysisToken:result.analysisToken}));
   });
 
   it("skips configurations whose metadata collections only changed order", async () => {
@@ -283,8 +291,10 @@ describe("LSP configuration dispatch", () => {
       lspDialect: "postgres",
       config: reordered,
       lastConfigKey,
+      lastAnalysisToken: "previous-token",
       syncGeneration: 1,
       getCurrentGeneration: () => 1,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
@@ -304,10 +314,11 @@ describe("LSP configuration dispatch", () => {
       lastConfigKey: null,
       syncGeneration: 1,
       getCurrentGeneration: () => 1,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
-    expect(updateConfiguration).toHaveBeenCalledWith(payload);
+    expect(updateConfiguration).toHaveBeenCalledWith(expect.objectContaining({...payload,oxideAnalysisToken:result.analysisToken}));
     expect(result.status).toBe("sent");
     expect(result.configKey).toBeTruthy();
     expect(result.lastConfigKey).toBe(result.configKey);
@@ -327,11 +338,78 @@ describe("LSP configuration dispatch", () => {
       lastConfigKey: null,
       syncGeneration: 1,
       getCurrentGeneration: () => currentGeneration,
+      confirmConfiguration: vi.fn().mockResolvedValue(true),
       updateConfiguration,
     });
 
     expect(updateConfiguration).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("sent-stale");
     expect(result.lastConfigKey).toBeNull();
+    expect(result.analysisToken).toBeUndefined();
+  });
+});
+
+describe("analysis configuration provenance",()=>{
+  const send=(overrides:Partial<Parameters<typeof dispatchLspConfiguration>[0]>={})=>dispatchLspConfiguration({
+    connectionId:"conn",driver:"postgres",lspDialect:"postgres",config:config(),lastConfigKey:null,
+    syncGeneration:1,getCurrentGeneration:()=>1,confirmConfiguration:vi.fn().mockResolvedValue(true),updateConfiguration:vi.fn(),...overrides});
+  it("sends a fresh opaque token and grants the exact acknowledged value without mutating input",async()=>{
+    const payload={...config(),oxideAnalysisToken:"caller-value"},updateConfiguration=vi.fn();
+    const result=await send({config:payload,updateConfiguration});
+    expect(result.analysisToken).toMatch(/^[A-Za-z0-9_-]{1,128}$/);expect(result.analysisToken).not.toBe("caller-value");
+    expect(updateConfiguration.mock.calls[0]![0].oxideAnalysisToken).toBe(result.analysisToken);expect(payload.oxideAnalysisToken).toBe("caller-value");
+  });
+  it("minted tokens do not change the semantic duplicate key",async()=>{
+    const first=await send(),second=await send();expect(first.analysisToken).not.toBe(second.analysisToken);expect(first.configKey).toBe(second.configKey);
+  });
+  it("retains an acknowledged token when an identical configuration is skipped",async()=>{
+    const updateConfiguration=vi.fn(),first=await send({updateConfiguration});
+    const second=await send({confirmConfiguration: vi.fn().mockResolvedValue(true),
+      updateConfiguration,lastConfigKey:first.lastConfigKey,lastAnalysisToken:first.analysisToken});
+    expect(second.status).toBe("duplicate");expect(second.analysisToken).toBe(first.analysisToken);expect(updateConfiguration).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe("server-applied configuration receipts",()=>{
+  const fixture=()=>{
+    const updateConfiguration=vi.fn().mockResolvedValue(undefined),confirmConfiguration=vi.fn().mockResolvedValue(true);
+    let generation=1;
+    const send=(overrides:Partial<Parameters<typeof dispatchLspConfiguration>[0]>={})=>dispatchLspConfiguration({
+      connectionId:"receipt",driver:"postgres",lspDialect:"postgres",config:config(),lastConfigKey:null,syncGeneration:1,
+      getCurrentGeneration:()=>generation,updateConfiguration,confirmConfiguration,...overrides});
+    return {send,updateConfiguration,confirmConfiguration,invalidate:()=>{generation++;}};
+  };
+  it("waits for server confirmation after the notification write",async()=>{
+    const f=fixture();let resolve!:(value:boolean)=>void;f.confirmConfiguration.mockReturnValue(new Promise<boolean>(done=>{resolve=done;}));
+    let settled=false;const pending=f.send().then(value=>{settled=true;return value;});await Promise.resolve();await Promise.resolve();
+    expect(f.updateConfiguration).toHaveBeenCalledOnce();expect(f.confirmConfiguration).toHaveBeenCalledOnce();expect(settled).toBe(false);
+    resolve(true);expect((await pending).analysisToken).toBe(f.confirmConfiguration.mock.calls[0]![0]);
+  });
+  it("does not grant or cache an unconfirmed configuration",async()=>{
+    const f=fixture();f.confirmConfiguration.mockResolvedValue(false);await expect(f.send()).rejects.toThrow("not been confirmed");
+  });
+  it("drops a confirmation that arrives after its source generation changes",async()=>{
+    const f=fixture();f.confirmConfiguration.mockImplementation(async()=>{f.invalidate();return true;});
+    const result=await f.send();expect(result.status).toBe("sent-stale");expect(result.analysisToken).toBeUndefined();expect(result.lastConfigKey).toBeNull();
+  });
+  it("rechecks duplicate configuration receipts without rewriting a healthy server",async()=>{
+    const f=fixture(),first=await f.send();const second=await f.send({lastConfigKey:first.lastConfigKey,lastAnalysisToken:first.analysisToken});
+    expect(second.status).toBe("duplicate");expect(f.confirmConfiguration).toHaveBeenLastCalledWith(first.analysisToken);expect(f.updateConfiguration).toHaveBeenCalledOnce();
+  });
+  it("resends a duplicate with a fresh token after restart or overwrite",async()=>{
+    const f=fixture(),first=await f.send();f.confirmConfiguration.mockResolvedValueOnce(false);
+    const second=await f.send({lastConfigKey:first.lastConfigKey,lastAnalysisToken:first.analysisToken});expect(second.status).toBe("sent");
+    expect(second.analysisToken).not.toBe(first.analysisToken);expect(f.updateConfiguration).toHaveBeenCalledTimes(2);expect(f.confirmConfiguration).toHaveBeenCalledTimes(3);
+  });
+  it("resends a semantic duplicate with no prior receipt",async()=>{
+    const f=fixture(),first=await f.send();const second=await f.send({lastConfigKey:first.lastConfigKey});expect(second.status).toBe("sent");expect(f.updateConfiguration).toHaveBeenCalledTimes(2);
+  });
+  it("does not resend or grant a duplicate after invalidation during readback",async()=>{
+    const f=fixture(),first=await f.send();f.confirmConfiguration.mockImplementation(async()=>{f.invalidate();return false;});
+    const result=await f.send({lastConfigKey:first.lastConfigKey,lastAnalysisToken:first.analysisToken});expect(result.status).toBe("stale");expect(result.analysisToken).toBeUndefined();expect(f.updateConfiguration).toHaveBeenCalledOnce();
+  });
+  it("propagates confirmation failures without issuing a second configuration",async()=>{
+    const f=fixture();f.confirmConfiguration.mockRejectedValue(new Error("IPC failed"));await expect(f.send()).rejects.toThrow("IPC failed");expect(f.updateConfiguration).toHaveBeenCalledOnce();
   });
 });

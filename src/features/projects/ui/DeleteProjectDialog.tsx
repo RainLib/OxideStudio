@@ -37,7 +37,7 @@ export function DeleteProjectDialog({
         }
       }}
     >
-      <DialogContent className="w-[440px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.35)]">
+      <DialogContent className="w-[440px] max-w-[calc(100vw-32px)] gap-4 p-5">
         <DialogHeader>
           <DialogTitle className="text-[15px]">Delete project?</DialogTitle>
           <DialogDescription className="text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">

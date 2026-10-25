@@ -16,4 +16,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /tmp/oxide-enterprise-gateway /usr/local/bin/
 USER 65532:65532
+EXPOSE 8790
 ENTRYPOINT ["oxide-enterprise-gateway"]

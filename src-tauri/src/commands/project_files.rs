@@ -9,7 +9,7 @@ mod models;
 
 pub(crate) use agent::{
     agent_apply_project_file_change, agent_list_project_entries, agent_project_directory,
-    agent_read_project_file,
+    agent_read_project_file, file_query_source,
 };
 pub use commands::*;
 pub use git::*;

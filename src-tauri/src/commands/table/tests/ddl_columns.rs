@@ -36,6 +36,7 @@ fn transfer_target_recreates_only_supported_same_product_identity() {
         &postgres.create_columns,
         &postgres.default_expressions,
         &postgres.identity_generations,
+        &postgres.character_metadata,
     )
     .unwrap();
     assert!(postgres_ddl
@@ -93,6 +94,7 @@ fn transfer_target_preserves_proven_postgres_identity_generation_mode() {
         &plan.create_columns,
         &plan.default_expressions,
         &plan.identity_generations,
+        &plan.character_metadata,
     )
     .unwrap()
     .join("\n");
@@ -523,6 +525,8 @@ fn builds_rename_column_statement_with_existing_columns() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "name".to_string(),
@@ -537,6 +541,8 @@ fn builds_rename_column_statement_with_existing_columns() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
 
@@ -578,6 +584,8 @@ fn builds_postgres_alter_column_statements() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     let statements = build_alter_table_column_statements(
@@ -627,6 +635,8 @@ fn builds_mysql_alter_column_preserving_definition() {
         comment: Some("identifier".to_string()),
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     let statements = build_alter_table_column_statements(
@@ -653,4 +663,85 @@ fn builds_mysql_alter_column_preserving_definition() {
                 "ALTER TABLE `app`.`users` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'stable identifier';".to_string()
             ]
         );
+}
+
+#[test]
+fn mysql_table_editor_keeps_character_metadata_when_changing_nullability() {
+    let mut existing = target_column("email");
+    existing.data_type = "varchar(80)".to_string();
+    existing.character_set = Some("utf8mb4".to_string());
+    existing.collation = Some("utf8mb4_bin".to_string());
+    let changes = AlterTableColumn {
+        name: "email".to_string(),
+        data_type: None,
+        length: None,
+        is_not_null: Some(true),
+        default_mode: None,
+        default_value: None,
+        comment_mode: None,
+        comment: None,
+    };
+    let ddl = build_alter_table_column_statements(
+        DatabaseKind::Mysql,
+        "app",
+        "users",
+        &changes,
+        &column_lookup(vec![existing.clone()]),
+    )
+    .unwrap()
+    .join("\n");
+    assert!(ddl.contains("varchar(80) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL"));
+
+    existing.collation = Some("utf8mb4_bin; DROP TABLE users".to_string());
+    assert!(build_alter_table_column_statements(
+        DatabaseKind::Mysql,
+        "app",
+        "users",
+        &changes,
+        &column_lookup(vec![existing]),
+    )
+    .is_err());
+}
+
+#[test]
+fn mysql_transfer_target_keeps_source_character_metadata_in_create_plan() {
+    let mut source = target_column("email");
+    source.data_type = "varchar(80)".to_string();
+    source.character_set = Some("latin1".to_string());
+    source.collation = Some("latin1_bin".to_string());
+    let plan = build_transfer_target_columns(&[source.clone()], "mysql", "mysql").unwrap();
+    let ddl = build_create_table_statements_with_transfer_metadata(
+        DatabaseKind::Mysql,
+        "app",
+        "copy",
+        &plan.create_columns,
+        &plan.default_expressions,
+        &plan.identity_generations,
+        &plan.character_metadata,
+    )
+    .unwrap()
+    .join("\n");
+    assert!(ddl.contains("CHARACTER SET latin1 COLLATE latin1_bin"));
+
+    source.collation = None;
+    let incomplete = build_transfer_target_columns(&[source], "mysql", "mysql").unwrap();
+    assert_eq!(
+        incomplete.columns[0].compatibility,
+        TableDataTransferCompatibility::Unsupported
+    );
+}
+
+#[test]
+fn cross_product_transfer_does_not_copy_mysql_collations_to_other_engines() {
+    let mut source = target_column("email");
+    source.data_type = "varchar(80)".to_string();
+    source.character_set = Some("utf8mb4".to_string());
+    source.collation = Some("utf8mb4_bin".to_string());
+    let plan = build_transfer_target_columns(&[source], "mysql", "postgres").unwrap();
+    assert!(plan.character_metadata.is_empty());
+    assert_eq!(
+        plan.columns[0].compatibility,
+        TableDataTransferCompatibility::Review
+    );
+    assert!(plan.columns[0].reason.contains("product-specific mapping"));
 }

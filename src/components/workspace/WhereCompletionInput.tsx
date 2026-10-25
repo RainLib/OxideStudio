@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,12 +14,10 @@ import {
   FunctionSquare,
   TextCursorInput,
 } from "lucide-react";
-import type { GridColumn } from "@glideapps/glide-data-grid";
 import { Input } from "@/components/ui/input";
 import { useLspClient } from "@/hooks/useLspClient";
 import {
   defaultDatabaseCapabilities,
-  lspLanguageIdForCapabilities,
   supportsLspCapabilities,
 } from "@/lib/databaseDialect";
 import { cn } from "@/lib/utils";
@@ -28,14 +27,12 @@ import {
   type DataGridConditionHistoryScope,
 } from "@/features/data-grid/model/conditionHistory";
 import {
-  buildWhereCompletionDocument,
-  localWhereCompletionCandidates,
-  mergeWhereCompletionCandidates,
   whereReplacementRange,
   type WhereCompletionCandidate,
 } from "@/lib/whereCompletion";
-import { getLspDocumentUri } from "@/services/lsp";
-import { CompletionItemKind, type CompletionItem } from "@/services/lsp/types";
+import {useWhereCompletion} from "@/features/data-grid/hooks/useWhereCompletion";
+import type {WhereCompletionInteraction} from "@/features/data-grid/model/whereCompletionSession";
+import { CompletionItemKind } from "@/services/lsp/types";
 import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 
 const COMPLETION_DEBOUNCE_MS = 55;
@@ -43,7 +40,6 @@ const COMPLETION_LIMIT = 80;
 
 type WhereCompletionInputProps = {
   value: string;
-  columns: readonly GridColumn[];
   onChange: (value: string) => void;
   onApply?: () => void;
   connectionId?: string | null;
@@ -80,7 +76,6 @@ function plainInsertText(value: string) {
 
 export function WhereCompletionInput({
   value,
-  columns,
   onChange,
   onApply,
   connectionId,
@@ -95,11 +90,8 @@ export function WhereCompletionInput({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const valueRef = useRef(value);
   const cursorRef = useRef(value.length);
+  const interactionEpochRef=useRef(0);
   const timerRef = useRef<number | null>(null);
-  const blurTimerRef = useRef<number | null>(null);
-  const requestRef = useRef(0);
-  const versionRef = useRef(0);
-  const openedRef = useRef(false);
   const [suggestions, setSuggestions] = useState<WhereCompletionCandidate[]>([]);
   const [history, setHistory] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -122,35 +114,12 @@ export function WhereCompletionInput({
       resolvedCapabilities &&
       supportsLspCapabilities(resolvedCapabilities),
   );
-  const { isReady, client } = useLspClient({
+  const { client, sessionKey } = useLspClient({
     connectionId,
     driver,
     enabled: canUseLsp,
     capabilities: resolvedCapabilities ?? undefined,
   });
-  const documentUri = useMemo(
-    () =>
-      driver && tabId && resolvedCapabilities
-        ? getLspDocumentUri(
-            tabId,
-            driver,
-            lspLanguageIdForCapabilities(resolvedCapabilities),
-          )
-        : "",
-    [driver, resolvedCapabilities, tabId],
-  );
-  const localColumns = useMemo(
-    () =>
-      columns.map((column) => ({
-        name: String(column.id || column.title),
-        type:
-          typeof (column as GridColumn & { dataType?: unknown }).dataType ===
-          "string"
-            ? String((column as GridColumn & { dataType?: unknown }).dataType)
-            : undefined,
-      })),
-    [columns],
-  );
   const historyScope = useMemo<DataGridConditionHistoryScope>(
     () => ({ connectionId, databaseName, schemaName, tableName }),
     [connectionId, databaseName, schemaName, tableName],
@@ -161,19 +130,28 @@ export function WhereCompletionInput({
   );
 
   useEffect(() => {
-    valueRef.current = value;
-    cursorRef.current = Math.min(cursorRef.current, value.length);
-  }, [value]);
-
-  useEffect(() => {
     setHistory(loadDataGridConditionHistory(historyScope));
   }, [historyRevision, historyScope, historyScopeKey]);
 
+  const hideSuggestions=useCallback(()=>{
+    const list=inputRef.current?.ownerDocument.getElementById(listboxId);
+    if(list)list.hidden=true;
+    inputRef.current?.setAttribute("aria-expanded","false");
+    inputRef.current?.removeAttribute("aria-activedescendant");
+  },[listboxId]);
   const closeSuggestions = useCallback(() => {
+    hideSuggestions();
     setIsOpen(false);
     setSuggestions([]);
     setSelectedIndex(0);
-  }, []);
+  }, [hideSuggestions]);
+  useLayoutEffect(()=>{
+    if(!isOpen||!suggestions.length)return;
+    const list=inputRef.current?.ownerDocument.getElementById(listboxId);
+    if(list)list.hidden=false;
+    inputRef.current?.setAttribute("aria-expanded","true");
+    inputRef.current?.setAttribute("aria-activedescendant",`${listboxId}-${selectedIndex}`);
+  },[isOpen,suggestions,listboxId,selectedIndex]);
 
   const historyCandidates = useCallback(
     (query = ""): WhereCompletionCandidate[] =>
@@ -203,96 +181,25 @@ export function WhereCompletionInput({
     inputRef.current?.focus();
   }, [historyCandidates]);
 
-  const requestSuggestions = useCallback(
-    async (condition: string, cursorOffset: number, manual: boolean) => {
-      if (!driver || !tableName) return;
-      const requestId = requestRef.current + 1;
-      requestRef.current = requestId;
-      const local = localWhereCompletionCandidates({
-        condition,
-        cursorOffset,
-        driver,
-        identifierQuote: resolvedCapabilities?.identifierQuote,
-        columns: localColumns,
-      });
-
-      if (manual || condition.trim()) {
-        const visible = local.slice(0, COMPLETION_LIMIT);
-        setSuggestions(visible);
-        setSelectedIndex(0);
-        setIsOpen(visible.length > 0);
-      }
-
-      if (!isReady || !documentUri || !connectionId) return;
-      const completionDocument = buildWhereCompletionDocument({
-        condition,
-        cursorOffset,
-        driver,
-        schema: schemaName,
-        table: tableName,
-      });
-      const version = versionRef.current + 1;
-      versionRef.current = version;
-
-      let items: CompletionItem[];
-      try {
-        if (openedRef.current) {
-          await client.didChange(documentUri, completionDocument.text, version);
-        } else {
-          openedRef.current = true;
-          try {
-            await client.didOpen(
-              documentUri,
-              completionDocument.text,
-              version,
-              lspLanguageIdForCapabilities(resolvedCapabilities!),
-            );
-          } catch (error) {
-            openedRef.current = false;
-            throw error;
-          }
-        }
-        items = await client.getCompletions(
-          documentUri,
-          completionDocument.line,
-          completionDocument.character,
-          { triggerKind: manual ? 1 : 3 },
-        );
-      } catch (error) {
-        // The current table's columns are already visible as the instant
-        // fallback. A cold or restarting LSP session must not interrupt grid
-        // filtering, and the next keystroke will retry synchronization.
-        console.debug("[WhereCompletion] LSP completion unavailable", error);
-        return;
-      }
-
-      if (
-        requestRef.current !== requestId ||
-        valueRef.current !== condition ||
-        cursorRef.current !== cursorOffset
-      ) {
-        return;
-      }
-      const merged = mergeWhereCompletionCandidates(local, items).slice(
-        0,
-        COMPLETION_LIMIT,
-      );
-      setSuggestions(merged);
-      setSelectedIndex(0);
-      setIsOpen(merged.length > 0);
-    },
-    [
-      client,
-      connectionId,
-      documentUri,
-      driver,
-      isReady,
-      localColumns,
-      resolvedCapabilities,
-      schemaName,
-      tableName,
-    ],
-  );
+  const publishSuggestions=useCallback((items:WhereCompletionCandidate[])=>{
+    if(!items.length)hideSuggestions();
+    setSuggestions(items);setSelectedIndex(0);setIsOpen(items.length>0);
+  },[hideSuggestions]);
+  const isCurrentInteraction=useCallback((interaction:WhereCompletionInteraction)=>
+    document.activeElement===inputRef.current&&inputRef.current?.selectionStart===interaction.cursorOffset&&valueRef.current===interaction.condition&&cursorRef.current===interaction.cursorOffset,[]);
+  const completion=useWhereCompletion({client,sessionKey,connectionId,tabId,driver,capabilities:resolvedCapabilities,
+    owner:listboxId,schema:schemaName,table:tableName,database:databaseName,isCurrent:isCurrentInteraction,publish:publishSuggestions});
+  const requestSuggestions=useCallback((condition:string,cursorOffset:number,manual:boolean)=>
+    completion.request({condition,cursorOffset,manual}),[completion.request]);
+  const cancelCompletion=useCallback(()=>{
+    interactionEpochRef.current++;
+    if(timerRef.current!==null){window.clearTimeout(timerRef.current);timerRef.current=null;}
+    completion.cancel();closeSuggestions();
+  },[completion.cancel,closeSuggestions]);
+  useLayoutEffect(()=>{
+    if(valueRef.current!==value)cancelCompletion();
+    valueRef.current=value;cursorRef.current=Math.min(cursorRef.current,value.length);
+  },[value,cancelCompletion]);
 
   const scheduleSuggestions = useCallback(
     (condition: string, cursorOffset: number, manual = false) => {
@@ -311,6 +218,9 @@ export function WhereCompletionInput({
 
   const acceptSuggestion = useCallback(
     (candidate: WhereCompletionCandidate) => {
+      if(!completion.isCandidateCurrent(candidate)){cancelCompletion();return;}
+      completion.cancel();
+      const acceptanceEpoch=++interactionEpochRef.current;
       const input = inputRef.current;
       const cursorOffset = input?.selectionStart ?? cursorRef.current;
       const replacement =
@@ -318,7 +228,7 @@ export function WhereCompletionInput({
           ? { start: 0, end: valueRef.current.length }
           : candidate.replacementRange ||
             whereReplacementRange(valueRef.current, cursorOffset);
-      const insertText = plainInsertText(candidate.insertText);
+      const insertText = candidate.snippet?plainInsertText(candidate.insertText):candidate.insertText;
       const nextValue =
         valueRef.current.slice(0, replacement.start) +
         insertText +
@@ -334,23 +244,20 @@ export function WhereCompletionInput({
       onChange(nextValue);
       closeSuggestions();
       window.requestAnimationFrame(() => {
+        if(interactionEpochRef.current!==acceptanceEpoch||valueRef.current!==nextValue||!inputRef.current)return;
         inputRef.current?.focus();
         inputRef.current?.setSelectionRange(nextCursor, nextCursor);
         scheduleSuggestions(nextValue, nextCursor, true);
       });
     },
-    [closeSuggestions, onChange, scheduleSuggestions],
+    [closeSuggestions, onChange, scheduleSuggestions, completion.isCandidateCurrent, completion.cancel, cancelCompletion],
   );
 
   useEffect(() => {
     return () => {
-      requestRef.current += 1;
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      if (blurTimerRef.current !== null) window.clearTimeout(blurTimerRef.current);
-      if (openedRef.current && documentUri) void client.didClose(documentUri);
-      openedRef.current = false;
     };
-  }, [client, documentUri]);
+  }, []);
 
   return (
     <div className="relative min-w-0 flex-1">
@@ -358,6 +265,7 @@ export function WhereCompletionInput({
         ref={inputRef}
         value={value}
         onChange={(event) => {
+          cancelCompletion();
           const nextValue = event.target.value;
           const cursorOffset = event.target.selectionStart ?? nextValue.length;
           valueRef.current = nextValue;
@@ -366,8 +274,11 @@ export function WhereCompletionInput({
           scheduleSuggestions(nextValue, cursorOffset);
         }}
         onClick={(event) => {
-          cursorRef.current = event.currentTarget.selectionStart ?? value.length;
+          const next=event.currentTarget.selectionStart??value.length;
+          if(next!==cursorRef.current)cancelCompletion();
+          cursorRef.current=next;
         }}
+        onSelect={(event)=>{const next=event.currentTarget.selectionStart??value.length;if(next!==cursorRef.current){cancelCompletion();cursorRef.current=next;}}}
         onKeyDown={(event) => {
           if (isDataGridConditionUndoRedoShortcut(event)) {
             // Preserve this input's native undo stack without allowing the
@@ -382,6 +293,7 @@ export function WhereCompletionInput({
             scheduleSuggestions(valueRef.current, cursorOffset, true);
             return;
           }
+          if(event.key==="Escape"){event.preventDefault();cancelCompletion();return;}
           if (isOpen && suggestions.length > 0) {
             if (event.key === "ArrowDown") {
               event.preventDefault();
@@ -400,18 +312,13 @@ export function WhereCompletionInput({
               acceptSuggestion(suggestions[selectedIndex]!);
               return;
             }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              closeSuggestions();
-              return;
-            }
           }
           if (event.key === "Enter") {
             onApply?.();
           }
         }}
         onBlur={() => {
-          blurTimerRef.current = window.setTimeout(closeSuggestions, 100);
+          cancelCompletion();
         }}
         placeholder="SQL condition, for example: status = 'active'"
         aria-label="SQL WHERE condition"
@@ -436,7 +343,7 @@ export function WhereCompletionInput({
           title="Reuse a previously applied WHERE condition"
           aria-label="Show WHERE condition history"
           onMouseDown={(event) => event.preventDefault()}
-          onClick={openHistory}
+          onClick={()=>{cancelCompletion();openHistory();}}
         >
           <Clock3 size={11} />
         </button>

@@ -189,6 +189,64 @@ fn parses_postgres_function_arguments() {
     assert!(params[1].optional);
     assert_eq!(params[2].name, "tags");
     assert_eq!(params[2].data_type, "text[]");
+    assert_eq!(params[0].mode.as_deref(), Some("IN"));
+    assert_eq!(params[2].mode.as_deref(), Some("VARIADIC"));
+}
+
+#[test]
+fn postgres_parameter_modes_preserve_quoted_names_nested_defaults_and_output_slots() {
+    let params = parse_postgres_function_parameters(
+        r#"IN "account name" integer, OUT "count, total" bigint, INOUT running numeric(10, 2), VARIADIC tags text[] DEFAULT ARRAY['a,b', $q$x, DEFAULT (])$q$]"#,
+    );
+    assert_eq!(params.len(), 4);
+    assert_eq!(params[0].name, "account name");
+    assert_eq!(params[1].name, "count, total");
+    assert_eq!(params[1].mode.as_deref(), Some("OUT"));
+    assert_eq!(params[2].mode.as_deref(), Some("INOUT"));
+    assert_eq!(params[2].data_type, "numeric(10, 2)");
+    assert_eq!(params[3].data_type, "text[]");
+    assert!(params[3].optional);
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json[3]["mode"], "VARIADIC");
+}
+
+#[test]
+fn postgres_parameter_modes_keep_unnamed_multiword_and_qualified_types() {
+    let params = parse_postgres_function_parameters(
+        "double precision, timestamp(6) with time zone, numeric(10, 2), types.custom_type[]",
+    );
+    assert_eq!(
+        params
+            .iter()
+            .map(|parameter| parameter.data_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "double precision",
+            "timestamp(6) with time zone",
+            "numeric(10, 2)",
+            "types.custom_type[]"
+        ]
+    );
+    assert_eq!(
+        params
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["arg1", "arg2", "arg3", "arg4"]
+    );
+    assert!(params.iter().all(|parameter| parameter.mode.is_none()));
+}
+
+#[test]
+fn postgres_parameter_modes_distinguish_default_literals_and_dollars_in_names() {
+    let params = parse_postgres_function_parameters(
+        r#""has DEFAULT word" text DEFAULT 'x DEFAULT y', arg$tag$ integer DEFAULT 2, x text DEFAULT E'it\'s,DEFAULT', y text DEFAULT $$,DEFAULT$$"#,
+    );
+    assert_eq!(params.len(), 4);
+    assert_eq!(params[0].name, "has DEFAULT word");
+    assert_eq!(params[1].name, "arg$tag$");
+    assert!(params.iter().all(|parameter| parameter.optional));
+    assert_eq!(params[1].data_type, "integer");
 }
 
 #[test]

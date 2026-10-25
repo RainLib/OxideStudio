@@ -71,7 +71,7 @@ export function ColumnFormatterDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface-raised))] p-0">
+      <DialogContent layout="custom" className="max-w-xl overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-5 py-4">
           <DialogTitle className="text-base">Format {columnName}</DialogTitle>
           <DialogDescription>

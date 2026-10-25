@@ -53,6 +53,9 @@ export type LspFunctionDefinition = {
 
 export type LspSchemaDefinition = {
   id: string;
+  server?: string | null;
+  /** Effective session lookup schema; never derive this from explorer selection. */
+  namespace?: { default_schema: string; tables_complete?: boolean } | null;
   catalog?: string | null;
   database: string;
   driver?: string | null;

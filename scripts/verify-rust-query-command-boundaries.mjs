@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/query.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["completion", "execution", "imports", "models", "read_only", "state"];
 const modules = [...facade.matchAll(/^(?:pub )?mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -31,7 +32,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/commands/query/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::commands::query(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning query module.`);
 
@@ -66,7 +67,7 @@ for (const [symbol, owner] of Object.entries({
 if (helpers !== 38 || typeMethods !== 3)
   throw new Error(`Expected 38 query helpers and 3 type methods; found ${helpers} and ${typeMethods}.`);
 
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 const commands = {
   execution: ["execute_query", "execute_native_query_page", "fetch_native_query_page", "close_native_query_page", "resolve_sql_statement_at_cursor", "validate_sql_syntax"],
   imports: ["build_dml_change_preview_sql", "preview_sql_script_import", "import_sql_script", "import_elasticsearch_console_file", "export_elasticsearch_console_file"],
@@ -79,7 +80,7 @@ for (const [module, functions] of Object.entries(commands)) for (const command o
     throw new Error(`src-tauri/src/lib.rs: register ${nestedPath} where its Tauri command macro is defined.`);
 }
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/commands/query/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/commands/query/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (testCount !== 18) throw new Error(`Expected 18 query command regression scenarios; found ${testCount}.`);
 

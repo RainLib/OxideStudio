@@ -108,6 +108,7 @@ pub(super) fn conservative_external_database_capabilities(
         supports_sql_query: true,
         supports_table_browsing: false,
         table_export_formats: Vec::new(),
+        file_query_formats: Vec::new(),
         supports_table_row_mutation: false,
         supports_table_data_transfer: false,
         supports_table_ddl: false,

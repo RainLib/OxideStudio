@@ -24,6 +24,23 @@ fn unsupported_driver_feature(feature: &str) -> anyhow::Error {
 
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
+    /// Resolve the effective session default in a selected database. A missing
+    /// contract remains unknown; never infer this from a selected namespace.
+    async fn sql_lookup_context(
+        &self,
+        _database: Option<&str>,
+    ) -> Result<Option<oxide_driver_protocol::SqlLookupContext>> {
+        Ok(None)
+    }
+
+    /// Execute a typed find operation, without accepting commands or pipelines.
+    async fn read_documents_read_only(
+        &self,
+        _request: crate::core::document_read::DocumentReadRequest<'_>,
+    ) -> Result<crate::core::document_read::DocumentReadPage> {
+        Err(unsupported_driver_feature("Read-only document queries"))
+    }
+
     /// Managed enterprise drivers use a remote policy-enforcing data plane.
     /// Consumers must not classify them as bundled/local merely because the
     /// underlying database dialect is PostgreSQL or MySQL.

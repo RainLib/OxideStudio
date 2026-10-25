@@ -1,3 +1,4 @@
+import { readSourceText } from "./lib/source-text.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,7 @@ import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/drivers/elasticsearch.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = [
   "catalog", "collections", "connection", "console", "documents",
   "driver", "mappings", "models", "results", "runtime",
@@ -28,7 +29,7 @@ let helpers = 0;
 let driverMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/drivers/elasticsearch/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+crate::drivers::elasticsearch::/.test(source))
     throw new Error(`${file}: import directly from its owning Elasticsearch module.`);
 

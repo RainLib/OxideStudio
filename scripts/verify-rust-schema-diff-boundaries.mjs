@@ -1,3 +1,4 @@
+import { readSourceText } from "./lib/source-text.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,7 @@ import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/core/schema_diff.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1]).filter((name) => name !== "tests");
 if (
@@ -22,7 +23,7 @@ const definitions = new Map();
 let functions = 0;
 for (const module of modules) {
   const file = `src-tauri/src/core/schema_diff/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+crate::core::schema_diff::/.test(source))
     throw new Error(`${file}: import directly from the owning schema diff module.`);
   const deps = new Set();
@@ -44,14 +45,15 @@ for (const [symbol, owner] of Object.entries({
   compare_sqlite_schema_snapshots: "sqlite", compare_routines: "routines",
   compare_schema_objects: "objects", compare_relation: "relations",
   create_relation_sql: "ddl", create_index_sql: "ddl",
+  mysql_character_clause: "ddl", mysql_character_changed: "ddl",
   finalize_change_plan: "plan_order", build_preflight_checks: "preflight",
   snapshot_fingerprint: "plan_model", render_migration_sql: "render",
   rewrite_postgres_schema_qualified_references: "postgres_refs",
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
-if (functions !== 109) throw new Error(`Expected 109 migrated schema diff functions, found ${functions}.`);
-const tests = ["support", "metadata", "relation", "views", "ddl", "sqlite", "planning"];
+if (functions !== 111) throw new Error(`Expected 111 schema diff functions, found ${functions}.`);
+const tests = ["support", "metadata", "mysql_character", "relation", "views", "ddl", "sqlite", "planning"];
 const testFolder = path.join(root, "src-tauri/src/core/schema_diff/tests");
 if (tests.some((name) => !fs.existsSync(path.join(testFolder, `${name}.rs`))))
   throw new Error("Schema diff tests must remain split by scenario.");
-console.log(`Rust schema diff boundaries verified: ${modules.length} modules, ${functions} functions, seven test modules, acyclic imports.`);
+console.log(`Rust schema diff boundaries verified: ${modules.length} modules, ${functions} functions, ${tests.length} test modules, acyclic imports.`);

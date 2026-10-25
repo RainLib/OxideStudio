@@ -1,3 +1,4 @@
+import { readSourceText } from "./lib/source-text.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,7 @@ import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/core/store.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1]).filter((name) => name !== "tests");
 if (
@@ -22,7 +23,7 @@ let functions = 0;
 let storeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/core/store/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+crate::core::store::/.test(source))
     throw new Error(`${file}: import directly from the owning store module.`);
   const deps = new Set();
@@ -50,9 +51,11 @@ for (const [symbol, owner] of Object.entries({
   AssistantTaskRecord: "models", default_project_id: "models",
   ProtectedConnectionCredentials: "credential_crypto",
   extract_ssh_tunnel_secrets: "credential_crypto",
+  restore_connection_config_with_key: "credential_crypto",
+  restore_read_only_connection_credentials: "credential_crypto",
   validate_cli_capability_cache_identity: "cache_policy",
   validate_assistant_task: "assistant_validation",
-  new: "setup", get_cli_capability_cache: "cache",
+  new: "setup", open: "setup", get_cli_capability_cache: "cache",
   record_driver_runtime_event: "telemetry",
   migrate_connections_project_scope: "migrations",
   save_project: "projects", save_connection: "connections",
@@ -60,8 +63,8 @@ for (const [symbol, owner] of Object.entries({
   save_assistant_task: "assistant", replace_resources: "resources",
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
-if (functions !== 15 || storeMethods !== 45)
-  throw new Error(`Expected 15 store helpers and 45 MetaStore methods; found ${functions} and ${storeMethods}.`);
+if (functions !== 17 || storeMethods !== 46)
+  throw new Error(`Expected 17 store helpers and 46 MetaStore methods; found ${functions} and ${storeMethods}.`);
 const tests = ["cache", "telemetry", "connections", "history", "assistant", "saved_sql"];
 const testFolder = path.join(root, "src-tauri/src/core/store/tests");
 if (tests.some((name) => !fs.existsSync(path.join(testFolder, `${name}.rs`))))

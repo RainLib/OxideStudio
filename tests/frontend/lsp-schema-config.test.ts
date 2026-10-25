@@ -417,6 +417,7 @@ describe("LSP schema config", () => {
     const baselineSignature = lspSchemaSignature([baseline]);
     const mutations: Array<(schema: LspSchemaDefinition) => void> = [
       (schema) => (schema.database = "audit"),
+      (schema) => (schema.server = "remote"),
       (schema) => (schema.driver = "mysql"),
       (schema) => (schema.server_version = "8.0.38"),
       (schema) => (schema.snapshot_revision = 42),
@@ -453,6 +454,27 @@ describe("LSP schema config", () => {
       mutate(changed);
       expect(lspSchemaSignature([changed])).not.toBe(baselineSignature);
     }
+  });
+
+  it("refreshes server-only identity changes while canonicalizing absent servers", () => {
+    const schema = signatureSchema();
+    const absent = lspSchemaSignature([schema]);
+    expect(lspSchemaSignature([{ ...schema, server: null }])).toBe(absent);
+    expect(lspSchemaSignature([{ ...schema, server: "remote" }])).not.toBe(absent);
+    expect(lspSchemaSignature([{ ...schema, server: "remote" }])).not.toBe(
+      lspSchemaSignature([{ ...schema, server: "other" }]),
+    );
+  });
+
+  it("refreshes effective schema and coverage without accepting unproven defaults", () => {
+    const schema=signatureSchema();
+    const absent=lspSchemaSignature([schema]);
+    const partial={default_schema:"sales",tables_complete:false};
+    expect(lspSchemaSignature([{...schema,namespace:null}])).toBe(absent);
+    expect(lspSchemaSignature([{...schema,namespace:partial}])).not.toBe(absent);
+    expect(lspSchemaSignature([{...schema,namespace:{default_schema:"sales"}}])).toBe(lspSchemaSignature([{...schema,namespace:partial}]));
+    expect(lspSchemaSignature([{...schema,namespace:{...partial,tables_complete:true}}])).not.toBe(lspSchemaSignature([{...schema,namespace:partial}]));
+    expect(lspSchemaSignature([{...schema,namespace:{...partial,default_schema:"dbo"}}])).not.toBe(lspSchemaSignature([{...schema,namespace:partial}]));
   });
 
   it("ignores metadata collection ordering while retaining ordered semantics", () => {

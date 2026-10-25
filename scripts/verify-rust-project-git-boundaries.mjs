@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/project_git.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["github", "models", "operations", "patch", "repository", "runtime", "validation"];
 const modules = [...facade.matchAll(/^(?:pub )?mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -31,7 +32,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/commands/project_git/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::commands::project_git(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning Project Git module.`);
 
@@ -66,7 +67,7 @@ for (const [symbol, owner] of Object.entries({
 if (helpers !== 48 || typeMethods !== 0)
   throw new Error(`Expected 48 Project Git helpers and 0 type methods; found ${helpers} and ${typeMethods}.`);
 
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 const commands = {
   repository: ["get_project_git_repository", "get_project_git_commit_files"],
   operations: ["init_project_git_repository", "stage_project_git_paths", "unstage_project_git_paths", "commit_project_git_changes", "create_project_git_branch", "checkout_project_git_branch", "set_project_git_remote", "fetch_project_git_repository", "pull_project_git_repository", "push_project_git_repository"],
@@ -79,7 +80,7 @@ for (const [module, functions] of Object.entries(commands)) for (const command o
     throw new Error(`src-tauri/src/lib.rs: register ${nestedPath} where its Tauri command macro is defined.`);
 }
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/commands/project_git/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/commands/project_git/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (testCount !== 7) throw new Error(`Expected 7 Project Git regression scenarios; found ${testCount}.`);
 

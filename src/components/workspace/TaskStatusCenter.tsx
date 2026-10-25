@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { PopupPresence } from "@/components/ui/PopupPresence";
+import { popupVariants } from "@/styles/variants/popup";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { useFileImportNavigation } from "@/features/table-import/fileImportNavigation";
 import {
   Bell,
   CheckCircle2,
@@ -16,6 +20,8 @@ import { assistantTaskService } from "@/services/tauri/assistant-task.service";
 import { assistantTaskToWorkbenchTask } from "@/lib/assistantTaskProjection";
 import { useTaskNavigationStore } from "@/lib/taskNavigation";
 import { cn } from "@/lib/utils";
+
+const FileImportJobsDialog = lazy(() => import("@/features/table-import/FileImportJobsDialog").then(module => ({ default: module.FileImportJobsDialog })));
 
 function taskAge(task: WorkbenchTask) {
   const end = task.finishedAt || Date.now();
@@ -112,6 +118,7 @@ export function TaskStatusCenter() {
 
   return (
     <div className="relative h-full">
+      {isTauri() && activeProjectId && <Suspense fallback={null}><FileImportJobsDialog key={activeProjectId} projectId={activeProjectId} /></Suspense>}
       <button
         type="button"
         className={cn(
@@ -169,8 +176,7 @@ export function TaskStatusCenter() {
         </span>
       )}
 
-      {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 w-[420px] overflow-hidden rounded-[6px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] shadow-[0_18px_45px_rgba(0,0,0,0.36)]">
+      <PopupPresence open={open}><div data-side="top" className={cn(popupVariants({ kind: "menu" }), "absolute bottom-full right-0 z-50 mb-1 w-[min(420px,calc(100vw-16px))] overflow-hidden")}>
           <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-2 text-[11px]">
             {selectedTask ? (
               <button
@@ -198,6 +204,10 @@ export function TaskStatusCenter() {
             )}
           </div>
           <div className="max-h-80 overflow-auto">
+            {isTauri() && !selectedTask && <button type="button" className="wb-text-button w-full justify-start border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-[11px]" onClick={() => {
+              setOpen(false);
+              useFileImportNavigation.getState().show(activeProjectId);
+            }}>File imports · saved preparations and jobs</button>}
             {selectedTask ? (
               <TaskDetails task={selectedTask} />
             ) : visibleTasks.length > 0 ? (
@@ -233,8 +243,7 @@ export function TaskStatusCenter() {
               </div>
             )}
           </div>
-        </div>
-      )}
+        </div></PopupPresence>
     </div>
   );
 }

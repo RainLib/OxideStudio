@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,7 +8,7 @@ const entry = "tests/frontend/table-editing.test.ts";
 const directory = "tests/frontend/table-editing";
 const scenarios = ["identity", "drafts", "loading", "mutations", "metadata"];
 const expectedImports = scenarios.map((name) => `./table-editing/${name}`);
-const entrySource = fs.readFileSync(path.join(root, entry), "utf8");
+const entrySource = readSourceText(path.join(root, entry));
 const actualImports = [...entrySource.matchAll(/import\s+["']([^"']+)["'];/g)].map(
   (match) => match[1],
 );
@@ -20,7 +21,7 @@ if (
 }
 
 const harness = `${directory}/harness.ts`;
-const harnessSource = fs.readFileSync(path.join(root, harness), "utf8");
+const harnessSource = readSourceText(path.join(root, harness));
 for (const required of [
   "vi.hoisted",
   'vi.mock("@/services/tauri"',
@@ -37,7 +38,7 @@ for (const required of [
 let testCount = 0;
 for (const scenario of scenarios) {
   const file = `${directory}/${scenario}.ts`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (!source.includes('from "./harness"')) {
     throw new Error(`${file}: scenarios must consume the shared harness.`);
   }

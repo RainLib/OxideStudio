@@ -10,4 +10,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/enterprise/target/release/oxide-control-plane /usr/local/bin/
 USER 65532:65532
+EXPOSE 8787
 ENTRYPOINT ["oxide-control-plane"]

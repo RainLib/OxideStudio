@@ -23,8 +23,16 @@ import type { DatabaseDriver } from "@/services/tauri/types/database";
 import type { TableInfo } from "@/services/tauri/types/schemaCatalog";
 import type { DatabaseDriverCatalogStatus } from "@/store/useDatabaseDriverCatalogStore";
 import { useMemo, useRef } from "react";
+import {useConnectionStore} from "@/store/useConnectionStore";
+import {useConnectionSemanticStore} from "@/services/lsp/connectionSemanticState";
+import {semanticTabRoute} from "@/services/lsp/semanticContext";
+import {createCompletionContextReader} from "../model/completionContextState";
+import {subscribeCompletionContext} from "../model/completionContextState";
+import {useLspRuntimeSnapshot} from "@/hooks/useLspRuntimeSnapshot";
+import {useCompletionContextRefresh} from "./useCompletionContextRefresh";
 
 interface QuerySqlCompletionOptions {
+  syncDocument?:(model:any)=>Promise<void>;
   activeProjectId: string;
   effectiveConnectionId: string | null;
   currentSchema: string | null;
@@ -54,6 +62,7 @@ interface QuerySqlCompletionOptions {
 }
 
 export function useQuerySqlCompletion({
+  syncDocument,
   activeProjectId,
   effectiveConnectionId,
   currentSchema,
@@ -81,11 +90,28 @@ export function useQuerySqlCompletion({
   editorLanguageId,
   isActivePane,
 }: QuerySqlCompletionOptions) {
+  const lspRuntime=useLspRuntimeSnapshot(lspClient);
+  const connectionRuntime=useConnectionStore(state=>effectiveConnectionId?state.connectionRuntimeStates[effectiveConnectionId]:undefined);
+  const executionObservation=useConnectionSemanticStore(state=>effectiveConnectionId?state.byConnectionId[effectiveConnectionId]:undefined);
+  const cacheScope=useMemo(()=>({connectionRuntime,executionObservation}),[connectionRuntime,executionObservation]);
+  const runtimeSequenceRef=useRef(0);
+  const observedProcess=effectiveConnectionId?lspRuntime:undefined;
+  const runtimeSequence=useMemo(()=>++runtimeSequenceRef.current,[connectionRuntime,executionObservation,observedProcess]);
+  const route=semanticTabRoute(activeTab);
+  const getCompletionContext=useMemo(()=>createCompletionContextReader({
+    connectionId:effectiveConnectionId,tabId:activeTab?.id,connection:activeConnection,
+    lspClient,metadataVersion,projectId:activeProjectId,currentSchema,route,
+  }),[effectiveConnectionId,activeTab?.id,activeConnection,metadataVersion,activeProjectId,currentSchema,route,lspClient]);
+  const subscribeContext=useMemo(()=>(listener:()=>void)=>subscribeCompletionContext(listener,lspClient),[lspClient]);
   const batchColumnSessionsRef = useRef(
     new Map<string, SqlBatchColumnRuntimeSession>(),
   );
+  useCompletionContextRefresh({editor:mountedEditor,enabled:isActivePane,read:getCompletionContext,subscribe:subscribeContext,
+    allowDocumentOnly:capabilities.supportsSqlQuery,
+    invalidate:()=>batchColumnSessionsRef.current.clear(),triggerOriginRef:completionTriggerOriginRef});
 
   const createCachedSqlCompletionRequest = useCachedSqlCompletionSource({
+    cacheScope,
     activeProjectId,
     connectionId: effectiveConnectionId,
     currentSchema,
@@ -111,6 +137,7 @@ export function useQuerySqlCompletion({
         documentUri,
         effectiveConnectionId || "",
         driver,
+        runtimeSequence,
         activeTab?.databaseName || "",
         activeTab?.targetSchema || currentSchema || "",
         metadataVersion,
@@ -141,6 +168,7 @@ export function useQuerySqlCompletion({
       metadataVersion,
       preferredElasticsearchIndex,
       rankByUsage,
+      runtimeSequence,
     ],
   );
   // Monaco providers are global per language. Scope requests to the document
@@ -150,6 +178,8 @@ export function useQuerySqlCompletion({
     uri === documentUri && canUseLsp;
   const { provideCompletionItems, resolveCompletionItem } =
     createQueryCompletionProvider({
+      syncDocument,
+      getCompletionContext,
       monaco,
       completionTriggerOriginRef,
       documentUri,

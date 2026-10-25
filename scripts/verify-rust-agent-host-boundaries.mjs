@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/agent/host.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1]).filter((name) => name !== "tests");
 if (
@@ -20,7 +21,7 @@ const definitions = new Map();
 let innerMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/agent/host/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|crate::agent::host::/.test(source))
     throw new Error(`${file}: import directly from the owning helper/type module.`);
   const dependencies = new Set();

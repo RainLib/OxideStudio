@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { queryService } from "@/services/tauri";
 import { useTaskStore } from "@/store/useTaskStore";
@@ -63,9 +64,9 @@ export function useConsoleFileController({
     if (!enabled || !activeTab || !contextKey || operationRef.current) return;
     if (
       activeTab.sql.trim() &&
-      !window.confirm(
+      !(await confirmAction(
         "Importing Console requests replaces the current editor content. Continue?",
-      )
+      ))
     ) {
       return;
     }

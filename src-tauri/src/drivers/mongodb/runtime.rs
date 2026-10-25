@@ -17,11 +17,19 @@ use super::results::{
 impl MongoDbDriver {
     pub fn new(url: &str) -> Self {
         Self {
+            agent_owned: false,
             url: url.to_string(),
             default_database: mongodb_default_database(url),
             active_database: Mutex::new(mongodb_default_database(url)),
             client: Mutex::new(None),
             server_version: Mutex::new(None),
+        }
+    }
+
+    pub fn new_agent_owned(url: &str) -> Self {
+        Self {
+            agent_owned: true,
+            ..Self::new(url)
         }
     }
 
@@ -224,7 +232,6 @@ impl MongoDbDriver {
 /// OIDC is an interactive native-driver flow.  It must never be delegated to
 /// an arbitrary external package just because that package happens to be the
 /// active MongoDB implementation for regular connections.
-
 pub(crate) fn mongodb_url_uses_oidc(value: &str) -> bool {
     let Ok(url) = url::Url::parse(value.trim()) else {
         return false;

@@ -110,6 +110,19 @@ fn routine_signatures_change_the_snapshot_fingerprint() {
 }
 
 #[test]
+fn routine_parameter_modes_change_the_snapshot_fingerprint_and_survive_json() {
+    let mut before = snapshot("before", vec![column("id", "int4", false)]);
+    before.routines = vec![routine("calc", "integer")];
+    let mut after = before.clone();
+    after.routines[0].parameters[0].mode = Some("INOUT".into());
+    let before = finalize_schema_snapshot(before).unwrap();
+    let after = finalize_schema_snapshot(after).unwrap();
+    assert_ne!(before.fingerprint, after.fingerprint);
+    let json = serde_json::to_value(&after).unwrap();
+    assert_eq!(json["routines"][0]["parameters"][0]["mode"], "INOUT");
+}
+
+#[test]
 fn generated_and_hidden_classification_changes_the_snapshot_fingerprint() {
     let ordinary = snapshot("ordinary", vec![column("total", "numeric", true)]);
     let mut generated_column = column("total", "numeric", true);

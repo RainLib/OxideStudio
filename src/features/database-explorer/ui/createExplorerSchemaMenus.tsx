@@ -162,7 +162,7 @@ export function createExplorerSchemaMenus({
           align="start"
           side="right"
           sideOffset={6}
-          className="w-[292px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.38)]"
+          className="w-[292px] p-0 text-[12px]"
           onClick={(event) => event.stopPropagation()}
         >
           <div className="flex h-8 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-2">

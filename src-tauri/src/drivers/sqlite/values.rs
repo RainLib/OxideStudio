@@ -2,9 +2,9 @@ use crate::core::protocol::QueryParameter;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteArguments, SqliteRow};
-use sqlx::{Column, Row, Sqlite, TypeInfo};
+use sqlx::{Row, Sqlite, TypeInfo, ValueRef};
 
-pub(super) fn normalize_sqlite_url(value: &str) -> String {
+pub(crate) fn normalize_sqlite_url(value: &str) -> String {
     let value = value.trim();
     if value == ":memory:" {
         "sqlite::memory:".to_string()
@@ -40,7 +40,10 @@ pub(super) fn sqlite_value(row: &SqliteRow, index: usize) -> Value {
     // SQLite permits permissive coercion (for example TEXT -> i64 yields 0),
     // so probing decoders in an arbitrary order corrupts visible result data.
     // Use the value's actual SQLite storage type reported by SQLx instead.
-    let storage_type = row.column(index).type_info().name().to_ascii_uppercase();
+    let storage_type = row
+        .try_get_raw(index)
+        .map(|value| value.type_info().name().to_ascii_uppercase())
+        .unwrap_or_else(|_| "NULL".into());
     match storage_type.as_str() {
         "NULL" => Value::Null,
         "INTEGER" | "BOOLEAN" => row
@@ -91,7 +94,12 @@ pub(super) fn bind_sqlite_parameter<'q>(
             Ok(query.bind(value.as_i64().unwrap_or_default()))
         }
         Value::Number(value) if value.is_u64() => {
-            Ok(query.bind(value.as_u64().unwrap_or_default() as i64))
+            let value = value
+                .as_u64()
+                .ok_or_else(|| anyhow!("Invalid unsigned integer"))?;
+            let value = i64::try_from(value)
+                .map_err(|_| anyhow!("Unsigned integer exceeds SQLite's signed 64-bit range"))?;
+            Ok(query.bind(value))
         }
         Value::Number(value) => Ok(query.bind(value.as_f64().unwrap_or_default())),
         Value::String(value) => Ok(query.bind(value.clone())),

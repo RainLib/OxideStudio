@@ -97,6 +97,8 @@ export interface QueryResultRun {
 }
 
 export interface TabData {
+  /** Ephemeral file snapshot; never an editable project document/connection. */
+  fileQuery?: import("@/features/file-query/model").FileQueryDocument;
   id: string;
   title: string;
   type: TabType;
@@ -231,6 +233,7 @@ export interface TabState {
     metadata?: Partial<
       Pick<
         TabData,
+        | "fileQuery"
         | "connectionId"
         | "databaseName"
         | "tableName"
@@ -358,16 +361,16 @@ export interface TabState {
     relativePath: string,
     forgetTargets?: boolean,
   ) => void;
-  closeTab: (id: string) => void;
-  forceCloseTab: (id: string) => void;
-  closeOtherTabs: (id: string) => void;
-  closeAllTabs: () => void;
-  closeTabsToLeft: (id: string) => void;
-  closeTabsToRight: (id: string) => void;
+  closeTab: (id: string) => Promise<void>;
+  forceCloseTab: (id: string) => Promise<void>;
+  closeOtherTabs: (id: string) => Promise<void>;
+  closeAllTabs: () => Promise<void>;
+  closeTabsToLeft: (id: string) => Promise<void>;
+  closeTabsToRight: (id: string) => Promise<void>;
   closeTabsByIds: (
     ids: readonly string[],
     fallbackTabId?: string | null,
-  ) => void;
+  ) => Promise<void>;
   togglePinTab: (id: string) => void;
   reorderTab: (
     draggedId: string,

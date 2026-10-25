@@ -58,7 +58,7 @@ export function RenameTableDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Rename {objectLabel}</DialogTitle>
           <DialogDescription>
@@ -68,15 +68,14 @@ export function RenameTableDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="name" className="text-right">
+            <div className="grid gap-1.5">
+              <Label htmlFor="name">
                 Name
               </Label>
               <Input
                 id="name"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                className="col-span-3"
                 autoFocus
               />
             </div>

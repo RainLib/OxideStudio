@@ -124,7 +124,7 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={ai.handleOpenChange}>
-      <DialogContent className="settings-dialog top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)] data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-top-0">
+      <DialogContent layout="custom" className="settings-dialog top-[14px] flex h-[calc(100vh-28px)] max-h-none w-[1040px] max-w-[calc(100vw-28px)] translate-y-0 flex-col gap-0 overflow-hidden p-0 text-[12px]">
         <DialogHeader className="relative flex h-10 shrink-0 items-center justify-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-frame))] px-4 py-0">
           <DialogTitle className="text-[12px] font-semibold tracking-normal text-[hsl(var(--wb-text-muted))]">
             {t("common.settings")}

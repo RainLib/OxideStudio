@@ -115,7 +115,11 @@ pub(super) fn current_target_aliases() -> Vec<String> {
         "x86_64" => "x64",
         value => value,
     };
-    let mut aliases = vec![format!("{os}-{arch}"), format!("{os_alias}-{arch_alias}")];
+    let mut aliases = vec![
+        format!("{os}-{arch}"),
+        format!("{os_alias}-{arch_alias}"),
+        env!("OXIDE_RUST_TARGET_TRIPLE").to_string(),
+    ];
     aliases.sort();
     aliases.dedup();
     aliases

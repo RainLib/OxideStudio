@@ -5,6 +5,8 @@ use anyhow::Result;
 use serde::Serialize;
 use std::env;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;

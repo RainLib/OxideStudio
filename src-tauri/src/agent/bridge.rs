@@ -1,5 +1,9 @@
+#[cfg(feature = "desktop")]
 use crate::agent::{host::AgentHostManager, protocol::RequestMetadata};
-use anyhow::{anyhow, Context, Result};
+#[cfg(any(feature = "desktop", unix))]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(feature = "desktop")]
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,6 +15,7 @@ use tokio::io::{
 pub const BRIDGE_ENDPOINT_ENV: &str = "OXIDE_AGENT_BRIDGE_ENDPOINT";
 pub const BRIDGE_TOKEN_ENV: &str = "OXIDE_AGENT_BRIDGE_TOKEN";
 const MAX_BRIDGE_FRAME_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "desktop")]
 const BRIDGE_TOKEN_BYTES: usize = 32;
 
 trait BridgeIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -44,6 +49,7 @@ struct BridgeResponseError {
     message: String,
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InvokeParams {
@@ -52,6 +58,7 @@ struct InvokeParams {
     input: Value,
 }
 
+#[cfg(feature = "desktop")]
 pub struct PrivateBridgeSession {
     endpoint: String,
     token: String,
@@ -60,6 +67,7 @@ pub struct PrivateBridgeSession {
     _socket_directory: tempfile::TempDir,
 }
 
+#[cfg(feature = "desktop")]
 impl PrivateBridgeSession {
     pub async fn start(manager: AgentHostManager, metadata: RequestMetadata) -> Result<Self> {
         let token = random_token(BRIDGE_TOKEN_BYTES);
@@ -131,6 +139,7 @@ impl PrivateBridgeSession {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl Drop for PrivateBridgeSession {
     fn drop(&mut self) {
         self.task.abort();
@@ -138,6 +147,7 @@ impl Drop for PrivateBridgeSession {
     }
 }
 
+#[cfg(feature = "desktop")]
 async fn serve_bridge_stream(
     stream: BoxBridgeIo,
     manager: AgentHostManager,
@@ -233,6 +243,7 @@ async fn serve_bridge_stream(
     }
 }
 
+#[cfg(feature = "desktop")]
 async fn write_response<W>(writer: &mut W, response: BridgeResponse) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -379,12 +390,14 @@ async fn connect_stream(endpoint: &str) -> Result<BoxBridgeIo> {
     Ok(Box::new(stream))
 }
 
+#[cfg(feature = "desktop")]
 fn random_token(bytes: usize) -> String {
     let mut raw = vec![0_u8; bytes];
     OsRng.fill_bytes(&mut raw);
     raw.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -397,6 +410,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
+#[cfg(feature = "desktop")]
 fn bounded_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }

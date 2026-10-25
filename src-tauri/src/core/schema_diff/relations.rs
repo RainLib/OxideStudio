@@ -2,7 +2,7 @@ use super::comments::table_comment_sql;
 use super::ddl::{
     add_constraint_sql, alter_column_sql, column_definition, column_structure_changed,
     create_index_sql, external_view_dependency_warnings, index_structure_changed,
-    normalized_view_select_definition,
+    mysql_character_clause, normalized_view_select_definition,
 };
 use super::metadata_children::metadata_only_change;
 use super::plan_model::{
@@ -15,6 +15,7 @@ use super::types::{
     SchemaSnapshot,
 };
 use crate::core::dialect::DatabaseKind;
+use crate::core::mysql_character::is_mysql_character_type;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn compare_relation(
@@ -368,6 +369,22 @@ pub(super) fn compare_columns(
     names.dedup();
 
     for column_name in names {
+        if kind == DatabaseKind::Mysql
+            && source_columns
+                .get(column_name)
+                .zip(target_columns.get(column_name))
+                .is_some_and(|(source, target)| {
+                    source.character_set.is_none()
+                        && source.collation.is_none()
+                        && is_mysql_character_type(&source.data_type)
+                        && (target.character_set.is_some() || target.collation.is_some())
+                })
+        {
+            warnings.push(format!(
+                "Source character metadata for {}.{column_name} is unavailable; it is not compared and existing target attributes are preserved for other changes.",
+                source.name
+            ));
+        }
         match (
             source_columns.get(column_name),
             target_columns.get(column_name),
@@ -375,23 +392,27 @@ pub(super) fn compare_columns(
             (Some(source_column), None) => {
                 let (definition, definition_warnings) =
                     column_definition(kind, source_schema, target_schema, source_column);
+                let definition_needs_review = !definition_warnings.is_empty();
                 warnings.extend(definition_warnings);
                 let ownership_unmodeled = source_column.is_generated != Some(false)
                     || source_column.is_hidden != Some(false);
+                let incomplete_definition = ownership_unmodeled
+                    || (kind == DatabaseKind::Mysql
+                        && mysql_character_clause(source_column).is_err());
                 if ownership_unmodeled {
                     warnings.push(format!(
                         "Column {}.{} cannot be generated until its generated/hidden definition is captured losslessly.",
                         source.name, column_name
                     ));
                 }
-                let risk = if ownership_unmodeled {
+                let risk = if incomplete_definition || definition_needs_review {
                     SchemaChangeRisk::Review
                 } else if source_column.is_nullable || source_column.default_value.is_some() {
                     SchemaChangeRisk::Safe
                 } else {
                     SchemaChangeRisk::Review
                 };
-                let sql = (!ownership_unmodeled)
+                let sql = (!incomplete_definition)
                     .then(|| {
                         format!(
                             "ALTER TABLE {} ADD COLUMN {};",
@@ -410,7 +431,7 @@ pub(super) fn compare_columns(
                     Some(column_name.to_string()),
                     format!("Add column {}.{}", source.name, column_name),
                     sql,
-                    !ownership_unmodeled,
+                    !incomplete_definition,
                     risk == SchemaChangeRisk::Review,
                 ));
             }
@@ -427,7 +448,7 @@ pub(super) fn compare_columns(
                 true,
             )),
             (Some(source_column), Some(target_column))
-                if column_structure_changed(source_column, target_column) =>
+                if column_structure_changed(kind, source_column, target_column) =>
             {
                 let (sql, manual_review, alter_warnings) = alter_column_sql(
                     kind,
@@ -439,7 +460,15 @@ pub(super) fn compare_columns(
                 );
                 warnings.extend(alter_warnings);
                 let destructive = source_column.data_type != target_column.data_type
-                    || (!source_column.is_nullable && target_column.is_nullable);
+                    || (!source_column.is_nullable && target_column.is_nullable)
+                    || (kind == DatabaseKind::Mysql
+                        && source_column
+                            .character_set
+                            .as_deref()
+                            .zip(target_column.character_set.as_deref())
+                            .is_some_and(|(source, target)| {
+                                !source.trim().eq_ignore_ascii_case(target.trim())
+                            }));
                 changes.push(change(
                     SchemaChangeKind::ColumnModify,
                     if destructive {

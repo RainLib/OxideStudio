@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/ai_cli/setup.rs";
 const folder = "src-tauri/src/ai_cli/setup";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 if (
   /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|static|const)\b/m.test(
     facade,
@@ -47,7 +48,7 @@ const allowed = {
 const graph = new Map();
 for (const module of modules) {
   const file = `${folder}/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (!allowed[module])
     throw new Error(
       `${file}: declare the new module's responsibility and dependency direction.`,
@@ -73,7 +74,7 @@ for (const [symbol, owner] of [
 ]) {
   const definitions = modules.filter((module) =>
     new RegExp(`\\bstatic\\s+${symbol}\\b`).test(
-      fs.readFileSync(path.join(root, folder, `${module}.rs`), "utf8"),
+      readSourceText(path.join(root, folder, `${module}.rs`)),
     ),
   );
   if (definitions.length !== 1 || definitions[0] !== owner)

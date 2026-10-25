@@ -15,6 +15,7 @@ pub(super) const EXTERNAL_RUNTIME_RECONNECT_BATCH_LIMIT: usize = 32;
 
 #[derive(Clone)]
 pub struct ConnectionManager {
+    pub(super) semantic_context: crate::core::semantic_context::ConnectionSemanticTracker,
     // thread-safe map of active connections
     pub(super) connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,
     // Store active schema per connection
@@ -29,6 +30,7 @@ pub struct ConnectionManager {
 }
 
 pub(super) struct ManagedConnection {
+    pub(super) semantic_session: String,
     pub(super) driver: Arc<dyn DatabaseDriver>,
     pub(super) ssh_tunnel: Option<SshTunnel>,
     /// The canonical identity supplied by the trusted connection command.

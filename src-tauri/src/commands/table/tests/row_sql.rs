@@ -201,6 +201,8 @@ fn builds_mysql_insert_with_parameter_placeholders() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
     let mut values = BTreeMap::new();
     values.insert("name".to_string(), json!("Ada"));
@@ -229,6 +231,8 @@ fn insert_builder_rechecks_required_columns_before_any_batch_is_created() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "id".to_string(),
@@ -243,6 +247,8 @@ fn insert_builder_rechecks_required_columns_before_any_batch_is_created() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "status".to_string(),
@@ -257,6 +263,8 @@ fn insert_builder_rechecks_required_columns_before_any_batch_is_created() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
 
@@ -329,6 +337,8 @@ fn builds_postgres_update_with_casted_parameters() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "email".to_string(),
@@ -343,6 +353,8 @@ fn builds_postgres_update_with_casted_parameters() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
     let mut key = BTreeMap::new();
@@ -386,6 +398,8 @@ fn builds_table_update_with_an_explicit_validated_expression() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "updated_at".to_string(),
@@ -400,6 +414,8 @@ fn builds_table_update_with_an_explicit_validated_expression() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
     let update = TableRowUpdate {
@@ -489,6 +505,8 @@ fn builds_postgres_structured_filter_with_parameters() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "id".to_string(),
@@ -503,6 +521,8 @@ fn builds_postgres_structured_filter_with_parameters() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
 
@@ -550,6 +570,8 @@ fn builds_mysql_structured_filter_with_parameters() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     let (where_clause, params) = build_structured_filter_where(
@@ -584,6 +606,8 @@ fn rejects_unknown_structured_filter_parts() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert!(build_structured_filter_where(
@@ -626,6 +650,8 @@ fn builds_safe_table_order_by_clause() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     let order = build_table_order_by(
@@ -672,6 +698,8 @@ fn builds_safe_table_order_by_clause() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "id".to_string(),
@@ -686,6 +714,8 @@ fn builds_safe_table_order_by_clause() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "created_at".to_string(),
@@ -700,6 +730,8 @@ fn builds_safe_table_order_by_clause() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
     assert_eq!(

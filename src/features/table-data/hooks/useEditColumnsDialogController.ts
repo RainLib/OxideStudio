@@ -1,3 +1,4 @@
+import { confirmAction, promptValue } from "@/lib/appDialogs";
 import { databaseService, tableService } from "@/services/tauri";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -197,9 +198,9 @@ export function useEditColumnsDialogController({
   };
 
   const handleDropColumn = async (columnName: string) => {
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Drop column "${columnName}" from "${tableName}"? This cannot be undone.`
-    );
+    ));
     if (!confirmed) return;
 
     setDroppingColumn(columnName);
@@ -221,7 +222,7 @@ export function useEditColumnsDialogController({
   };
 
   const handleRenameColumn = async (columnName: string) => {
-    const nextName = window.prompt("Rename column to:", columnName);
+    const nextName = (await promptValue("Rename column to:", columnName));
     if (nextName === null) return;
 
     const trimmedName = nextName.trim();

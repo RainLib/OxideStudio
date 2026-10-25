@@ -182,16 +182,21 @@ impl DatabaseDriverPackageRegistry {
         if !is_safe_token(driver_id) || !is_safe_token(package_version) {
             return Err("Invalid driver package identity".to_string());
         }
-        let package = self
-            .list_installed()
-            .into_iter()
-            .find(|package| {
-                package.manifest.driver_id == driver_id
-                    && package.manifest.package_version == package_version
-            })
-            .ok_or_else(|| {
-                format!("Driver package {driver_id} {package_version} is not installed")
-            })?;
+        let driver_root = self.root.join(driver_id);
+        let package_root = driver_root.join(package_version);
+        // Pins address an exact immutable directory. Do not hash unrelated
+        // packages or let a malformed directory shadow the selected identity.
+        let active = read_active_version(&driver_root);
+        let package = inspect_package(
+            &self.root,
+            &package_root,
+            &package_root.join("manifest.json"),
+            driver_id,
+            package_version,
+            active.as_deref(),
+            &self.trust,
+        )
+        .ok_or_else(|| format!("Driver package {driver_id} {package_version} is not installed"))?;
         if package.status != DriverPackageStatus::Ready {
             return Err(package.status_message.clone().unwrap_or_else(|| {
                 format!("Driver package {driver_id} {package_version} is not ready")

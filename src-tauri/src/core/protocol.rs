@@ -380,6 +380,14 @@ pub struct ColumnInfo {
     /// than visible; old external driver packages remain wire-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_hidden: Option<bool>,
+    /// Database-reported character set. Missing means unknown or inapplicable,
+    /// never an instruction to reset an existing column to a database default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    /// Database-reported column collation; optional for older driver packages
+    /// and schema snapshots that predate character metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }
@@ -444,6 +452,8 @@ pub struct ForeignKeyReferenceInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParameterInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub name: String,
     pub data_type: String,
     #[serde(default)]

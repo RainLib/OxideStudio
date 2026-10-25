@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -270,19 +271,19 @@ export function DatabaseAdministrationDialog({
     setForm("password");
   };
 
-  const handleTerminate = (session: DatabaseAdminSession) => {
+  const handleTerminate = async (session: DatabaseAdminSession) => {
     if (!connectionId) return;
-    if (!window.confirm(`Terminate session ${session.id}? This cannot be undone.`)) return;
+    if (!(await confirmAction(`Terminate session ${session.id}? This cannot be undone.`))) return;
     void runMutation(
       () => databaseService.terminateDatabaseAdminSession(connectionId, driver, session.id, true),
       "sessions",
     );
   };
 
-  const handleDeleteUser = (user: DatabaseAdminUser) => {
+  const handleDeleteUser = async (user: DatabaseAdminUser) => {
     if (!connectionId) return;
     const label = accountLabel(user);
-    if (!window.confirm(`Delete database account ${label}? This cannot be undone.`)) return;
+    if (!(await confirmAction(`Delete database account ${label}? This cannot be undone.`))) return;
     void runMutation(
       () => databaseService.deleteDatabaseAdminUser(connectionId, driver, {
         name: user.name,
@@ -293,10 +294,10 @@ export function DatabaseAdministrationDialog({
     );
   };
 
-  const handleLogin = (user: DatabaseAdminUser, nextCanLogin: boolean) => {
+  const handleLogin = async (user: DatabaseAdminUser, nextCanLogin: boolean) => {
     if (!connectionId) return;
     const actionLabel = nextCanLogin ? "Unlock" : "Lock";
-    if (!window.confirm(`${actionLabel} ${accountLabel(user)}?`)) return;
+    if (!(await confirmAction(`${actionLabel} ${accountLabel(user)}?`))) return;
     void runMutation(
       () => databaseService.setDatabaseAdminUserLogin(connectionId, driver, {
         name: user.name,
@@ -339,7 +340,7 @@ export function DatabaseAdministrationDialog({
       if (!nextOpen) resetForm();
       onOpenChange(nextOpen);
     }}>
-      <DialogContent className="flex h-[min(720px,80vh)] max-w-[780px] flex-col overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="flex h-[min(720px,80vh)] max-w-[780px] flex-col overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
           <DialogTitle className="text-[13px]">Database Administration{titleSuffix}</DialogTitle>
           <DialogDescription className="text-[11px] wb-muted">

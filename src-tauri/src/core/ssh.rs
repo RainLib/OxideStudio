@@ -1,22 +1,29 @@
 use crate::core::config::{SshJumpHostConfig, SshTunnelConfig};
 use crate::core::dialect::database_capabilities_for_driver;
 use anyhow::{anyhow, bail, Context, Result};
+use russh::client;
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
-use russh::{client, ChannelMsg, ChannelStream};
+#[cfg(feature = "desktop")]
+use russh::{ChannelMsg, ChannelStream};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::copy_bidirectional;
+#[cfg(feature = "desktop")]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, timeout_at, Instant};
 use url::Url;
+#[cfg(feature = "desktop")]
 use uuid::Uuid;
 
 const SSH_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const SSH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FORWARDING_CHANNELS: usize = 64;
+#[cfg(feature = "desktop")]
 const MAX_SSH_CAPTURE_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "desktop")]
 const MAX_SSH_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SSH_HOPS: usize = 4;
 
@@ -59,6 +66,7 @@ impl SshHop {
         }
     }
 
+    #[cfg(any(feature = "desktop", test))]
     fn identity(&self) -> String {
         format!(
             "{}@{}:{}",
@@ -117,12 +125,14 @@ impl client::Handler for SshClientHandler {
 /// One authenticated SSH session used by file-hosted database transports.
 /// It reuses the same strict known-hosts policy as TCP forwarding, but does
 /// not expose a general renderer-controlled shell API.
+#[cfg(feature = "desktop")]
 pub(crate) struct SshSession {
     session: client::Handle<SshClientHandler>,
     upstream_sessions: Vec<client::Handle<SshClientHandler>>,
     identity: String,
 }
 
+#[cfg(feature = "desktop")]
 impl SshSession {
     pub(crate) async fn connect(config: &SshTunnelConfig) -> Result<Self> {
         let identity = ssh_hops(config)?
@@ -371,6 +381,7 @@ impl SshSession {
     }
 }
 
+#[cfg(feature = "desktop")]
 async fn wait_for_exit_status(channel: &mut russh::Channel<client::Msg>) -> Option<u32> {
     let mut exit_status = None;
     loop {
@@ -384,6 +395,7 @@ async fn wait_for_exit_status(channel: &mut russh::Channel<client::Msg>) -> Opti
     }
 }
 
+#[cfg(feature = "desktop")]
 fn validate_exit_status(exit_status: Option<u32>) -> Result<()> {
     match exit_status {
         Some(0) => Ok(()),
@@ -392,6 +404,7 @@ fn validate_exit_status(exit_status: Option<u32>) -> Result<()> {
     }
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn shell_quote(path: &str) -> Result<String> {
     if path.trim().is_empty() || path.contains('\0') || path.contains('\n') || path.contains('\r') {
         bail!("Remote path is invalid");

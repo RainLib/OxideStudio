@@ -4,7 +4,7 @@ use super::access::{get_target_columns, query_data_compare_target_tracked};
 use super::compare_rows::{
     build_table_data_compare_result, data_compare_degradation_level,
     data_compare_key_columns_are_declared_unique, data_compare_row_count,
-    data_compare_transfer_endpoint, fetch_data_compare_extreme_keys, fetch_full_data_compare_rows,
+    data_compare_sample_coverage, data_compare_transfer_endpoint, fetch_full_data_compare_rows,
     fetch_sampled_data_compare_rows, merge_data_compare_sample_keys,
     normalized_data_compare_threshold, skipped_table_data_compare_result,
 };
@@ -12,6 +12,7 @@ use super::compare_runtime::{
     emit_running_table_data_compare_progress, emit_table_data_compare_progress,
     ensure_table_data_compare_not_cancelled, validate_table_data_compare_id,
 };
+use super::compare_sampling::fetch_data_compare_sample_keys;
 use super::compare_types::{
     TableDataCompareCancellationState, TableDataCompareDegradationLevel, TableDataCompareProgress,
     TableDataCompareProgressPhase, TableDataCompareProgressStatus, TableDataCompareRequest,
@@ -91,7 +92,11 @@ pub async fn compare_table_data_full(
         )?;
         let sampling_strategy = request
             .sampling_strategy
-            .unwrap_or(TableDataCompareSamplingStrategy::ExtremeValues);
+            .unwrap_or(TableDataCompareSamplingStrategy::Stratified);
+        let verification_method = match &sampling_strategy {
+            TableDataCompareSamplingStrategy::ExtremeValues => "extreme_key_sample",
+            TableDataCompareSamplingStrategy::Stratified => "stratified_key_sample",
+        };
         let enable_checksum = request.enable_checksum.unwrap_or(true);
         let (source_columns, target_columns) = tokio::try_join!(
             get_target_columns(
@@ -259,30 +264,21 @@ pub async fn compare_table_data_full(
                 );
                 let source_key_cancellation = compare_cancellation.clone();
                 let target_key_cancellation = compare_cancellation.clone();
+                let sample_progress = |endpoint, processed| emit_running_table_data_compare_progress(
+                    &app, &compare_id, TableDataCompareProgressPhase::SelectingSampleKeys,
+                    Some(endpoint), processed, Some(source_row_count), Some(target_row_count),
+                    Some("Selecting bounded shared sample keys"),
+                );
                 let (source_keys, target_keys) = tokio::try_join!(
-                    fetch_data_compare_extreme_keys(
-                        &app,
-                        &manager,
-                        &request.source,
-                        "source",
-                        &compare_id,
-                        &source_query_id,
-                        &source_key_cancellation,
-                        source_kind,
-                        &key_columns,
-                        threshold.sample_size,
+                    fetch_data_compare_sample_keys(
+                        &manager, &request.source, &source_query_id, &source_key_cancellation,
+                        source_kind, &key_columns, threshold.sample_size, source_row_count,
+                        &sampling_strategy, |processed| sample_progress("source", processed),
                     ),
-                    fetch_data_compare_extreme_keys(
-                        &app,
-                        &manager,
-                        &request.target,
-                        "target",
-                        &compare_id,
-                        &target_query_id,
-                        &target_key_cancellation,
-                        target_kind,
-                        &key_columns,
-                        threshold.sample_size,
+                    fetch_data_compare_sample_keys(
+                        &manager, &request.target, &target_query_id, &target_key_cancellation,
+                        target_kind, &key_columns, threshold.sample_size, target_row_count,
+                        &sampling_strategy, |processed| sample_progress("target", processed),
                     ),
                 )?;
                 ensure_table_data_compare_not_cancelled(&compare_cancellation)?;
@@ -291,34 +287,39 @@ pub async fn compare_table_data_full(
                 let target_sample_cancellation = compare_cancellation.clone();
                 let (source_rows, target_rows) = tokio::try_join!(
                     fetch_sampled_data_compare_rows(
-                        &app,
                         &manager,
                         &request.source,
-                        "source",
-                        &compare_id,
                         &source_sample_cancellation,
                         source_kind,
                         &columns,
                         &source_columns,
                         &key_columns,
                         &sampled_keys,
+                        |processed| emit_running_table_data_compare_progress(
+                            &app, &compare_id, TableDataCompareProgressPhase::FetchingRows,
+                            Some("source"), processed, Some(source_row_count), Some(target_row_count),
+                            Some("Reading rows for the shared sample keys"),
+                        ),
                     ),
                     fetch_sampled_data_compare_rows(
-                        &app,
                         &manager,
                         &request.target,
-                        "target",
-                        &compare_id,
                         &target_sample_cancellation,
                         target_kind,
                         &columns,
                         &target_columns,
                         &key_columns,
                         &sampled_keys,
+                        |processed| emit_running_table_data_compare_progress(
+                            &app, &compare_id, TableDataCompareProgressPhase::FetchingRows,
+                            Some("target"), processed, Some(source_row_count), Some(target_row_count),
+                            Some("Reading rows for the shared sample keys"),
+                        ),
                     ),
                 )?;
-                let maximum = source_row_count.max(target_row_count).max(1);
-                let sampling_rate = (sampled_keys.len() as f64 / maximum as f64).min(1.0);
+                let sampling_rate = data_compare_sample_coverage(
+                    source_rows.len(), target_rows.len(), source_row_count, target_row_count,
+                );
                 emit_running_table_data_compare_progress(
                     &app,
                     &compare_id,
@@ -341,7 +342,7 @@ pub async fn compare_table_data_full(
                     Some(sampling_strategy),
                     sampling_rate,
                     None,
-                    "extreme_key_sample",
+                    verification_method,
                     enable_checksum,
                     &compare_cancellation,
                 )

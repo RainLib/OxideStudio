@@ -60,7 +60,7 @@ export function ConnectionAppearancePicker({
       <PopoverContent
         align="end"
         sideOffset={5}
-        className="w-[316px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.4)]"
+        className="w-[316px] p-0"
       >
         <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2">
           <div className="text-[11px] font-semibold">Connection appearance</div>

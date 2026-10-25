@@ -26,6 +26,10 @@ import type {
   SqliteBackupRun,
   SqliteBackupRunTrigger,
   SqliteBackupSchedule,
+  SqliteBackupWorkerStatus,
+  SqliteBackupArtifactQuery,
+  SqliteBackupArtifactPage,
+  SqliteBackupDeletePreview,
   UpdateDatabaseAdminPasswordRequest,
 } from "../types";
 
@@ -133,6 +137,18 @@ export async function listSqliteBackupSchedules(): Promise<
   );
 }
 
+export async function getSqliteBackupWorkerStatus(): Promise<SqliteBackupWorkerStatus> {
+  return invokeWithInterceptors<SqliteBackupWorkerStatus>("get_sqlite_backup_worker_status");
+}
+
+export async function listSqliteBackupArtifacts(request: SqliteBackupArtifactQuery): Promise<SqliteBackupArtifactPage> {
+  return invokeWithInterceptors<SqliteBackupArtifactPage>("list_sqlite_backup_artifacts", { request });
+}
+
+export async function setSqliteBackupBackgroundEnabled(enabled: boolean): Promise<SqliteBackupWorkerStatus> {
+  return invokeWithInterceptors<SqliteBackupWorkerStatus>("set_sqlite_backup_background_enabled", { enabled });
+}
+
 export async function saveSqliteBackupSchedule(
   request: SaveSqliteBackupScheduleRequest,
 ): Promise<SqliteBackupSchedule> {
@@ -175,9 +191,13 @@ export async function cancelSqliteBackupRun(id: string): Promise<boolean> {
   });
 }
 
-export async function deleteSqliteBackupRun(id: string): Promise<boolean> {
+export async function previewSqliteBackupFileDelete(id: string): Promise<SqliteBackupDeletePreview> {
+  return invokeWithInterceptors<SqliteBackupDeletePreview>("preview_sqlite_backup_file_delete", { request: { id } });
+}
+
+export async function deleteSqliteBackupRun(id: string, confirmationToken?: string): Promise<boolean> {
   return invokeWithInterceptors<boolean>("delete_sqlite_backup_run", {
-    request: { id },
+    request: { id, confirmationToken },
   });
 }
 

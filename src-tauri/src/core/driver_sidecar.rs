@@ -23,12 +23,12 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 const MAX_DRIVER_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-type PendingDriverRequest = oneshot::Sender<Result<DriverResult, String>>;
+type PendingDriverRequest = oneshot::Sender<Result<DriverResponse, String>>;
 type PendingDriverRequests = Arc<Mutex<HashMap<u64, PendingDriverRequest>>>;
 
 pub struct DatabaseDriverSidecar {
     child: Arc<Mutex<Child>>,
-    stdin: Arc<Mutex<FramedWrite<ChildStdin, LinesCodec>>>,
+    stdin: Arc<Mutex<Option<FramedWrite<ChildStdin, LinesCodec>>>>,
     pending: PendingDriverRequests,
     next_request_id: AtomicU64,
     capabilities: DriverRuntimeCapabilities,
@@ -39,6 +39,27 @@ impl DatabaseDriverSidecar {
         package: &InstalledDriverPackage,
         registry: &DatabaseDriverPackageRegistry,
         host_version: &str,
+    ) -> Result<Self, String> {
+        Self::spawn_scoped(package, registry, host_version, None).await
+    }
+
+    /// Host-owned file sessions bind their cleanup directory before launch.
+    /// It is never copied from ambient environment or ordinary connections.
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) async fn spawn_file_query(
+        package: &InstalledDriverPackage,
+        registry: &DatabaseDriverPackageRegistry,
+        host_version: &str,
+        workspace: &Path,
+    ) -> Result<Self, String> {
+        Self::spawn_scoped(package, registry, host_version, Some(workspace)).await
+    }
+
+    async fn spawn_scoped(
+        package: &InstalledDriverPackage,
+        registry: &DatabaseDriverPackageRegistry,
+        host_version: &str,
+        workspace: Option<&Path>,
     ) -> Result<Self, String> {
         if package.status != DriverPackageStatus::Ready {
             return Err("Only a verified driver package can be launched".to_string());
@@ -59,6 +80,9 @@ impl DatabaseDriverSidecar {
             .kill_on_drop(true)
             .env_clear();
         copy_safe_environment(&mut command);
+        if let Some(workspace) = workspace {
+            command.env("OXIDE_FILE_QUERY_WORKSPACE", workspace);
+        }
         // The Java JDBC runtime is shared across signed vendor packages. Bind
         // its protocol identity from the verified manifest, never from a JAR
         // resource or package-controlled launcher argument.
@@ -101,7 +125,7 @@ impl DatabaseDriverSidecar {
         );
         let mut process = Self {
             child: Arc::new(Mutex::new(child)),
-            stdin: Arc::new(Mutex::new(FramedWrite::new(stdin, LinesCodec::new()))),
+            stdin: Arc::new(Mutex::new(Some(FramedWrite::new(stdin, LinesCodec::new())))),
             pending,
             next_request_id: AtomicU64::new(1),
             capabilities: DriverRuntimeCapabilities::default(),
@@ -159,6 +183,22 @@ impl DatabaseDriverSidecar {
         request: DriverRequest,
         request_timeout: Duration,
     ) -> Result<DriverResult, String> {
+        match self.request_response(request, request_timeout).await? {
+            DriverResponse::Ok(result) => Ok(result),
+            DriverResponse::Error(error) => Err(format!(
+                "Database driver error {}: {}",
+                error.code, error.message
+            )),
+        }
+    }
+
+    /// Distinguish an ordinary engine error from a lost transport. Session
+    /// owners can preserve a usable connection after SQL syntax errors.
+    pub(crate) async fn request_response(
+        &self,
+        request: DriverRequest,
+        request_timeout: Duration,
+    ) -> Result<DriverResponse, String> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if request_id == u64::MAX {
             return Err("Database driver request id overflow".to_string());
@@ -174,12 +214,20 @@ impl DatabaseDriverSidecar {
 
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(request_id, sender);
-        let send_result = timeout(request_timeout, async {
-            self.stdin.lock().await.send(message).await
+        let send_result = match timeout(request_timeout, async {
+            let mut input = self.stdin.lock().await;
+            input
+                .as_mut()
+                .ok_or_else(|| "Database driver input is closed".to_string())?
+                .send(message)
+                .await
+                .map_err(|error| format!("Cannot send database driver request: {error}"))
         })
         .await
-        .map_err(|_| "Database driver request timed out while sending".to_string())?
-        .map_err(|error| format!("Cannot send database driver request: {error}"));
+        {
+            Ok(result) => result,
+            Err(_) => Err("Database driver request timed out while sending".to_string()),
+        };
         if let Err(error) = send_result {
             self.pending.lock().await.remove(&request_id);
             return Err(error);
@@ -204,6 +252,13 @@ impl DatabaseDriverSidecar {
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn close_input_for_file_query_test(&self) {
+        // ChildStdin::shutdown does not close the Windows pipe handle. Drop
+        // it, exactly as OS process exit closes the Host's pipe descriptors.
+        drop(self.stdin.lock().await.take());
     }
 }
 
@@ -261,18 +316,11 @@ fn spawn_response_dispatcher(
                 Ok(response) => response,
                 Err(error) => break format!("Database driver returned invalid JSON: {error}"),
             };
-            let result = match response.response {
-                DriverResponse::Ok(result) => Ok(result),
-                DriverResponse::Error(error) => Err(format!(
-                    "Database driver error {}: {}",
-                    error.code, error.message
-                )),
-            };
             // A caller may have timed out locally and removed its pending
             // receiver before a slow sidecar finishes.  That late reply must
             // not poison unrelated requests that are still in flight.
             if let Some(sender) = pending.lock().await.remove(&response.id) {
-                let _ = sender.send(result);
+                let _ = sender.send(Ok(response.response));
             }
         };
         let pending = std::mem::take(&mut *pending.lock().await);

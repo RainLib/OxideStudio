@@ -1,8 +1,6 @@
 import { lspDiagnosticOverlapsOffsetRange } from "@/features/query-editor/model/completionProviderRuntime";
 import {
   isPublishDiagnosticsParams,
-  lspDiagnosticToMonacoMarker,
-  shouldApplyLspDiagnostics,
 } from "@/features/query-editor/model/lspMonacoAdapter";
 import {
   isMysqlRoutineParserDiagnostic,
@@ -16,8 +14,24 @@ import {
 } from "@/services/lsp";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
+import {createDiagnosticPublication} from "../model/diagnosticPublication";
+import {watchLspProviderContext,type LspProviderContextOptions} from "../model/lspProviderContext";
+import {subscribeLspDocumentShadow} from "../model/lspDocumentSync";
+import type {CompletionContextState} from "@/services/lsp/semanticContext";
+import {createDiagnosticRecovery} from "../model/diagnosticRecovery";
+import {captureDiagnosticSnapshot} from "../model/diagnosticSnapshotRequest";
+import type {DiagnosticSnapshot,DiagnosticSnapshotRequest} from "@/services/lsp/client/diagnostics";
+import type {PublishDiagnosticsParams} from "@/services/lsp/types";
+import {createSharedDiagnosticMarkers} from "../model/sharedDiagnosticMarkers";
+import {createSharedEditorMarkers} from "../model/sharedEditorMarkers";
 
-interface EditorDiagnosticsContext {
+interface EditorDiagnosticsContext extends LspProviderContextOptions {
+  documentUri:string;
+  diagnosticTabId?:string;
+  diagnosticDialect?:string;
+  syntaxContextKey?:string;
+  requestDiagnosticSnapshot?:(request:DiagnosticSnapshotRequest)=>Promise<DiagnosticSnapshot|null>;
+  subscribeDiagnostics?:(accept:(value:PublishDiagnosticsParams)=>void)=>Promise<()=>void>;
   monaco: typeof import("monaco-editor") | null;
   lspReady: boolean;
   lspSessionKey: string;
@@ -50,36 +64,25 @@ export function useEditorDiagnostics({
   mountedEditor,
   activeTab,
   driver,
+  documentUri,
+  diagnosticTabId,
+  getSemanticContext,
+  subscribeSemanticContext,
+  diagnosticDialect,syntaxContextKey,requestDiagnosticSnapshot,subscribeDiagnostics,
 }: EditorDiagnosticsContext) {
   useEffect(() => {
     if (!monaco || !lspReady) return;
 
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-
-    void listen<LspServerNotification>(LSP_NOTIFICATION_EVENT, (event) => {
-      if (
-        event.payload.sessionKey &&
-        event.payload.sessionKey !== lspSessionKey
-      ) {
-        return;
-      }
-      if (event.payload.method !== "textDocument/publishDiagnostics") return;
-      if (!isPublishDiagnosticsParams(event.payload.params)) return;
-
-      const { uri, diagnostics, version } = event.payload.params;
-      const model = monaco.editor.getModel(monaco.Uri.parse(uri));
-      if (!model) return;
-      if (
-        !shouldApplyLspDiagnostics({
-          diagnosticsVersion: version,
-          currentDocumentVersion: documentVersionsRef.current.get(uri),
-          modelText: model.getValue(),
-          synchronizedText: documentTextsRef.current.get(uri),
-        })
-      ) {
-        return;
-      }
+    const unavailable:CompletionContextState={connection:undefined,runtime:undefined,metadataVersion:0,projectId:"",route:"",generation:undefined,available:false,lspAllowed:false,metadataAllowed:false,syntaxAllowed:true};
+    const model=()=>monaco.editor.getModel(monaco.Uri.parse(documentUri));
+    const tabId=extractSqlDocumentTabId(documentUri)||diagnosticTabId;
+    const read=getSemanticContext||(()=>unavailable);
+    const shadow=()=>({version:documentVersionsRef.current.get(documentUri),text:documentTextsRef.current.get(documentUri)});
+    const markers=createSharedDiagnosticMarkers({monaco,model,read,shadow,session:lspSessionKey,dialect:diagnosticDialect,editor:mountedEditor,tabId,setDiagnostics:setLspDiagnostics});
+    const controller=createDiagnosticPublication({uri:documentUri,dialect:diagnosticDialect,read,model,
+      shadow,clear:markers.clear,
+      publish:(model,diagnostics)=>{
       const mysqlRoutineAnalysis = mysqlRoutineAnalysisForModel(model);
       const visibleDiagnostics = mysqlRoutineAnalysis
         ? diagnostics.filter(
@@ -90,29 +93,28 @@ export function useEditorDiagnostics({
               ),
           )
         : diagnostics;
-      const tabId = extractSqlDocumentTabId(uri);
-      if (tabId) {
-        setLspDiagnostics(tabId, visibleDiagnostics);
-      }
-
-      monaco.editor.setModelMarkers(
-        model,
-        "sql-lsp",
-        visibleDiagnostics.map((diagnostic) =>
-          lspDiagnosticToMonacoMarker(monaco, diagnostic),
-        ),
-      );
-    }).then((cleanup) => {
-      if (disposed) {
-        cleanup();
-      } else {
-        unlisten = cleanup;
-      }
+      markers.publish(model,visibleDiagnostics);
+    }});
+    const recovery=createDiagnosticRecovery({controller,
+      listen:subscribeDiagnostics||((accept)=>listen<LspServerNotification>(LSP_NOTIFICATION_EVENT,event=>{
+        if(disposed||event.payload.sessionKey!==lspSessionKey||event.payload.method!=="textDocument/publishDiagnostics"||!isPublishDiagnosticsParams(event.payload.params))return;
+        accept(event.payload.params);
+      })),
+      request:requestDiagnosticSnapshot||(()=>Promise.resolve(null)),
+      capture:mode=>captureDiagnosticSnapshot({uri:documentUri,dialect:diagnosticDialect,mode,read,model,shadow,isActive:()=>!disposed}),
     });
+    const refresh=()=>{markers.refresh();recovery.refresh();};
+    const releaseContext=watchLspProviderContext({getSemanticContext,subscribeSemanticContext},refresh);
+    const releaseShadow=subscribeLspDocumentShadow(documentVersionsRef.current,uri=>{if(uri===documentUri)refresh();});
+    const change=mountedEditor?.onDidChangeModelContent?.(refresh);
+    const modelChange=mountedEditor?.onDidChangeModel?.(refresh);
+    const focus=mountedEditor?.onDidFocusEditorText?.(()=>markers.refresh());
+    const blur=mountedEditor?.onDidBlurEditorText?.(()=>markers.refresh());
 
     return () => {
       disposed = true;
-      unlisten?.();
+      markers.dispose();
+      releaseContext();releaseShadow();change?.dispose();modelChange?.dispose();focus?.dispose();blur?.dispose();recovery.dispose();
     };
   }, [
     lspSessionKey,
@@ -120,6 +122,8 @@ export function useEditorDiagnostics({
     lspReady,
     mysqlRoutineAnalysisForModel,
     setLspDiagnostics,
+    documentUri,diagnosticTabId,getSemanticContext,subscribeSemanticContext,mountedEditor,documentVersionsRef,documentTextsRef,
+    diagnosticDialect,syntaxContextKey,requestDiagnosticSnapshot,subscribeDiagnostics,
   ]);
 
   useEffect(() => {
@@ -130,6 +134,7 @@ export function useEditorDiagnostics({
     const documentOffset = databaseError?.documentOffset;
     const documentEndOffset = databaseError?.documentEndOffset;
     const owner = "database-query";
+    const markers=createSharedEditorMarkers({monaco,model,editor:mountedEditor,layer:owner,contextKey:activeTab?.id??diagnosticTabId??documentUri});
 
     if (
       !databaseError ||
@@ -137,8 +142,8 @@ export function useEditorDiagnostics({
       documentOffset < 0 ||
       documentOffset > model.getValueLength()
     ) {
-      monaco.editor.setModelMarkers(model, owner, []);
-      return;
+      markers.publish([]);
+      return markers.dispose;
     }
 
     const start = model.getPositionAt(documentOffset);
@@ -148,7 +153,7 @@ export function useEditorDiagnostics({
         Math.max(documentOffset, documentEndOffset ?? documentOffset + 1),
       ),
     );
-    monaco.editor.setModelMarkers(model, owner, [
+    markers.publish([
       {
         severity: monaco.MarkerSeverity.Error,
         message: activeTab?.error || "Database query failed",
@@ -177,15 +182,15 @@ export function useEditorDiagnostics({
       },
     ]);
 
-    return () => {
-      monaco.editor.setModelMarkers(model, owner, []);
-    };
+    return markers.dispose;
   }, [
     activeTab?.error,
     activeTab?.id,
     activeTab?.queryError,
     monaco,
     mountedEditor,
+    documentUri,
+    diagnosticTabId,
   ]);
 
   useEffect(() => {
@@ -193,10 +198,9 @@ export function useEditorDiagnostics({
     const model = mountedEditor.getModel();
     if (!model) return;
     const owner = "oracle-syntax";
+    const markers=createSharedEditorMarkers({monaco,model,editor:mountedEditor,layer:owner,contextKey:driver});
     const diagnostics = buildOracleSyntaxDiagnostics(model.getValue(), driver);
-    monaco.editor.setModelMarkers(
-      model,
-      owner,
+    markers.publish(
       diagnostics.map((diagnostic) => {
         const start = model.getPositionAt(diagnostic.startOffset);
         const end = model.getPositionAt(diagnostic.endOffset);
@@ -212,23 +216,22 @@ export function useEditorDiagnostics({
         };
       }),
     );
-    return () => monaco.editor.setModelMarkers(model, owner, []);
-  }, [activeTab?.sql, driver, monaco, mountedEditor]);
+    return markers.dispose;
+  }, [activeTab?.id,activeTab?.sql,driver,monaco,mountedEditor,documentUri]);
 
   useEffect(() => {
     if (!monaco || !mountedEditor) return;
     const model = mountedEditor.getModel();
     if (!model) return;
     const owner = "mysql-routine-syntax";
+    const markers=createSharedEditorMarkers({monaco,model,editor:mountedEditor,layer:owner,contextKey:driver});
     if (!supportsMysqlRoutineSyntaxDiagnostics(driver)) {
-      monaco.editor.setModelMarkers(model, owner, []);
-      return;
+      markers.publish([]);
+      return markers.dispose;
     }
     const timer = window.setTimeout(() => {
       const analysis = mysqlRoutineAnalysisForModel(model);
-      monaco.editor.setModelMarkers(
-        model,
-        owner,
+      markers.publish(
         (analysis?.diagnostics || []).map((diagnostic) => {
           const start = model.getPositionAt(diagnostic.startOffset);
           const end = model.getPositionAt(diagnostic.endOffset);
@@ -245,20 +248,14 @@ export function useEditorDiagnostics({
         }),
       );
     }, 180);
-    return () => window.clearTimeout(timer);
+    return () => {window.clearTimeout(timer);markers.dispose();};
   }, [
     activeTab?.sql,
+    activeTab?.id,
     driver,
     monaco,
     mountedEditor,
     mysqlRoutineAnalysisForModel,
+    documentUri,
   ]);
-
-  useEffect(() => {
-    if (!monaco || !mountedEditor) return;
-    const model = mountedEditor.getModel();
-    if (!model) return;
-    return () =>
-      monaco.editor.setModelMarkers(model, "mysql-routine-syntax", []);
-  }, [monaco, mountedEditor]);
 }

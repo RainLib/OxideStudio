@@ -1,23 +1,33 @@
+#[cfg(feature = "desktop")]
+#[path = "build/backup_worker_identity.rs"]
+mod backup_worker_identity;
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(mobile)");
+    println!(
+        "cargo:rustc-env=OXIDE_RUST_TARGET_TRIPLE={}",
+        std::env::var("TARGET").expect("Cargo target is available")
+    );
+    expose_bundled_driver_versions();
+    #[cfg(feature = "desktop")]
+    configure_desktop();
+}
+
+#[cfg(feature = "desktop")]
+fn configure_desktop() {
     // Tauri embeds the application icon into the macOS development binary.
     // Track the source assets explicitly so replacing an icon invalidates the
     // generated context instead of leaving the previous Dock icon cached.
-    let desktop = std::env::var_os("CARGO_FEATURE_DESKTOP").is_some();
-    if desktop {
-        for icon in ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"] {
-            println!("cargo:rerun-if-changed={icon}");
-        }
+    for icon in ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"] {
+        println!("cargo:rerun-if-changed={icon}");
     }
-    expose_bundled_driver_versions();
-    if desktop {
-        configure_windows_test_manifest();
-    }
+    backup_worker_identity::expose();
+    configure_windows_test_manifest();
 
     // Development launches the TypeScript host through the installed Node 22
     // runtime. Production builds still require and bundle the self-contained
     // external binaries declared in tauri.conf.json.
-    if desktop && tauri_build::is_dev() && std::env::var_os("TAURI_CONFIG").is_none() {
+    if tauri_build::is_dev() && std::env::var_os("TAURI_CONFIG").is_none() {
         std::env::set_var("TAURI_CONFIG", r#"{"bundle":{"externalBin":[]}}"#);
     }
 
@@ -32,11 +42,10 @@ fn main() {
         .expect("enterprise Gateway client protocol must compile");
     println!("cargo:rerun-if-changed=../enterprise/gateway/proto/oxide_gateway.proto");
 
-    if desktop {
-        tauri_build::build();
-    }
+    tauri_build::build();
 }
 
+#[cfg(feature = "desktop")]
 fn configure_windows_test_manifest() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")

@@ -1,0 +1,138 @@
+/* Portals share workbench tokens without changing the surrounding page theme. */
+:root {
+  --wb-popup-dialog-shadow: 0 16px 48px hsl(220 18% 10% / .17);
+  --wb-popup-menu-shadow: 0 6px 18px hsl(220 18% 10% / .14);
+}
+.dark {
+  --wb-popup-dialog-shadow: 0 16px 48px hsl(0 0% 0% / .32);
+  --wb-popup-menu-shadow: 0 6px 18px hsl(0 0% 0% / .22);
+}
+.wb-popup {
+  --background: var(--wb-panel-raised);
+  --foreground: var(--wb-text);
+  --card: var(--wb-panel-raised);
+  --card-foreground: var(--wb-text);
+  --popover: var(--wb-panel-raised);
+  --popover-foreground: var(--wb-text);
+  --primary: var(--wb-accent);
+  --primary-foreground: var(--wb-accent-foreground);
+  --secondary: var(--wb-panel);
+  --secondary-foreground: var(--wb-text);
+  --muted: var(--wb-panel);
+  --muted-foreground: var(--wb-text-muted);
+  --accent: var(--wb-hover);
+  --accent-foreground: var(--wb-text);
+  --border: var(--wb-border);
+  --input: var(--wb-border);
+  --ring: var(--wb-accent);
+  --background-primary: var(--wb-editor);
+  --background-secondary: var(--wb-panel);
+  --background-tertiary: var(--wb-panel);
+  --background-elevated: var(--wb-panel-raised);
+  --border-subtle: var(--wb-border-subtle);
+  --border-divider: var(--wb-border);
+  --wb-surface: var(--wb-editor);
+  --wb-surface-raised: var(--wb-panel-raised);
+  --wb-surface-hover: var(--wb-hover);
+  --wb-text-secondary: var(--wb-text-muted);
+  --destructive: 350 58% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --wb-popup-warning-text: 35 90% 28%;
+  --wb-popup-success-text: 155 70% 28%;
+  --ui-control-height: 32px;
+  --ui-control-height-sm: 28px;
+  --ui-control-height-lg: 36px;
+  --ui-control-radius: 4px;
+  --ui-control-font-size: var(--wb-ui-font-size, 12px);
+  --wb-popup-enter: 180ms;
+  --wb-popup-exit: 120ms;
+  --wb-popup-from-x: 0px;
+  --wb-popup-from-y: 4px;
+  font-family: var(--wb-ui-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-size: var(--wb-ui-font-size, 12px);
+  line-height: 1.5;
+  scrollbar-color: hsl(var(--wb-border)) transparent;
+  caret-color: hsl(var(--wb-accent));
+  accent-color: hsl(var(--wb-accent));
+}
+
+.wb-popup :where(.text-xs, .text-\[11px\], .text-\[12px\], .text-sm, .text-\[14px\]) { font-size: var(--wb-ui-font-size, 12px); }
+.wb-popup :where(.text-\[10px\], .text-\[9px\]) { font-size: var(--wb-ui-font-size-sm, 11px); }
+.wb-popup :where(.text-\[13px\]) { font-size: var(--wb-ui-font-size-md, 13px); }
+.wb-popup .wb-dialog-title { font-size: var(--wb-ui-font-size-lg, 14px); line-height: 20px; }
+.wb-popup .wb-dialog-description { font-size: var(--wb-ui-font-size, 12px); line-height: 20px; }
+.wb-popup :where(input:not([type=checkbox]):not([type=radio]), select, textarea) { background-color: hsl(var(--wb-editor)); }
+.wb-popup :where(button, input, select, textarea):focus-visible { outline-color: hsl(var(--wb-accent)); }
+.wb-popup ::selection { background-color: hsl(var(--wb-active-strong)); }
+.wb-popup [data-popup-danger] { color: hsl(var(--wb-error-text)); }
+.wb-popup .text-destructive { color: hsl(var(--wb-error-text)); }
+.wb-popup :where(.text-red-200, .text-red-300, .text-red-400, .text-red-500, .text-red-600) { color: hsl(var(--wb-error-text)); }
+.wb-popup :where(.text-amber-200, .text-amber-300, .text-amber-400, .text-yellow-300, .text-yellow-400) { color: hsl(var(--wb-popup-warning-text)); }
+.wb-popup :where(.text-emerald-300, .text-emerald-400, .text-green-400) { color: hsl(var(--wb-popup-success-text)); }
+.dark .wb-popup { --wb-popup-warning-text: 38 90% 70%; --wb-popup-success-text: 160 60% 65%; }
+.wb-popup[data-state=closed] { pointer-events: none; }
+.wb-dialog[data-layout=standard] .wb-dialog-footer {
+  margin: 4px -20px -20px;
+  padding: 12px 20px;
+  border-top: 1px solid hsl(var(--wb-border-subtle));
+  background: hsl(var(--wb-panel));
+}
+.wb-dialog-close { color: hsl(var(--wb-text-muted)); }
+.wb-dialog-close:hover { color: hsl(var(--wb-text)); background: hsl(var(--wb-hover)); }
+.wb-dialog-overlay { background: hsl(0 0% 0% / .4); }
+:root:not(.dark) .wb-dialog-overlay { background: hsl(220 18% 10% / .22); }
+:root[data-appearance-density=comfortable] .wb-popup { --ui-control-height: 36px; --ui-control-height-sm: 32px; }
+
+.wb-popup[data-state=open], .wb-popup[data-state=delayed-open], .wb-popup[data-state=instant-open], .wb-popup[data-state=visible] {
+  animation: wb-popup-enter var(--wb-popup-enter) cubic-bezier(.16, 1, .3, 1);
+}
+.wb-popup[data-state=closed] { animation: wb-popup-exit var(--wb-popup-exit) ease-in; }
+.wb-dialog-overlay[data-state=open] { animation: wb-overlay-enter 180ms ease-out; }
+.wb-dialog-overlay[data-state=closed] { animation: wb-overlay-exit 120ms ease-in; }
+.wb-floating { --wb-popup-enter: 120ms; --wb-popup-exit: 80ms; --wb-popup-from-y: -2px; --wb-popup-exit-y: -1px; }
+.wb-floating[role=menu] {
+  max-height: min(var(--radix-popper-available-height, 100dvh), calc(100dvh - 16px));
+  max-width: calc(100vw - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.wb-floating[data-side=top] { --wb-popup-from-y: 2px; }
+.wb-floating[data-side=left] { --wb-popup-from-x: 2px; --wb-popup-from-y: 0px; }
+.wb-floating[data-side=right] { --wb-popup-from-x: -2px; --wb-popup-from-y: 0px; }
+.wb-tooltip { --wb-popup-enter: 100ms; --wb-popup-exit: 80ms; --wb-popup-from-y: 0px; --wb-popup-exit-y: 0px; }
+.monaco-editor .monaco-hover {
+  background-color: hsl(var(--wb-panel-raised)) !important;
+  color: hsl(var(--wb-text)) !important;
+  border-color: hsl(var(--wb-border)) !important;
+  border-radius: 6px;
+  box-shadow: var(--wb-popup-menu-shadow);
+  animation: wb-overlay-enter 100ms ease-out;
+}
+:root[data-reduce-motion=true] .monaco-editor .monaco-hover { animation-duration: .01ms !important; }
+@keyframes wb-popup-enter {
+  from { opacity: 0; transform: translate(var(--wb-popup-from-x), var(--wb-popup-from-y)); }
+  to { opacity: 1; transform: translate(0, 0); }
+}
+@keyframes wb-popup-exit {
+  from { opacity: 1; transform: translate(0, 0); }
+  to { opacity: 0; transform: translate(0, var(--wb-popup-exit-y, 2px)); }
+}
+@keyframes wb-overlay-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wb-overlay-exit { from { opacity: 1; } to { opacity: 0; } }
+:root[data-reduce-motion=true] :is(.wb-popup, .wb-dialog-overlay),
+:root[data-reduce-motion=true] .wb-popup *,
+:root[data-reduce-motion=true] .wb-popup *::before,
+:root[data-reduce-motion=true] .wb-popup *::after {
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-popup, .wb-dialog-overlay, .wb-popup *, .wb-popup *::before, .wb-popup *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

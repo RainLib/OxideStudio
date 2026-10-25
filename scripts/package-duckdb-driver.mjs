@@ -33,6 +33,7 @@ const CAPABILITIES = {
   identifierQuote: '"',
   defaultPort: 0,
   supportsSqlQuery: true,
+  fileQueryFormats: ["csv", "json", "jsonl", "parquet"],
   supportsTableBrowsing: true,
   tableExportFormats: ["csv", "json", "jsonl", "sql", "tsv", "xlsx", "parquet", "arrow"],
   supportsTableRowMutation: false,

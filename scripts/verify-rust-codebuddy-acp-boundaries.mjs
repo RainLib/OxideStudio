@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "src-tauri/src/ai_cli/codebuddy";
-const source = fs.readFileSync(path.join(root, `${base}.rs`), "utf8");
+const source = readSourceText(path.join(root, `${base}.rs`));
 
 for (const required of [
   "mod acp;",
@@ -21,7 +22,7 @@ for (const required of [
   }
 }
 
-const acp = fs.readFileSync(path.join(root, `${base}/acp.rs`), "utf8");
+const acp = readSourceText(path.join(root, `${base}/acp.rs`));
 for (const required of [
   "pub(super) async fn discover_catalog_via_acp",
   "pub(super) fn parse_available_commands",
@@ -34,7 +35,7 @@ for (const required of [
   }
 }
 
-const tests = fs.readFileSync(path.join(root, `${base}/tests.rs`), "utf8");
+const tests = readSourceText(path.join(root, `${base}/tests.rs`));
 for (const required of [
   "concurrent_capability_requests_share_one_discovery",
   "concurrent_effort_requests_share_one_model_scoped_discovery",

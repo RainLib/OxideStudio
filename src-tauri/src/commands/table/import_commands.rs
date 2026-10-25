@@ -1,24 +1,15 @@
 //! Import commands for table operations.
 
 use super::access::{ensure_target_relation_operation_allowed, get_target_columns};
-use super::import_csv::canonical_import_columns;
-use super::import_json::{
-    import_json_lines_in_transaction, is_json_lines_path, json_import_rows_with_cancel,
-};
-use super::import_preview::{
-    validate_import_file, verify_import_file_digest, xlsx_import_rows_with_cancel,
-};
-use super::import_transaction::{
-    import_csv_in_transaction, import_materialized_rows_in_transaction,
-};
+use super::import_preview::{validate_import_file, verify_import_file_digest};
+use super::import_transaction::{import_csv_in_transaction, import_streamed_rows_in_transaction};
 use super::import_types::{
     default_table_import_mode, TableCsvImportOptions, TableImportCancellationState,
     TableImportExecutionContext, TableImportFormat, TableImportMode, TableImportReport,
     TableImportReportStatus, TableImportResult,
 };
 use super::limits::{
-    MAX_IMPORT_ROWS, TABLE_IMPORT_CANCELLED, TABLE_IMPORT_REPORT_KIND,
-    TABLE_IMPORT_REPORT_PARENT_ID,
+    TABLE_IMPORT_CANCELLED, TABLE_IMPORT_REPORT_KIND, TABLE_IMPORT_REPORT_PARENT_ID,
 };
 use super::policy::{table_data_dialect_for_connection, RelationOperation};
 use super::reports::{
@@ -31,7 +22,6 @@ use crate::core::dialect::canonical_driver_name;
 use crate::core::manager::ConnectionManager;
 use crate::core::protocol::Response;
 use crate::core::store::MetaStore;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::AppHandle;
 use tauri::State;
@@ -86,7 +76,12 @@ pub async fn import_table_data(
             table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
         let path = PathBuf::from(file_path.trim());
         validate_import_file(&path, format)?;
-        verify_import_file_digest(&path, expected_file_digest.as_deref())?;
+        let digest_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            verify_import_file_digest(&digest_path, expected_file_digest.as_deref())
+        })
+        .await
+        .map_err(|error| format!("Import digest worker failed: {error}"))??;
         let database = database.as_deref();
         ensure_target_relation_operation_allowed(
             &manager,
@@ -135,83 +130,21 @@ pub async fn import_table_data(
                 report_id: None,
             });
         }
-        if matches!(format, TableImportFormat::Json) && is_json_lines_path(&path) {
-            let (rows_imported, batches) = import_json_lines_in_transaction(
-                &manager,
-                &connection_id,
-                kind,
-                &schema,
-                &table,
-                &column_lookup,
-                &path,
-                database,
-                mode,
-                &context,
-            )
-            .await?;
-            return Ok(TableImportResult {
-                import_id: import_id.clone(),
-                file_path: path.display().to_string(),
-                rows_imported,
-                batches,
-                report_id: None,
-            });
-        }
-        // JSON arrays and XLSX worksheets are bounded but materialized by
-        // blocking parsers. Keep that CPU/filesystem work off Tokio's command
-        // workers and propagate the active import cancellation flag into row
-        // conversion so query/LSP/cancel IPC remains responsive.
-        let parse_path = path.clone();
-        let parse_cancel_rx = context.cancel_rx.clone();
-        let source_rows = tauri::async_runtime::spawn_blocking(move || {
-            let is_cancelled = || *parse_cancel_rx.borrow();
-            match format {
-                TableImportFormat::Json => json_import_rows_with_cancel(&parse_path, &is_cancelled),
-                TableImportFormat::Xlsx => {
-                    xlsx_import_rows_with_cancel(&parse_path, &is_cancelled).map(|rows| rows.2)
-                }
-                // CSV and JSONL return before this branch so the source
-                // remains streamable rather than materializing every row.
-                TableImportFormat::Csv => unreachable!("CSV import returned above"),
-            }
-        })
-        .await
-        .map_err(|error| format!("Import parser worker failed: {error}"))??;
-        context.ensure_not_cancelled()?;
-        if source_rows.len() > MAX_IMPORT_ROWS {
-            return Err(format!(
-                "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
-            ));
-        }
-        let pending_rows = source_rows
-            .into_iter()
-            .map(|row| {
-                let headers = row.keys().cloned().collect::<Vec<_>>();
-                let canonical_headers = canonical_import_columns(&headers, &column_lookup)?;
-                Ok(headers
-                    .into_iter()
-                    .zip(canonical_headers)
-                    .filter_map(|(source, target)| {
-                        row.get(&source).cloned().map(|value| (target, value))
-                    })
-                    .collect::<BTreeMap<_, _>>())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let materialized_context = context.with_total_rows(Some(pending_rows.len() as u64));
-        let (rows_imported, batches) = import_materialized_rows_in_transaction(
+        let (rows_imported, batches) = import_streamed_rows_in_transaction(
             &manager,
             &connection_id,
             kind,
             &schema,
             &table,
             &column_lookup,
-            pending_rows,
+            &path,
+            format,
             database,
             mode,
-            &materialized_context,
+            &context.cancel_rx,
+            &|rows, batches| context.emit_running(rows, batches),
         )
         .await?;
-
         Ok(TableImportResult {
             import_id: import_id.clone(),
             file_path: path.display().to_string(),

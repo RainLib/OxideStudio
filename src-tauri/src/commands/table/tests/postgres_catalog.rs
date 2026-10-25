@@ -19,6 +19,8 @@ fn generates_postgres_table_ddl_from_columns() {
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
+                character_set: None,
+                collation: None,
             },
             ColumnInfo {
                 name: "email".to_string(),
@@ -33,6 +35,8 @@ fn generates_postgres_table_ddl_from_columns() {
                 comment: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
+                character_set: None,
+                collation: None,
             },
         ],
         &[

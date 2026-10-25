@@ -77,6 +77,53 @@ pub(super) fn read_active_version(driver_root: &Path) -> Option<String> {
         })
 }
 
+/// Unlike discovery, execution must distinguish no selection from an invalid
+/// selection. An unreadable/corrupt marker must never enable bundled fallback.
+pub(super) fn read_active_version_strict(driver_root: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    for (name, json) in [("activation.json", true), ("current", false)] {
+        let file = match fs::File::open(driver_root.join(name)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(driver_root.join(name)) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    _ => return Err("Driver activation exists but cannot be read".into()),
+                }
+            }
+            Err(error) => return Err(format!("Cannot read driver activation: {error}")),
+        };
+        let mut bytes = Vec::new();
+        file.take(16 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("Cannot read driver activation: {error}"))?;
+        if bytes.len() > 16 * 1024 {
+            return Err("Driver activation exceeds 16 KiB".into());
+        }
+        let version = if json {
+            let state: DriverActivationState = serde_json::from_slice(&bytes)
+                .map_err(|_| "Driver activation is invalid JSON".to_string())?;
+            if state
+                .previous
+                .as_deref()
+                .is_some_and(|value| !is_safe_token(value))
+            {
+                return Err("Driver activation previous version is invalid".into());
+            }
+            state.current
+        } else {
+            String::from_utf8(bytes)
+                .map_err(|_| "Driver activation is not UTF-8".to_string())?
+                .trim()
+                .to_string()
+        };
+        if !is_safe_token(&version) {
+            return Err("Driver activation selected version is invalid".into());
+        }
+        return Ok(Some(version));
+    }
+    Ok(None)
+}
+
 pub(super) fn read_activation_state(driver_root: &Path) -> Option<DriverActivationState> {
     let path = driver_root.join("activation.json");
     let metadata = fs::metadata(&path).ok()?;

@@ -42,7 +42,9 @@
             "binaries/sql-lsp": "sql-lsp",
             "binaries/sql-lsp.exe": "sql-lsp.exe",
             "binaries/sql-lsp.manifest.json": "sql-lsp.manifest.json",
-            "binaries/sql-lsp.exe.manifest.json": "sql-lsp.exe.manifest.json"
+            "binaries/sql-lsp.exe.manifest.json": "sql-lsp.exe.manifest.json",
+            "../vendor/sql-lsp/UNICODE-LICENSE.txt": "sql-lsp.UNICODE-LICENSE.txt",
+            "../vendor/sql-lsp/PINYIN-LICENSE.txt": "sql-lsp.PINYIN-LICENSE.txt"
         },
         "externalBin": [
             "binaries/oxide-agent-host",

@@ -31,6 +31,7 @@ import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTaskStore } from "@/store/useTaskStore";
 import { v4 as uuidv4 } from "uuid";
 import type { TabSlice } from "../types";
+import { runFileQuery } from "./fileQuery";
 
 /** Owns query execution, retry, result projection, and execution-history lifecycle. */
 export const createRunQueryAction: TabSlice<"runTabQuery"> = (set, get) => ({
@@ -43,6 +44,7 @@ export const createRunQueryAction: TabSlice<"runTabQuery"> = (set, get) => ({
   ) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
+    if (tab.fileQuery) return runFileQuery(set, get, id, sqlOverride);
 
     const editorQuery = sqlOverride || tab.sql;
     if (!editorQuery.trim()) return;

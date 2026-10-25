@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
+import { validateDriverPackageFiles } from "./driver-package-files.mjs";
+import { validateSqlLookupFixture, verifySqlLookupContext, SQL_LOOKUP_CHECKS } from "./driver-sql-lookup-conformance.mjs";
 
-export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.2.0";
+export const DRIVER_CONFORMANCE_RUNNER_VERSION = "1.3.0";
 export const CATALOG_CONFORMANCE_OPERATIONS = Object.freeze([
   "connect",
   "metadata",
@@ -40,24 +42,8 @@ export function sha256Bytes(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function sha256File(path) {
-  return sha256Bytes(await readFile(path));
-}
-
 function assert(condition, message) {
   if (!condition) throw new Error(message);
-}
-
-function packageFile(packageRoot, value, label) {
-  assert(typeof value === "string" && value.length > 0, `${label} is required`);
-  assert(!isAbsolute(value), `${label} must be package-relative`);
-  const path = resolve(packageRoot, value);
-  const boundary = relative(packageRoot, path);
-  assert(
-    boundary && boundary !== ".." && !boundary.startsWith(`..${delimiter}`) && !isAbsolute(boundary),
-    `${label} escapes the package root`,
-  );
-  return path;
 }
 
 function safeChildEnvironment(extra = {}) {
@@ -82,31 +68,11 @@ function safeChildEnvironment(extra = {}) {
   return { ...env, ...extra };
 }
 
-async function packageLaunch(manifest, packageRoot, javaBinary) {
-  const entrypoint = packageFile(packageRoot, manifest.entrypoint, "Driver entrypoint");
-  assert((await stat(entrypoint).catch(() => null))?.isFile(), "Driver entrypoint is missing");
-  assert(
-    (await sha256File(entrypoint)).toLowerCase() === String(manifest.sha256 || "").toLowerCase(),
-    "Driver entrypoint SHA-256 does not match the package manifest",
-  );
-
+function packageLaunch(manifest, files, javaBinary) {
+  const entrypoint = files.entrypoint;
   if (manifest.runtime?.kind === "java") {
     assert(javaBinary, "Java driver conformance requires --java <managed-java-binary>");
-    const classpath = [entrypoint];
-    for (const item of manifest.runtime.classpath || []) {
-      const path = packageFile(packageRoot, item.path, "Java classpath entry");
-      assert((await stat(path).catch(() => null))?.isFile(), "Java classpath entry is missing");
-      assert(
-        (await sha256File(path)).toLowerCase() === String(item.sha256 || "").toLowerCase(),
-        "Java classpath SHA-256 does not match the package manifest",
-      );
-      classpath.push(path);
-    }
-    return {
-      command: resolve(javaBinary),
-      args: ["-cp", classpath.join(delimiter), manifest.runtime.mainClass],
-      entrypoint,
-    };
+    return { command: resolve(javaBinary), args: ["-cp", [entrypoint, ...files.classpath].join(delimiter), manifest.runtime.mainClass], entrypoint };
   }
   assert(!manifest.runtime || manifest.runtime.kind === "native", "Unsupported driver runtime kind");
   return { command: entrypoint, args: [], entrypoint };
@@ -369,6 +335,7 @@ function validateManifestFixture(manifest, fixture) {
   assert((fixture.query.parameters || []).length > 0, "Query conformance requires at least one bound parameter");
   assert(fixture.errorMapping?.statement, "Conformance fixture must include an error-mapping check");
   assert((fixture.errorMapping.expectedCodes || []).length > 0, "Error-mapping check requires expectedCodes");
+  validateSqlLookupFixture(fixture.sqlLookupContext);
   const declaresDatabaseCatalogs = manifest.capabilities?.supportsDatabaseCatalogs === true;
   if (declaresDatabaseCatalogs) {
     assert(fixture.databaseScope?.statement, "Database-catalog packages require a databaseScope query fixture");
@@ -409,10 +376,9 @@ export async function runDriverConformance({
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   const fixture = JSON.parse(fixtureBytes.toString("utf8"));
   validateManifestFixture(manifest, fixture);
-  const packageRoot = dirname(resolve(manifestPath));
-  const launch = launchOverride || await packageLaunch(manifest, packageRoot, javaBinary);
-  const entrypoint = packageFile(packageRoot, manifest.entrypoint, "Driver entrypoint");
-  assert((await sha256File(entrypoint)).toLowerCase() === String(manifest.sha256).toLowerCase(), "Driver entrypoint SHA-256 does not match the package manifest");
+  const files = await validateDriverPackageFiles(manifest, dirname(resolve(manifestPath)));
+  const packageRoot = files.root;
+  const launch = launchOverride || packageLaunch(manifest, files, javaBinary);
   const connection = resolveConnection(fixture, environment);
   const connectionId = `conformance-${createHash("sha256").update(`${manifest.driverId}:${fixture.id}`).digest("hex").slice(0, 16)}`;
   const recorder = operationRecorder();
@@ -443,6 +409,8 @@ export async function runDriverConformance({
       assert(String(handshake.protocolVersion).split(".")[0] === String(manifest.protocolVersion).split(".")[0], "Handshake protocol major mismatch");
       const declared = manifest.capabilities || {};
       const runtime = handshake.capabilities || {};
+      if (runtime.sqlLookupContext === true) assert(fixture.sqlLookupContext, "SQL lookup-capable runtime requires a sqlLookupContext fixture");
+      if (fixture.sqlLookupContext) assert(runtime.sqlLookupContext === true && runtime.metadata === true, "Runtime did not prove SQL lookup context capability");
       if (declared.supportsSqlQuery) assert(runtime.query === true, "Runtime did not prove query capability");
       if (declared.supportsTableBrowsing) assert(runtime.metadata === true, "Runtime did not prove metadata capability");
       if (declared.supportsQueryCancellation) assert(runtime.cancellation === true, "Runtime did not prove cancellation capability");
@@ -490,15 +458,21 @@ export async function runDriverConformance({
       });
     }
 
-    if ((fixture.metadata || []).length > 0) {
-      await recorder.run("metadata", fixture.metadata.map((item) => item.id), async () => {
-        for (const item of fixture.metadata) {
+    if ((fixture.metadata || []).length > 0 || fixture.sqlLookupContext) {
+      const checks = [...(fixture.metadata || []).map(item => item.id), ...(fixture.sqlLookupContext ? SQL_LOOKUP_CHECKS : [])];
+      await recorder.run("metadata", [...new Set(checks)], async () => {
+        for (const item of fixture.metadata || []) {
           const value = assertResultKind(await client.request("metadata", {
             connection_id: connectionId,
             request: item.request,
           }), "metadata");
           assertValue(value, item.expect);
         }
+        if (fixture.sqlLookupContext) await verifySqlLookupContext({
+          fixture: fixture.sqlLookupContext,
+          metadata: async database => assertResultKind(await client.request("metadata", { connection_id: connectionId, request: { kind: "sqlLookupContext", database } }), "metadata"),
+          query: async query => assertQueryResult(assertResultKind(await client.request("query", queryParams(connectionId, query)), "query"), query.expect),
+        });
       });
     }
 

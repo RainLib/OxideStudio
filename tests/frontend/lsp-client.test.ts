@@ -10,6 +10,23 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("LSP client", () => {
+  it("propagates document transport failures so a lifecycle cannot commit a failed revision", async () => {
+    const client = new LspClient("document:fixture"); mocks.invoke.mockResolvedValueOnce("initialized");
+    await client.initialize("/fixture/sql-lsp");
+    mocks.invoke.mockRejectedValueOnce(new Error("open transport failed"));
+    await expect(client.didOpen("oxide-file-query://project/file.sql", "SELECT 1", 1, "sql")).rejects.toThrow("open transport failed");
+    mocks.invoke.mockRejectedValueOnce(new Error("change transport failed"));
+    await expect(client.didChange("oxide-file-query://project/file.sql", "SELECT 2", 2)).rejects.toThrow("change transport failed");
+  });
+  it("keeps default format fallback while allowing callers to require real success", async () => {
+    const client = new LspClient("document:format-errors");
+    await expect(client.formatDocument("fixture.sql", 2, true, true)).rejects.toThrow("not ready");
+    mocks.invoke.mockResolvedValueOnce("initialized"); await client.initialize("/fixture/sql-lsp");
+    mocks.invoke.mockRejectedValueOnce(new Error("default failure"));
+    await expect(client.formatDocument("fixture.sql", 2, true)).resolves.toEqual([]);
+    mocks.invoke.mockRejectedValueOnce(new Error("strict failure"));
+    await expect(client.formatDocument("fixture.sql", 2, true, true)).rejects.toThrow("strict failure");
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -165,4 +182,36 @@ describe("LSP client", () => {
       data: { symbol: 42 },
     });
   });
+});
+
+
+describe("process incarnation observation",()=>{
+  it("changes its opaque generation on actual initialize, disconnect, restart and shutdown",async()=>{
+    mocks.invoke.mockReset();const client=new LspClient("file-query:runtime"),listener=vi.fn(),release=client.subscribeRuntime(listener),initial=client.getRuntimeSnapshot();
+    mocks.invoke.mockResolvedValueOnce("initialized");await client.initialize("/fixture/sql-lsp");const first=client.getRuntimeSnapshot();expect(first.ready).toBe(true);expect(first.generation).not.toBe(initial.generation);
+    client.markDisconnected();const closed=client.getRuntimeSnapshot();expect(closed.ready).toBe(false);expect(closed.generation).not.toBe(first.generation);
+    mocks.invoke.mockResolvedValueOnce("initialized");await client.initialize("/fixture/sql-lsp");expect(client.getRuntimeSnapshot().generation).not.toBe(first.generation);
+    mocks.invoke.mockResolvedValueOnce("shutdown");await client.shutdown();expect(client.getRuntimeSnapshot().ready).toBe(false);expect(listener).toHaveBeenCalledTimes(4);release();
+  });
+  it("keeps a stable snapshot for an already-running process and repeated disconnected observations",async()=>{
+    mocks.invoke.mockReset();const client=new LspClient("file-query:stable");mocks.invoke.mockResolvedValueOnce("initialized");await client.initialize("/fixture/sql-lsp");const snapshot=client.getRuntimeSnapshot(),listener=vi.fn();client.subscribeRuntime(listener);
+    mocks.invoke.mockResolvedValueOnce(true);await client.initialize("/fixture/sql-lsp");expect(client.getRuntimeSnapshot()).toBe(snapshot);expect(listener).not.toHaveBeenCalled();
+    client.markDisconnected();const closed=client.getRuntimeSnapshot();client.markDisconnected();expect(client.getRuntimeSnapshot()).toBe(closed);expect(listener).toHaveBeenCalledOnce();
+  });
+  it("does not announce readiness or reuse a grant when initialization fails",async()=>{
+    mocks.invoke.mockReset();const client=new LspClient("file-query:failed"),snapshot=client.getRuntimeSnapshot(),listener=vi.fn();client.subscribeRuntime(listener);
+    mocks.invoke.mockRejectedValueOnce(new Error("cannot initialize"));await expect(client.initialize("/fixture/sql-lsp")).rejects.toThrow("cannot initialize");expect(client.getRuntimeSnapshot()).toBe(snapshot);expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+it("rejects a receipt from a previous process after the same client restarts",async()=>{
+  mocks.invoke.mockReset();mocks.invoke.mockResolvedValueOnce("initialized");const client=new LspClient("receipt:restart");await client.initialize("/fixture/sql-lsp");
+  let resolve!:(value:unknown)=>void;mocks.invoke.mockImplementationOnce(()=>new Promise(done=>{resolve=done;}));const pending=client.confirmAnalysisConfiguration("current");
+  client.markDisconnected();mocks.invoke.mockResolvedValueOnce("initialized");await client.initialize("/fixture/sql-lsp");resolve({applied:true,oxideAnalysisToken:"current"});
+  expect(await pending).toBe(false);
+});
+it("accepts configuration confirmation only for the current running client",async()=>{
+  mocks.invoke.mockReset();const client=new LspClient("receipt:current");expect(await client.confirmAnalysisConfiguration("current")).toBe(false);expect(mocks.invoke).not.toHaveBeenCalled();
+  mocks.invoke.mockResolvedValueOnce("initialized");await client.initialize("/fixture/sql-lsp");mocks.invoke.mockResolvedValueOnce({applied:true,oxideAnalysisToken:"current"});
+  expect(await client.confirmAnalysisConfiguration("current")).toBe(true);
 });

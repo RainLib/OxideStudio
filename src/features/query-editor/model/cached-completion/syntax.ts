@@ -1,4 +1,4 @@
-import { unquoteIdentifier } from "./lexical";
+import { unquoteIdentifier, NON_ALIAS_KEYWORDS } from "./lexical";
 
 export const UNQUOTED_SQL_IDENTIFIER =
   '[_\\p{ID_Start}][$@#_\\u200c\\u200d\\p{ID_Continue}]*';
@@ -9,11 +9,16 @@ export const SQL_IDENTIFIER =
 // segment visible to splitQualifiedIdentifier instead of letting the matcher
 // stop after the first identifier.
 export const QUALIFIED_RELATION_IDENTIFIER =
-  `(?:(?:${SQL_IDENTIFIER}\\s*\\.\\s*)?${SQL_IDENTIFIER}\\s*\\.\\s*\\.\\s*${SQL_IDENTIFIER}|${SQL_IDENTIFIER}(?:\\s*\\.\\s*${SQL_IDENTIFIER}){0,3})`;
+  `(?:${SQL_IDENTIFIER}(?:\\s*\\.\\s*(?:${SQL_IDENTIFIER})?){0,2}\\s*\\.\\s*${SQL_IDENTIFIER}|${SQL_IDENTIFIER})(?![$@#_\\u200c\\u200d\\p{ID_Continue}]|\\s*\\.)`;
+const RELATION_ALIAS_IDENTIFIER = `(?!(?:${[...NON_ALIAS_KEYWORDS].join("|")})\\b)${SQL_IDENTIFIER}`;
 export const TRAILING_IDENTIFIER_FRAGMENT =
   `(?:"[^"]*|\`[^\`]*|\\[[^\\]]*|${UNQUOTED_SQL_IDENTIFIER})`;
 export const RELATION_MATCHER = new RegExp(
-  `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${QUALIFIED_RELATION_IDENTIFIER})\\s*(?:as\\s+)?(${SQL_IDENTIFIER})?`,
+  `\\b(from|join|update|into|apply)\\s+(?:lateral\\s+)?(${QUALIFIED_RELATION_IDENTIFIER})\\s*(?:as\\s+)?(${RELATION_ALIAS_IDENTIFIER})?`,
+  "giu",
+);
+export const COMMA_RELATION_MATCHER = new RegExp(
+  `,\\s*(${QUALIFIED_RELATION_IDENTIFIER})\\s*(?:as\\s+)?(${RELATION_ALIAS_IDENTIFIER})?`,
   "giu",
 );
 export const TRAILING_QUALIFIER = new RegExp(
@@ -32,9 +37,9 @@ export const RELATION_TARGET_CONTEXT_MATCHER = new RegExp(
   `\\b(?:from|join|into|update|truncate\\s+table|alter\\s+table|drop\\s+(?:table|view)|describe|desc)\\s+((?:${SQL_IDENTIFIER}\\s*\\.\\s*)*(?:${TRAILING_IDENTIFIER_FRAGMENT})?)$`,
   "iu",
 );
-export const SUBQUERY_RELATION_MATCHER = /\b(?:from|join|apply)\s+(?:lateral\s+)?\(/giu;
+export const SUBQUERY_RELATION_MATCHER = /(?:\b(?:from|join|apply)\s+|,\s*)(?:lateral\s+)?\(/giu;
 export const TABLE_FUNCTION_RELATION_MATCHER = new RegExp(
-  `\\b(?:from|join|apply)\\s+(?:lateral\\s+)?${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*\\s*\\(`,
+  `(?:\\b(?:from|join|apply)\\s+|,\\s*)(?:lateral\\s+)?(${SQL_IDENTIFIER}(?:\\.${SQL_IDENTIFIER})*)\\s*\\(`,
   "giu",
 );
 export const COMPLETE_QUALIFIED_IDENTIFIER_MATCHER = new RegExp(

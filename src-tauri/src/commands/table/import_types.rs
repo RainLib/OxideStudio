@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri::Emitter;
+
+pub(super) type ImportRow = BTreeMap<String, Value>;
 use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 

@@ -170,12 +170,25 @@ pub async fn connect_agent_read_only_driver(
     let normalized_requested = requested_driver.to_ascii_lowercase();
     let canonical_driver =
         canonical_driver_name(requested_driver).unwrap_or(normalized_requested.as_str());
+    if canonical_driver == "mongodb" && mongodb::mongodb_url_uses_oidc(url) {
+        return Err(anyhow::anyhow!(
+            "MongoDB OIDC browser authentication is unavailable to headless agents"
+        ));
+    }
     if canonical_driver == "sqlite" {
         let mut driver = sqlite::SqliteDriver::new_read_only(url)?;
         driver
             .connect()
             .await
             .context("Failed to open SQLite in read-only mode")?;
+        return Ok(Box::new(driver));
+    }
+    if canonical_driver == "mongodb" {
+        let mut driver = mongodb::MongoDbDriver::new_agent_owned(url);
+        driver
+            .connect()
+            .await
+            .context("Failed to connect to MongoDB")?;
         return Ok(Box::new(driver));
     }
     connect_driver(driver, url).await
@@ -206,25 +219,12 @@ pub async fn connect_agent_read_only_preferred_driver(
             "MongoDB OIDC browser authentication is unavailable to headless agents"
         ));
     }
-    let active_external = registry.list_installed().into_iter().any(|package| {
-        package.active
-            && package
-                .manifest
-                .driver_id
-                .eq_ignore_ascii_case(canonical_driver)
-    });
-    if package_version.is_none() && !active_external {
+    let package = registry
+        .resolve_preferred(canonical_driver, package_version)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let Some(package) = package else {
         return connect_agent_read_only_driver(canonical_driver, url).await;
-    }
-
-    let package = match package_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(version) => registry.resolve_version(canonical_driver, version),
-        None => registry.resolve_active(canonical_driver),
-    }
-    .map_err(|error| anyhow::anyhow!(error))?;
+    };
     let mut driver = external::ExternalDriver::new_agent_read_only(
         package,
         registry.clone(),
@@ -266,25 +266,12 @@ pub async fn connect_preferred_driver(
     if canonical_driver == "mongodb" && mongodb::mongodb_url_uses_oidc(url) {
         return connect_driver(canonical_driver, url).await;
     }
-    let active_external = registry.list_installed().into_iter().any(|package| {
-        package.active
-            && package
-                .manifest
-                .driver_id
-                .eq_ignore_ascii_case(canonical_driver)
-    });
-    if package_version.is_none() && !active_external {
+    let package = registry
+        .resolve_preferred(canonical_driver, package_version)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let Some(package) = package else {
         return connect_driver(canonical_driver, url).await;
-    }
-
-    let package = match package_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(version) => registry.resolve_version(canonical_driver, version),
-        None => registry.resolve_active(canonical_driver),
-    }
-    .map_err(|error| anyhow::anyhow!(error))?;
+    };
     let mut driver =
         external::ExternalDriver::new(package, registry.clone(), connection_id, url.to_string());
     driver

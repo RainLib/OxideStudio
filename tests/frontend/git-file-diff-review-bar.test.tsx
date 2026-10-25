@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 /**
  * @vitest-environment happy-dom
  */
@@ -60,7 +61,7 @@ describe("Git diff editor review controls", () => {
     mocks.applyPatch.mockResolvedValue({ message: "Patch applied." });
     mocks.refresh.mockResolvedValue(undefined);
     mocks.openProjectGitDiffInEditor.mockResolvedValue("git-diff-tab");
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.mocked(confirmAction).mockReset().mockResolvedValue(true);
   });
 
   afterEach(async () => {
@@ -111,7 +112,7 @@ describe("Git diff editor review controls", () => {
       button(container, "Discard hunk").click();
       await flush();
     });
-    expect(window.confirm).toHaveBeenCalled();
+    expect(confirmAction).toHaveBeenCalled();
     expect(mocks.applyPatch).toHaveBeenCalledWith(
       "project-1",
       expect.stringContaining("@@ -1 +1 @@"),
@@ -169,3 +170,5 @@ async function flush() {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+vi.mock("@/lib/appDialogs", () => ({ confirmAction: vi.fn(async () => true) }));

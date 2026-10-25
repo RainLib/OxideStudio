@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { Command } from "cmdk";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useTabStore } from "@/store/useTabStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -31,12 +32,14 @@ import {
   type SearchableDatabaseObject,
 } from "@/lib/searchEverywhere";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
+import { useI18n } from "@/i18n";
 
 export function CommandPalette({
   initiallyOpen = false,
 }: {
   initiallyOpen?: boolean;
 }) {
+  const { locale } = useI18n();
   const [open, setOpen] = useState(initiallyOpen);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -56,7 +59,7 @@ export function CommandPalette({
   const savedSqlFiles = useSavedQueryStore((state) => state.files);
   const openSavedSqlFile = useSavedQueryStore((state) => state.openFile);
   const keymap = useSettingsStore((state) => state.settings.keymap);
-  const actions = useMemo(() => workbenchActions(), []);
+  const actions = useMemo(() => workbenchActions(), [locale]);
   const databaseObjects = useMemo(
     () => searchableDatabaseObjects(schemas, tables, currentSchema),
     [currentSchema, schemas, tables],
@@ -241,19 +244,14 @@ export function CommandPalette({
     }
   };
 
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/25 px-4 pt-[14vh]">
-      <button
-        type="button"
-        className="fixed inset-0 cursor-default"
-        aria-label="Close command palette"
-        onClick={() => setOpen(false)}
-      />
+    <Dialog open={open} onOpenChange={setOpen}>
+    <DialogContent layout="custom" showCloseButton={false} className="top-[14vh] max-w-[680px] translate-y-0 overflow-hidden">
+      <DialogTitle className="sr-only">Search everywhere</DialogTitle>
+      <DialogDescription className="sr-only">Search actions, objects, files, tabs and data sources.</DialogDescription>
       <Command
         shouldFilter={false}
-        className="relative w-full max-w-[680px] overflow-hidden rounded-[7px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[12px] text-[hsl(var(--wb-text))] shadow-[0_22px_70px_rgba(0,0,0,0.48)]"
+        className="relative w-full overflow-hidden text-[12px]"
         onKeyDown={(event) => {
           if (event.key === "Escape") setOpen(false);
         }}
@@ -423,7 +421,8 @@ export function CommandPalette({
           )}
         </Command.List>
       </Command>
-    </div>
+    </DialogContent>
+    </Dialog>
   );
 }
 

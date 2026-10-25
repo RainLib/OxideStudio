@@ -55,7 +55,7 @@ export function SchemaStructuredDraftDialogView(props: SchemaStructuredDraftDial
         if (!next) void closeWithPersist();
       }}
     >
-      <DialogContent className="grid h-[min(800px,calc(100vh-24px))] w-[min(1120px,calc(100vw-24px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="grid h-[min(800px,calc(100vh-24px))] w-[min(1120px,calc(100vw-24px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">

@@ -1,5 +1,18 @@
 import type { IPosition, IRange, languages } from "monaco-editor";
 import type { InlineLspContext } from "@/services/tauri/ai.service";
+import {cachedIdentifierRange} from "./cached-completion/identifierEdits";
+import {sqlCompletionIdentifierFragment} from "./sqlCompletionTriggerPolicy";
+import {localInlineSuggestion} from "@/lib/inlineCompletion";
+
+/** Only a known SQL identifier can consume the rest of its current member.
+ * AI prose, snippets and path punctuation never receive this replacement. */
+export function inlineIdentifierSuffixLength(options:{prefix:string;text:string;context:InlineLspContext;model:any;monaco:any;position:IPosition}){
+  const candidate=options.context.candidates?.find(value=>[5,6,7].includes(value.kind??-1)&&localInlineSuggestion(options.prefix,{candidates:[value]})===options.text);
+  const fragment=sqlCompletionIdentifierFragment(options.prefix);
+  if(!candidate||fragment.unsupported||fragment.openingQuote)return 0;
+  const range=cachedIdentifierRange(options.monaco,options.model,options.position,fragment);
+  return Math.max(0,range.endColumn-options.position.column);
+}
 
 /** Semantic context enriches AI; a restarting language server must not gate it. */
 export async function optionalInlineLspContext(options: {
@@ -44,11 +57,12 @@ export function inlineCompletionEdit(options: {
   text: string;
   position: IPosition;
   selectedSuggestion?: languages.SelectedSuggestionInfo;
+  replaceSuffixLength?:number;
   model: {
     getLineMaxColumn(lineNumber: number): number;
     getValueInRange(range: IRange): string;
   };
-}): { insertText: string; range: IRange } | null {
+}): { insertText: string; range: IRange;isInlineEdit?:boolean } | null {
   const { position, model, selectedSuggestion: selected } = options;
   if (!options.text) return null;
   const text =
@@ -57,13 +71,16 @@ export function inlineCompletionEdit(options: {
       ? options.text.split("\n", 1)[0]
       : options.text;
   if (!text) return null;
+  const suffixLength=Number.isSafeInteger(options.replaceSuffixLength)&&options.replaceSuffixLength!>0
+    ?Math.min(options.replaceSuffixLength!,Math.max(0,model.getLineMaxColumn(position.lineNumber)-position.column)):0;
   const pointRange = {
     startLineNumber: position.lineNumber,
     startColumn: position.column,
     endLineNumber: position.lineNumber,
-    endColumn: position.column,
+    endColumn: position.column+suffixLength,
   };
-  if (!selected) return { insertText: text, range: pointRange };
+  const inlineEdit=suffixLength?{isInlineEdit:true}:{};
+  if (!selected) return { insertText: text, range: pointRange,...inlineEdit };
   const range = selected.range;
   if (
     selected.isSnippetText ||
@@ -72,8 +89,9 @@ export function inlineCompletionEdit(options: {
     range.startColumn > position.column ||
     range.endColumn < position.column
   ) return null;
+  const replacementRange={...range,endColumn:Math.max(range.endColumn,position.column+suffixLength)};
   const before = model.getValueInRange({ ...range, endColumn: position.column });
-  const after = model.getValueInRange({ ...range, startColumn: position.column });
+  const after = model.getValueInRange({ ...replacementRange, startColumn:position.column+suffixLength });
   const insertText = before + text + after;
-  return insertText.startsWith(selected.text) ? { insertText, range } : null;
+  return insertText.startsWith(selected.text) ? { insertText, range:replacementRange,...inlineEdit } : null;
 }

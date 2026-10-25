@@ -45,8 +45,8 @@ describe("AssistantConversationMinimap", () => {
   let root: Root | null = null;
   let host: HTMLDivElement | null = null;
 
-  afterEach(() => {
-    root?.unmount();
+  afterEach(async () => {
+    await act(async () => { root?.unmount(); });
     root = null;
     host?.remove();
     host = null;
@@ -93,7 +93,9 @@ describe("AssistantConversationMinimap", () => {
         ?.getAttribute("aria-label"),
     ).toContain("Question 1");
     expect(navigation?.textContent).not.toContain("Read schema metadata");
-    expect(navigation?.textContent).toContain("The users table has five columns");
+    const inspectAnchor = navigation?.querySelector<HTMLButtonElement>('button[aria-label*="Inspect the current database"]');
+    await act(async () => { inspectAnchor?.focus(); });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("The users table has five columns");
 
     await act(async () => {
       navigation

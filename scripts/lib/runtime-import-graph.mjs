@@ -36,7 +36,7 @@ function resolveLocal(root, importer, specifier) {
       fs.existsSync(candidate) &&
       fs.statSync(candidate).isFile()
     ) {
-      return path.relative(root, candidate);
+      return path.relative(root, candidate).split(path.sep).join("/");
     }
   }
   return null;

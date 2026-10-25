@@ -4,8 +4,10 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.io.OutputStreamWriter;
 import java.io.Reader;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
@@ -57,8 +59,8 @@ public final class DriverMain {
   });
 
   public static void main(String[] args) throws Exception {
-    try (BufferedReader input = new BufferedReader(new InputStreamReader(System.in));
-         PrintWriter output = new PrintWriter(System.out, true)) {
+    try (BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+         PrintWriter output = new PrintWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8), true)) {
       for (String line; (line = input.readLine()) != null;) {
         long id = 0;
         try {
@@ -124,6 +126,7 @@ public final class DriverMain {
   private static Map<String, Object> handshake() {
     Map<String, Object> capabilities = new LinkedHashMap<>();
     capabilities.put("metadata", true); capabilities.put("query", true); capabilities.put("cancellation", true);
+    capabilities.put("sqlLookupContext", isSqlServerDriver());
     capabilities.put("transactions", false); capabilities.put("databaseScopedQueries", true); capabilities.put("databaseCreation", true);
     // Primary, imported and exported keys are part of the portable JDBC
     // DatabaseMetaData contract. Package capabilities still decide whether
@@ -413,6 +416,7 @@ public final class DriverMain {
     Connection connection = connection(params); Map<String, Object> request = object(params.get("request")); String kind = text(request.get("kind"));
     DatabaseMetaData metadata = connection.getMetaData();
     return switch (kind) {
+      case "sqlLookupContext" -> sqlLookupContext(connectionId(params), connection, request);
       case "databases" -> strings(metadata.getCatalogs(), "TABLE_CAT");
       // JDBC metadata may expose the same schema name under multiple
       // catalogs (for example SQL Server and DB2). Preserve the optional
@@ -508,6 +512,30 @@ public final class DriverMain {
   }
 
   private static boolean isOracleDriver() { return "oracle".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")); }
+  private static boolean isSqlServerDriver() { return "sqlserver".equalsIgnoreCase(System.getenv("OXIDE_DRIVER_ID")); }
+
+  /** The engine resolves the user's default in the requested database. This
+   * does not use Explorer's schema selection and does not assert that catalog
+   * enumeration can prove an object's absence under restricted permissions. */
+  private static Object sqlLookupContext(String connectionId, Connection connection, Map<String, Object> request) throws SQLException {
+    if (!isSqlServerDriver()) return null;
+    Map<String, Object> context = new LinkedHashMap<>();
+    context.put("database", request.get("database"));
+    try (QueryContext ignored = QueryContext.apply(connectionId, connection, context);
+         PreparedStatement statement = connection.prepareStatement("SELECT DB_NAME(), SCHEMA_NAME()")) {
+      configureQueryStatement(statement);
+      try (ResultSet rows = statement.executeQuery()) {
+        if (!rows.next()) throw new SQLException("SQL lookup context returned no row");
+        String database = rows.getString(1), schema = rows.getString(2);
+        if (rows.next()) throw new SQLException("SQL lookup context returned multiple rows");
+        if (database == null || database.isBlank() || schema == null || schema.isBlank()) return null;
+        String requestedDatabase = nullable(request.get("database"));
+        if (requestedDatabase != null && !requestedDatabase.equals(database)) throw new SQLException("SQL lookup context database mismatch");
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("database", database); result.put("defaultSchema", schema); return result;
+      }
+    }
+  }
 
   private static String oracleObjectType(String objectType) {
     if (objectType == null) return null;

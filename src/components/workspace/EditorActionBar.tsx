@@ -119,11 +119,11 @@ interface EditorActionBarProps {
 }
 
 const dialogClass =
-  "flex max-h-[76vh] max-w-2xl flex-col gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]";
+  "flex max-h-[76vh] max-w-2xl flex-col gap-0 overflow-hidden p-0";
 const historyDialogClass =
-  "flex h-[min(720px,76vh)] max-w-4xl flex-col gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]";
+  "flex h-[min(720px,76vh)] max-w-4xl flex-col gap-0 overflow-hidden p-0";
 const menuClass =
-  "min-w-[230px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
+  "min-w-[230px] p-1 text-[12px]";
 const menuItemClass =
   "h-7 cursor-default rounded-[3px] px-2 text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
 
@@ -388,7 +388,7 @@ export function EditorActionBar({
               <History size={13} />
             </button>
           </DialogTrigger>
-          <DialogContent className={historyDialogClass}>
+          <DialogContent layout="custom" className={historyDialogClass}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
               <DialogTitle className="text-[13px]">Query History</DialogTitle>
             </DialogHeader>
@@ -460,7 +460,7 @@ export function EditorActionBar({
               </PopoverTrigger>
               <PopoverContent
                 align="end"
-                className="w-80 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_24px_rgba(0,0,0,0.36)]"
+                className="w-80 p-0"
               >
                 <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2">
                   <div className="text-[11px] font-semibold">
@@ -548,7 +548,7 @@ export function EditorActionBar({
               <Star size={13} />
             </button>
           </DialogTrigger>
-          <DialogContent className={dialogClass}>
+          <DialogContent layout="custom" className={dialogClass}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
               <DialogTitle className="text-[13px]">SQL Library</DialogTitle>
             </DialogHeader>
@@ -602,7 +602,7 @@ export function EditorActionBar({
               <BookmarkPlus size={13} />
             </button>
           </DialogTrigger>
-          <DialogContent className="w-[360px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.44)] [&>button.absolute]:right-2 [&>button.absolute]:top-2 [&>button.absolute]:flex [&>button.absolute]:h-5 [&>button.absolute]:w-5 [&>button.absolute]:items-center [&>button.absolute]:justify-center">
+          <DialogContent layout="custom" className="w-[360px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0 [&>button.absolute]:right-2 [&>button.absolute]:top-2 [&>button.absolute]:flex [&>button.absolute]:h-5 [&>button.absolute]:w-5 [&>button.absolute]:items-center [&>button.absolute]:justify-center">
             <DialogHeader className="flex h-9 flex-row items-center gap-2 space-y-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)] px-3">
               <BookmarkPlus size={12} className="text-[hsl(var(--wb-accent))]" />
               <DialogTitle className="text-[12px]">

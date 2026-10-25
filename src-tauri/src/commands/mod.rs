@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod ai;
+pub mod app_update;
 pub mod cache;
 /// Commands module
 /// 将所有 Tauri commands 按功能模块组织
@@ -8,6 +9,8 @@ pub mod database;
 pub mod database_admin;
 pub mod database_search;
 pub mod document;
+pub mod file_query;
+pub mod large_transfer;
 pub mod lsp;
 pub mod mcp_http;
 pub mod mq;
@@ -18,6 +21,7 @@ pub mod query;
 pub mod saved_sql_io;
 pub mod schema;
 pub mod schema_diff;
+pub mod semantic_context;
 pub mod settings;
 pub mod sqlite_backup;
 pub mod sqlite_backup_schedule;

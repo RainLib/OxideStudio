@@ -1,4 +1,4 @@
-import { confirmDiscardTabChanges } from "@/features/workspace-tabs/model/tabLifecycle";
+import { confirmCurrentTabChanges } from "@/features/workspace-tabs/model/confirmTabAction";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
 import { tableService } from "@/services/tauri";
 import type { TableSort } from "@/services/tauri/types";
@@ -24,10 +24,10 @@ export const createTablePagingSlice: TabSlice<"loadTablePage"> = (
 
     if (
       !options?.discardDraftsConfirmed &&
-      !confirmDiscardTabChanges(
-        [tab],
+      !(await confirmCurrentTabChanges(
+        () => get().tabs.filter((candidate) => candidate.id === tabId),
         options?.discardAction || "reload the table data",
-      )
+      ))
     ) {
       return false;
     }

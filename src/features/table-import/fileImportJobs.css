@@ -1,0 +1,22 @@
+.file-import-jobs * {
+  scrollbar-color: hsl(var(--muted-foreground) / 0.55) transparent;
+  scrollbar-width: thin;
+}
+
+.file-import-jobs ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.file-import-jobs ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.file-import-jobs ::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.55);
+  border-radius: 4px;
+}
+
+.file-import-jobs ::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}

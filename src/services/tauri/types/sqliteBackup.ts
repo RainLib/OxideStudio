@@ -41,6 +41,7 @@ export type SqliteBackupScheduleFrequency = "hourly" | "daily" | "weekly";
 export type SqliteBackupCompression = "none" | "gzip";
 
 export type SqliteBackupRunStatus =
+  | "queued"
   | "running"
   | "success"
   | "failed"
@@ -58,6 +59,8 @@ export interface SaveSqliteBackupScheduleRequest {
   frequency: SqliteBackupScheduleFrequency;
   intervalHours: number;
   timeOfDay: string;
+  /** IANA zone; "system" follows the machine. Omission preserves an existing zone. */
+  timeZone?: string;
   /** Sunday = 0 through Saturday = 6. */
   weekday: number;
   retentionCount: number;
@@ -75,6 +78,9 @@ export interface SqliteBackupSchedule {
   frequency: SqliteBackupScheduleFrequency;
   intervalHours: number;
   timeOfDay: string;
+  /** Missing legacy value follows the machine's current time zone. */
+  timeZone?: string | null;
+  schedulingError?: string | null;
   weekday: number;
   retentionCount: number;
   compression: SqliteBackupCompression;
@@ -103,4 +109,33 @@ export interface SqliteBackupRun {
   integrityCheck?: string | null;
   progressPercent: number;
   error?: string | null;
+  cancelRequested?: boolean;
+}
+
+export interface SqliteBackupWorkerStatus {
+  backgroundEnabled: boolean;
+  running: boolean;
+  upgrading?: boolean;
+  message?: string | null;
+}
+
+export interface SqliteBackupArtifactQuery {
+  projectId?: string;
+  scheduleId?: string;
+  search?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface SqliteBackupArtifactPage {
+  items: SqliteBackupRun[];
+  nextCursor: string | null;
+}
+
+export interface SqliteBackupDeletePreview {
+  id: string;
+  filePath: string | null;
+  byteLen: number | null;
+  reviewRequired: boolean;
+  confirmationToken: string | null;
 }

@@ -29,6 +29,30 @@ run_live_tests() {
   echo "Running live database integration tests"
   cargo test --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test live_database -- --nocapture
 
+  echo "Running PostgreSQL/MySQL stratified sampled comparisons"
+  cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --lib sampled_compare_live_ -- --ignored --nocapture --test-threads=1
+
+  echo "Running PostgreSQL durable transfer scenarios"
+  cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test large_transfer_jobs postgres_transfer_ -- --ignored --nocapture --test-threads=1
+
+  echo "Running MySQL transfer engine contract"
+  cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test large_transfer_jobs mysql::mysql_transfer_engine_contract -- --exact --ignored --nocapture
+
+  echo "Running MySQL durable transfer scenarios"
+  cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test large_transfer_jobs mysql_transfer_ -- --skip mysql::mysql_transfer_engine_contract --ignored --nocapture --test-threads=1
+
+  if [[ "${OXIDE_LIVE_POSTGRES_MILLION:-0}" == "1" ]]; then
+    export OXIDE_POSTGRES_TRANSFER_EVIDENCE="${OXIDE_POSTGRES_TRANSFER_EVIDENCE:-${ROOT_DIR}/postgres-million-evidence.json}"
+    echo "Running PostgreSQL million-row process recovery and memory acceptance"
+    cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test large_transfer_jobs postgres::process::postgres_million_row_transfer_survives_process_kill -- --exact --ignored --nocapture
+  fi
+
+  if [[ "${OXIDE_LIVE_MYSQL_MILLION:-0}" == "1" ]]; then
+    export OXIDE_MYSQL_TRANSFER_EVIDENCE="${OXIDE_MYSQL_TRANSFER_EVIDENCE:-${ROOT_DIR}/mysql-million-evidence.json}"
+    echo "Running MySQL million-row process recovery and memory acceptance"
+    cargo test --locked --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" --test large_transfer_jobs mysql::jobs::process::mysql_million_row_transfer_survives_process_kill -- --exact --ignored --nocapture
+  fi
+
   echo "Running existing ignored live driver smoke tests"
   cargo test --manifest-path "${ROOT_DIR}/src-tauri/Cargo.toml" test_get_schemas -- --ignored --nocapture
 }
@@ -175,8 +199,7 @@ docker run -d \
   -e MYSQL_USER="${DB_USER}" \
   -e MYSQL_PASSWORD="${DB_PASSWORD}" \
   -p "127.0.0.1:${MYSQL_PORT}:3306" \
-  "${MYSQL_IMAGE}" \
-  --default-authentication-plugin=mysql_native_password >/dev/null
+  "${MYSQL_IMAGE}" >/dev/null
 
 echo "Starting Redis on 127.0.0.1:${REDIS_PORT}"
 docker run -d \
@@ -206,6 +229,16 @@ wait_for_redis
 wait_for_mongodb
 wait_for_elasticsearch
 grant_mysql_lifecycle_privileges
+
+echo "Live database image references and resolved image IDs:"
+docker inspect --format '{{.Name}} {{.Config.Image}} {{.Image}}' \
+  "${PG_CONTAINER}" "${MYSQL_CONTAINER}" "${REDIS_CONTAINER}" \
+  "${MONGO_CONTAINER}" "${ELASTICSEARCH_CONTAINER}"
+echo "Live PostgreSQL server version:"
+docker exec "${PG_CONTAINER}" psql -U "${DB_USER}" -d "${DB_NAME}" -Atc 'SELECT version();'
+echo "Live MySQL server version:"
+docker exec -e MYSQL_PWD="${DB_PASSWORD}" "${MYSQL_CONTAINER}" \
+  mysql -u"${DB_USER}" -D"${DB_NAME}" --batch --skip-column-names -e 'SELECT VERSION();'
 
 export TEST_POSTGRES_URL="postgres://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${PG_PORT}/${DB_NAME}"
 export TEST_MYSQL_URL="mysql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${MYSQL_PORT}/${DB_NAME}"

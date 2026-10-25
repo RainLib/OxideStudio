@@ -235,10 +235,10 @@ export function createTableImportActions({
     setCsvImportSource(null);
     setIsCsvImportSubmitting(false);
     if (
-      !confirmDiscardTableChanges(
+      !(await confirmDiscardTableChanges(
         activeTab.id,
         "refresh the table after importing CSV rows",
-      )
+      ))
     ) {
       const message =
         "Rows were imported. Existing unsaved table changes were preserved; submit or revert them before refreshing.";
@@ -364,10 +364,10 @@ export function createTableImportActions({
       finishTask(taskId, `${importedRowCount} rows imported`);
       setJsonImportSource(null);
       if (
-        !confirmDiscardTableChanges(
+        !(await confirmDiscardTableChanges(
           activeTab.id,
           "refresh the table after importing JSON rows",
-        )
+        ))
       ) {
         updateTask(taskId, {
           detail: `${importedRowCount} rows imported; refresh skipped to preserve drafts`,
@@ -427,10 +427,10 @@ export function createTableImportActions({
       finishTask(taskId, `${importedRowCount} rows imported`);
       setXlsxImportSource(null);
       if (
-        !confirmDiscardTableChanges(
+        !(await confirmDiscardTableChanges(
           activeTab.id,
           "refresh the table after importing XLSX rows",
-        )
+        ))
       ) {
         updateTask(taskId, {
           detail: `${importedRowCount} rows imported; refresh skipped to preserve drafts`,

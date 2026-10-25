@@ -85,7 +85,7 @@ export function SidebarStatusBar({
             </div>
           </PopoverTrigger>
           <PopoverContent
-            className="w-64 p-2 bg-background-elevated border-border text-foreground"
+            className="w-64 p-2 border-border text-foreground"
             align="start"
             side="top"
           >

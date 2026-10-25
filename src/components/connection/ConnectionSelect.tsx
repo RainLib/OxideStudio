@@ -92,7 +92,7 @@ export function ConnectionSelect({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-[var(--radix-popover-trigger-width)] min-w-[240px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]"
+        className="w-[var(--radix-popover-trigger-width)] min-w-[240px] p-1"
       >
         <div className="relative mb-1 flex h-7 items-center">
           <Search size={12} className="pointer-events-none absolute left-2 wb-muted" />

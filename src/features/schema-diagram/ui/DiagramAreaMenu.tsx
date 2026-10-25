@@ -38,7 +38,7 @@ export function DiagramAreaMenu({
           {area.name} · {area.visibleRelationCount}/{area.relationNames.length}
         </button>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-48 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+      <ContextMenuContent className="w-48">
         <ContextMenuItem
           className="gap-2 text-[10px]"
           onClick={() => beginRenameArea(area.id)}

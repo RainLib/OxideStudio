@@ -16,6 +16,8 @@ export interface ColumnInfo {
     identity_generation?: "always" | "byDefault";
     is_generated?: boolean;
     is_hidden?: boolean;
+    character_set?: string | null;
+    collation?: string | null;
     default_value?: string;
     comment?: string;
 }

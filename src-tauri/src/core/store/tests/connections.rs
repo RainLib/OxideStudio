@@ -1,6 +1,81 @@
 use super::super::*;
 
 #[tokio::test]
+async fn read_only_credentials_reuse_desktop_crypto_without_creating_a_key_or_migrating_rows() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let store = MetaStore::for_test(pool);
+    let original = serde_json::json!({
+        "id":"readonly", "url":"postgres://fixture:fixture-password@example.test/db",
+        "password":"fixture-password", "sshTunnel":{
+            "host":"bastion.example.test", "password":"ssh-fixture",
+            "jumpHosts":[{"host":"hop.example.test","privateKeyPassphrase":"hop-fixture"}]
+        }
+    });
+    let (safe, protected) = store
+        .protect_connection_config("project-a", "readonly", &original)
+        .unwrap();
+    let protected = protected.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let key_path = directory.path().join(CONNECTION_CREDENTIAL_KEY_FILE);
+    let mut restored = safe.clone();
+    assert!(restore_read_only_connection_credentials(
+        directory.path(),
+        "project-a",
+        "readonly",
+        &mut restored,
+        &protected.ciphertext,
+        &protected.nonce
+    )
+    .is_err());
+    assert!(
+        !key_path.exists(),
+        "read-only clients must never create a credential key"
+    );
+    std::fs::write(&key_path, [7_u8; CONNECTION_CREDENTIAL_KEY_BYTES]).unwrap();
+    restore_read_only_connection_credentials(
+        directory.path(),
+        "project-a",
+        "readonly",
+        &mut restored,
+        &protected.ciphertext,
+        &protected.nonce,
+    )
+    .unwrap();
+    assert_eq!(restored, original);
+    for (project, connection) in [
+        ("other-project", "readonly"),
+        ("project-a", "other-connection"),
+    ] {
+        assert!(restore_read_only_connection_credentials(
+            directory.path(),
+            project,
+            connection,
+            &mut safe.clone(),
+            &protected.ciphertext,
+            &protected.nonce
+        )
+        .is_err());
+    }
+    assert!(restore_read_only_connection_credentials(
+        directory.path(),
+        "project-a",
+        "readonly",
+        &mut safe.clone(),
+        &protected.ciphertext,
+        &[1, 2]
+    )
+    .is_err());
+    assert_eq!(
+        std::fs::read(&key_path).unwrap(),
+        vec![7_u8; CONNECTION_CREDENTIAL_KEY_BYTES]
+    );
+}
+
+#[tokio::test]
 async fn connection_credentials_are_encrypted_outside_metadata_json() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)

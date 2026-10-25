@@ -8,8 +8,15 @@ import { QueryEditorSurface } from "@/features/query-editor/ui/QueryEditorSurfac
 import { SqlBatchColumnDialog } from "./SqlBatchColumnDialog";
 import { SqlParametersPanel } from "./SqlParametersPanel";
 import { SqlScriptImportDialog } from "./SqlScriptImportDialog";
+import { useTabStore } from "@/store/useTabStore";
+import { FileQueryEditor } from "@/features/file-query/FileQueryEditor";
 
-export function QueryEditor({
+export function QueryEditor(props: QueryEditorProps = {}) {
+  const tab = useTabStore(state => state.tabs.find(tab => tab.id === (props.tabId ?? state.activeTabId)));
+  return tab?.fileQuery ? <FileQueryEditor tab={tab} /> : <DatabaseQueryEditor {...props} />;
+}
+
+function DatabaseQueryEditor({
   tabId,
   isActivePane = true,
   onActivate,

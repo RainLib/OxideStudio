@@ -44,6 +44,8 @@ fn full_data_compare_keyset_uses_bound_values_and_lexicographic_order() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "id".to_string(),
@@ -58,6 +60,8 @@ fn full_data_compare_keyset_uses_bound_values_and_lexicographic_order() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ];
     let (predicate, params) = data_compare_keyset_continuation(

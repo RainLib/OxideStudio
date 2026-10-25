@@ -60,7 +60,7 @@ export function DatabaseSearchDialogView({
   } = controller;
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && closeDialog()}>
-      <DialogContent className="grid h-[min(760px,calc(100vh-32px))] w-[min(960px,calc(100vw-32px))] max-w-none grid-rows-[auto_auto_auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_18px_48px_rgba(0,0,0,0.42)] [&>button]:right-3 [&>button]:top-3">
+      <DialogContent layout="custom" className="grid h-[min(760px,calc(100vh-32px))] w-[min(960px,calc(100vw-32px))] max-w-none grid-rows-[auto_auto_auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 [&>button]:right-3 [&>button]:top-3">
         <DialogHeader className="space-y-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 pr-11 text-left">
           <div className="flex items-center gap-2">
             <Search size={14} className="text-[hsl(var(--wb-accent))]" />

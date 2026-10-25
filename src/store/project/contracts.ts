@@ -8,7 +8,7 @@ export interface ProjectState {
   isLoading: boolean;
   loadProjects: () => Promise<void>;
   reconcileManagedProjects: () => void;
-  setActiveProject: (projectId: string) => boolean;
+  setActiveProject: (projectId: string) => Promise<boolean>;
   createProject: (name: string, rootPath?: string | null) => Promise<Project>;
   deleteProject: (projectId: string) => Promise<void>;
 }

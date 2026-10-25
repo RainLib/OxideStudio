@@ -395,6 +395,8 @@ impl DatabaseDriver for RemoteSqliteDriver {
                     identity_generation: None,
                     is_generated: Some(hidden >= 2),
                     is_hidden: Some(hidden == 1),
+                    character_set: None,
+                    collation: None,
                     default_value: string_at(row, default),
                     comment: None,
                 })

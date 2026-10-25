@@ -67,34 +67,38 @@ impl ConnectionManager {
         transaction_id: Option<String>,
         query_id: Option<String>,
     ) -> Result<Vec<crate::core::protocol::QueryResult>> {
-        let driver = self.get_driver(id).await?;
-        let query_id = query_id.as_deref();
-        if let Some(transaction_id) =
-            transaction_id.filter(|transaction_id| !transaction_id.trim().is_empty())
-        {
-            return driver
-                .query_transaction_tracked(query_id, &transaction_id, sql)
-                .await;
-        }
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                let query_id = query_id.as_deref();
+                if let Some(transaction_id) =
+                    transaction_id.filter(|transaction_id| !transaction_id.trim().is_empty())
+                {
+                    return driver
+                        .query_transaction_tracked(query_id, &transaction_id, sql)
+                        .await;
+                }
 
-        // Priority: 1. Explicit schema, 2. Active schema for session, 3. Default
-        if let Some(schema) = query_schema {
-            driver
-                .query_with_context_tracked(query_id, sql, &schema)
-                .await
-        } else {
-            let schema = {
-                let schemas = self.active_schemas.lock().await;
-                schemas.get(id).cloned()
-            };
-            if let Some(schema) = schema {
-                driver
-                    .query_with_context_tracked(query_id, sql, &schema)
-                    .await
-            } else {
-                driver.query_tracked(query_id, sql).await
-            }
-        }
+                // Priority: 1. Explicit schema, 2. Active schema for session, 3. Default
+                if let Some(schema) = query_schema {
+                    driver
+                        .query_with_context_tracked(query_id, sql, &schema)
+                        .await
+                } else {
+                    let schema = {
+                        let schemas = self.active_schemas.lock().await;
+                        schemas.get(id).cloned()
+                    };
+                    if let Some(schema) = schema {
+                        driver
+                            .query_with_context_tracked(query_id, sql, &schema)
+                            .await
+                    } else {
+                        driver.query_tracked(query_id, sql).await
+                    }
+                }
+            })
+            .await
     }
 
     pub async fn query_native_page(
@@ -105,9 +109,13 @@ impl ConnectionManager {
         page_size: u32,
         max_rows: Option<u32>,
     ) -> Result<crate::core::protocol::NativeQueryPage> {
-        self.get_driver(id)
-            .await?
-            .query_native_page(query_id, sql, page_size, max_rows)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .query_native_page(query_id, sql, page_size, max_rows)
+                    .await
+            })
             .await
     }
 
@@ -118,22 +126,28 @@ impl ConnectionManager {
         cursor: &str,
         page_size: u32,
     ) -> Result<crate::core::protocol::NativeQueryPage> {
-        self.get_driver(id)
-            .await?
-            .fetch_native_query_page(query_id, cursor, page_size)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .fetch_native_query_page(query_id, cursor, page_size)
+                    .await
+            })
             .await
     }
 
     pub async fn close_native_query_page(&self, id: &str, cursor: &str) -> Result<()> {
-        self.get_driver(id)
-            .await?
-            .close_native_query_page(cursor)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.close_native_query_page(cursor).await })
             .await
     }
 
     pub async fn cancel_query(&self, id: &str, query_id: &str) -> Result<bool> {
-        let driver = self.get_driver(id).await?;
-        driver.cancel_query(query_id).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.cancel_query(query_id).await })
+            .await
     }
 
     pub async fn execute_parameterized(
@@ -142,13 +156,17 @@ impl ConnectionManager {
         sql: &str,
         params: &[QueryParameter],
     ) -> Result<u64> {
-        let driver = self.get_driver(id).await?;
-        driver.execute_parameterized(sql, params).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.execute_parameterized(sql, params).await })
+            .await
     }
 
     pub async fn create_database(&self, id: &str, request: DatabaseCreateRequest) -> Result<()> {
-        let driver = self.get_driver(id).await?;
-        driver.create_database(request).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.create_database(request).await })
+            .await
     }
 
     pub async fn plan_schema_migration(
@@ -156,9 +174,9 @@ impl ConnectionManager {
         id: &str,
         request: SchemaMigrationPlanRequest,
     ) -> Result<SchemaMigrationPlanResult> {
-        self.get_driver(id)
-            .await?
-            .plan_schema_migration(request)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.plan_schema_migration(request).await })
             .await
     }
 
@@ -167,9 +185,9 @@ impl ConnectionManager {
         id: &str,
         request: SchemaMigrationPreflightRequest,
     ) -> Result<SchemaMigrationPreflightResult> {
-        self.get_driver(id)
-            .await?
-            .preflight_schema_migration(request)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.preflight_schema_migration(request).await })
             .await
     }
 
@@ -178,9 +196,9 @@ impl ConnectionManager {
         id: &str,
         request: SchemaMigrationApplyRequest,
     ) -> Result<SchemaMigrationApplyResult> {
-        self.get_driver(id)
-            .await?
-            .apply_schema_migration(request)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.apply_schema_migration(request).await })
             .await
     }
 
@@ -189,9 +207,9 @@ impl ConnectionManager {
         id: &str,
         request: SchemaMigrationVerifyRequest,
     ) -> Result<SchemaMigrationVerifyResult> {
-        self.get_driver(id)
-            .await?
-            .verify_schema_migration(request)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.verify_schema_migration(request).await })
             .await
     }
 
@@ -201,8 +219,10 @@ impl ConnectionManager {
         sql: &str,
         params: &[QueryParameter],
     ) -> Result<Vec<crate::core::protocol::QueryResult>> {
-        let driver = self.get_driver(id).await?;
-        driver.query_parameterized(sql, params).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.query_parameterized(sql, params).await })
+            .await
     }
 
     /// Execute a query against one explicitly selected server database. This
@@ -213,8 +233,10 @@ impl ConnectionManager {
         database: &str,
         sql: &str,
     ) -> Result<Vec<crate::core::protocol::QueryResult>> {
-        let driver = self.get_driver(id).await?;
-        driver.query_database(database, sql).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.query_database(database, sql).await })
+            .await
     }
 
     pub async fn query_database_with_context(
@@ -225,9 +247,13 @@ impl ConnectionManager {
         schema: Option<&str>,
         query_id: Option<&str>,
     ) -> Result<Vec<crate::core::protocol::QueryResult>> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .query_database_with_context_tracked(query_id, database, sql, schema)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .query_database_with_context_tracked(query_id, database, sql, schema)
+                    .await
+            })
             .await
     }
 
@@ -238,9 +264,13 @@ impl ConnectionManager {
         sql: &str,
         params: &[QueryParameter],
     ) -> Result<Vec<crate::core::protocol::QueryResult>> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .query_database_parameterized(database, sql, params)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .query_database_parameterized(database, sql, params)
+                    .await
+            })
             .await
     }
 
@@ -249,8 +279,10 @@ impl ConnectionManager {
         id: &str,
         statements: &[ParameterizedStatement],
     ) -> Result<Vec<u64>> {
-        let driver = self.get_driver(id).await?;
-        driver.execute_parameterized_batch(statements).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async { driver.execute_parameterized_batch(statements).await })
+            .await
     }
 
     pub async fn execute_sqlite_rebuild_batch(
@@ -259,9 +291,13 @@ impl ConnectionManager {
         statements: &[ParameterizedStatement],
         backup_destination: &std::path::Path,
     ) -> Result<crate::core::driver::SqliteRebuildReceipt> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .execute_sqlite_rebuild_batch(statements, backup_destination)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .execute_sqlite_rebuild_batch(statements, backup_destination)
+                    .await
+            })
             .await
     }
 
@@ -271,9 +307,13 @@ impl ConnectionManager {
         database: &str,
         statements: &[ParameterizedStatement],
     ) -> Result<Vec<u64>> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .execute_database_parameterized_batch(database, statements)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .execute_database_parameterized_batch(database, statements)
+                    .await
+            })
             .await
     }
 
@@ -283,9 +323,13 @@ impl ConnectionManager {
         transaction_id: &str,
         schema: Option<String>,
     ) -> Result<()> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .begin_transaction(transaction_id, schema.as_deref())
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run_transaction(transaction_id, true, async {
+                driver
+                    .begin_transaction(transaction_id, schema.as_deref())
+                    .await
+            })
             .await
     }
 
@@ -296,9 +340,13 @@ impl ConnectionManager {
         database: &str,
         schema: Option<String>,
     ) -> Result<()> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .begin_database_transaction(transaction_id, database, schema.as_deref())
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run_transaction(transaction_id, true, async {
+                driver
+                    .begin_database_transaction(transaction_id, database, schema.as_deref())
+                    .await
+            })
             .await
     }
 
@@ -308,20 +356,32 @@ impl ConnectionManager {
         transaction_id: &str,
         statements: &[ParameterizedStatement],
     ) -> Result<Vec<u64>> {
-        let driver = self.get_driver(id).await?;
-        driver
-            .execute_parameterized_transaction(transaction_id, statements)
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .execute_parameterized_transaction(transaction_id, statements)
+                    .await
+            })
             .await
     }
 
     pub async fn commit_transaction(&self, id: &str, transaction_id: &str) -> Result<()> {
-        let driver = self.get_driver(id).await?;
-        driver.commit_transaction(transaction_id).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run_transaction(transaction_id, false, async {
+                driver.commit_transaction(transaction_id).await
+            })
+            .await
     }
 
     pub async fn rollback_transaction(&self, id: &str, transaction_id: &str) -> Result<()> {
-        let driver = self.get_driver(id).await?;
-        driver.rollback_transaction(transaction_id).await
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run_transaction(transaction_id, false, async {
+                driver.rollback_transaction(transaction_id).await
+            })
+            .await
     }
 
     /// Get databases visible from the connected server.
@@ -336,6 +396,18 @@ impl ConnectionManager {
     ) -> Result<Vec<crate::core::protocol::DatabaseInfo>> {
         let driver = self.get_driver(id).await?;
         driver.get_database_metadata().await
+    }
+
+    /// Get schemas in the currently connected database.
+    pub async fn sql_lookup_context(
+        &self,
+        id: &str,
+        database: Option<&str>,
+    ) -> Result<Option<oxide_driver_protocol::SqlLookupContext>> {
+        self.get_driver(id)
+            .await?
+            .sql_lookup_context(database)
+            .await
     }
 
     /// Get schemas in the currently connected database.
@@ -744,12 +816,16 @@ impl ConnectionManager {
     }
 
     pub async fn set_current_schema(&self, connection_id: &str, schema: &str) -> Result<()> {
-        let driver = self.get_driver(connection_id).await?;
-        driver.set_current_schema(schema).await?;
+        let (driver, operation) = self.get_observed_driver(connection_id).await?;
+        operation
+            .run(async {
+                driver.set_current_schema(schema).await?;
 
-        let mut schemas = self.active_schemas.lock().await;
-        schemas.insert(connection_id.to_string(), schema.to_string());
+                let mut schemas = self.active_schemas.lock().await;
+                schemas.insert(connection_id.to_string(), schema.to_string());
 
-        Ok(())
+                Ok(())
+            })
+            .await
     }
 }

@@ -11,6 +11,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { matchesSqlLspSourceFingerprint, sqlLspCargoBuildArgs, sqlLspSourceFingerprint } from "./lib/sql-lsp-build-inputs.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lspSourceDir = join(repoRoot, "vendor", "sql-lsp");
@@ -27,7 +28,8 @@ function targetIntegrityIsValid() {
     const manifest = JSON.parse(readFileSync(targetManifest, "utf8"));
     return (
       typeof manifest.sha256 === "string" &&
-      manifest.sha256.toLowerCase() === digest(targetBinary).toLowerCase()
+      manifest.sha256.toLowerCase() === digest(targetBinary).toLowerCase() &&
+      (manifest.sourceFingerprint == null || matchesSqlLspSourceFingerprint(manifest.sourceFingerprint, lspSourceDir))
     );
   } catch {
     return false;
@@ -51,6 +53,7 @@ if (process.env.OXIDE_SKIP_SQL_LSP_PREPARE === "1") {
 let sourceBinary = process.env.OXIDE_SQL_LSP_BINARY;
 let sourceRevision = "override";
 let sourceDirty = null;
+let sourceFingerprint = null;
 if (sourceBinary) {
   sourceBinary = resolve(sourceBinary);
   if (!existsSync(sourceBinary)) {
@@ -64,12 +67,16 @@ if (sourceBinary) {
   }
 
   console.log(`Building SQL LSP from submodule: ${lspSourceDir}`);
-  const cargo = spawnSync("cargo", ["build", "--release", "--manifest-path", manifest], {
+  sourceFingerprint = sqlLspSourceFingerprint(lspSourceDir);
+  const cargo = spawnSync("cargo", sqlLspCargoBuildArgs(manifest, process.env.OXIDE_SQL_LSP_OFFLINE === "1"), {
     cwd: repoRoot,
     stdio: "inherit",
   });
   if (cargo.status !== 0) {
     process.exit(cargo.status ?? 1);
+  }
+  if (!matchesSqlLspSourceFingerprint(sourceFingerprint, lspSourceDir)) {
+    throw new Error("SQL LSP source changed during compilation; retry preparation before replacing the bundled binary");
   }
   sourceBinary = join(lspSourceDir, "target", "release", binaryName);
   const revision = spawnSync("git", ["rev-parse", "HEAD"], {
@@ -79,7 +86,7 @@ if (sourceBinary) {
   if (revision.status === 0) {
     sourceRevision = revision.stdout.trim();
   }
-  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=normal"], {
     cwd: lspSourceDir,
     encoding: "utf8",
   });
@@ -105,6 +112,7 @@ const manifestContents = `${JSON.stringify(
     schemaVersion: 1,
     sourceRevision,
     sourceDirty,
+    sourceFingerprint,
     sha256,
     platform: process.platform,
     architecture: process.arch,

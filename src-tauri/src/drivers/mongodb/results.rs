@@ -103,6 +103,8 @@ pub(super) fn infer_mongodb_columns(documents: &[Document]) -> Vec<ColumnInfo> {
             identity_generation: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
             default_value: None,
             comment: None,
             name,

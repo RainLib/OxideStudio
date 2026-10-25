@@ -4,6 +4,7 @@ import {
   type CompletionItem,
 } from "@/services/lsp/types";
 import { completionFilterTextForQuery } from "@/features/query-editor/model/completionMatch";
+import { cachedIdentifierFragment, cachedIdentifierQualifier } from "@/features/query-editor/model/cached-completion/identifierFragments";
 
 const SQL_CONTEXT_KEYWORDS = new Set([
   "select",
@@ -31,8 +32,9 @@ export function isCompletedSqlContextKeyword(word: string) {
 
 export function sqlContextKeywordBeforeCursor(textBeforeCursor: string) {
   const trimmed = textBeforeCursor.trimEnd();
-  const match = trimmed.match(/([A-Za-z_][A-Za-z0-9_]*)$/);
-  const token = match?.[1];
+  const fragment = cachedIdentifierFragment(trimmed);
+  if (fragment.openingQuote || fragment.unsupported || cachedIdentifierQualifier(trimmed)) return null;
+  const token = fragment.prefix;
   if (!token) return null;
 
   const keyword = token.toLowerCase();

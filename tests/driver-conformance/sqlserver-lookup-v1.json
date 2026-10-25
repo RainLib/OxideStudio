@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "sqlserver-lookup-v1",
+  "driverId": "sqlserver",
+  "timeoutMs": 30000,
+  "connection": { "urlEnv": "OXIDE_SQLSERVER_CONFORMANCE_URL" },
+  "serverVersionPattern": "^16\\.",
+  "query": {
+    "statement": "WITH filtered AS (SELECT l.id, l.label FROM ledger l WHERE l.id = ? AND l.label = ?), ranked AS (SELECT id, label, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM filtered) SELECT id AS bound_number, label AS bound_text FROM ranked WHERE rn = 1",
+    "parameters": [42, "oxide"],
+    "expect": { "minRows": 1, "columns": ["bound_number", "bound_text"], "firstRow": [42, "oxide"] }
+  },
+  "databaseScope": {
+    "statement": "SELECT DB_NAME() AS database_name, SCHEMA_NAME() AS schema_name",
+    "context": { "database": "oxide_lsp_secondary", "readOnly": true },
+    "expect": { "minRows": 1, "columns": ["database_name", "schema_name"], "firstRow": ["oxide_lsp_secondary", "reporting"] }
+  },
+  "errorMapping": {
+    "statement": "SELECT * FROM oxide_lsp_missing_table_should_not_exist",
+    "expectedCodes": ["QUERY_FAILED"]
+  },
+  "metadata": [
+    { "id": "defaultSchema", "request": { "kind": "schemas", "database": "oxide_lsp_primary" }, "expect": { "type": "array", "contains": { "equals": "sales" } } },
+    { "id": "defaultRelations", "request": { "kind": "relations", "database": "oxide_lsp_primary", "namespace": "sales" }, "expect": { "type": "array", "contains": { "path": ["name"], "equals": "ledger" } } },
+    { "id": "defaultColumns", "request": { "kind": "columns", "database": "oxide_lsp_primary", "namespace": "sales", "relation": "ledger" }, "expect": { "type": "array", "contains": { "path": ["name"], "equals": "label" } } }
+  ],
+  "sqlLookupContext": {
+    "current": { "database": "oxide_lsp_primary", "defaultSchema": "sales" },
+    "databases": [{ "database": "oxide_lsp_secondary", "defaultSchema": "reporting" }],
+    "currentQuery": {
+      "statement": "SELECT DB_NAME() AS database_name, SCHEMA_NAME() AS schema_name",
+      "context": { "readOnly": true },
+      "expect": { "minRows": 1, "columns": ["database_name", "schema_name"], "firstRow": ["oxide_lsp_primary", "sales"] }
+    }
+  }
+}

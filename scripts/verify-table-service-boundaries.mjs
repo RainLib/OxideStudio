@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "src/services/tauri/table";
-const facade = fs.readFileSync(path.join(root, `${base}.service.ts`), "utf8");
+const facade = readSourceText(path.join(root, `${base}.service.ts`));
 
 for (const module of ["page", "export", "compare", "import", "transfer", "definition"]) {
   if (!facade.includes(`export * from "./table/${module}";`)) {
@@ -34,21 +35,18 @@ const ownership = {
 };
 
 for (const [module, symbols] of Object.entries(ownership)) {
-  const source = fs.readFileSync(path.join(root, `${base}/${module}.ts`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/${module}.ts`));
   if (!source.includes('from "../client"') || symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`${module} must retain its Tauri table command ownership.`);
   }
 }
 
-const definitionFacade = fs.readFileSync(path.join(root, `${base}/definition.ts`), "utf8");
+const definitionFacade = readSourceText(path.join(root, `${base}/definition.ts`));
 for (const module of ["table", "columns", "indexes", "constraints", "views", "sources"]) {
   if (!definitionFacade.includes(`./definition/${module}`)) {
     throw new Error(`Table definition facade must compose ${module}.`);
   }
-  const source = fs.readFileSync(
-    path.join(root, `${base}/definition/${module}.ts`),
-    "utf8",
-  );
+  const source = readSourceText(path.join(root, `${base}/definition/${module}.ts`));
   if (!source.includes('from "../../client"') || source.includes('from "../definition"')) {
     throw new Error(`Table definition ${module} has an invalid command boundary.`);
   }
@@ -63,10 +61,7 @@ const definitionOwnership = {
   sources: ["getTableDdl", "getViewDefinition", "getPostgresRoutineDefinitions"],
 };
 for (const [module, symbols] of Object.entries(definitionOwnership)) {
-  const source = fs.readFileSync(
-    path.join(root, `${base}/definition/${module}.ts`),
-    "utf8",
-  );
+  const source = readSourceText(path.join(root, `${base}/definition/${module}.ts`));
   if (symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`Table definition ${module} lost a command owner.`);
   }

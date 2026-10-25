@@ -46,6 +46,9 @@ desktop release; rollout approval remains an organization operation.
 
 ## Casdoor identity and local deployment
 
+For a Chinese walkthrough of local and remote validation configuration, see
+[`后端部署与完整流程验证`](../docs/ENTERPRISE_VALIDATION_DEPLOYMENT.md).
+
 The control plane validates standard OIDC access tokens and uses Casdoor as the
 reference identity provider. It never receives a Casdoor Client Secret: the
 administration web application is a public client and uses Authorization Code

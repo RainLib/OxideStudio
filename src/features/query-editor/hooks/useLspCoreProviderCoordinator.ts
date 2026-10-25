@@ -1,5 +1,12 @@
 import { useEffect } from "react";
 import type { LspClient } from "@/services/lsp";
+import { subscribeDocumentAnalysis, type SubscribeDocumentAnalysis } from "@/services/lsp/documentAnalysisEvents";
+import { createLspProviderRefresh } from "../model/lspProviderRefresh";
+import {registerLspDocumentFormatter,registerLspRangeFormatter} from "../model/lspFormattingRegistry";
+import {registerLspDocumentSymbols} from "../model/lspDocumentSymbolRegistration";
+import {captureLspDocumentRequest,watchLspProviderContext,type LspProviderContextOptions} from "../model/lspProviderContext";
+import type {DocumentStructureKind} from "@/services/lsp/client/documentStructure";
+import type {DocumentSemanticKind,DocumentSemanticInputs} from "@/services/lsp/client/documentSemantics";
 import {
   revealLspDatabaseDefinition,
   revealLspProjectDefinition,
@@ -17,14 +24,23 @@ import {
 
 type Disposable = { dispose: () => void };
 
-export type LspCoreProviderCoordinatorOptions = {
+export type LspCoreProviderCoordinatorOptions = LspProviderContextOptions & {
+  editor?:any;
   activeProjectId?: string | null;
   canUseLsp: boolean;
   documentUri: string;
   editorLanguageId: string;
+  serverDialect?: string;
   isActivePane: boolean;
   lspClient: LspClient;
   monaco: any;
+  syncDocument?: (model: any) => Promise<void>;
+  documentVersionsRef?: { current: Map<string, number> };
+  documentTextsRef?: { current: Map<string, string> };
+  subscribeAnalysis?: SubscribeDocumentAnalysis;
+  onDocumentFormatResult?: (result: { ok: true } | { ok: false; error: unknown }) => void;
+  /** Document navigation can be ready before formatting preferences commit. */
+  canFormat?: () => boolean;
 };
 
 function emptyDisposableResult<T extends object>(value: T) {
@@ -53,25 +69,71 @@ function providerRequestIsCurrent(
  *
  * Completion and hover intentionally live in a separate metadata-sensitive
  * lifecycle. Explorer refreshes and completion preferences must not recreate
- * navigation, formatting, rename, symbol, semantic-token or inlay providers.
+ * navigation, formatting, rename, semantic-token or inlay providers. Symbols
+ * renew their registration when semantics change to invalidate Monaco's outline cache.
  */
 export function registerLspCoreProviders({
   activeProjectId,
   canUseLsp,
   documentUri,
   editorLanguageId,
+  serverDialect,
   lspClient,
   monaco,
+  syncDocument,
+  documentVersionsRef,
+  documentTextsRef,
+  subscribeAnalysis = subscribeDocumentAnalysis,
+  onDocumentFormatResult,
+  canFormat,
+  getSemanticContext,
+  subscribeSemanticContext,
+  editor,
 }: Omit<LspCoreProviderCoordinatorOptions, "isActivePane">): Disposable {
+  let disposed = false;
   const handlesModel = (model: any) =>
-    canUseLsp && model.uri.toString() === documentUri;
+    !disposed && canUseLsp && model.uri.toString() === documentUri;
+  const captureDocument=(model:any,token?:{isCancellationRequested?:boolean})=>captureLspDocumentRequest({read:getSemanticContext,model,token,isActive:()=>handlesModel(model)});
+  const semantic=async<K extends DocumentSemanticKind>(kind:K,model:any,input:DocumentSemanticInputs[K])=>{
+    const version=documentVersionsRef?.current.get(documentUri),text=documentTextsRef?.current.get(documentUri);
+    if(!serverDialect||version===undefined||text!==model.getValue())return null;
+    const result=await lspClient.getDocumentSemantics({uri:documentUri,version,dialect:serverDialect,operation:{kind,...input}});
+    return documentVersionsRef?.current.get(documentUri)===version&&documentTextsRef?.current.get(documentUri)===text?result?.value??null:null;
+  };
+  const structure=async<K extends DocumentStructureKind>(kind:K,model:any,positions?:Array<{line:number;character:number}>)=>{
+    const version=documentVersionsRef?.current.get(documentUri),text=documentTextsRef?.current.get(documentUri);
+    if(!serverDialect||version===undefined||text!==model.getValue())return null;
+    const result=await lspClient.getDocumentStructure({uri:documentUri,version,dialect:serverDialect,kind,...(positions?{positions}:{})});
+    return documentVersionsRef?.current.get(documentUri)===version&&documentTextsRef?.current.get(documentUri)===text?result:null;
+  };
   const disposables: Disposable[] = [];
+  let documentSymbols:ReturnType<typeof registerLspDocumentSymbols>|undefined;
   let semanticTokensCache: {
     model: any;
     version: number;
     resultId?: string;
     data: Uint32Array;
   } | null = null;
+  const refresh = createLspProviderRefresh({
+    subscribe: onPublication => canUseLsp ? subscribeAnalysis({
+      sessionKey: lspClient.getSessionKey(), documentUri, onPublication,
+    }) : { dispose: () => undefined },
+    accept: ({ version,analysisToken }) => {
+      if(getSemanticContext){const current=getSemanticContext();if(!current.lspAllowed||!current.analysisToken||current.analysisToken!==analysisToken)return false;}
+      if (documentVersionsRef && version !== documentVersionsRef.current.get(documentUri)) return false;
+      if (documentVersionsRef && !documentVersionsRef.current.has(documentUri)) return false;
+      if (documentTextsRef) {
+        const text = documentTextsRef.current.get(documentUri);
+        const model = monaco.editor?.getModel(monaco.Uri.parse(documentUri));
+        if (text === undefined || !model || model.isDisposed?.() || model.getValue() !== text) return false;
+      }
+      return true;
+    },
+    invalidate: () => { semanticTokensCache = null;documentSymbols?.refresh(); },
+  });
+  disposables.push({dispose:watchLspProviderContext({getSemanticContext,subscribeSemanticContext},()=>{
+    refresh.invalidate();editor?.trigger("oxide.semanticContext","closeParameterHints",{});
+  })});
   let dollarQuoteBodyCache: {
     model: any;
     version: number;
@@ -81,15 +143,19 @@ export function registerLspCoreProviders({
 
   disposables.push(
     monaco.languages.registerDefinitionProvider(editorLanguageId, {
-      provideDefinition: async (model: any, position: any) => {
+      provideDefinition: async (model: any, position: any, token?:{isCancellationRequested?:boolean}) => {
         if (!handlesModel(model)) return [];
-        const locations = await lspClient.getDefinitions(
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return [];}
+        const locations = request.lspAllowed?await lspClient.getDefinitions(
           documentUri,
           position.lineNumber - 1,
           position.column - 1,
-        );
+        ):(await semantic("definitions",model,{position:{line:position.lineNumber-1,character:position.column-1}}))??[];
+        if(!request.isCurrent())return [];
         const editorLocations = [];
         for (const location of locations) {
+          if(!request.isCurrent())return [];
           if (
             await revealLspDatabaseDefinition(
               location.uri,
@@ -99,6 +165,7 @@ export function registerLspCoreProviders({
             continue;
           }
           if (
+            request.isCurrent() &&
             await revealLspProjectDefinition(
               location.uri,
               activeProjectId || "local",
@@ -111,51 +178,62 @@ export function registerLspCoreProviders({
             range: toMonacoRange(monaco, location.range),
           });
         }
-        return editorLocations;
+        return request.isCurrent()?editorLocations:[];
       },
     }),
     monaco.languages.registerReferenceProvider(editorLanguageId, {
-      provideReferences: async (model: any, position: any) => {
+      provideReferences: async (model: any, position: any, _context?:unknown, token?:{isCancellationRequested?:boolean}) => {
         if (!handlesModel(model)) return [];
-        const locations = await lspClient.getReferences(
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return [];}
+        const locations = request.lspAllowed?await lspClient.getReferences(
           documentUri,
           position.lineNumber - 1,
           position.column - 1,
-        );
+        ):(await semantic("references",model,{position:{line:position.lineNumber-1,character:position.column-1},includeDeclaration:true}))??[];
+        if(!request.isCurrent())return [];
         return locations.map((location) => ({
           uri: monaco.Uri.parse(location.uri),
           range: toMonacoRange(monaco, location.range),
         }));
       },
     }),
-    monaco.languages.registerDocumentFormattingEditProvider(editorLanguageId, {
+    registerLspDocumentFormatter(monaco.languages,editorLanguageId,documentUri, {
       provideDocumentFormattingEdits: async (
         model: any,
         options: any,
         token?: { isCancellationRequested?: boolean },
       ) => {
+        if (canFormat && !canFormat()) return [];
         if (!handlesModel(model)) return [];
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
         const modelVersion = providerModelVersion(model);
         let edits;
         try {
+          await syncDocument?.(model);
+          if(!request.isCurrent()||(canFormat&&!canFormat()))return [];
           edits = await lspClient.formatDocument(
             documentUri,
             options.tabSize || 2,
             options.insertSpaces !== false,
+            Boolean(onDocumentFormatResult),
           );
         } catch (error) {
+          if (!request.isCurrent()||!providerRequestIsCurrent(model, modelVersion, token)||(canFormat&&!canFormat())) return [];
           console.error("[LSP] Document formatting failed:", error);
+          onDocumentFormatResult?.({ ok: false, error });
           return [];
         }
-        if (!providerRequestIsCurrent(model, modelVersion, token)) return [];
+        if (!request.isCurrent()||!providerRequestIsCurrent(model, modelVersion, token)||(canFormat&&!canFormat())) return [];
+        onDocumentFormatResult?.({ ok: true });
         return edits.map((edit) => ({
           range: toMonacoRange(monaco, edit.range),
           text: edit.newText,
         }));
       },
     }),
-    monaco.languages.registerDocumentRangeFormattingEditProvider(
-      editorLanguageId,
+    registerLspRangeFormatter(
+      monaco.languages,editorLanguageId,documentUri,
       {
         provideDocumentRangeFormattingEdits: async (
           model: any,
@@ -163,10 +241,14 @@ export function registerLspCoreProviders({
           options: any,
           token?: { isCancellationRequested?: boolean },
         ) => {
+          if (canFormat && !canFormat()) return [];
           if (!handlesModel(model)) return [];
+          const request=captureDocument(model,token);if(!request.isCurrent())return [];
           const modelVersion = providerModelVersion(model);
           let edits;
           try {
+            await syncDocument?.(model);
+            if(!request.isCurrent()||(canFormat&&!canFormat()))return [];
             edits = await lspClient.formatRange(
               documentUri,
               {
@@ -183,10 +265,11 @@ export function registerLspCoreProviders({
               options.insertSpaces !== false,
             );
           } catch (error) {
+            if(!request.isCurrent()||(canFormat&&!canFormat()))return [];
             console.error("[LSP] Range formatting failed:", error);
             return [];
           }
-          if (!providerRequestIsCurrent(model, modelVersion, token)) return [];
+          if (!request.isCurrent()||!providerRequestIsCurrent(model, modelVersion, token)||(canFormat&&!canFormat())) return [];
           return edits.map((edit) => ({
             range: toMonacoRange(monaco, edit.range),
             text: edit.newText,
@@ -195,27 +278,31 @@ export function registerLspCoreProviders({
       },
     ),
     monaco.languages.registerSignatureHelpProvider(editorLanguageId, {
-      signatureHelpTriggerCharacters: ["(", ","],
-      signatureHelpRetriggerCharacters: [","],
+      signatureHelpTriggerCharacters: ["sqlserver", "mssql", "tsql"].includes(serverDialect ?? editorLanguageId)
+        ? ["(", ",", " ", "="] : ["(", ","],
+      signatureHelpRetriggerCharacters: ["sqlserver", "mssql", "tsql"].includes(serverDialect ?? editorLanguageId)
+        ? [",", "="] : [","],
       provideSignatureHelp: async (
         model: any,
         position: any,
         token?: { isCancellationRequested?: boolean },
       ) => {
         if (!handlesModel(model)) return null;
+        const request=captureDocument(model,token);if(!request.isCurrent())return null;
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return null;}
         const modelVersion = providerModelVersion(model);
         let help;
         try {
-          help = await lspClient.getSignatureHelp(
+          help = request.lspAllowed?await lspClient.getSignatureHelp(
             documentUri,
             position.lineNumber - 1,
             position.column - 1,
-          );
+          ):await semantic("signature",model,{position:{line:position.lineNumber-1,character:position.column-1}});
         } catch (error) {
           console.error("[LSP] Signature help failed:", error);
           return null;
         }
-        if (!providerRequestIsCurrent(model, modelVersion, token)) return null;
+        if (!request.isCurrent()||!providerRequestIsCurrent(model, modelVersion, token)) return null;
         if (!help) return null;
         return emptyDisposableResult({
           value: {
@@ -237,8 +324,9 @@ export function registerLspCoreProviders({
       },
     }),
     monaco.languages.registerRenameProvider(editorLanguageId, {
-      resolveRenameLocation: async (model: any, position: any) => {
-        if (!handlesModel(model)) {
+      resolveRenameLocation: async (model: any, position: any, token?:{isCancellationRequested?:boolean}) => {
+        const request=captureDocument(model,token);
+        if (!handlesModel(model)||!request.isCurrent()) {
           return {
             range: new monaco.Range(
               position.lineNumber,
@@ -250,12 +338,13 @@ export function registerLspCoreProviders({
             rejectReason: "Database LSP is not active for this document.",
           };
         }
-        const range = await lspClient.prepareRename(
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return {rejectReason:"The semantic context changed before rename.",text:"",range:new monaco.Range(position.lineNumber,position.column,position.lineNumber,position.column)};}
+        const range = request.lspAllowed?await lspClient.prepareRename(
           documentUri,
           position.lineNumber - 1,
           position.column - 1,
-        );
-        if (!range) {
+        ):await semantic("prepareRename",model,{position:{line:position.lineNumber-1,character:position.column-1}});
+        if (!range||!request.isCurrent()) {
           return {
             range: new monaco.Range(
               position.lineNumber,
@@ -277,20 +366,23 @@ export function registerLspCoreProviders({
         model: any,
         position: any,
         newName: string,
+        token?:{isCancellationRequested?:boolean},
       ) => {
-        if (!handlesModel(model)) {
+        const request=captureDocument(model,token);
+        if (!handlesModel(model)||!request.isCurrent()) {
           return {
             edits: [],
             rejectReason: "Database LSP is not active for this document.",
           };
         }
-        const edit = await lspClient.rename(
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return {edits:[],rejectReason:"The semantic context changed before rename."};}
+        const edit = request.lspAllowed?await lspClient.rename(
           documentUri,
           position.lineNumber - 1,
           position.column - 1,
           newName,
-        );
-        return edit
+        ):await semantic("rename",model,{position:{line:position.lineNumber-1,character:position.column-1},newName});
+        return edit&&request.isCurrent()
           ? toMonacoWorkspaceEdit(monaco, edit)
           : { edits: [], rejectReason: "No safe rename edits were found." };
       },
@@ -298,12 +390,13 @@ export function registerLspCoreProviders({
     monaco.languages.registerCodeActionProvider(
       editorLanguageId,
       {
-        provideCodeActions: async (model: any, range: any, context: any) => {
-          if (!handlesModel(model)) {
+        provideCodeActions: async (model: any, range: any, context: any, token?:{isCancellationRequested?:boolean}) => {
+          const request=captureDocument(model,token);
+          if (!handlesModel(model)||!request.isCurrent()) {
             return emptyDisposableResult({ actions: [] });
           }
-          const actions = await lspClient.getCodeActions(
-            documentUri,
+          if(syncDocument){await syncDocument(model);if(!request.isCurrent())return emptyDisposableResult({actions:[]});}
+          const actionRange=
             {
               start: {
                 line: range.startLineNumber - 1,
@@ -313,8 +406,8 @@ export function registerLspCoreProviders({
                 line: range.endLineNumber - 1,
                 character: range.endColumn - 1,
               },
-            },
-            (context.markers || []).map((marker: any) => ({
+            };
+          const diagnostics=(context.markers || []).map((marker: any) => ({
               range: {
                 start: {
                   line: marker.startLineNumber - 1,
@@ -339,9 +432,10 @@ export function registerLspCoreProviders({
                   : marker.code,
               source: marker.source,
               message: marker.message,
-            })),
-            context.only ? [String(context.only)] : undefined,
-          );
+            }));
+          const only=context.only?[String(context.only)]:undefined;
+          const actions=request.lspAllowed?await lspClient.getCodeActions(documentUri,actionRange,diagnostics,only):(await semantic("codeActions",model,{range:actionRange,context:{diagnostics,...(only?{only}:{})}}))??[];
+          if(!request.isCurrent())return emptyDisposableResult({actions:[]});
           return emptyDisposableResult({
             actions: actions.map((action) => ({
               title: action.title,
@@ -357,11 +451,14 @@ export function registerLspCoreProviders({
       },
       { providedCodeActionKinds: ["quickfix", "refactor.rewrite", "source"] },
     ),
-    monaco.languages.registerDocumentSymbolProvider(editorLanguageId, {
+    (documentSymbols=registerLspDocumentSymbols(monaco.languages,editorLanguageId, {
       displayName: "Database symbols",
-      provideDocumentSymbols: async (model: any) => {
+      provideDocumentSymbols: async (model: any, token?:{isCancellationRequested?:boolean}) => {
         if (!handlesModel(model)) return [];
-        const symbols = await lspClient.getDocumentSymbols(documentUri);
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return [];}
+        const symbols = request.lspAllowed?await lspClient.getDocumentSymbols(documentUri):(await structure("symbols",model))?.items??[];
+        if(!request.isCurrent())return [];
         const convertSymbol = (symbol: any): any => ({
           name: symbol.name,
           detail: symbol.detail || "",
@@ -373,32 +470,37 @@ export function registerLspCoreProviders({
         });
         return symbols.map(convertSymbol);
       },
-    }),
+    })),
     monaco.languages.registerFoldingRangeProvider(editorLanguageId, {
-      provideFoldingRanges: async (model: any) => {
+      provideFoldingRanges: async (model: any, _context?:unknown, token?:{isCancellationRequested?:boolean}) => {
         if (!handlesModel(model)) return [];
-        return (await lspClient.getFoldingRanges(documentUri)).map((range) => ({
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return [];}
+        const ranges=request.lspAllowed?await lspClient.getFoldingRanges(documentUri):(await structure("folding",model))?.items??[];if(!request.isCurrent())return [];
+        return ranges.map((range) => ({
           start: range.startLine + 1,
           end: range.endLine + 1,
         }));
       },
     }),
     monaco.languages.registerSelectionRangeProvider(editorLanguageId, {
-      provideSelectionRanges: async (model: any, positions: any[]) => {
+      provideSelectionRanges: async (model: any, positions: any[], token?:{isCancellationRequested?:boolean}) => {
         if (!handlesModel(model)) return [];
-        const selections = await lspClient.getSelectionRanges(
-          documentUri,
-          positions.map((position) => ({
+        const request=captureDocument(model,token);if(!request.isCurrent())return [];
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return [];}
+        const points=positions.map((position) => ({
             line: position.lineNumber - 1,
             character: position.column - 1,
-          })),
-        );
+          }));
+        const selections=request.lspAllowed?await lspClient.getSelectionRanges(documentUri,points):(await structure("selection",model,points))?.items??[];
+        if(!request.isCurrent())return [];
         return positions.map((_, index) =>
           flattenLspSelectionRanges(monaco, selections[index]),
         );
       },
     }),
     monaco.languages.registerDocumentSemanticTokensProvider(editorLanguageId, {
+      onDidChange: refresh.onDidChange,
       getLegend: () => ({
         tokenTypes: ["namespace", "class", "property", "function", "variable"],
         tokenModifiers: [],
@@ -408,7 +510,12 @@ export function registerLspCoreProviders({
         _lastResultId: string | null,
         token: { isCancellationRequested?: boolean },
       ) => {
-        if (!handlesModel(model)) return { data: new Uint32Array() };
+        // Monaco treats an empty array as a successful token response. Decline
+        // other documents, while retaining empty responses to clear this owner.
+        if (model.uri.toString() !== documentUri) return null;
+        if (!handlesModel(model) || token?.isCancellationRequested) return { data: new Uint32Array() };
+        const request=captureDocument(model,token);if(!request.isCurrent())return {data:new Uint32Array()};
+        const generation = refresh.generation;
         const modelVersion = providerModelVersion(model);
         const cachedSemanticTokens = semanticTokensCache;
         if (
@@ -422,8 +529,9 @@ export function registerLspCoreProviders({
             data: cachedSemanticTokens.data.slice(),
           };
         }
-        const result = await lspClient.getSemanticTokens(documentUri);
-        if (!providerRequestIsCurrent(model, modelVersion, token) || !result) {
+        if(syncDocument){await syncDocument(model);if(!request.isCurrent())return {data:new Uint32Array()};}
+        const result = request.lspAllowed?await lspClient.getSemanticTokens(documentUri):await semantic("tokens",model,{});
+        if (!request.isCurrent()||!refresh.isCurrent(generation) || !providerRequestIsCurrent(model, modelVersion, token) || !result) {
           return { data: new Uint32Array() };
         }
         const response = {
@@ -445,19 +553,23 @@ export function registerLspCoreProviders({
       },
     }),
     monaco.languages.registerInlayHintsProvider(editorLanguageId, {
+      onDidChangeInlayHints: refresh.onDidChange,
       displayName: "Database parameter and INSERT column hints",
       provideInlayHints: async (
         model: any,
         range: any,
         token?: { isCancellationRequested?: boolean },
       ) => {
-        if (!handlesModel(model)) {
+        if (!handlesModel(model) || token?.isCancellationRequested) {
           return emptyDisposableResult({ hints: [] });
         }
+        const request=captureDocument(model,token);if(!request.isCurrent())return emptyDisposableResult({hints:[]});
         const modelVersion = providerModelVersion(model);
+        const generation = refresh.generation;
         let hints;
         try {
-          hints = await lspClient.getInlayHints(documentUri, {
+          if(syncDocument){await syncDocument(model);if(!request.isCurrent())return emptyDisposableResult({hints:[]});}
+          const hintRange={
             start: {
               line: range.startLineNumber - 1,
               character: range.startColumn - 1,
@@ -466,12 +578,13 @@ export function registerLspCoreProviders({
               line: range.endLineNumber - 1,
               character: range.endColumn - 1,
             },
-          });
+          };
+          hints = request.lspAllowed?await lspClient.getInlayHints(documentUri,hintRange):(await semantic("inlayHints",model,{range:hintRange}))??[];
         } catch (error) {
           console.error("[LSP] Inlay hints failed:", error);
           return emptyDisposableResult({ hints: [] });
         }
-        if (!providerRequestIsCurrent(model, modelVersion, token)) {
+        if (!request.isCurrent()||!refresh.isCurrent(generation) || !providerRequestIsCurrent(model, modelVersion, token)) {
           return emptyDisposableResult({ hints: [] });
         }
         const lspInlayHints = hints.map((hint) => ({
@@ -608,7 +721,12 @@ export function registerLspCoreProviders({
   );
 
   return {
-    dispose: () => disposables.forEach((disposable) => disposable.dispose()),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      refresh.dispose();
+      disposables.forEach((disposable) => disposable.dispose());
+    },
   };
 }
 
@@ -620,9 +738,19 @@ export function useLspCoreProviderCoordinator(
     canUseLsp,
     documentUri,
     editorLanguageId,
+    serverDialect,
     isActivePane,
     lspClient,
     monaco,
+    syncDocument,
+    documentVersionsRef,
+    documentTextsRef,
+    subscribeAnalysis,
+    onDocumentFormatResult,
+    canFormat,
+    getSemanticContext,
+    subscribeSemanticContext,
+    editor,
   } = options;
 
   useEffect(() => {
@@ -632,16 +760,36 @@ export function useLspCoreProviderCoordinator(
       canUseLsp,
       documentUri,
       editorLanguageId,
+      serverDialect,
       lspClient,
       monaco,
+      syncDocument,
+      documentVersionsRef,
+      documentTextsRef,
+      subscribeAnalysis,
+      onDocumentFormatResult,
+      canFormat,
+      getSemanticContext,
+      subscribeSemanticContext,
+      editor,
     }).dispose;
   }, [
     activeProjectId,
     canUseLsp,
     documentUri,
     editorLanguageId,
+    serverDialect,
     isActivePane,
     lspClient,
     monaco,
+    syncDocument,
+    documentVersionsRef,
+    documentTextsRef,
+    subscribeAnalysis,
+    onDocumentFormatResult,
+    canFormat,
+    getSemanticContext,
+    subscribeSemanticContext,
+    editor,
   ]);
 }

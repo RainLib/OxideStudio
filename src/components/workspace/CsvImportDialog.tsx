@@ -23,6 +23,7 @@ import type {
 } from "@/services/tauri/types";
 import {
   createCsvColumnMapping,
+  validateCsvRowSelection,
   type CsvColumnMapping,
   type CsvEncoding,
 } from "@/lib/csvImport";
@@ -40,6 +41,7 @@ interface CsvImportDialogProps {
   nativePreviewTruncated?: boolean;
   onClose: () => void;
   onCancelImport?: () => Promise<void> | void;
+  onPrepareResumable?: (options: TableCsvImportOptions, mode: TableImportMode) => void;
   onImport: (
     rows: Array<Record<string, unknown>>,
     options: TableCsvImportOptions,
@@ -67,6 +69,7 @@ export function CsvImportDialog({
   onClose,
   onCancelImport,
   onImport,
+  onPrepareResumable,
 }: CsvImportDialogProps) {
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -157,12 +160,23 @@ export function CsvImportDialog({
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  const nativePreviewError = nativePreviewTruncated
+  const nativePreviewError = nativePreviewTruncated && !onPrepareResumable
     ? "This source is larger than the 32 MiB review limit. Use Import delimited text (streaming)… or split the file before using custom column mapping."
     : null;
   const blockingError = loadError || analysis.error || analysis.analysis?.error || nativePreviewError;
   const canImport = !isLoading && !analysis.isAnalyzing && !isPreparing &&
-    !isSubmitting && !blockingError && plan.errorCount === 0 && plan.rowCount > 0;
+    !isSubmitting && !nativePreviewTruncated && !blockingError && plan.errorCount === 0 && plan.rowCount > 0;
+  // Native preparation validates the entire source. Never retrieve worker rows
+  // or treat the truncated browser prefix as an authoritative full-file review.
+  const canPrepare = !isLoading && !analysis.isAnalyzing && !isPreparing && !isSubmitting &&
+    !loadError && !analysis.error && !!analysis.analysis &&
+    !validateCsvRowSelection({ hasHeader, titleRow, dataStartRow, lastDataRow }) &&
+    mapping.some(item => item.targetColumn !== null);
+  const importOptions: TableCsvImportOptions = {
+    delimiter, firstRowHeader: hasHeader, titleRow, dataStartRow, lastDataRow,
+    columnMapping: mapping.map(({ sourceIndex, targetColumn }) => ({ sourceIndex, targetColumn })),
+    emptyFieldsAsNull: emptyAsNull, trimValues, encoding: decoded.encoding,
+  };
 
   const updateMapping = (sourceIndex: number, value: string) => {
     setMapping((current) => current.map((item) =>
@@ -184,7 +198,7 @@ export function CsvImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}>
-      <DialogContent className="h-[min(820px,calc(100vh-32px))] w-[min(1120px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="h-[min(820px,calc(100vh-32px))] w-[min(1120px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">
@@ -373,11 +387,12 @@ export function CsvImportDialog({
               )}
             </div>
 
+            {nativePreviewTruncated && onPrepareResumable && <p className="shrink-0 border-t border-[hsl(var(--wb-border-subtle))] px-3 py-2 text-[11px] wb-muted">Preview shows only a source prefix. Prepare resumable import to validate the full native file with these options before a separate publication review.</p>}
             {(blockingError || plan.errorCount > 0) && (
               <section className="max-h-36 shrink-0 overflow-auto border-t border-red-500/25 bg-red-500/5 px-3 py-2 text-[10px] text-red-300" role="alert">
                 <div className="mb-1 flex items-center gap-1.5 font-medium">
                   <AlertCircle size={12} />
-                  {blockingError ? "File could not be parsed" : `${plan.errorCount.toLocaleString()} validation error${plan.errorCount === 1 ? "" : "s"}`}
+                  {blockingError ? "Review needs attention" : `${plan.errorCount.toLocaleString()} validation error${plan.errorCount === 1 ? "" : "s"}`}
                 </div>
                 {blockingError ? (
                   <div>{blockingError}</div>
@@ -399,14 +414,14 @@ export function CsvImportDialog({
         </div>
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
-          <span className="text-[10px] wb-muted">
+          <span className="min-w-0 flex-1 pr-3 text-[10px] wb-muted">
             {importMode === "truncate"
               ? "Replace deletes existing rows and inserts this reviewed source in one transaction. Empty sources never clear the table."
               : isNativeSource
               ? `${decoded.encoding.toUpperCase()} will be decoded strictly by the native streaming importer. No rows are written before full-file preflight succeeds.`
               : "No rows are written until Import is confirmed. Database errors roll back the full batch."}
           </span>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <button
               type="button"
               className="wb-text-button h-7 px-3 text-[11px]"
@@ -418,6 +433,7 @@ export function CsvImportDialog({
             >
               {isCancelling ? "Cancelling…" : isSubmitting && onCancelImport ? "Cancel import" : "Cancel"}
             </button>
+            {onPrepareResumable && <button type="button" className="wb-text-button h-7 whitespace-nowrap px-3 text-[11px]" disabled={!canPrepare} onClick={() => onPrepareResumable(importOptions, importMode)}>Prepare resumable…</button>}
             <button
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"

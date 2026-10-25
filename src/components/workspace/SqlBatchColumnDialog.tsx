@@ -55,7 +55,7 @@ export function SqlBatchColumnDialog({
 
   return (
     <Dialog open={Boolean(session)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="w-[520px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="w-[520px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
           <div className="flex items-center gap-2">
             <Columns3 size={15} className="text-[hsl(var(--wb-accent))]" />

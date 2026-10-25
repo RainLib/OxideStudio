@@ -7,6 +7,11 @@ use serde_json::{json, Value};
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "live_database/cancellation.rs"]
+mod cancellation;
+#[path = "live_database/mysql_character.rs"]
+mod mysql_character;
+
 fn live_tests_enabled() -> bool {
     env::var("OXIDE_LIVE_DB_TESTS")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))

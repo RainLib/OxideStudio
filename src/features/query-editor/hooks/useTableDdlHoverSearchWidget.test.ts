@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {CompletionContextState} from "@/services/lsp/semanticContext";
 import {
   findTableDdlHoverSearchMatches,
   registerTableDdlHoverSearchWidget,
@@ -22,7 +23,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function fixture() {
+function fixture(contextOptions:Partial<TableDdlHoverSearchRuntime>={}) {
   const listeners: Record<string, (event?: any) => void> = {};
   const host = document.createElement("div");
   document.body.append(host);
@@ -60,6 +61,7 @@ function fixture() {
     showTableDdlHoverPreview: true,
     supportsTableBrowsing: true,
     targetSchema: "public",
+    ...contextOptions,
   };
   const controller = registerTableDdlHoverSearchWidget({
     editor,
@@ -184,5 +186,29 @@ describe("table DDL hover search", () => {
 
     expect(state.editor.addContentWidget).not.toHaveBeenCalled();
     state.controller.dispose();
+  });
+
+  const context=():CompletionContextState=>({connection:{},runtime:{},execution:{},metadataVersion:1,projectId:"project-1",route:"app",generation:{},available:true,lspAllowed:true,metadataAllowed:true});
+  it("removes a visible DDL widget synchronously when driver authority changes",async()=>{
+    let current=context(),notify=()=>{};const release=vi.fn();
+    const state=fixture({getSemanticContext:()=>current,subscribeSemanticContext:listener=>{notify=listener;return release;}});
+    state.listeners.mouseMove!({target:{position:{lineNumber:1,column:16}}});await vi.advanceTimersByTimeAsync(320);
+    expect(state.host.querySelector('[data-table-ddl-hover-search]')).not.toBeNull();
+    current={...current,execution:{},metadataAllowed:false};notify();
+    expect(state.host.querySelector('[data-table-ddl-hover-search]')).toBeNull();
+    state.controller.dispose();expect(release).toHaveBeenCalledOnce();
+  });
+  it("does not start a DDL fetch while metadata is held",async()=>{
+    const current={...context(),metadataAllowed:false};
+    const state=fixture({getSemanticContext:()=>current});
+    state.listeners.mouseMove!({target:{position:{lineNumber:1,column:16}}});await vi.advanceTimersByTimeAsync(500);
+    expect(metadataMocks.loadTableDdl).not.toHaveBeenCalled();expect(metadataMocks.loadTableMetadata).not.toHaveBeenCalled();state.controller.dispose();
+  });
+  it("discards a delayed DDL result even when no semantic subscription was supplied",async()=>{
+    const response=deferred<string>();metadataMocks.loadTableDdl.mockReturnValue(response.promise);let current=context();
+    const state=fixture({getSemanticContext:()=>current});
+    state.listeners.mouseMove!({target:{position:{lineNumber:1,column:16}}});await vi.advanceTimersByTimeAsync(320);
+    current={...current,execution:{}};response.resolve("CREATE TABLE stale(id int)");await vi.advanceTimersByTimeAsync(1);
+    expect(state.editor.addContentWidget).not.toHaveBeenCalled();state.controller.dispose();
   });
 });

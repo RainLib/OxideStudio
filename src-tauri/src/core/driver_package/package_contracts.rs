@@ -20,6 +20,24 @@ pub(super) fn validate_capability_contract(
     {
         return Err("Invalid driver capability contract".to_string());
     }
+    let file_formats = capabilities
+        .file_query_formats
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if file_formats.len() != capabilities.file_query_formats.len()
+        || capabilities
+            .file_query_formats
+            .iter()
+            .any(|format| !matches!(format.as_str(), "csv" | "json" | "jsonl" | "parquet"))
+        || (!file_formats.is_empty()
+            && (!capabilities.supports_sql_query
+                || capabilities.connection_mode
+                    != crate::core::dialect::DatabaseConnectionMode::File))
+    {
+        return Err(
+            "File-query formats require a file SQL driver and unique reviewed formats".into(),
+        );
+    }
     // Identifier quoting is interpolated into generated completion and table
     // SQL. A signed package may select only the delimiter families supported
     // by the host; arbitrary text here must never become a code-generation
@@ -195,3 +213,7 @@ pub(super) fn validate_schema_migration_contract(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/file_query_contract.rs"]
+mod file_query_tests;

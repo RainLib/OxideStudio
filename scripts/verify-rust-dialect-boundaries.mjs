@@ -1,3 +1,4 @@
+import { readSourceText } from "./lib/source-text.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,7 @@ import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/core/dialect.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["catalog", "sql", "types"];
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -25,7 +26,7 @@ const definitions = new Map();
 let helpers = 0;
 for (const module of modules) {
   const file = `src-tauri/src/core/dialect/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+crate::core::dialect::/.test(source))
     throw new Error(`${file}: import directly from its dialect owner.`);
   const dependencies = new Set();
@@ -50,7 +51,7 @@ for (const [symbol, owner] of Object.entries({
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
 
-const sql = fs.readFileSync(path.join(root, "src-tauri/src/core/dialect/sql.rs"), "utf8");
+const sql = readSourceText(path.join(root, "src-tauri/src/core/dialect/sql.rs"));
 const methods = [...sql.matchAll(/^    pub fn (\w+)/gm)].map((match) => match[1]);
 if (helpers !== 21 || methods.length !== 40)
   throw new Error(`Expected 21 dialect helpers and 40 DatabaseKind methods; found ${helpers} and ${methods.length}.`);

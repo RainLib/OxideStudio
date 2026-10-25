@@ -563,6 +563,8 @@ fn column(
         identity_generation: None,
         is_generated: None,
         is_hidden: None,
+        character_set: None,
+        collation: None,
         is_primary_key,
         default_value: None,
         comment: Some(comment.to_string()),

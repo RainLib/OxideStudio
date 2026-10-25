@@ -753,6 +753,8 @@ fn meilisearch_columns(documents: &[Value], primary_key: Option<&str>) -> Vec<Co
             identity_generation: None,
             is_generated: None,
             is_hidden: None,
+            character_set: None,
+            collation: None,
             default_value: None,
             comment: None,
         })

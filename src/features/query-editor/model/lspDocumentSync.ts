@@ -14,6 +14,26 @@ export type LspTextModel = {
 
 /** One FIFO tail per virtual LSP document URI. */
 export type LspDocumentSyncChains = Map<string, Promise<void>>;
+const shadowListeners=new WeakMap<Map<string,number>,Set<(uri:string)=>void>>();
+const ownedSynchronizers = new WeakMap<Map<string,number>, Map<string,(model:LspTextModel)=>Promise<void>>>();
+export function bindLspDocumentSynchronizer(versions:Map<string,number>,uri:string,sync:(model:LspTextModel)=>Promise<void>){
+  let bindings=ownedSynchronizers.get(versions);if(!bindings)ownedSynchronizers.set(versions,bindings=new Map());bindings.set(uri,sync);
+  // Keep a tombstone while old providers retain these shadow maps. Falling
+  // back to a raw didOpen after owner disposal would resurrect a closed URI.
+  return ()=>{if(bindings!.get(uri)===sync)bindings!.set(uri,()=>Promise.reject(new Error("LSP document owner was released")));};
+}
+export function commitLspDocumentShadow(options:{uri:string;text:string;version:number;openedDocuments:Set<string>;documentVersions:Map<string,number>;documentTexts:Map<string,string>}){
+  const {uri,text,version,openedDocuments,documentVersions,documentTexts}=options;
+  const changed=documentVersions.get(uri)!==version||documentTexts.get(uri)!==text;
+  openedDocuments.add(uri);documentVersions.set(uri,version);documentTexts.set(uri,text);if(changed)notifyShadow(documentVersions,uri);
+}
+export function subscribeLspDocumentShadow(versions:Map<string,number>,listener:(uri:string)=>void){
+  const listeners=shadowListeners.get(versions)||new Set<(uri:string)=>void>();listeners.add(listener);shadowListeners.set(versions,listeners);
+  return ()=>{listeners.delete(listener);if(!listeners.size)shadowListeners.delete(versions);};
+}
+function notifyShadow(versions:Map<string,number>,uri:string){
+  for(const listener of shadowListeners.get(versions)||[]){try{listener(uri);}catch(error){console.error("[LSP] Document shadow listener failed:",error);}}
+}
 
 /**
  * Queue a document operation after every prior operation for the same URI.
@@ -66,6 +86,8 @@ export async function syncLspModelBeforeCompletion(options: {
     documentVersions,
     documentTexts,
   } = options;
+  const ownedSync=ownedSynchronizers.get(documentVersions)?.get(uri);
+  if(ownedSync){await ownedSync(model);return;}
   const text = model.getValue();
   if (openedDocuments.has(uri) && documentTexts?.get(uri) === text) return;
 
@@ -78,6 +100,7 @@ export async function syncLspModelBeforeCompletion(options: {
     // skip the document change after a transient LSP restart.
     documentVersions.set(uri, version);
     documentTexts?.set(uri, text);
+    notifyShadow(documentVersions,uri);
     return;
   }
 
@@ -87,4 +110,5 @@ export async function syncLspModelBeforeCompletion(options: {
   openedDocuments.add(uri);
   documentVersions.set(uri, version);
   documentTexts?.set(uri, text);
+  notifyShadow(documentVersions,uri);
 }

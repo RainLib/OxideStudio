@@ -102,7 +102,7 @@ export function DataSourceList({
             side="right"
             sideOffset={6}
             onKeyDownCapture={updateTypeahead}
-            className="flex h-[min(440px,calc(100dvh-126px))] w-[288px] flex-col overflow-hidden rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]"
+            className="flex h-[min(440px,calc(100dvh-126px))] w-[288px] flex-col overflow-hidden p-0"
           >
             <div className="flex h-8 items-center gap-2 border-b border-[hsl(var(--wb-border-subtle))] px-2 text-[11px]">
               <Search size={12} className="shrink-0 wb-muted" />

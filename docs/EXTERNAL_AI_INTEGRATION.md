@@ -8,28 +8,34 @@ OxideStudio 提供独立的 Rust 可执行程序 `oxide-agent`。外部 AI 直�
 
 ## 1. 准备可执行文件
 
-本地开发版默认位于：
+在仓库根目录构建后，本地开发版位于：
 
 ```text
-/Users/houshuai/project/ai_project/OxideStudio/src-tauri/target/debug/oxide-agent
+src-tauri/target/debug/oxide-agent       # macOS / Linux
+src-tauri/target/debug/oxide-agent.exe   # Windows
 ```
 
 后续示例可以先定义：
 
 ```bash
-BIN="/Users/houshuai/project/ai_project/OxideStudio/src-tauri/target/debug/oxide-agent"
-PROJECT_ID="pencil-7ef0839d"
+BIN="$PWD/src-tauri/target/debug/oxide-agent"
+PROJECT_ID="<project-id>"
 ```
 
 如果该文件尚未生成，在仓库根目录执行：
 
 ```bash
 cargo build \
+  --no-default-features \
   --manifest-path src-tauri/Cargo.toml \
   --bin oxide-agent
 ```
 
 正式发布包会按平台和架构提供独立的 `oxide-agent`。配置外部客户端时，应使用实际安装或解压后的绝对路径。
+
+`--no-default-features` 构建保留公开 CLI/MCP、只读数据库执行、凭据读取和私有 bridge 客户端，不初始化 Tauri，不需要 WebView/GTK、桌面 keyring 或 protoc。桌面 broker、系统浏览器登录、远程 SQLite worker 和 UI 命令仍由 Desktop feature 提供；私有 bridge 客户端仍必须连接已有 Desktop 签发的 endpoint/token，不提供独立写权限。`prepare-oxide-agent.mjs` 使用同一构建方式准备各平台发布文件。完整独立驱动包和非 SQL 查询覆盖仍按下文边界推进。
+
+开发入口 `npm run ai -- ...` 与 `npm run --silent ai:mcp -- ...` 也会启动同一个原生程序，不再运行另一套空的 TypeScript adapter。MCP 必须使用 `--silent` 去掉 npm 的启动横幅，保持 stdout 只有 JSON-RPC 帧；外部客户端也可直接使用原生程序。入口优先使用 `OXIDE_AGENT_BIN` 指定的程序，否则寻找当前 Cargo target 下的 debug/release 程序；原生程序版本必须与当前 checkout 的 `package.json` 一致。入口仅依赖 Node 内置模块，会原样传递授权参数与 stdio，不自动构建。
 
 ## 2. 查询项目和连接 ID
 
@@ -70,12 +76,12 @@ printf '{}' > /tmp/oxide-input.json
 {
   "mcpServers": {
     "oxide-studio": {
-      "command": "/Users/houshuai/project/ai_project/OxideStudio/src-tauri/target/debug/oxide-agent",
+      "command": "<absolute-path-to-oxide-agent>",
       "args": [
         "mcp",
         "stdio",
         "--project",
-        "pencil-7ef0839d"
+        "<project-id>"
       ]
     }
   }
@@ -92,12 +98,12 @@ printf '{}' > /tmp/oxide-input.json
 {
   "mcpServers": {
     "oxide-studio": {
-      "command": "/Users/houshuai/project/ai_project/OxideStudio/src-tauri/target/debug/oxide-agent",
+      "command": "<absolute-path-to-oxide-agent>",
       "args": [
         "mcp",
         "stdio",
         "--project",
-        "pencil-7ef0839d",
+        "<project-id>",
         "--connection",
         "<connection-id>",
         "--database",
@@ -169,7 +175,7 @@ MCP-Protocol-Version: 2025-11-25
 - 默认只监听 loopback，并只允许 `localhost`、`127.0.0.1` 和 `::1` Host；loopback 浏览器 Origin 可用，其他 Origin 必须显式列入 allowlist；
 - 非 loopback 监听同时要求 `--allow-remote`、`--allowed-host` 和 `--allowed-origin`，缺少任一项都会拒绝启动；HTTP 本身不提供 TLS，远程部署必须放在受信网络或 TLS 反向代理之后；
 - `/healthz` 与 `/readyz` 只返回服务身份和 readiness，不返回 token、项目、连接或数据库信息；`/mcp` 始终先经过 Origin 和 bearer token 校验；
-- HTTP 和 stdio 都只暴露五个公开只读工具。应用内 Codex/CodeBuddy 使用的短期私有 bridge 是另一条协议边界，HTTP token 不能用于审批或数据库写入。
+- HTTP 和 stdio 暴露相同的七项公开只读工具。应用内 Codex/CodeBuddy 使用的短期私有 bridge 是另一条协议边界，HTTP token 不能用于审批或数据库写入。
 
 ## 4. CLI 使用
 
@@ -221,7 +227,7 @@ printf '%s\n' '{
 以下参数也可以通过环境变量提供：
 
 ```bash
-export OXIDE_PROJECT_ID="pencil-7ef0839d"
+export OXIDE_PROJECT_ID="<project-id>"
 export OXIDE_CONNECTION_ID="<connection-id>"
 export OXIDE_DATABASE="reporting,analytics"
 export OXIDE_MCP_TOOL="connection.listSummaries,query.runReadOnly"
@@ -239,18 +245,41 @@ export OXIDE_DATA_DIR="$HOME/Library/Application Support/com.houshuai.oxide-stud
 | --- | --- | --- |
 | `connection.listSummaries` | 列出项目内脱敏后的连接摘要 | 不返回密码和完整连接 URL |
 | `metadata.listObjects` | 按连接、父对象、类型或名称前缀查询缓存对象 | 依赖 OxideStudio 已写入的 metadata 缓存，单次最多 200 项 |
-| `query.runReadOnly` | 执行后端校验的只读 SQL | 当前仅 PostgreSQL、MySQL/MariaDB；只接受单条只读查询 |
-| `query.explainEstimate` | 执行估算型 EXPLAIN | 不支持 `ANALYZE`，不会实际执行写入 |
+| `metadata.inspectLive` | 直接读取当前数据库、schema、关系、集合、列/字段、索引和约束 | 不接收 SQL 或行值；按驱动能力返回，支持前缀、offset 和每页最多 200 项 |
+| `query.runReadOnly` | 执行后端校验的只读 SQL | 内置 PostgreSQL、MySQL/MariaDB、SQLite；外置包须通过方言与只读握手校验；只接受单条只读查询 |
+| `document.findReadOnly` | 原生 MongoDB 的有界文档查询 | 过滤、排序、投影及行/字节分页；返回 canonical Extended JSON；不接受 command、pipeline 或服务端脚本 |
+| `query.explainEstimate` | 执行驱动支持的估算型 EXPLAIN | 当前 PostgreSQL/MySQL；不支持 `ANALYZE`，SQLite 会明确拒绝 |
 | `lsp.sqlContext` | 无需打开编辑器即可分析 SQL 光标上下文和候选项 | 缓存候选仍受项目和连接范围限制 |
 
-所有工具当前均为只读。SQL 查询会在只读事务中运行，应用行数、结果大小和 30 秒 deadline，并在完成后关闭临时数据库连接。
+所有工具当前均为只读。内置 PostgreSQL/MySQL 查询使用只读事务，SQLite 使用引擎只读打开；外置包采用其已验证的只读执行契约。SQL 应用行数、结果大小和默认 30 秒 deadline；实时元数据的 deadline 覆盖连接、目录读取与版本读取，结束后关闭临时连接。文档查询的输入、预算和游标规则见 [文档只读查询](HEADLESS_DOCUMENT_READS.md)。
+
+### 5.1 实时元数据
+
+`kind` 可取 `databases/schemas/relations/collections/columns/indexes/constraints`。`columns/indexes/constraints` 必须传 `relation`。PostgreSQL 分别传 `database` 和 `schema`；MySQL/MongoDB/Redis 的 namespace 与所选数据库保持一致；SQLite 的逻辑数据库与 schema 都是 `main`，文件路径仍来自已保存连接。Elasticsearch/Meilisearch 的 `--database` 白名单约束索引名，列/字段检查通过 `relation` 指定索引。
+
+例如在 Windows PowerShell 中检查一个保存的 SQLite 连接：
+
+```powershell
+$bin = Join-Path (Get-Location) 'src-tauri/target/debug/oxide-agent.exe'
+$metadataInput = Join-Path $env:TEMP 'oxide-live-metadata.json'
+[IO.File]::WriteAllText($metadataInput, '{"kind":"relations","schema":"main","limit":50}', [Text.UTF8Encoding]::new($false))
+& $bin tools call metadata.inspectLive --project '<project-id>' --connection '<connection-id>' --database main --input ('@' + $metadataInput)
+```
+
+结果包含 `source: "live"`、`objects`、`total` 和 `nextOffset`。后续页可把 `nextOffset` 作为 `offset`，但每次都会重新读取目录，不代表跨请求的事务快照。集合枚举遵循驱动的分页接口，最多检查 100,000 个对象、1,000 个 continuation；超限或超时明确失败，不将局部结果标成完整目录。
+
+缓存工具与 `lsp.sqlContext` 同样执行数据库白名单。限制数据库时，缺少数据库归属的旧缓存会被排除；PostgreSQL 旧缓存中的 `DATABASE` 节点实际代表 schema，不能据此推断数据库授权。需要当前目录时使用实时接口。
 
 ## 6. 运行方式和当前限制
 
-- OxideStudio 界面不必保持打开；`oxide-agent` 会自行读取本地 `metadata.db`，并在 SQL 工具调用时按需连接已保存的数据源。
+- OxideStudio 界面不必保持打开；`oxide-agent` 会自行读取本地 `metadata.db`，并在 SQL/实时元数据调用时按需连接已保存的数据源。
 - `metadata.db` 以只读方式打开，`oxide-agent` 不会修改项目、连接或缓存。
-- metadata 缓存需要先由 OxideStudio 刷新。应用关闭后仍可读取已有缓存，但不会自动发现远端新增对象。
-- MongoDB、Redis 和 Elasticsearch 当前只能通过 `metadata.listObjects` 读取缓存对象，尚未开放原生查询工具。
+- 需要联网时，按已授权项目/连接读取 `connection_credentials`，复用 Desktop 的认证解密与 SSH 凭据合并；缺少密钥、凭据损坏或被复制到其他连接时明确失败。读取不会生成密钥或迁移旧记录，连接摘要和缓存读取不要求解密凭据。
+- `metadata.listObjects` 仍读取缓存；`metadata.inspectLive` 可以在应用关闭后发现新增对象，且不会回写缓存。
+- MongoDB 的原生文档只读查询已开放，使用方法、数据类型、分页和真实服务端验收见 [文档只读查询](HEADLESS_DOCUMENT_READS.md)。Redis 和 Elasticsearch 当前提供其原生元数据，尚未开放任意命令。MongoDB 的交互式 OIDC 浏览器登录在 headless 路径明确拒绝。
+- 联网工具优先使用已激活的签名外置包；`driverPackageVersion` 固定连接只使用该确切版本。仅在没有 pin、没有激活记录时使用内置驱动；激活记录损坏、所选版本缺失、签名/摘要/目标不匹配均明确失败，不回退另一个客户端。运行库位置复用当前 profile 的 `settings.drivers.storePath`，缺失时使用平台默认目录；显式便携 profile 默认使用其 `database-drivers` 子目录。
+- 外置进程必须通过 manifest 绑定的握手，并声明 `readOnlyEnforcement`；文件型包还须声明 `readOnlyConnections`，Host 始终发送 `readOnly: "true"` 连接选项。查询和实时元数据的 `driverPackageVersion` 表示实际选中的外置版本；内置通道为 null。没有编译可信驱动公钥的开发构建仍拒绝所有外置包。
+- 外置 SQL 目前接受签名能力声明中的 postgres/mysql/sqlite/duckdb/clickhouse profile，并保留输入、数据库范围、行数、字节数和超时门禁。完整外置厂商覆盖、通用 JDBC 的只读执行、高级连接参数和任意非 SQL 查询仍在对齐。完整运行验收与边界见 [签名驱动验收](HEADLESS_DRIVER_ACCEPTANCE.md)。
 - 不提供新增、修改、删除、DDL 或其他 mutation 工具。
 - 如果项目有多个连接，工具必须传 `connectionId`，或者在启动 MCP/CLI 时使用 `--connection` 固定连接。
 - Streamable HTTP 支持 bearer token、Host/Origin 校验和 Desktop supervisor；当前不提供 OIDC，因此远程部署不能把 bearer token 当成多用户身份系统。

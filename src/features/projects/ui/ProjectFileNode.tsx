@@ -8,6 +8,8 @@ import {
 import { cn } from "@/lib/utils";
 import type { ProjectFileTreeNode } from "@/store/useProjectFilesStore";
 import { supportsProjectFilePreview } from "@/services/tauri/project-files.service";
+import { fileQueryFormat } from "@/features/file-query/model";
+import { useI18n } from "@/i18n";
 import {
   ChevronDown, ChevronRight, FileCode2, FileText, Folder, FolderOpen,
   Image as ImageIcon, LoaderCircle, MoreHorizontal, Trash2,
@@ -25,6 +27,8 @@ interface ProjectFileNodeProps {
   onOpen: (node: ProjectFileTreeNode) => void;
   onRename: (node: ProjectFileTreeNode) => void;
   onDelete: (node: ProjectFileTreeNode) => void;
+  onQuery?: (node: ProjectFileTreeNode) => void;
+  onOpenText?: (node: ProjectFileTreeNode) => void;
   disabled?: boolean;
 }
 
@@ -36,8 +40,11 @@ export function ProjectFileNode({
   onOpen,
   onRename,
   onDelete,
+  onQuery,
+  onOpenText,
   disabled = false,
 }: ProjectFileNodeProps) {
+  const { t } = useI18n();
   const isDirectory = node.kind === "directory";
   const isImage = supportsProjectFilePreview(node.name);
   const FileIcon = isImage
@@ -118,8 +125,10 @@ export function ProjectFileNode({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="start"
-            className="min-w-[150px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[11px]"
+            className="min-w-[150px] p-1 text-[11px]"
           >
+            {!isDirectory && fileQueryFormat(node.name) && onQuery && <DropdownMenuItem className="h-7 text-[11px]" disabled={disabled || node.isSymlink} onClick={() => onQuery(node)}>{t("fileQuery.queryFile")}</DropdownMenuItem>}
+            {!isDirectory && fileQueryFormat(node.name) !== "parquet" && onOpenText && <DropdownMenuItem className="h-7 text-[11px]" disabled={disabled || node.isSymlink} onClick={() => onOpenText(node)}>{t("fileQuery.openText")}</DropdownMenuItem>}
             <DropdownMenuItem
               className="h-7 text-[11px]"
               disabled={disabled}
@@ -151,6 +160,8 @@ export function ProjectFileNode({
             onOpen={onOpen}
             onRename={onRename}
             onDelete={onDelete}
+            onQuery={onQuery}
+            onOpenText={onOpenText}
             disabled={disabled}
           />
         ))}

@@ -20,6 +20,7 @@ export type WorkbenchActionId =
   | "editor.inlineCompletion.acceptNextWord"
   | "editor.inlineCompletion.hide"
   | "file.save"
+  | "file.queryData"
   | "workbench.toggleDatabaseExplorer"
   | "workbench.openProjectFiles"
   | "workbench.toggleSqlLibrary"

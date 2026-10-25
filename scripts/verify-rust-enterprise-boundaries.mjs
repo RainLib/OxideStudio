@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/enterprise/mod.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["callback", "client", "commands", "gateway_driver", "models", "session", "support"];
 const modules = [...facade.matchAll(/^(?:pub )?mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -25,7 +26,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/enterprise/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   const productionSource = source.replace(/\n#\[cfg\(test\)\][\s\S]*$/, "\n");
   if (
     /\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::enterprise(?:::\w+)?::/.test(productionSource)
@@ -53,7 +54,7 @@ for (const [symbol, owner] of Object.entries({
   enterprise_sign_in: "commands",
   ManagedGatewayDriver: "gateway_driver",
 })) {
-  const source = fs.readFileSync(path.join(root, `src-tauri/src/enterprise/${owner}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `src-tauri/src/enterprise/${owner}.rs`));
   if (!new RegExp(`\\b${symbol}\\b`).test(source)) {
     throw new Error(`${symbol} must have one owner in ${owner}.`);
   }
@@ -69,7 +70,7 @@ const commands = [
   "enterprise_sign_out",
   "enterprise_connect_managed_source",
 ];
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 for (const command of commands) {
   if (!new RegExp(`\\benterprise::commands::${command},`).test(lib)) {
     throw new Error(`${command} must be registered from enterprise/commands.rs.`);
@@ -77,7 +78,7 @@ for (const command of commands) {
 }
 const testFiles = ["tests", "gateway_driver"];
 const testCount = testFiles.reduce((count, file) => count + [
-  ...fs.readFileSync(path.join(root, `src-tauri/src/enterprise/${file}.rs`), "utf8")
+  ...readSourceText(path.join(root, `src-tauri/src/enterprise/${file}.rs`))
     .matchAll(/^\s*#\[(?:tokio::)?test\]$/gm),
 ].length, 0);
 if (helpers !== 37 || typeMethods !== 55 || testCount !== 12) {

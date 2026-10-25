@@ -104,8 +104,12 @@ export async function formatLspDocument(
   uri: string,
   tabSize: number,
   insertSpaces: boolean,
+  throwOnError = false,
 ): Promise<TextEdit[]> {
-  if (!client.isInitialized()) return [];
+  if (!client.isInitialized()) {
+    if (throwOnError) throw new Error("SQL intelligence is not ready for formatting.");
+    return [];
+  }
   try {
     return parseTextEdits(
       await client.invoke<unknown>("lsp_formatting", {
@@ -119,6 +123,7 @@ export async function formatLspDocument(
     );
   } catch (error) {
     console.error("[LSP] ✗ Formatting failed:", error);
+    if (throwOnError) throw error;
     return [];
   }
 }

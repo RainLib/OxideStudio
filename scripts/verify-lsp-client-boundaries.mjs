@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -8,7 +9,7 @@ import {
 } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
+const read = (relativePath) => readSourceText(path.join(root, relativePath));
 const facadePath = "src/services/lsp/client.ts";
 const base = "src/services/lsp/client";
 const facade = read(facadePath);
@@ -39,6 +40,15 @@ for (const required of [
 }
 
 const ownership = {
+  completionSnapshot:["getLspCompletionSnapshot"],
+  completionConstraints:["parseCompletionConstraints"],
+  completionValueType:["parseCompletionValueType"],
+  analysisConfiguration: ["confirmLspAnalysisConfiguration"],
+  diagnostics:["getLspDiagnosticSnapshot"],
+  documentStructure:["getLspDocumentStructure"],
+  documentSemantics:["getLspDocumentSemantics"],
+  documentCompletions:["getLspDocumentCompletions"],
+  documentSemanticValidation:["validDocumentSemanticValue"],
   completion: ["getLspCompletionList", "resolveLspCompletionItem"],
   documents: [
     "getLspInlineCompletionContext",
@@ -69,15 +79,15 @@ for (const [module, symbols] of Object.entries(ownership)) {
     }
   }
 }
-for (const module of ["completion", "documents", "navigation", "parsing"]) {
+for (const module of ["completion", "documents", "navigation", "parsing", "diagnostics", "analysisConfiguration", "documentStructure", "documentSemantics", "documentCompletions", "documentSemanticValidation", "completionSnapshot", "completionConstraints"]) {
   const source = read(`${base}/${module}.ts`);
   if (source.includes("@tauri-apps/api/core")) {
     throw new Error(`LSP client ${module} must dispatch through its transport bridge.`);
   }
 }
-if (read(`${base}/parsing.ts`).includes("LspClient")) {
+for(const module of ["parsing","documentSemanticValidation"]){if (read(`${base}/${module}.ts`).includes("LspClient")) {
   throw new Error("LSP response parsing must remain independent of the client lifecycle.");
-}
+}}
 
 const files = listTypeScriptModules(root, base);
 const graph = new Map();

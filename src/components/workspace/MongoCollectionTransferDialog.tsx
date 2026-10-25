@@ -156,7 +156,7 @@ export function MongoCollectionTransferDialog({
   const complete = status?.startsWith("Transferred ");
   return (
     <Dialog open={open} onOpenChange={(next) => !next && !busy && onClose()}>
-      <DialogContent className="max-w-xl border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="max-w-xl p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-5 py-4">
           <DialogTitle className="flex items-center gap-2 text-[14px]">
             <ArrowRightLeft size={16} className="text-[hsl(var(--wb-accent))]" />

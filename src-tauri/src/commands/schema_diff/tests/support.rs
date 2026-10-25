@@ -35,6 +35,8 @@ pub(super) fn semantic_fixture_snapshot() -> SchemaSnapshot {
                 comment: Some("private comment".to_string()),
                 is_generated: Some(false),
                 is_hidden: Some(false),
+                character_set: None,
+                collation: None,
             }],
             indexes: vec![IndexInfo {
                 name: "users_idx".to_string(),

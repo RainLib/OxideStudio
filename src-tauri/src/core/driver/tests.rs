@@ -61,6 +61,8 @@ impl DatabaseDriver for CollectionsDriver {
 #[tokio::test]
 async fn minimal_driver_can_rely_on_non_relational_defaults() {
     let driver = MinimalDriver;
+    assert_eq!(driver.sql_lookup_context(None).await.unwrap(), None);
+    assert_eq!(driver.sql_lookup_context(Some("db")).await.unwrap(), None);
 
     assert_eq!(driver.get_databases().await.unwrap(), Vec::<String>::new());
     assert_eq!(driver.get_schemas().await.unwrap(), Vec::<String>::new());

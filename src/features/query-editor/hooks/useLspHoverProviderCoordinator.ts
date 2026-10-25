@@ -16,15 +16,18 @@ import {
 import { syncLspModelBeforeCompletion } from "../model/lspDocumentSync";
 import { toMonacoRange } from "../model/lspMonacoAdapter";
 import { useTableDdlHoverSearchWidget } from "./useTableDdlHoverSearchWidget";
+import {captureLspDocumentRequest,watchLspProviderContext,type LspProviderContextOptions} from "../model/lspProviderContext";
 
 type Disposable = { dispose: () => void };
 
-export type LspHoverProviderRuntime = {
+export type LspHoverProviderRuntime = LspProviderContextOptions & {
+  syncDocument?: (model: any) => Promise<void>;
   activeProjectId?: string | null;
   canUseLsp: boolean;
   currentSchema?: string | null;
   databaseName?: string | null;
   documentLanguageId: string;
+  serverDialect?:string;
   documentUri: string;
   driver: Parameters<typeof loadTableMetadata>[0]["driver"];
   effectiveConnectionId?: string | null;
@@ -56,6 +59,7 @@ function runtimeOwnerKey(runtime: LspHoverProviderRuntime) {
     runtime.databaseName || "",
     runtime.targetSchema || runtime.currentSchema || "",
     runtime.documentLanguageId,
+    runtime.serverDialect||"",
     runtime.showTableDdlHoverPreview ? "ddl" : "metadata-only",
     runtime.metadataRevision ?? "",
   ].join("\u0000");
@@ -68,11 +72,14 @@ export function registerLspHoverProvider(options: {
   monaco: any;
 }): Disposable {
   const { editorLanguageId, getRuntime, lspClient, monaco } = options;
-  return monaco.languages.registerHoverProvider(editorLanguageId, {
-    provideHover: async (model: any, position: any) => {
+  let disposed=false;
+  const provider=monaco.languages.registerHoverProvider(editorLanguageId, {
+    provideHover: async (model: any, position: any, token?:{isCancellationRequested?:boolean}) => {
       const runtime = getRuntime();
       const uri = model.uri.toString();
       if (!runtime.canUseLsp || uri !== runtime.documentUri) return null;
+      const request=captureLspDocumentRequest({read:runtime.getSemanticContext,model,token,isActive:()=>!disposed});
+      if(!request.isCurrent())return null;
 
       const ownerKey = runtimeOwnerKey(runtime);
       const modelVersion = model.getVersionId();
@@ -80,6 +87,7 @@ export function registerLspHoverProvider(options: {
         const currentRuntime = getRuntime();
         return (
           currentRuntime.canUseLsp &&
+          request.isCurrent() &&
           currentRuntime.documentUri === uri &&
           runtimeOwnerKey(currentRuntime) === ownerKey &&
           model.getVersionId() === modelVersion
@@ -87,22 +95,27 @@ export function registerLspHoverProvider(options: {
       };
 
       try {
-        const identity = extractLspDocumentIdentity(uri);
-        await syncLspModelBeforeCompletion({
-          uri,
-          model,
-          languageId:
-            identity?.driver?.toLowerCase() === runtime.driver.toLowerCase()
-              ? runtime.documentLanguageId
-              : identity?.driver
-                ? lspLanguageId(identity.driver)
-                : "sql",
-          client: lspClient,
-          openedDocuments: runtime.openedDocumentsRef.current,
-          documentVersions: runtime.documentVersionsRef.current,
-          documentTexts: runtime.documentTextsRef.current,
-        });
+        if (runtime.syncDocument) {
+          await runtime.syncDocument(model);
+        } else {
+          const identity = extractLspDocumentIdentity(uri);
+          await syncLspModelBeforeCompletion({
+            uri,
+            model,
+            languageId:
+              identity?.driver?.toLowerCase() === runtime.driver.toLowerCase()
+                ? runtime.documentLanguageId
+                : identity?.driver
+                  ? lspLanguageId(identity.driver)
+                  : "sql",
+            client: lspClient,
+            openedDocuments: runtime.openedDocumentsRef.current,
+            documentVersions: runtime.documentVersionsRef.current,
+            documentTexts: runtime.documentTextsRef.current,
+          });
+        }
       } catch {
+        if (runtime.syncDocument) return null;
         // Keep server and metadata hover independently available during a
         // transient document-sync failure.
       }
@@ -111,6 +124,7 @@ export function registerLspHoverProvider(options: {
       const line = model.getLineContent(position.lineNumber);
       const identifier = sqlIdentifierAtColumn(line, position.column);
       const relation =
+        request.metadataAllowed &&
         runtime.effectiveConnectionId &&
         runtime.supportsTableBrowsing &&
         isSqlRelationIdentifierContext(line, position.column)
@@ -132,10 +146,16 @@ export function registerLspHoverProvider(options: {
         tableIdentity && runtime.interactiveTableHover,
       );
       const shouldLoadTablePreview = tableIdentity && !interactiveTablePreview;
+      const localHover=async()=>{
+        const version=runtime.documentVersionsRef.current.get(uri),text=runtime.documentTextsRef.current.get(uri),dialect=runtime.serverDialect??runtime.documentLanguageId;
+        if(version===undefined||text!==model.getValue()||dialect==="sql")return null;
+        const result=await lspClient.getDocumentSemantics({uri,version,dialect,operation:{kind:"hover",position:{line:position.lineNumber-1,character:position.column-1}}});
+        return runtime.documentVersionsRef.current.get(uri)===version&&runtime.documentTextsRef.current.get(uri)===text?result?.value??null:null;
+      };
       const [lspHover, metadata, ddl] = await Promise.all([
         interactiveTablePreview
           ? Promise.resolve(null)
-          : lspClient
+          : !request.lspAllowed?localHover().catch(()=>null):lspClient
               .getHover(uri, position.lineNumber - 1, position.column - 1)
               .catch(() => null),
         shouldLoadTablePreview
@@ -186,6 +206,7 @@ export function registerLspHoverProvider(options: {
       };
     },
   });
+  return {dispose:()=>{disposed=true;provider.dispose();}};
 }
 
 export function useLspHoverProviderCoordinator(
@@ -204,6 +225,10 @@ export function useLspHoverProviderCoordinator(
       options.showTableDdlHoverPreview &&
       options.supportsTableBrowsing,
   });
+  useEffect(()=>watchLspProviderContext({getSemanticContext:options.getSemanticContext,
+    subscribeSemanticContext:options.subscribeSemanticContext},()=>{
+    options.editor?.trigger("oxide.semanticContext","editor.action.hideHover",{});
+  }),[options.editor,options.getSemanticContext,options.subscribeSemanticContext]);
 
   useEffect(() => {
     if (!options.isActivePane || !options.monaco) return;

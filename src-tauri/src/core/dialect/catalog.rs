@@ -437,7 +437,8 @@ const ELASTICSEARCH_SPEC: DatabaseSpec = DatabaseSpec {
     supports_key_value_browsing: false,
     supports_schemas: false,
     supports_database_catalogs: false,
-    supports_connection_database: true,
+    // Index selection belongs to the request, not the endpoint URL path.
+    supports_connection_database: false,
     supports_create_database: false,
     supports_create_database_owner: false,
     supports_create_database_charset: false,

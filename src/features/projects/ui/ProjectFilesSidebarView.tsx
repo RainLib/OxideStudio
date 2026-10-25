@@ -12,9 +12,11 @@ import { ProjectFileNode } from "@/features/projects/ui/ProjectFileNode";
 import type { useProjectFilesSidebarController } from "@/features/projects/hooks/useProjectFilesSidebarController";
 import { DEFAULT_PROJECT_FILE_FILTER } from "@/lib/projectFileFilter";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 import {
   AlertTriangle,
   FilePlus2,
+  FileSearch,
   FolderOpen,
   FolderPlus,
   RefreshCw,
@@ -32,7 +34,9 @@ export function ProjectFilesSidebarView({
   deleteError, setDeleteError, isMutating, saveFileFilter, chooseProjectDirectory,
   showCreateDialog, showRenameDialog, openNode, submitEntryDialog, confirmDelete,
   reloadConflictingFile, overwriteConflictingFile, hideSidebar,
+  queryNode, openDataFile, openAsText,
 }: ProjectFilesSidebarViewProps) {
+  const { t } = useI18n();
   return (
     <div className="flex h-full min-h-0 flex-col bg-[hsl(var(--wb-panel))]">
       <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar)/0.72)] px-2">
@@ -51,6 +55,7 @@ export function ProjectFilesSidebarView({
           <span />
         )}
         <div className="wb-tool-header-actions flex items-center gap-0.5">
+          <button type="button" className="wb-icon-button h-6 w-6" onClick={openDataFile} title={t("fileQuery.openSidebar")} aria-label={t("fileQuery.openSidebar")}><FileSearch size={12} /></button>
           <button
             type="button"
             className="wb-icon-button h-6 w-6"
@@ -198,6 +203,8 @@ export function ProjectFilesSidebarView({
                   })
                 }
                 onOpen={(entry) => void openNode(entry)}
+                onQuery={queryNode}
+                onOpenText={entry => void openAsText(entry)}
                 onRename={showRenameDialog}
                 onDelete={(entry) => {
                   setDeleteError(null);
@@ -211,7 +218,7 @@ export function ProjectFilesSidebarView({
       )}
 
       <Dialog open={fileFilterDialogOpen} onOpenChange={setFileFilterDialogOpen}>
-        <DialogContent className="w-[440px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogContent layout="custom" className="w-[440px] max-w-[calc(100vw-32px)] gap-0 p-0">
           <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
             <DialogTitle className="text-[13px]">File name filter</DialogTitle>
             <DialogDescription className="text-[10px] leading-4">
@@ -260,7 +267,7 @@ export function ProjectFilesSidebarView({
         open={Boolean(entryDialog)}
         onOpenChange={(open) => !open && setEntryDialog(null)}
       >
-        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogContent layout="custom" className="w-[420px] max-w-[calc(100vw-32px)] gap-0 p-0">
           <form onSubmit={submitEntryDialog}>
             <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
               <DialogTitle className="text-[13px]">
@@ -319,7 +326,7 @@ export function ProjectFilesSidebarView({
           }
         }}
       >
-        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)]">
           <DialogHeader>
             <DialogTitle className="text-[13px]">Delete {deleteTarget?.name}?</DialogTitle>
             <DialogDescription className="text-[11px] leading-5">

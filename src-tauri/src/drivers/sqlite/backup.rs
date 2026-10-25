@@ -5,6 +5,78 @@ use sqlx::{ConnectOptions, Connection, Pool, Row, Sqlite};
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
+/// Trusted backup and migration workers open an existing source read-only and
+/// write only their reviewed snapshot target. This is not a public read-only driver
+/// capability: Agent/MCP connections still reject backup/restore operations.
+pub(crate) async fn backup_existing_file(
+    source: &Path,
+    destination: &Path,
+    control: &LocalDatabaseBackupControl,
+) -> Result<LocalDatabaseFileReceipt> {
+    if !source.is_absolute() || !source.is_file() {
+        return Err(anyhow!(
+            "Backup source must be an existing absolute SQLite file"
+        ));
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(source)
+        .read_only(true)
+        .create_if_missing(false)
+        .disable_statement_logging();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let result = async {
+        prepare_backup_destination(&pool, destination).await?;
+        let mut connection = pool.acquire().await?;
+        publish_sqlite_backup_controlled(&mut connection, destination, control).await
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+pub(super) async fn publish_sqlite_backup_controlled(
+    source: &mut SqliteConnection,
+    destination: &Path,
+    control: &LocalDatabaseBackupControl,
+) -> Result<LocalDatabaseFileReceipt> {
+    if control.is_cancelled() {
+        return Err(anyhow!("SQLite backup was cancelled"));
+    }
+    control.set_progress_percent(1);
+    let temporary = temporary_backup_path(destination)?;
+    let result = async {
+        let options = SqliteConnectOptions::new()
+            .filename(&temporary)
+            .create_if_missing(true)
+            .disable_statement_logging();
+        let mut backup = SqliteConnection::connect_with(&options).await?;
+        copy_sqlite_database_controlled(source, &mut backup, Some(control)).await?;
+        control.set_progress_percent(92);
+        let integrity_check = sqlite_connection_integrity(&mut backup).await?;
+        control.set_progress_percent(96);
+        backup.close().await?;
+        sync_file(&temporary).await?;
+        control.set_progress_percent(99);
+        if control.is_cancelled() {
+            return Err(anyhow!("SQLite backup was cancelled"));
+        }
+        replace_backup_file(&temporary, destination)?;
+        control.set_progress_percent(100);
+        Ok(LocalDatabaseFileReceipt {
+            byte_len: std::fs::metadata(destination)?.len(),
+            integrity_check,
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 pub(super) async fn copy_sqlite_database(
     source: &mut SqliteConnection,
     destination: &mut SqliteConnection,

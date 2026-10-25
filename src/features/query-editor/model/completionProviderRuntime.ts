@@ -8,6 +8,7 @@ export const OPEN_BATCH_COLUMN_SELECTION_COMMAND =
   "oxide.sqlCompletion.openBatchColumns";
 
 export type SqlBatchColumnRuntimeSession = SqlBatchColumnDialogSession & {
+  context?: import("@/services/lsp/semanticContext").CompletionContextSnapshot;
   ownerKey: string;
   uri: string;
   modelVersion: number;

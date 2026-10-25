@@ -2,6 +2,109 @@ use super::super::*;
 use super::support::*;
 
 #[test]
+fn official_rust_target_packages_match_only_the_compiled_host_target() {
+    let compiled = env!("OXIDE_RUST_TARGET_TRIPLE").to_string();
+    assert!(!compiled.is_empty());
+    assert!(supports_current_target_names(std::slice::from_ref(
+        &compiled
+    )));
+    assert!(!supports_current_target_names(&[format!(
+        "{compiled}-other-abi"
+    )]));
+}
+
+#[test]
+fn pinned_resolution_uses_its_exact_directory_despite_a_spoofed_neighbor() {
+    let directory = tempfile::tempdir().unwrap();
+    write_package(directory.path(), DRIVER_PROTOCOL_VERSION, None);
+    let good = directory.path().join("clickhouse/1.2.3");
+    let neighbor = directory.path().join("not-clickhouse/1.2.3");
+    fs::create_dir_all(&neighbor).unwrap();
+    fs::copy(good.join("driver"), neighbor.join("driver")).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(good.join("manifest.json")).unwrap()).unwrap();
+    manifest["displayName"] = serde_json::json!("AAA invalid directory");
+    fs::write(
+        neighbor.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let registry =
+        DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf());
+    let selected = registry.resolve_version("clickhouse", "1.2.3").unwrap();
+    assert_eq!(selected.package_root, good);
+}
+
+#[test]
+fn preferred_resolution_freezes_the_selection_and_only_absence_allows_fallback() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry =
+        DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf());
+    assert!(registry
+        .resolve_preferred("clickhouse", None)
+        .unwrap()
+        .is_none());
+    write_package(directory.path(), DRIVER_PROTOCOL_VERSION, None);
+    let root = directory.path().join("clickhouse");
+    assert_eq!(
+        registry
+            .resolve_preferred("clickhouse", None)
+            .unwrap()
+            .unwrap()
+            .manifest
+            .package_version,
+        "1.2.3"
+    );
+    fs::write(root.join("activation.json"), r#"{"current":"9.9.9"}"#).unwrap();
+    assert!(
+        registry.resolve_preferred("clickhouse", None).is_err(),
+        "a missing selected package must not fall back"
+    );
+    assert!(
+        registry
+            .resolve_preferred("clickhouse", Some("1.2.3"))
+            .is_ok(),
+        "an explicit installed pin is independent of global activation"
+    );
+    for marker in [
+        "{",
+        r#"{"current":"../outside"}"#,
+        r#"{"current":"1.2.3","previous":"../outside"}"#,
+    ] {
+        fs::write(root.join("activation.json"), marker).unwrap();
+        assert!(
+            registry.resolve_preferred("clickhouse", None).is_err(),
+            "invalid activation must not fall back to the legacy current marker"
+        );
+    }
+    fs::write(root.join("activation.json"), vec![b' '; 16 * 1024 + 1]).unwrap();
+    assert!(registry.resolve_preferred("clickhouse", None).is_err());
+    for pin in ["", " ", "../outside", "9.9.9"] {
+        assert!(registry.resolve_preferred("clickhouse", Some(pin)).is_err());
+    }
+    fs::remove_file(root.join("activation.json")).unwrap();
+    fs::write(root.join("current"), "invalid/path").unwrap();
+    assert!(registry.resolve_preferred("clickhouse", None).is_err());
+    fs::remove_file(root.join("current")).unwrap();
+    assert!(registry
+        .resolve_preferred("clickhouse", None)
+        .unwrap()
+        .is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_activation_is_an_invalid_selection_not_an_absent_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("sqlite");
+    fs::create_dir(&root).unwrap();
+    std::os::unix::fs::symlink(root.join("missing.json"), root.join("activation.json")).unwrap();
+    let registry =
+        DatabaseDriverPackageRegistry::allow_unsigned_for_tests(directory.path().to_path_buf());
+    assert!(registry.resolve_preferred("sqlite", None).is_err());
+}
+
+#[test]
 fn discovers_verified_active_package() {
     let directory = tempfile::tempdir().unwrap();
     write_package(directory.path(), DRIVER_PROTOCOL_VERSION, None);

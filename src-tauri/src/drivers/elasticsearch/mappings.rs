@@ -17,6 +17,8 @@ pub(super) fn elasticsearch_mapping_to_columns(
         identity_generation: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
         default_value: None,
         comment: Some("Elasticsearch document id".to_string()),
     }];
@@ -79,6 +81,8 @@ pub(super) fn collect_mapping_properties(
                 identity_generation: None,
                 is_generated: Some(false),
                 is_hidden: Some(false),
+                character_set: None,
+                collation: None,
                 default_value: None,
                 comment: None,
             });

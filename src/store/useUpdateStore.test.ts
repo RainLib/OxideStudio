@@ -7,6 +7,10 @@ const updateService = vi.hoisted(() => ({
   installAppUpdateAndRestart: vi.fn(),
   checkForAppUpdate: vi.fn(),
   getCurrentAppVersion: vi.fn(),
+  getAppUpdateInstallationStatus: vi.fn(),
+  cancelAppUpdatePreparation: vi.fn(),
+  recoverAppUpdateBackups: vi.fn(),
+  restartAfterAppUpdate: vi.fn(),
 }));
 
 vi.mock("@/services/appUpdateService", () => ({
@@ -43,6 +47,10 @@ describe("application update state", () => {
     updateService.installAppUpdateAndRestart.mockReset();
     updateService.checkForAppUpdate.mockReset();
     updateService.getCurrentAppVersion.mockReset();
+    updateService.getAppUpdateInstallationStatus.mockResolvedValue({ installationId: null, phase: "idle", recoveryRequired: false, message: null });
+    updateService.cancelAppUpdatePreparation.mockReset();
+    updateService.recoverAppUpdateBackups.mockReset();
+    updateService.restartAfterAppUpdate.mockReset();
     useTaskStore.setState({ tasks: [] });
     useUpdateStore.setState({
       currentVersion: "1.0.0",
@@ -53,6 +61,9 @@ describe("application update state", () => {
       error: null,
       lastCheckedAt: null,
       ignoredVersion: null,
+      nativeInstallation: null,
+      preparationCancelable: false,
+      packageDownloaded: false,
     });
   });
 
@@ -160,5 +171,54 @@ describe("application update state", () => {
 
     expect(updateService.installAppUpdateAndRestart).toHaveBeenCalledTimes(1);
     expect(useUpdateStore.getState().status).toBe("installing");
+  });
+
+  it("rechecks foreground tasks after waiting for the independent worker", async () => {
+    updateService.installAppUpdateAndRestart.mockImplementation(async (onPhase) => {
+      onPhase("preparing");
+      expect(useUpdateStore.getState().status).toBe("preparing");
+      useTaskStore.setState({ tasks: [task("running")] });
+      onPhase("installing");
+    });
+    useUpdateStore.setState({ status: "downloaded" });
+    await useUpdateStore.getState().installAndRestart();
+    expect(useUpdateStore.getState().status).toBe("downloaded");
+    expect(useUpdateStore.getState().error).toContain("New work started");
+  });
+
+  it("keeps a successful installation separate from restart failure", async () => {
+    updateService.installAppUpdateAndRestart.mockRejectedValue(Object.assign(new Error("restart needed"), { name: "AppUpdateRestartRequired" }));
+    updateService.getAppUpdateInstallationStatus.mockResolvedValue({ installationId: "installed", phase: "restartRequired", recoveryRequired: false, message: "restart" });
+    useUpdateStore.setState({ status: "downloaded" });
+    await useUpdateStore.getState().installAndRestart();
+    expect(useUpdateStore.getState().status).toBe("restart-required");
+    await useUpdateStore.getState().restartInstalledUpdate();
+    expect(updateService.restartAfterAppUpdate).toHaveBeenCalledOnce();
+    expect(updateService.installAppUpdateAndRestart).toHaveBeenCalledOnce();
+    expect(updateService.recoverAppUpdateBackups).not.toHaveBeenCalled();
+  });
+
+  it("recovers only the installation the user reviewed", async () => {
+    updateService.getAppUpdateInstallationStatus.mockResolvedValue({ installationId: "reviewed-update", phase: "installing", recoveryRequired: true, message: "close installer" });
+    await useUpdateStore.getState().refreshInstallationStatus();
+    await useUpdateStore.getState().recoverBackupsAfterUpdate();
+    expect(updateService.recoverAppUpdateBackups).toHaveBeenCalledWith("reviewed-update");
+    expect(useUpdateStore.getState().nativeInstallation).toBeNull();
+    expect(useUpdateStore.getState().status).toBe("available");
+    expect(useUpdateStore.getState().packageDownloaded).toBe(false);
+  });
+
+  it("discards an old status response after the reviewed installation was recovered", async () => {
+    const failed = { installationId: "reviewed", phase: "installing" as const, recoveryRequired: true, message: "close installer" };
+    let respond: ((value: typeof failed) => void) | undefined;
+    updateService.getAppUpdateInstallationStatus.mockImplementationOnce(() => new Promise((resolve) => { respond = resolve; }));
+    useUpdateStore.setState({ nativeInstallation: failed });
+    const stale = useUpdateStore.getState().refreshInstallationStatus();
+    await vi.waitFor(() => expect(respond).toBeTypeOf("function"));
+    await useUpdateStore.getState().recoverBackupsAfterUpdate();
+    respond?.(failed);
+    await stale;
+    expect(useUpdateStore.getState().nativeInstallation).toBeNull();
+    expect(useUpdateStore.getState().status).toBe("available");
   });
 });

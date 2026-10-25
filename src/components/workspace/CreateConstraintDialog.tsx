@@ -311,7 +311,7 @@ export function CreateConstraintDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="w-[560px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="w-[560px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] p-4">
           <DialogTitle>Create Constraint</DialogTitle>
           <div className="text-xs text-muted-foreground font-mono truncate">

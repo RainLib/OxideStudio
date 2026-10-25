@@ -1,13 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import {useLspRuntimeSnapshot,type LspRuntimePort} from "@/hooks/useLspRuntimeSnapshot";
 import type { Monaco } from "@monaco-editor/react";
 import { extractLspDocumentIdentity } from "@/services/lsp";
+import {acquireLspDocument,type LspDocumentLease} from "@/services/lsp/documentOwnership";
+import {refreshSharedModelPublication} from "../model/sharedModelPublication";
 import {
   enqueueLspDocumentSync,
-  syncLspModelBeforeCompletion,
+  bindLspDocumentSynchronizer,
+  commitLspDocumentShadow,
   type LspDocumentSyncClient,
 } from "../model/lspDocumentSync";
 
-export type LspDocumentLifecycleClient = LspDocumentSyncClient & {
+export type LspDocumentLifecycleClient = LspDocumentSyncClient & LspRuntimePort & {
   didClose: (uri: string) => Promise<void>;
 };
 
@@ -31,8 +35,11 @@ type UseLspDocumentLifecycleOptions = {
 };
 
 type DocumentSession = {
+  tabId:string;
   sessionKey: string;
   client: LspDocumentLifecycleClient;
+  lease: LspDocumentLease;
+  unbind: () => void;
 };
 
 // A remounted editor can reuse the same virtual URI before an old didOpen has
@@ -54,13 +61,16 @@ export function useLspDocumentLifecycle({
   canUseLsp,
   documentLanguageId,
   documentUri,
-  lifecycleKey,
+  lifecycleKey:providedLifecycleKey,
   lspClient,
-  lspReady,
+  lspReady:requestedLspReady,
   lspSessionKey,
   monaco,
   tabs,
 }: UseLspDocumentLifecycleOptions) {
+  const process=useLspRuntimeSnapshot(lspClient);
+  const lspReady=requestedLspReady&&process.ready;
+  const lifecycleKey=useMemo(()=>({provided:providedLifecycleKey,process:process.generation}),[providedLifecycleKey,process]);
   const openedDocumentsRef = useRef<Set<string>>(new Set());
   const documentSessionsRef = useRef<Map<string, DocumentSession>>(new Map());
   const documentVersionsRef = useRef<Map<string, number>>(new Map());
@@ -73,14 +83,16 @@ export function useLspDocumentLifecycle({
     null,
   );
   const runtimeKey = lspReady ? lspSessionKey : null;
-  const previousRuntimeKeyRef = useRef<string | null>(runtimeKey);
+  const previousRuntimeKeyRef = useRef({key:runtimeKey,lifecycleKey});
+  const previousLifecycleKeyRef=useRef(lifecycleKey);
   const activeSyncKey =
     lspReady && canUseLsp && activeTabId && documentUri
       ? `${lspSessionKey}\u0000${activeTabId}\u0000${documentUri}`
       : null;
   const previousActiveSyncKeyRef = useRef<string | null>(activeSyncKey);
 
-  if (previousActiveSyncKeyRef.current !== activeSyncKey) {
+  if (previousActiveSyncKeyRef.current !== activeSyncKey||previousLifecycleKeyRef.current!==lifecycleKey) {
+    previousLifecycleKeyRef.current=lifecycleKey;
     previousActiveSyncKeyRef.current = activeSyncKey;
     lifecycleGenerationRef.current += 1;
     requestedDocumentKeyRef.current = null;
@@ -96,20 +108,45 @@ export function useLspDocumentLifecycle({
   const clearMarkers = (uri: string) => {
     if (!monaco) return;
     const model = monaco.editor.getModel(monaco.Uri.parse(uri));
-    if (model) monaco.editor.setModelMarkers(model, "sql-lsp", []);
+    if (model&&!refreshSharedModelPublication(monaco.editor,model,"sql-lsp")) monaco.editor.setModelMarkers(model, "sql-lsp", []);
   };
 
-  useEffect(() => {
-    if (previousRuntimeKeyRef.current === runtimeKey) return;
-    previousRuntimeKeyRef.current = runtimeKey;
-    activeDocumentUriRef.current = null;
+  const closeOwnedDocument=(_uri:string,owner:DocumentSession)=>{owner.unbind();return owner.lease.release();};
+  const syncDocument=useCallback((model:{getValue:()=>string})=>{
+    if(!lspReady||!canUseLsp||!activeTabId||!documentUri)return Promise.reject(new Error("Document source is unavailable"));
+    const generation=lifecycleGenerationRef.current,uri=documentUri;
+    return enqueueLspDocumentSync(lifecycleSyncChains,lspSessionKey+"\u0000"+uri,async()=>{
+      if(generation!==lifecycleGenerationRef.current||activeDocumentUriRef.current!==uri)throw new Error("Document source changed before synchronization");
+      let owner=documentSessionsRef.current.get(uri);
+      if(owner&&(owner.sessionKey!==lspSessionKey||owner.client!==lspClient)){
+        documentSessionsRef.current.delete(uri);forgetDocument(uri);await closeOwnedDocument(uri,owner).catch(()=>undefined);owner=undefined;
+      }
+      if(!owner){
+        const lease=acquireLspDocument({client:lspClient,sessionKey:lspSessionKey,uri,priority:1,onClose:monaco?()=>clearMarkers(uri):undefined,onCloseKey:monaco??undefined,onShadow:shadow=>{
+          if(documentSessionsRef.current.get(uri)?.lease!==lease)return;
+          commitLspDocumentShadow({uri,text:shadow.text,version:shadow.version,openedDocuments:openedDocumentsRef.current,documentVersions:documentVersionsRef.current,documentTexts:documentTextsRef.current});
+        }});
+        owner={tabId:activeTabId,sessionKey:lspSessionKey,client:lspClient,lease,unbind:bindLspDocumentSynchronizer(documentVersionsRef.current,uri,async next=>{
+          const isCurrent=()=>activeDocumentUriRef.current===uri&&documentSessionsRef.current.get(uri)?.lease===lease;
+          if(!isCurrent())throw new Error("Document source changed before synchronization");
+          await lease.synchronize(next.getValue(),documentLanguageId);
+          if(!isCurrent())throw new Error("Document source changed during synchronization");
+        })};
+        documentSessionsRef.current.set(uri,owner);
+      }
+      await owner.lease.synchronize(model.getValue(),documentLanguageId);
+      if(generation!==lifecycleGenerationRef.current||activeDocumentUriRef.current!==uri){
+        if(documentSessionsRef.current.get(uri)===owner){documentSessionsRef.current.delete(uri);forgetDocument(uri);}
+        await closeOwnedDocument(uri,owner).catch(()=>undefined);throw new Error("Document source changed during synchronization");
+      }
+    });
+  },[lspReady,canUseLsp,activeTabId,documentUri,documentLanguageId,lspClient,lspSessionKey,lifecycleKey,monaco]);
 
-    for (const [uri, owner] of documentSessionsRef.current) {
-      documentSessionsRef.current.delete(uri);
-      forgetDocument(uri);
-      void owner.client.didClose(uri).catch(() => undefined);
-    }
-  }, [runtimeKey]);
+  useEffect(() => {
+    if(previousRuntimeKeyRef.current.key===runtimeKey&&previousRuntimeKeyRef.current.lifecycleKey===lifecycleKey)return;
+    previousRuntimeKeyRef.current={key:runtimeKey,lifecycleKey};activeDocumentUriRef.current=null;
+    for(const [uri,owner] of documentSessionsRef.current){documentSessionsRef.current.delete(uri);forgetDocument(uri);void closeOwnedDocument(uri,owner).catch(()=>undefined);}
+  },[runtimeKey,lifecycleKey]);
 
   useEffect(() => {
     if (!lspReady || !activeTabId || !documentUri || !canUseLsp) {
@@ -117,69 +154,26 @@ export function useLspDocumentLifecycle({
       return;
     }
     activeDocumentUriRef.current = documentUri;
-    const generation = lifecycleGenerationRef.current;
 
     // One tab can acquire a different virtual URI when its dialect/package
     // changes. Close the previous URI before opening the replacement.
     for (const staleUri of Array.from(openedDocumentsRef.current)) {
       const staleIdentity = extractLspDocumentIdentity(staleUri);
-      if (staleUri === documentUri || staleIdentity?.tabId !== activeTabId) {
+      const staleTabId=staleIdentity?.tabId??documentSessionsRef.current.get(staleUri)?.tabId;
+      if (staleUri === documentUri || staleTabId !== activeTabId) {
         continue;
       }
       forgetDocument(staleUri);
       const staleOwner = documentSessionsRef.current.get(staleUri);
       documentSessionsRef.current.delete(staleUri);
-      if (staleOwner) void staleOwner.client.didClose(staleUri);
+      if (staleOwner) void closeOwnedDocument(staleUri,staleOwner).catch(()=>undefined);
     }
 
     const syncChainKey = `${lspSessionKey}\u0000${documentUri}`;
     const synchronizeDocument = () => {
       documentChangeTimerRef.current = null;
-      void enqueueLspDocumentSync(
-        lifecycleSyncChains,
-        syncChainKey,
-        async () => {
-          if (
-            lifecycleGenerationRef.current !== generation ||
-            activeDocumentUriRef.current !== documentUri
-          ) {
-            return;
-          }
-
-          const owner = documentSessionsRef.current.get(documentUri);
-          if (owner?.sessionKey !== lspSessionKey) {
-            documentSessionsRef.current.delete(documentUri);
-            if (owner) {
-              await owner.client.didClose(documentUri).catch(() => undefined);
-            }
-          }
-
-          await syncLspModelBeforeCompletion({
-            uri: documentUri,
-            model: { getValue: () => activeDocumentText },
-            languageId: documentLanguageId,
-            client: lspClient,
-            openedDocuments: openedDocumentsRef.current,
-            documentVersions: documentVersionsRef.current,
-            documentTexts: documentTextsRef.current,
-          });
-
-          if (
-            lifecycleGenerationRef.current !== generation ||
-            activeDocumentUriRef.current !== documentUri ||
-            !openedDocumentsRef.current.has(documentUri)
-          ) {
-            forgetDocument(documentUri);
-            await lspClient.didClose(documentUri).catch(() => undefined);
-            return;
-          }
-
-          documentSessionsRef.current.set(documentUri, {
-            sessionKey: lspSessionKey,
-            client: lspClient,
-          });
-        },
-      ).catch((error) => {
+      const current=monaco?.editor.getModel(monaco.Uri.parse(documentUri));
+      void syncDocument(current&&!current.isDisposed()?current:{getValue:()=>activeDocumentText}).catch((error) => {
         // Completion retries the exact failed revision through this same FIFO.
         console.debug("[LSP] Deferred document synchronization failed:", error);
       });
@@ -217,6 +211,8 @@ export function useLspDocumentLifecycle({
     documentLanguageId,
     documentUri,
     lifecycleKey,
+    syncDocument,
+    monaco,
     lspClient,
     lspReady,
     lspSessionKey,
@@ -229,15 +225,15 @@ export function useLspDocumentLifecycle({
 
     for (const uri of Array.from(openedDocumentsRef.current)) {
       const identity = extractLspDocumentIdentity(uri);
-      if (identity && currentDocumentTabIds.has(identity.tabId)) continue;
+      const ownerTabId=identity?.tabId??documentSessionsRef.current.get(uri)?.tabId??(uri===documentUri?activeTabId:undefined);
+      if (ownerTabId&&currentDocumentTabIds.has(ownerTabId)) continue;
 
       forgetDocument(uri);
       const owner = documentSessionsRef.current.get(uri);
       documentSessionsRef.current.delete(uri);
-      if (owner) void owner.client.didClose(uri);
-      clearMarkers(uri);
+      if (owner) void closeOwnedDocument(uri,owner).catch(()=>undefined);
     }
-  }, [monaco, tabs]);
+  }, [monaco, tabs,documentUri,activeTabId]);
 
   useEffect(() => {
     return () => {
@@ -248,8 +244,7 @@ export function useLspDocumentLifecycle({
         documentChangeTimerRef.current = null;
       }
       for (const [uri, owner] of documentSessionsRef.current) {
-        void owner.client.didClose(uri);
-        clearMarkers(uri);
+        void closeOwnedDocument(uri,owner).catch(()=>undefined);
       }
       openedDocumentsRef.current.clear();
       documentSessionsRef.current.clear();
@@ -260,6 +255,7 @@ export function useLspDocumentLifecycle({
   }, [monaco]);
 
   return {
+    syncDocument,
     openedDocumentsRef,
     documentVersionsRef,
     documentTextsRef,

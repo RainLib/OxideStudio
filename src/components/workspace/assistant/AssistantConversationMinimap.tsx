@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { AssistantTurn } from "@/ai/assistant/turns";
 import { assistantTurnAnswer } from "@/ai/assistant/turns";
 import type { RefObject } from "react";
@@ -109,6 +110,7 @@ export function AssistantConversationMinimap({
   );
 
   return (
+    <TooltipProvider delayDuration={350}>
     <nav
       className="wb-assistant-minimap absolute bottom-3 left-1.5 top-3 z-20 w-7 select-none"
       aria-label="Conversation navigation"
@@ -120,8 +122,9 @@ export function AssistantConversationMinimap({
           (anchors.length === 1 ? 0.5 : index / (anchors.length - 1));
         const active = anchor.id === activeId;
         return (
+          <Tooltip key={anchor.id}>
+          <TooltipTrigger asChild>
           <button
-            key={anchor.id}
             type="button"
             className="group absolute left-0 flex h-4 w-7 -translate-y-1/2 items-center px-1.5 outline-none"
             style={{ top: `${ratio * 100}%` }}
@@ -138,7 +141,9 @@ export function AssistantConversationMinimap({
                   "h-[3px] w-4 bg-[hsl(var(--wb-text-muted)/0.9)] opacity-100",
               )}
             />
-            <span className="pointer-events-none invisible absolute left-8 top-1/2 w-[min(340px,calc(100cqw-52px))] -translate-y-1/2 translate-x-1 rounded-[7px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-left opacity-0 transition-[opacity,transform,visibility] duration-200 group-hover:visible group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:visible group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
+          </button>
+          </TooltipTrigger>
+            <TooltipContent side="right" className="w-[min(340px,calc(100vw-16px))] px-2.5 py-2 text-left">
               <span className="block text-[9px] font-medium text-[hsl(var(--wb-text-muted))]">
                 Question
               </span>
@@ -151,11 +156,12 @@ export function AssistantConversationMinimap({
               <span className="mt-1 block line-clamp-3 text-[10px] leading-4 text-[hsl(var(--wb-text-muted))]">
                 {compact(anchor.answer, 240)}
               </span>
-            </span>
-          </button>
+            </TooltipContent>
+          </Tooltip>
         );
       })}
     </nav>
+    </TooltipProvider>
   );
 }
 

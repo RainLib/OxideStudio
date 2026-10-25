@@ -134,8 +134,8 @@ export function ValueEditorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="flex h-[min(700px,calc(100vh-32px))] w-[min(980px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[hsl(var(--wb-text))] shadow-[0_24px_72px_rgba(0,0,0,0.52)] [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]"
+      <DialogContent layout="custom"
+        className="flex h-[min(700px,calc(100vh-32px))] w-[min(980px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0 [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]"
         onKeyDown={(event) => {
           if (
             isReadOnly &&

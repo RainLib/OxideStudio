@@ -1,3 +1,4 @@
+import { confirmAction, promptValue } from "@/lib/appDialogs";
 import { tableService } from "@/services/tauri";
 import type { ConstraintInfo, IndexInfo } from "@/services/tauri/types";
 
@@ -84,9 +85,9 @@ export function createTableStructureActions({
       return;
     }
 
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Drop index "${index.name}" from "${activeTab.tableName}"?`,
-    );
+    ));
     if (!confirmed) return;
 
     setMetadataError(null);
@@ -117,7 +118,7 @@ export function createTableStructureActions({
       return;
     }
 
-    const nextName = window.prompt("Rename index to:", index.name);
+    const nextName = (await promptValue("Rename index to:", index.name));
     if (nextName === null) return;
 
     const trimmedName = nextName.trim();
@@ -301,9 +302,9 @@ export function createTableStructureActions({
       return;
     }
 
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Drop constraint "${constraint.name}" from "${activeTab.tableName}"?`,
-    );
+    ));
     if (!confirmed) return;
 
     setMetadataError(null);

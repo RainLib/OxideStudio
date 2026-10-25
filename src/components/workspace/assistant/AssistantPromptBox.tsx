@@ -306,7 +306,7 @@ export function AssistantPromptBox({
             collisionPadding={10}
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={(event) => event.preventDefault()}
-            className="custom-scrollbar max-h-[236px] w-[min(var(--radix-popover-trigger-width),calc(100vw-20px))] overflow-y-auto rounded-[10px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1.5 text-[hsl(var(--wb-text))] shadow-[0_6px_12px_rgba(0,0,0,0.34)]"
+            className="custom-scrollbar max-h-[236px] w-[min(var(--radix-popover-trigger-width),calc(100vw-20px))] overflow-y-auto p-1.5"
             role="listbox"
             aria-label="Provider commands"
           >

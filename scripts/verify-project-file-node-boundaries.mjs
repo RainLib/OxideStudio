@@ -1,9 +1,10 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
+const read = (relativePath) => readSourceText(path.join(root, relativePath));
 const facade = read("src/components/workspace/ProjectFilesSidebar.tsx");
 const controller = read("src/features/projects/hooks/useProjectFilesSidebarController.ts");
 const view = read("src/features/projects/ui/ProjectFilesSidebarView.tsx");

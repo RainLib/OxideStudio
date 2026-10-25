@@ -1,3 +1,4 @@
+import { showMessage } from "@/lib/appDialogs";
 import type { useDatabaseExplorerStore } from "@/store/useDatabaseExplorerStore";
 import type { useConnectionStore } from "@/store/useConnectionStore";
 import type { useTabStore } from "@/store/useTabStore";
@@ -206,7 +207,7 @@ export function createRoutineTreeRenderer({
             setDdlViewerOpen(true);
           })
           .catch((error) =>
-            window.alert(
+            showMessage(
               `Unable to load ${kind} definition: ${error instanceof Error ? error.message : String(error)}`,
             ),
           );
@@ -273,7 +274,7 @@ export function createRoutineTreeRenderer({
                           copyText(definitions.join("\n\n")),
                         )
                         .catch((error) =>
-                          window.alert(
+                          showMessage(
                             `Failed to load routine definition: ${error instanceof Error ? error.message : String(error)}`,
                           ),
                         )

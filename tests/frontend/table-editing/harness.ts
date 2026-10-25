@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 /**
  * @vitest-environment happy-dom
  */
@@ -96,10 +97,7 @@ beforeEach(() => {
     pageSize: 500,
     totalRows: 0,
   });
-  vi.stubGlobal(
-    "confirm",
-    vi.fn(() => true),
-  );
+  vi.mocked(confirmAction).mockReset().mockResolvedValue(true);
 
   connectionStore.setState({
     connections: [
@@ -148,3 +146,5 @@ beforeEach(() => {
 export const mocksForTests = mocks;
 export const useConnectionStore = connectionStore;
 export const useTabStore = tabStore;
+
+vi.mock("@/lib/appDialogs", () => ({ confirmAction: vi.fn(async () => true) }));

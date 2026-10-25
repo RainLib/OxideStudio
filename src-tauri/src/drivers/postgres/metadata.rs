@@ -381,10 +381,12 @@ impl PostgresDriver {
                 ) as is_primary_key,
                 EXISTS (
                     SELECT 1
-                    FROM pg_constraint con
-                    WHERE con.conrelid = t.oid
-                      AND con.contype IN ('p', 'u')
-                      AND a.attnum = ANY(con.conkey)
+                    FROM pg_index i
+                    WHERE i.indrelid = t.oid
+                      AND i.indisunique AND i.indisvalid AND i.indisready
+                      AND i.indpred IS NULL AND i.indexprs IS NULL
+                      AND COALESCE((to_jsonb(i)->>'indnkeyatts')::integer, i.indnatts::integer) = 1
+                      AND i.indkey[0] = a.attnum
                 ) as is_unique,
                 EXISTS (
                     SELECT 1
@@ -433,6 +435,8 @@ impl PostgresDriver {
                         .flatten(),
                     is_generated: Some(row.try_get("is_generated").unwrap_or(false)),
                     is_hidden: Some(false),
+                    character_set: None,
+                    collation: None,
                     default_value: row.try_get("column_default").ok(),
                     comment: row.try_get("column_comment").ok(),
                 }

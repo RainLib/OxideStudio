@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "vendor/sql-lsp/src/dialects/mysql";
-const facade = fs.readFileSync(path.join(root, `${base}.rs`), "utf8");
+const facade = readSourceText(path.join(root, `${base}.rs`));
 for (const required of [
   "mod completion;",
   "mod helpers;",
@@ -16,7 +17,7 @@ for (const required of [
     throw new Error(`MySQL dialect facade must retain ${required}.`);
   }
 }
-if (facade.includes("CompletionContext")) {
+if (/\bCompletionContext\s*::/.test(facade)) {
   throw new Error("MySQL dialect facade must not own completion-context dispatch.");
 }
 for (const [name, symbols] of Object.entries({
@@ -29,7 +30,7 @@ for (const [name, symbols] of Object.entries({
   helpers: ["MysqlDialect", "create_keyword_item", "add_schema_columns"],
   hover: ["pub(super) fn hover", "MysqlDialect::find_table_by_reference"],
 })) {
-  const source = fs.readFileSync(path.join(root, `${base}/${name}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/${name}.rs`));
   if (/\buse\s+super::\*/.test(source) || symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`${name} must retain direct MySQL dialect ownership.`);
   }

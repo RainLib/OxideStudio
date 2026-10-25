@@ -5,10 +5,8 @@ use super::import_csv::{
     csv_delimiter, csv_import_reader, csv_import_row_selected, csv_import_source_columns,
     resolve_csv_import_row_range,
 };
-use super::import_json::{is_json_lines_path, json_import_rows};
-use super::import_preview::{
-    import_file_digest, validate_import_file, verify_import_file_digest, xlsx_import_rows,
-};
+use super::import_json_stream::{stream_json_rows, JSON_ROW_COLUMNS};
+use super::import_preview::{import_file_digest, validate_import_file, verify_import_file_digest};
 use super::import_types::{
     TableCsvColumnMapping, TableCsvImportOptions, TableImportColumnInference, TableImportFormat,
 };
@@ -23,9 +21,6 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -331,6 +326,7 @@ pub(super) fn infer_csv_import_columns(
     Ok((columns, total_rows, options))
 }
 
+#[cfg(test)]
 pub(super) fn infer_materialized_import_columns(
     rows: Vec<BTreeMap<String, Value>>,
     driver: &str,
@@ -361,37 +357,41 @@ pub(super) fn infer_materialized_import_columns(
 }
 
 /// JSON Lines imports are intentionally streamed during inference.  The
-/// regular JSON reader materializes an array so it can support both array and
-/// document forms, whereas `.jsonl`/`.ndjson` may use the larger streaming
-/// import budget and must not be copied into memory merely to propose a table.
-pub(super) fn infer_json_lines_import_columns(
+/// same bounded row reader also handles regular JSON documents/arrays; no
+/// complete source is materialized merely to propose a target table.
+pub(super) fn infer_streamed_import_columns(
     path: &Path,
     driver: &str,
+    format: TableImportFormat,
 ) -> Result<(Vec<CreateTableColumn>, u64), String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let reader = BufReader::new(file);
     let mut source_columns = BTreeSet::new();
     let mut inferred_types = BTreeMap::<String, Option<ImportInferredType>>::new();
     let mut total_rows = 0_u64;
-
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<Value>(&line)
-            .map_err(|error| format!("Invalid JSON object on line {}: {error}", index + 1))?;
-        let Value::Object(object) = value else {
-            return Err(format!("JSON row {} is not an object", index + 1));
-        };
-        for (column, value) in object {
+    let mut observe = |_, row: super::import_types::ImportRow| {
+        for (column, value) in row {
             source_columns.insert(column.clone());
+            let limit = if matches!(format, TableImportFormat::Xlsx) {
+                super::limits::XLSX_MAX_COLUMNS
+            } else {
+                JSON_ROW_COLUMNS
+            };
+            if source_columns.len() > limit {
+                return Err(format!("Import source exceeds {limit} distinct fields"));
+            }
             if let Some(next) = import_value_inferred_type(&value) {
                 let inferred = inferred_types.entry(column).or_insert(None);
                 *inferred = Some(merge_import_inferred_type(*inferred, next));
             }
         }
         total_rows += 1;
+        Ok(())
+    };
+    match format {
+        TableImportFormat::Json => stream_json_rows(path, &|| false, &mut observe)?,
+        TableImportFormat::Xlsx => {
+            super::import_xlsx_stream::stream_xlsx_rows(path, &|| false, &mut observe)?;
+        }
+        TableImportFormat::Csv => return Err("CSV has its own inference reader".into()),
     }
 
     if total_rows == 0 {
@@ -435,18 +435,19 @@ pub async fn infer_table_import_columns(
                 (columns, total_rows, Some(csv_options))
             }
             TableImportFormat::Json => {
-                let (columns, total_rows) = if is_json_lines_path(&path) {
-                    infer_json_lines_import_columns(&path, &driver_for_worker)?
-                } else {
-                    let rows = json_import_rows(&path)?;
-                    infer_materialized_import_columns(rows, &driver_for_worker)?
-                };
+                let (columns, total_rows) = infer_streamed_import_columns(
+                    &path,
+                    &driver_for_worker,
+                    TableImportFormat::Json,
+                )?;
                 (columns, total_rows, None)
             }
             TableImportFormat::Xlsx => {
-                let (_, _, rows) = xlsx_import_rows(&path)?;
-                let (columns, total_rows) =
-                    infer_materialized_import_columns(rows, &driver_for_worker)?;
+                let (columns, total_rows) = infer_streamed_import_columns(
+                    &path,
+                    &driver_for_worker,
+                    TableImportFormat::Xlsx,
+                )?;
                 (columns, total_rows, None)
             }
         };
@@ -464,4 +465,12 @@ pub async fn infer_table_import_columns(
         Ok(inference) => Ok(Response::ok(inference)),
         Err(error) => Ok(Response::err("INFER_TABLE_IMPORT_COLUMNS_ERROR", &error)),
     }
+}
+
+#[cfg(test)]
+pub(super) fn infer_json_lines_import_columns(
+    path: &Path,
+    driver: &str,
+) -> Result<(Vec<CreateTableColumn>, u64), String> {
+    infer_streamed_import_columns(path, driver, TableImportFormat::Json)
 }

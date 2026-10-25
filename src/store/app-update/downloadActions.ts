@@ -13,6 +13,7 @@ export function createUpdateDownloadActions(set: AppUpdateSet, get: AppUpdateGet
         downloadedBytes: 0,
         totalBytes: null,
         error: null,
+        packageDownloaded: false,
       });
       try {
         const { downloadAppUpdate } = await import("@/services/appUpdateService");
@@ -41,6 +42,7 @@ export function createUpdateDownloadActions(set: AppUpdateSet, get: AppUpdateGet
           status: "downloaded",
           downloadedBytes: lastTotalBytes ?? lastObservedDownloadedBytes,
           totalBytes: lastTotalBytes,
+          packageDownloaded: true,
         });
       } catch (error) {
         set({ status: "available", error: describeUpdateError(error) });

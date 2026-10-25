@@ -451,7 +451,7 @@ export function TableDataCompareDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="flex h-[min(760px,calc(100vh-32px))] w-[min(1040px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="flex h-[min(760px,calc(100vh-32px))] w-[min(1040px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-5 py-4">
           <DialogTitle className="flex items-center gap-2 text-[15px]">
             <GitCompareArrows size={16} className="text-cyan-300" />

@@ -72,6 +72,7 @@ export interface DatabaseCapabilities {
   supportsTableBrowsing: boolean;
   /** Effective Host encoders enabled for this driver and application build. */
   tableExportFormats?: DatabaseTableExportFormat[];
+  fileQueryFormats?: Array<"csv" | "json" | "jsonl" | "parquet">;
   supportsTableRowMutation: boolean;
   /** Cross-connection table transfer is separately verified from Grid editing. */
   supportsTableDataTransfer?: boolean;

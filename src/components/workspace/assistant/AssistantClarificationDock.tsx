@@ -119,7 +119,7 @@ export function AssistantClarificationDock({
         sideOffset={6}
         collisionPadding={8}
         onOpenAutoFocus={(event) => event.preventDefault()}
-        className="z-50 w-[var(--radix-popover-trigger-width)] min-w-[240px] max-w-[calc(100vw-16px)] overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_6px_14px_rgba(0,0,0,0.34)]"
+        className="z-50 w-[var(--radix-popover-trigger-width)] min-w-[240px] max-w-[calc(100vw-16px)] overflow-hidden p-0"
         aria-label="Agent clarification"
         data-assistant-clarification-dock
       >

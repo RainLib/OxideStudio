@@ -1,5 +1,5 @@
 import { tabMatchesDatabase } from "@/features/workspace-tabs/model/tabIdentity";
-import { confirmDiscardTabChanges } from "@/features/workspace-tabs/model/tabLifecycle";
+import { confirmCurrentTabChanges } from "@/features/workspace-tabs/model/confirmTabAction";
 import { DEFAULT_DATABASE_DRIVER } from "@/lib/databaseDialect";
 import { loadTableMetadata } from "@/services/tableMetadataCache";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -122,10 +122,10 @@ export const createTableMetadataSlice: TabSlice<
 
     if (matchingTabs.length === 0) return;
     if (
-      !confirmDiscardTabChanges(
-        matchingTableTabs,
+      !(await confirmCurrentTabChanges(
+        () => get().tabs.filter((candidate) => matchingTableTabs.some((tab) => tab.id === candidate.id)),
         `refresh ${schemaName}.${tableName}`,
-      )
+      ))
     ) {
       return;
     }

@@ -6,16 +6,15 @@ pub(super) const DEFAULT_PAGE_SIZE: u32 = 500;
 
 pub(super) const MAX_PAGE_SIZE: u32 = 5_000;
 
-pub(super) const MAX_JSON_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+pub(super) const MAX_JSON_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
-pub(super) const MAX_XLSX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+pub(super) const MAX_XLSX_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(super) const MAX_JSON_LINES_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// CSV records are parsed incrementally and written through a single explicit
-/// transaction, so they can have a larger bounded source budget than JSON.
-/// JSON documents now stream their parser input, but their normalized rows are
-/// still bounded and materialized before the shared transaction executor.
+/// transaction. JSON documents and JSONL use bounded parser/queue/batch
+/// budgets as well; XLSX also streams cells and indexes shared strings on disk.
 pub(super) const MAX_CSV_IMPORT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The desktop CSV review UI intentionally reads only a bounded prefix.  The
@@ -38,9 +37,9 @@ pub(super) const MAX_JSON_IMPORT_PREVIEW_ARRAY_ITEMS: usize = 32;
 
 pub(super) const MAX_JSON_IMPORT_PREVIEW_OBJECT_FIELDS: usize = 32;
 
-pub(super) const MAX_IMPORT_ROWS: usize = 100_000;
-
 pub(super) const IMPORT_BATCH_SIZE: usize = 500;
+pub(super) const STRUCTURED_IMPORT_BATCH_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const STRUCTURED_IMPORT_QUEUE_BATCHES: usize = 2;
 
 pub(super) const XLSX_MAX_ROWS: u64 = 1_048_576;
 

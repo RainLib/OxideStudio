@@ -156,6 +156,7 @@ pub enum TableDataCompareDegradationLevel {
 #[serde(rename_all = "camelCase")]
 pub enum TableDataCompareSamplingStrategy {
     ExtremeValues,
+    Stratified,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,5 @@
 /// OxideStudio - Tauri Application Entry Point
 /// 重构后的精简版本,使用模块化的 commands
-#[cfg(feature = "desktop")]
 pub mod agent;
 #[cfg(feature = "desktop")]
 pub mod ai_cli;
@@ -18,13 +17,13 @@ pub mod lsp;
 // and exits before running a test. Reference the build-script generated anchor
 // only for MSVC unit tests; application and CLI binaries retain their own
 // tauri-build manifests and cannot receive a duplicate MANIFEST resource.
-#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+#[cfg(all(test, feature = "desktop", target_os = "windows", target_env = "msvc"))]
 #[link(name = "oxide_unit_test_manifest", kind = "static")]
 unsafe extern "C" {
     fn oxide_unit_test_manifest_anchor();
 }
 
-#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+#[cfg(all(test, feature = "desktop", target_os = "windows", target_env = "msvc"))]
 #[used]
 static OXIDE_UNIT_TEST_MANIFEST_ANCHOR: unsafe extern "C" fn() = oxide_unit_test_manifest_anchor;
 
@@ -61,7 +60,18 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(manager)
         .manage(lsp_state)
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = window.try_state::<commands::file_query::FileQueryState>() {
+                    if let Ok(service) = &state.0 {
+                        let (service, label) = (service.clone(), window.label().to_string());
+                        tauri::async_runtime::spawn(async move { let _ = service.close_window(&label).await; });
+                    }
+                }
+            }
+        })
         .setup(|app| {
+            commands::semantic_context::install_semantic_state_events(app.handle());
             let oidc_app_handle = app.handle().clone();
             drivers::mongodb_oidc::set_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -114,6 +124,19 @@ pub fn run() {
                 app.state::<ConnectionManager>()
                     .set_external_runtime_telemetry_store(meta_store.clone()),
             );
+            let large_transfer_jobs = block_on(core::transfer_jobs::LargeTransferJobs::open(
+                &app.path().app_data_dir()?.join("large-transfers"),
+                meta_store.clone(),
+                app.state::<core::driver_package::DatabaseDriverPackageRegistry>().inner().clone(),
+            )).map_err(|_| "Large transfer storage is unavailable. Restore the migration ledger and its authentication key together; existing jobs were not reset.".to_string());
+            app.manage(commands::large_transfer::LargeTransferJobState(large_transfer_jobs));
+            let file_queries = block_on(async {
+                core::file_query::FileQuerySessions::new(
+                    &app.path().app_cache_dir().map_err(|error| error.to_string())?.join("file-query-sessions-v1"),
+                    app.state::<core::driver_package::DatabaseDriverPackageRegistry>().inner().clone(),
+                ).map_err(|error| error.to_string())
+            });
+            app.manage(commands::file_query::FileQueryState(file_queries));
             app.manage(meta_store);
             let mcp_http_service = Arc::new(
                 commands::mcp_http::McpHttpServerState::new(app.handle())
@@ -152,10 +175,11 @@ pub fn run() {
             app.manage(commands::table::TableDataTransferCancellationState::default());
             app.manage(commands::table::TableExportCancellationState::default());
             app.manage(commands::table::TableImportCancellationState::default());
-            app.manage(
+            let backup_state =
                 commands::sqlite_backup_schedule::SqliteBackupScheduleState::load(app.handle())
-                    .map_err(std::io::Error::other)?,
-            );
+                    .map_err(std::io::Error::other)?;
+            backup_state.start_supervisor();
+            app.manage(backup_state);
             app.manage(commands::schema_diff::ExternalSchemaMigrationSessionState::default());
             app.manage(commands::ai::AiCancellationState::default());
             app.manage(enterprise::EnterpriseClient::new(app.handle()));
@@ -181,6 +205,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::file_query::pick_file_query,
+            commands::file_query::open_project_file_query,
+            commands::file_query::run_file_query,
+            commands::file_query::close_file_query,
+            commands::file_query::close_project_file_queries,
+            commands::file_query::cancel_file_query_open,
+            commands::file_query::get_file_query_session,
+            commands::file_query::resolve_file_query_statement,
             // Connection commands
             commands::connection::connect_db,
             commands::connection::test_db_connection,
@@ -311,7 +343,18 @@ pub fn run() {
             commands::sqlite_backup::preview_sqlite_backup_plan,
             commands::sqlite_backup::execute_sqlite_backup_plan,
             commands::sqlite_backup_schedule::commands::list_sqlite_backup_schedules,
+            commands::app_update::download_app_update,
+            commands::app_update::prepare_app_update,
+            commands::app_update::poll_app_update_preparation,
+            commands::app_update::cancel_app_update_preparation,
+            commands::app_update::install_app_update,
+            commands::app_update::get_app_update_installation_status,
+            commands::app_update::recover_app_update_backups,
+            commands::sqlite_backup_schedule::commands::get_sqlite_backup_worker_status,
+            commands::sqlite_backup_schedule::commands::set_sqlite_backup_background_enabled,
             commands::sqlite_backup_schedule::commands::list_sqlite_backup_runs,
+            commands::sqlite_backup_schedule::commands::list_sqlite_backup_artifacts,
+            commands::sqlite_backup_schedule::commands::preview_sqlite_backup_file_delete,
             commands::sqlite_backup_schedule::commands::save_sqlite_backup_schedule,
             commands::sqlite_backup_schedule::commands::delete_sqlite_backup_schedule,
             commands::sqlite_backup_schedule::commands::run_sqlite_backup_schedule,
@@ -340,6 +383,8 @@ pub fn run() {
             commands::schema::get_database_schema_objects,
             commands::schema::get_database_schema_object_members,
             commands::schema::get_tables,
+            commands::schema::get_sql_lookup_context,
+            commands::semantic_context::get_connection_semantic_state,
             commands::schema::get_schema_objects,
             commands::schema::get_schema_object_members,
             commands::schema::get_schema_object_source,
@@ -385,6 +430,13 @@ pub fn run() {
             commands::table::preview_table_data_compare_sync,
             commands::table::execute_table_data_compare_sync,
             commands::table::preview_table_data_transfer,
+            commands::large_transfer::prepare_large_transfer,
+            commands::large_transfer::list_large_transfers,
+            commands::large_transfer::get_large_transfer,
+            commands::large_transfer::preview_large_transfer,
+            commands::large_transfer::start_large_transfer,
+            commands::large_transfer::pause_large_transfer,
+            commands::large_transfer::cancel_large_transfer,
             commands::table::preview_table_data_transfer_batch_plan,
             commands::table::execute_table_data_transfer_batch,
             commands::table::preview_table_data_transfer_target,
@@ -403,6 +455,11 @@ pub fn run() {
             commands::table::preflight_table_csv_import,
             commands::table::preflight_table_json_import,
             commands::table::import_table_data,
+            commands::table::prepare_table_import_job,
+            commands::table::list_table_import_jobs,
+            commands::table::resume_table_import_preparation,
+            commands::table::list_table_import_preparations,
+            commands::table::discard_table_import_preparation,
             commands::table::cancel_table_import,
             commands::table::list_table_import_reports,
             commands::table::mutate_table_rows,

@@ -28,6 +28,25 @@ pub(super) async fn project_root(
     Ok(root)
 }
 
+pub(crate) async fn file_query_source(
+    meta_store: &MetaStore,
+    project_id: &str,
+    relative_path: &str,
+    expected_root: &str,
+) -> Result<crate::core::file_query::AuthorizedFile, String> {
+    if expected_root.trim().is_empty() {
+        return Err("Expected project root is required for file queries".into());
+    }
+    let root = project_root(meta_store, project_id, Some(expected_root)).await?;
+    let relative =
+        validate_relative_path(relative_path, false).map_err(|error| error.to_string())?;
+    let path = root
+        .resolve_existing(&relative)
+        .map_err(|error| error.to_string())?;
+    crate::core::file_query::AuthorizedFile::for_project(&path, &root.path)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) async fn agent_list_project_entries(
     meta_store: &MetaStore,
     project_id: &str,

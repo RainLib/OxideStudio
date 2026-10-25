@@ -113,6 +113,7 @@ fn handle_request(
                 // query requests as read-only, independently of host SQL parsing.
                 read_only_enforcement: true,
                 semantic_schema_migration: false,
+                ..DriverRuntimeCapabilities::default()
             },
         })),
         DriverRequest::Connect {
@@ -188,6 +189,12 @@ fn handle_request(
             metadata(connection(connections, &connection_id)?, request).map(DriverResult::Metadata)
         }
         DriverRequest::Cancel { .. } => Ok(DriverResult::Boolean(false)),
+        DriverRequest::QueryPage { .. }
+        | DriverRequest::FetchQueryPage { .. }
+        | DriverRequest::CloseQuerySession { .. } => Err(protocol_error(
+            "QUERY_PAGING_UNSUPPORTED",
+            "ClickHouse native query cursors are unavailable",
+        )),
         DriverRequest::BeginTransaction { .. }
         | DriverRequest::CommitTransaction { .. }
         | DriverRequest::RollbackTransaction { .. } => Err(protocol_error(
@@ -674,6 +681,7 @@ fn metadata(
     request: MetadataRequest,
 ) -> Result<Value, DriverProtocolError> {
     match request {
+        MetadataRequest::SqlLookupContext { .. } => Ok(Value::Null),
         MetadataRequest::Databases => rows_json(connection, "SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY name", None).map(|rows| json!(rows.iter().map(|row| row_string(row, 0)).collect::<Vec<_>>())),
         MetadataRequest::Schemas { database } => Ok(json!([database.or_else(|| connection.default_database.clone()).unwrap_or_else(|| "default".to_string())])),
         MetadataRequest::Relations { database, namespace } => {
@@ -715,7 +723,9 @@ fn metadata(
             let rows = metadata_rows(connection, "SELECT name, expr, type FROM system.data_skipping_indices WHERE database = {database:String} AND table = {table:String} ORDER BY name", &format!("{database}\u{1f}{relation}"))?;
             Ok(Value::Array(rows.iter().map(|row| json!({ "name": row_string(row, 0), "columns": [], "is_unique": false, "is_primary": false, "index_type": row_string(row, 2), "definition": nullable_string(row, 1) })).collect()))
         }
-        MetadataRequest::Constraints { .. } | MetadataRequest::ReferencingForeignKeys { .. } | MetadataRequest::Collections { .. } | MetadataRequest::Routines { .. } => Ok(Value::Array(Vec::new())),
+        MetadataRequest::Constraints { .. } | MetadataRequest::ReferencingForeignKeys { .. } | MetadataRequest::Collections { .. } | MetadataRequest::Routines { .. }
+        | MetadataRequest::SchemaObjects { .. } | MetadataRequest::SchemaObjectMembers { .. } => Ok(Value::Array(Vec::new())),
+        MetadataRequest::ObjectSource { .. } => Err(protocol_error("UNSUPPORTED", "ClickHouse object source is unavailable")),
     }
 }
 
@@ -779,8 +789,7 @@ fn nullable_string(row: &[Value], index: usize) -> Value {
         .unwrap_or(Value::Null)
 }
 fn statement_type(sql: &str) -> String {
-    sql.trim_start()
-        .split_whitespace()
+    sql.split_whitespace()
         .next()
         .unwrap_or("UNKNOWN")
         .to_ascii_uppercase()
@@ -817,9 +826,11 @@ fn status_error(code: &str, response: reqwest::blocking::Response) -> DriverProt
         code,
         format!(
             "ClickHouse HTTP {status}{}",
-            (!detail.trim().is_empty())
-                .then(|| format!(": {detail}"))
-                .unwrap_or_default()
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ),
     )
 }

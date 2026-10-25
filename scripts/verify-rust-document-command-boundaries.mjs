@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/document.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["elasticsearch", "models", "mongodb", "support", "transfer"];
 const modules = [...facade.matchAll(/^(?:pub )?mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -24,7 +25,7 @@ const graph = new Map();
 let helpers = 0;
 for (const module of modules) {
   const file = `src-tauri/src/commands/document/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (
     /\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::commands::document(?:::\w+)?::/.test(source)
   ) {
@@ -49,7 +50,7 @@ for (const [symbol, owner] of Object.entries({
   collection_transfer_plan_token: "transfer",
   elasticsearch_clear_plan_token: "elasticsearch",
 })) {
-  const source = fs.readFileSync(path.join(root, `src-tauri/src/commands/document/${owner}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `src-tauri/src/commands/document/${owner}.rs`));
   if (!new RegExp(`\\b${symbol}\\b`).test(source)) {
     throw new Error(`${symbol} must have one owner in ${owner}.`);
   }
@@ -71,7 +72,7 @@ const commandModules = {
     "execute_elasticsearch_index_clear",
   ],
 };
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 for (const [module, commands] of Object.entries(commandModules)) {
   for (const command of commands) {
     if (!new RegExp(`\\bcommands::document::${module}::${command},`).test(lib)) {
@@ -80,7 +81,7 @@ for (const [module, commands] of Object.entries(commandModules)) {
   }
 }
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/commands/document/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/commands/document/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (helpers !== 25 || testCount !== 9) {
   throw new Error(`Expected 25 document-command helpers and 9 tests; found ${helpers} and ${testCount}.`);

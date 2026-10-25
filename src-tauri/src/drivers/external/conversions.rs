@@ -71,7 +71,7 @@ pub(super) fn native_query_page_from_sidecar(page: DriverQueryPage) -> Result<Na
 /// uses the standard/PostgreSQL scanner: its quote/comment rules cover the
 /// compatible SQL subset while preserving the package's own execution engine
 /// as the authority for vendor-specific syntax.
-pub(super) fn external_statement_scan_dialect(
+pub(crate) fn external_statement_scan_dialect(
     driver_id: &str,
     lsp_language_id: Option<&str>,
 ) -> Option<StatementScanDialect> {

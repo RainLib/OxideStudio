@@ -31,7 +31,7 @@ interface TransactionControlProps {
 }
 
 const menuClass =
-  "min-w-[176px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
+  "min-w-[176px] p-1 text-[12px]";
 const itemClass =
   "h-7 cursor-default rounded-[3px] text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
 

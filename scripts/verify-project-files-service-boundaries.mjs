@@ -1,8 +1,9 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
-const read=(file)=>fs.readFileSync(path.join(root,file),"utf8");
+const read=(file)=>readSourceText(path.join(root,file));
 const facade=read("src/services/tauri/project-files.service.ts");
 for(const [module,symbols] of Object.entries({git:["getGitChanges","getGitFileDiff"],context:["getCompletionContext","getLspDocuments"],files:["setProjectRoot","writeProjectFile","deleteProjectFileIfRevision"]})){
  const source=read(`src/services/tauri/project-files/${module}.ts`);

@@ -80,6 +80,7 @@ export function TableDataViewContent({
       }}
     >
       <TableDataDialogs
+        isTableReadOnly={isTableReadOnly}
         importInputRef={importInputRef}
         setCsvImportSource={setCsvImportSource}
         csvImportSource={csvImportSource}

@@ -1,21 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
   DBX_REFERENCE_DRIVER_IDS,
+  DBX_REFERENCE_BASELINE,
+  DBX_REFERENCE_EXTENSION_IDS,
   REFERENCE_DATABASE_DRIVER_CANDIDATES,
   driverCandidateAvailability,
   referenceDriverPackageRequirement,
   referenceDriverCandidate,
   referenceDriverDeliveryPlan,
 } from "./referenceDriverCatalog";
+import baseline from "./__fixtures__/dbx-catalog-2026-10-21.json";
 
 describe("DBX reference driver catalogue", () => {
-  it("tracks the complete 80-product DBX baseline without duplicate ids", () => {
-    expect(DBX_REFERENCE_DRIVER_IDS).toHaveLength(80);
-    expect(new Set(DBX_REFERENCE_DRIVER_IDS).size).toBe(80);
+  it("tracks the exact pinned upstream roster, with extension entries separate", () => {
+    expect(DBX_REFERENCE_BASELINE.revision).toBe(baseline.revision);
+    const catalogIds = [...DBX_REFERENCE_DRIVER_IDS, ...DBX_REFERENCE_EXTENSION_IDS];
+    expect([...catalogIds].sort()).toEqual([...baseline.databaseTypes].sort());
+    expect(new Set(catalogIds).size).toBe(catalogIds.length);
+    expect(referenceDriverCandidate("plugin")).toBeUndefined();
   });
 
   it("keeps the five explicit compatibility products separate from the DBX baseline", () => {
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(86);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(93);
     const compatibilityCandidates = REFERENCE_DATABASE_DRIVER_CANDIDATES.filter(
       (candidate) => candidate.source === "compatibility",
     );
@@ -30,6 +36,32 @@ describe("DBX reference driver catalogue", () => {
       source: "dbx-agent",
       dataModel: "queue",
       preferredRuntime: "native",
+    });
+  });
+
+  it("keeps new products gated and assigns their own query and runtime families", () => {
+    for (const driver of ["solr", "couchdb", "gbase8s", "gbase8c", "transwarp", "nebula", "salesforce"]) {
+      expect(driverCandidateAvailability(referenceDriverCandidate(driver)!, [])).toBe("requiresPackage");
+    }
+    for (const driver of ["gbase8s", "gbase8c", "transwarp"]) {
+      expect(referenceDriverDeliveryPlan(referenceDriverCandidate(driver)!)).toMatchObject({
+        runtimeRoute: "signedJdbc",
+        lspRoute: "genericSql",
+      });
+    }
+    for (const driver of ["solr", "couchdb", "nebula"]) {
+      expect(referenceDriverDeliveryPlan(referenceDriverCandidate(driver)!)).toMatchObject({
+        runtimeRoute: "dedicatedWorkspace",
+        lspRoute: "notApplicable",
+        lspLanguageId: null,
+      });
+    }
+    expect(referenceDriverCandidate("nebula")?.dataModel).toBe("graph");
+    expect(referenceDriverCandidate("couchdb")?.dataModel).toBe("document");
+    expect(referenceDriverDeliveryPlan(referenceDriverCandidate("salesforce")!)).toMatchObject({
+      runtimeRoute: "signedSidecar",
+      lspRoute: "notApplicable",
+      lspLanguageId: null,
     });
   });
 

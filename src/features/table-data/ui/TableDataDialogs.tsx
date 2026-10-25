@@ -2,6 +2,9 @@ import { CsvImportDialog } from "@/components/workspace/CsvImportDialog";
 import { JsonImportDialog } from "@/components/workspace/JsonImportDialog";
 import { TableDataTransferDialog } from "@/components/workspace/TableDataTransferDialog";
 import { Suspense, lazy } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { useFileImportNavigation } from "@/features/table-import/fileImportNavigation";
+import type { PrepareTableImportJobRequest } from "@/services/tauri/types/resumableImport";
 
 const MongoDocumentCloneDialog = lazy(() =>
   import("@/features/data-grid/ui/MongoDocumentCloneDialog").then((module) => ({
@@ -16,6 +19,7 @@ const MongoDocumentMutationDialog = lazy(() =>
 );
 
 interface TableDataDialogsContext {
+  isTableReadOnly: boolean;
   importInputRef: React.RefObject<HTMLInputElement | null>;
   setCsvImportSource: React.Dispatch<
     React.SetStateAction<{
@@ -99,6 +103,7 @@ interface TableDataDialogsContext {
 }
 
 export function TableDataDialogs({
+  isTableReadOnly,
   importInputRef,
   setCsvImportSource,
   csvImportSource,
@@ -129,6 +134,22 @@ export function TableDataDialogs({
   setMongoDocumentAction,
   runTabQuery,
 }: TableDataDialogsContext) {
+  const connection = connections.find(item => item.id === tabConnectionId);
+  const resumableTarget = isTauri() && driver === "sqlite" && !!connection &&
+    connection.origin !== "managed" && !connection.driverPackageVersion && !connection.sshTunnel?.enabled &&
+    !isTableReadOnly && !activeTab.isExecuting && !!activeTab.tableName && !!activeTab.schemaName;
+  const prepare = (source: Pick<PrepareTableImportJobRequest, "filePath" | "format" | "expectedFileDigest" | "mode" | "csvOptions">) => {
+    if (!resumableTarget || !tabConnectionId || !activeTab.tableName || !activeTab.schemaName) return;
+    useFileImportNavigation.getState().show(activeProjectId, {
+      ...source, projectId: activeProjectId, importId: crypto.randomUUID(),
+      connectionId: tabConnectionId, driver: "sqlite", schema: activeTab.schemaName,
+      table: activeTab.tableName, database: activeTab.databaseName,
+      firstRowHeader: source.csvOptions?.firstRowHeader ?? true,
+    });
+    setCsvImportSource(null);
+    setJsonImportSource(null);
+    setXlsxImportSource(null);
+  };
   return (
     <>
       <input
@@ -157,6 +178,7 @@ export function TableDataDialogs({
         onClose={() => setCsvImportSource(null)}
         onCancelImport={activeCsvImportId ? handleCancelCsvImport : undefined}
         onImport={handleImportCsvRows}
+        onPrepareResumable={resumableTarget && csvImportSource?.nativePath && csvImportSource.contentDigest ? (csvOptions, mode) => prepare({ filePath: csvImportSource.nativePath!, format: "csv", expectedFileDigest: csvImportSource.contentDigest!, csvOptions, mode }) : undefined}
       />
 
       <JsonImportDialog
@@ -168,6 +190,7 @@ export function TableDataDialogs({
         isSubmitting={isJsonImportSubmitting}
         onClose={() => setJsonImportSource(null)}
         onImport={handleImportJsonRows}
+        onPrepareResumable={resumableTarget && jsonImportSource?.preview.contentDigest ? mode => prepare({ filePath: jsonImportSource.nativePath, format: "json", expectedFileDigest: jsonImportSource.preview.contentDigest, mode }) : undefined}
       />
 
       <JsonImportDialog
@@ -179,6 +202,7 @@ export function TableDataDialogs({
         isSubmitting={isXlsxImportSubmitting}
         onClose={() => setXlsxImportSource(null)}
         onImport={handleImportXlsxRows}
+        onPrepareResumable={resumableTarget && xlsxImportSource?.preview.contentDigest ? mode => prepare({ filePath: xlsxImportSource.nativePath, format: "xlsx", expectedFileDigest: xlsxImportSource.preview.contentDigest, mode, csvOptions: undefined }) : undefined}
       />
 
       {tabConnectionId && activeTab.schemaName && activeTab.tableName && (

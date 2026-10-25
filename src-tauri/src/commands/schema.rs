@@ -36,6 +36,23 @@ pub async fn get_databases(
 
 /// 获取所有 schemas
 #[tauri::command]
+pub async fn get_sql_lookup_context(
+    manager: State<'_, ConnectionManager>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<Response<Option<oxide_driver_protocol::SqlLookupContext>>, String> {
+    let result = manager
+        .sql_lookup_context(&connection_id, database.as_deref())
+        .await;
+    Ok(schema_result(
+        result,
+        "SQL_LOOKUP_CONTEXT_FAILED",
+        serde_json::json!({"connectionId":connection_id,"database":database}),
+    ))
+}
+
+/// 获取所有 schemas
+#[tauri::command]
 pub async fn get_schemas(
     manager: State<'_, ConnectionManager>,
     connection_id: String,

@@ -1,8 +1,12 @@
 Database product icons in this directory are copied from the DBX project
-(`docs/public/icons/database`) for use as database-identification assets.
+(`apps/desktop/public/icons/database`, formerly `docs/public/icons/database`)
+for use as database-identification assets.
 
 Source project: DBX
 License: Apache License 2.0
 Source license: https://www.apache.org/licenses/LICENSE-2.0
+
+Solr, CouchDB, NebulaGraph, Transwarp Inceptor and Salesforce assets were
+added from DBX revision eeab128d738e59bbc4bd16646998275b921e16d2.
 
 Vendor marks remain the property of their respective owners.

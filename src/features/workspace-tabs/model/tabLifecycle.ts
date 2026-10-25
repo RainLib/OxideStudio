@@ -1,5 +1,7 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { TabData } from "@/features/workspace-tabs/model/types";
 import { QueryResult, queryService, schemaService } from "@/services/tauri";
+import { fileQueryService } from "@/services/tauri/file-query.service";
 
 export function hasPendingTableChanges(
   tab: Pick<TabData, "type" | "pendingEdits" | "newRowsCount">,
@@ -27,15 +29,12 @@ export function hasUnsavedTabChanges(
   );
 }
 
-export function confirmDiscardTabChanges(tabs: TabData[], action: string) {
+export async function confirmDiscardTabChanges(tabs: TabData[], action: string) {
   const dirtyFiles = tabs.filter(
     (tab) => (tab.fileRelativePath || tab.savedSqlFileId) && tab.isDirty,
   );
   const dirtyTables = tabs.filter(hasPendingTableChanges);
   if (dirtyFiles.length === 0 && dirtyTables.length === 0) return true;
-  if (typeof window === "undefined" || typeof window.confirm !== "function") {
-    return false;
-  }
 
   const details: string[] = [];
   if (dirtyFiles.length > 0) {
@@ -66,11 +65,12 @@ export function confirmDiscardTabChanges(tabs: TabData[], action: string) {
     );
   }
 
-  return window.confirm(
+  return (await confirmAction(
     `Unsaved changes will be discarded when you ${action}.\n\n${details.join(
       "\n",
-    )}\n\nUse Submit Changes or save the file first to keep them. Select OK to discard, or Cancel to stay.`,
-  );
+    )}\n\nUse Submit Changes or save the file first to keep them. Choose Discard changes to discard, or Cancel to stay.`,
+    { title: "Unsaved changes", confirmLabel: "Discard changes" },
+  ));
 }
 
 /**
@@ -81,6 +81,7 @@ export function confirmDiscardTabChanges(tabs: TabData[], action: string) {
 export function tabAfterReleasingRuntimePayload(tab: TabData): TabData {
   return {
     ...tab,
+    fileQuery: tab.fileQuery ? { ...tab.fileQuery, session: null } : undefined,
     results: null,
     resultSql: undefined,
     nativeQueryCursor: undefined,
@@ -136,6 +137,10 @@ export function releaseTabRuntimeResources(tabs: readonly TabData[]) {
   const released = new Set<string>();
   const cancelledQueries = new Set<string>();
   for (const tab of tabs) {
+    if (tab.fileQuery) {
+      if (tab.fileQuery.session) void fileQueryService.close(tab.fileQuery.session).catch(() => undefined);
+      continue;
+    }
     if (tab.runningQueryId && !cancelledQueries.has(tab.runningQueryId)) {
       cancelledQueries.add(tab.runningQueryId);
       void queryService.cancelQuery(tab.runningQueryId).catch(() => undefined);

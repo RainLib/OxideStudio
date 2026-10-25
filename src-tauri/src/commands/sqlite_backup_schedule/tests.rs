@@ -1,10 +1,11 @@
+use super::artifact_files::{delete_recorded_file, recorded_identity};
 use super::*;
 use crate::core::driver::LocalDatabaseBackupControl;
 use chrono::{DateTime, Utc};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-fn schedule(directory: &Path) -> SqliteBackupSchedule {
+pub(super) fn schedule(directory: &Path) -> SqliteBackupSchedule {
     SqliteBackupSchedule {
         id: uuid::Uuid::new_v4().to_string(),
         name: "Nightly / app".to_string(),
@@ -15,6 +16,8 @@ fn schedule(directory: &Path) -> SqliteBackupSchedule {
         frequency: SqliteBackupScheduleFrequency::Hourly,
         interval_hours: 6,
         time_of_day: "02:00".to_string(),
+        time_zone: None,
+        scheduling_error: None,
         weekday: 1,
         retention_count: 2,
         compression: SqliteBackupCompression::None,
@@ -107,7 +110,7 @@ fn hourly_next_run_and_filename_are_deterministic_and_bounded() {
         .unwrap()
         .with_timezone(&Utc);
     assert_eq!(
-        schedule_next_run(&schedule, now).to_rfc3339(),
+        schedule_next_run(&schedule, now).unwrap().to_rfc3339(),
         "2026-08-31T06:00:00+00:00"
     );
     assert!(!schedule_is_due(&schedule, now));
@@ -128,7 +131,7 @@ fn hourly_next_run_and_filename_are_deterministic_and_bounded() {
     let path = backup_file_path(&schedule, "12345678-1234-1234-1234-123456789abc", now);
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
-        Some("oxide-sqlite-backup__Nightly _ app__20260831-000000__12345678.sqlite")
+        Some("oxide-sqlite-backup__Nightly _ app__20260831-000000__12345678-1234-1234-1234-123456789abc.sqlite")
     );
 }
 
@@ -160,6 +163,7 @@ fn retention_file_guard_rejects_other_directories_and_symlinks_by_name() {
         integrity_check: Some("ok".to_string()),
         progress_percent: 100,
         error: None,
+        cancel_requested: false,
     };
     assert_eq!(
         safe_run_file(&run),
@@ -228,9 +232,10 @@ fn gzip_backup_is_published_with_round_trip_content_and_safe_retention_path() {
         integrity_check: Some(receipt.integrity_check),
         progress_percent: 100,
         error: None,
+        cancel_requested: false,
     };
     assert_eq!(safe_run_file(&run), Some(compressed.clone()));
-    delete_safe_run_file(&run).unwrap();
+    delete_recorded_file(&run, recorded_identity(&run).as_ref()).unwrap();
     assert!(!compressed.exists());
 }
 

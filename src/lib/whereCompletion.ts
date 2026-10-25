@@ -1,3 +1,5 @@
+import {sqlValueTemplates,sqlIsPredicateLabels,sqlLogicalContinuation} from "@/features/query-languages/sql/valueTemplates";
+import {SQL_PATTERN_WORDS,SQL_ESCAPE_VALUES,sqlNegatedPatternOperators,sqlPatternOperators} from "@/features/query-languages/sql/patternOperators";
 import {
   qualifiedTableName,
   quoteIdentifier,
@@ -6,6 +8,8 @@ import {
 import type { CompletionItem } from "@/services/lsp/types";
 import { CompletionItemKind } from "@/services/lsp/types";
 import type { DatabaseDriver } from "@/services/tauri/types";
+import {boundedCachedComment, rankCachedColumns, searchCachedColumns} from "@/features/query-editor/model/cached-completion/metadataSearch";
+import {sqlPredicateContext,SQL_UNTYPED_STRING} from "@/features/query-languages/sql/predicateContext";
 
 export type WhereCompletionDocument = {
   text: string;
@@ -18,6 +22,8 @@ export type WhereCompletionDocument = {
 export type WhereCompletionCandidate = {
   label: string;
   insertText: string;
+  snippet?: boolean;
+  preserveInsertText?: boolean;
   /** Place the caret before this many trailing code units after insertion. */
   cursorOffsetFromEnd?: number;
   /** Insert continuations at the caret instead of replacing the active token. */
@@ -38,40 +44,19 @@ const WHERE_OPERATORS = [
   { label: "<", insertText: "< " },
   { label: ">=", insertText: ">= " },
   { label: "<=", insertText: "<= " },
-  { label: "LIKE", insertText: "LIKE " },
-  { label: "ILIKE", insertText: "ILIKE ", postgresOnly: true },
   { label: "IN", insertText: "IN (" },
   { label: "NOT IN", insertText: "NOT IN (" },
   { label: "BETWEEN", insertText: "BETWEEN " },
   { label: "IS NULL", insertText: "IS NULL " },
   { label: "IS NOT NULL", insertText: "IS NOT NULL " },
 ] as const;
-const WHERE_VALUE_KEYWORDS = [
-  "NULL",
-  "TRUE",
-  "FALSE",
-  "CURRENT_DATE",
-  "CURRENT_TIMESTAMP",
-];
-const WHERE_IS_PREDICATES = [
-  { label: "NULL", insertText: "NULL " },
-  { label: "NOT NULL", insertText: "NOT NULL " },
-  { label: "TRUE", insertText: "TRUE " },
-  { label: "FALSE", insertText: "FALSE " },
-  { label: "UNKNOWN", insertText: "UNKNOWN " },
-];
-const WHERE_IS_NOT_PREDICATES = [
-  { label: "NULL", insertText: "NULL " },
-  { label: "TRUE", insertText: "TRUE " },
-  { label: "FALSE", insertText: "FALSE " },
-  { label: "UNKNOWN", insertText: "UNKNOWN " },
-];
+
 const WHERE_NOT_PREDICATES = [
   { label: "IN", insertText: "IN (" },
-  { label: "LIKE", insertText: "LIKE " },
   { label: "BETWEEN", insertText: "BETWEEN " },
 ];
 const SQL_RESERVED_IDENTIFIERS = new Set([
+  ...SQL_PATTERN_WORDS,
   "ALL",
   "AND",
   "AS",
@@ -105,24 +90,6 @@ const SQL_RESERVED_IDENTIFIERS = new Set([
   "WHERE",
 ]);
 
-// The filter row accepts the same identifier surface as the editor: quoted
-// names may contain spaces and qualified references may mix quote styles.
-// A simple `\S+` or word regex would stop at `"created at"` and offer a
-// second column instead of the predicate/operator that must follow it.
-const SQL_IDENTIFIER_SEGMENT =
-  '(?:"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]|[\\p{L}\\p{N}_$@-]+)';
-const TRAILING_IDENTIFIER_REFERENCE = new RegExp(
-  `(?:^|\\s)(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)$`,
-  "u",
-);
-const TRAILING_PREDICATE_COLUMN = new RegExp(
-  `(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)\\s*(?:=|<>|!=|<=|>=|<|>|\\b(?:like|ilike|between)\\b|\\b(?:not\\s+)?in\\s*\\()\\s*$`,
-  "iu",
-);
-const PREDICATE_COLUMN_START = new RegExp(
-  `(${SQL_IDENTIFIER_SEGMENT}(?:\\s*\\.\\s*${SQL_IDENTIFIER_SEGMENT})*)\\s*(?:=|<>|!=|<=|>=|<|>|\\b(?:like|ilike|between)\\b|\\b(?:not\\s+)?in\\b)`,
-  "giu",
-);
 const COMPLETE_QUOTED_IDENTIFIER_SOURCE =
   '"(?:[^\"]|\"\")*"|`[^`]*`|\\[[^\\]]*\\]';
 
@@ -130,10 +97,11 @@ export function buildWhereCompletionDocument(options: {
   condition: string;
   cursorOffset: number;
   driver: DatabaseDriver;
+  identifierQuote?: string;
   schema?: string | null;
   table: string;
 }) {
-  const relation = qualifiedTableName(
+  const relation = options.identifierQuote ? [options.schema,options.table].filter((value):value is string=>Boolean(value)).map(value=>quoteIdentifierWithCapabilities({identifierQuote:options.identifierQuote!},value)).join(".") : qualifiedTableName(
     options.driver,
     options.schema,
     options.table,
@@ -205,81 +173,6 @@ function completionFilterText(value: string) {
     .replace(/["`\]]$/u, "");
 }
 
-function unquoteIdentifierSegment(segment: string) {
-  const trimmed = segment.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return trimmed.slice(1, -1).replace(/""/gu, '"');
-  }
-  if (trimmed.startsWith("`") && trimmed.endsWith("`")) {
-    return trimmed.slice(1, -1);
-  }
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function trailingColumnReference(text: string) {
-  const reference = text.trimEnd().match(TRAILING_IDENTIFIER_REFERENCE)?.[1];
-  if (!reference) return null;
-  const segments = reference.match(new RegExp(SQL_IDENTIFIER_SEGMENT, "gu"));
-  const last = segments?.[segments.length - 1];
-  return last ? unquoteIdentifierSegment(last).toLocaleLowerCase() : null;
-}
-
-function predicateColumnBeforeCursor(
-  text: string,
-  columns: Array<{ name: string; type?: string }>,
-) {
-  const trailingReference = text.match(TRAILING_PREDICATE_COLUMN)?.[1];
-  const references = Array.from(text.matchAll(PREDICATE_COLUMN_START));
-  const reference =
-    trailingReference || references[references.length - 1]?.[1];
-  if (!reference) return undefined;
-  const name = trailingColumnReference(reference);
-  if (!name) return undefined;
-  return columns.find(
-    (column) => column.name.toLocaleLowerCase() === name,
-  );
-}
-
-function predicateValueCandidates(columnType?: string) {
-  const type = columnType?.toLocaleLowerCase() || "";
-  if (/\b(?:bool|boolean|bit)\b/u.test(type)) {
-    return [
-      { label: "TRUE", insertText: "TRUE " },
-      { label: "FALSE", insertText: "FALSE " },
-      { label: "NULL", insertText: "NULL " },
-    ];
-  }
-  if (/\b(?:date|time|timestamp|interval)\b/u.test(type)) {
-    return [
-      { label: "''", insertText: "'' ", cursorOffsetFromEnd: 2 },
-      { label: "CURRENT_DATE", insertText: "CURRENT_DATE " },
-      { label: "CURRENT_TIMESTAMP", insertText: "CURRENT_TIMESTAMP " },
-      { label: "NULL", insertText: "NULL " },
-    ];
-  }
-  if (/\b(?:int|serial|numeric|decimal|number|float|double|real|money)\b/u.test(type)) {
-    return [
-      { label: "0", insertText: "0 " },
-      { label: "1", insertText: "1 " },
-      { label: "NULL", insertText: "NULL " },
-    ];
-  }
-  if (/\b(?:char|varchar|nvarchar|nchar|text|string|clob|json|xml|uuid)\b/u.test(type)) {
-    return [
-      { label: "''", insertText: "'' ", cursorOffsetFromEnd: 2 },
-      { label: "'%…%'", insertText: "'%%' ", cursorOffsetFromEnd: 3 },
-      { label: "NULL", insertText: "NULL " },
-    ];
-  }
-  return WHERE_VALUE_KEYWORDS.map((label) => ({
-    label,
-    insertText: `${label} `,
-  }));
-}
-
 function fuzzyScore(label: string, typed: string) {
   const normalizedLabel = label.toLocaleLowerCase();
   const normalizedTyped = typed.toLocaleLowerCase();
@@ -312,66 +205,42 @@ function safeColumnInsertText(
       : quoteIdentifier(driver, name);
 }
 
-export function localWhereCompletionCandidates(options: {
+type WhereSearchColumn = { name: string; type?: string; comment?: string };
+type WhereCompletionOptions = {
   condition: string;
   cursorOffset: number;
   driver: DatabaseDriver;
   identifierQuote?: string;
-  columns: Array<{ name: string; type?: string }>;
-}) {
+  dialect?: string;
+  qualifiers?: readonly string[];
+  valueType?: string;
+  valueRole?: "pattern-escape";
+  logicalContinuation?: boolean;
+  patternEscape?: boolean;
+  columns: WhereSearchColumn[];
+};
+export function whereCompletionContext(options:WhereCompletionOptions){
+  let context=sqlPredicateContext({...options,dialect:options.dialect??options.driver,replacementStart:whereReplacementRange(options.condition,options.cursorOffset).start});
+  if(context.phase==="continuation"&&context.escapeAttachable&&options.patternEscape!==undefined)context={...context,canEscape:options.patternEscape};
+  return context.phase==="value"&&options.valueType!==undefined?{...context,type:options.valueType,...(context.valueRole?{escapeSupported:context.escapeSupported||options.valueRole==="pattern-escape"}:{} )}:context;
+}
+export function localWhereCompletionCandidates(options: WhereCompletionOptions,
+  rankColumns: (columns: WhereSearchColumn[], query: string) => ReturnType<typeof rankCachedColumns<WhereSearchColumn>> = rankCachedColumns,
+): WhereCompletionCandidate[] {
   const replacement = whereReplacementRange(
     options.condition,
     options.cursorOffset,
   );
-  const typed = completionFilterText(
+  let typed = completionFilterText(
     options.condition.slice(replacement.start, options.cursorOffset),
   );
   const beforeToken = options.condition.slice(0, replacement.start).trimEnd();
   const beforeCursor = options.condition.slice(0, options.cursorOffset);
-  const normalizedColumns = new Set(
-    options.columns.map((column) => column.name.toLocaleLowerCase()),
-  );
-  const lastIdentifier = trailingColumnReference(beforeToken);
-  const afterColumn = Boolean(
-    lastIdentifier && normalizedColumns.has(lastIdentifier),
-  );
-  const betweenNeedsSeparator =
-    /\bbetween\s+(?:[^\s,()]+|'(?:''|[^'])*'|"(?:""|[^"])*")\s*$/iu.test(
-      beforeCursor,
-    );
-  const betweenNeedsUpperValue =
-    /\bbetween\s+(?:[^\s,()]+|'(?:''|[^'])*'|"(?:""|[^"])*")\s+and\s*$/iu.test(
-      beforeCursor,
-    );
-  const insideInList = /\b(?:not\s+)?in\s*\([^)]*$/iu.test(beforeCursor);
-  const afterInComma = insideInList && /,\s*$/u.test(beforeCursor);
-  const afterInValue =
-    insideInList &&
-    !afterInComma &&
-    /(?:'(?:''|[^'])*'|"(?:""|[^"])*"|\b(?:true|false|null|current_date|current_timestamp)\b|[-+]?\d+(?:\.\d+)?)\s*$/iu.test(
-      beforeCursor,
-    );
-  const afterNullPredicate = /\bis\s+(?:not\s+)?null\s*$/iu.test(beforeCursor);
-  const afterIsKeyword = /\bis\s*$/iu.test(beforeCursor);
-  const afterIsNotKeyword = /\bis\s+not\s*$/iu.test(beforeCursor);
-  const afterNotKeyword = /\bnot\s*$/iu.test(beforeCursor);
-  const afterNegatedOperand =
-    /(?:^|\(|\b(?:and|or)\s+)\s*not\s*$/iu.test(beforeCursor);
-  const afterCompletedExpression =
-    afterNullPredicate ||
-    (!afterColumn &&
-      !betweenNeedsSeparator &&
-      !betweenNeedsUpperValue &&
-      !insideInList &&
-      /(?:['"\d)]|\b(?:true|false|null|current_date|current_timestamp))$/iu.test(
-        beforeToken,
-      ));
-  const afterPredicateOperator =
-    /(?:=|<>|!=|<=|>=|<|>|\b(?:like|ilike|between))\s*$/iu.test(beforeToken) ||
-    /\b(?:not\s+)?in\s*\(\s*$/iu.test(beforeCursor) ||
-    betweenNeedsUpperValue ||
-    afterInComma;
-  const predicateColumn = predicateColumnBeforeCursor(beforeCursor, options.columns);
+  const fieldPrefix=options.condition.slice(replacement.start,options.cursorOffset);
+  const context=whereCompletionContext(options);
+  if(context.blocked||context.phase==="relation"||context.phase==="type")return [];
+  if(context.consumedKeyword)typed="";
+  const afterNegatedOperand=/\bnot\s*$/iu.test(beforeCursor)&&context.phase==="operand";
 
   const keywordCandidates = (
     keywords: Array<
@@ -380,6 +249,7 @@ export function localWhereCompletionCandidates(options: {
           label: string;
           insertText: string;
           cursorOffsetFromEnd?: number;
+          preserveInsertText?: boolean;
           replacementRange?: WhereReplacementRange;
         }
     >,
@@ -393,23 +263,32 @@ export function localWhereCompletionCandidates(options: {
           fuzzyScore(typeof keyword === "string" ? keyword : keyword.label, typed),
         ),
       )
-      .map((keyword, index) => ({
+      .map((keyword, index) => {
+        const explicitRange=typeof keyword === "string" ? undefined : keyword.replacementRange;
+        const insertText=typeof keyword === "string" ? `${keyword} ` : keyword.insertText;
+        const insertAfterKeyword=context.consumedKeyword&&!explicitRange;
+        return ({
         label: typeof keyword === "string" ? keyword : keyword.label,
         insertText:
-          typeof keyword === "string" ? `${keyword} ` : keyword.insertText,
+          `${insertAfterKeyword&&insertText!=="("&&!/\s$/u.test(beforeCursor)?" ":""}${insertText}`,
         cursorOffsetFromEnd:
           typeof keyword === "string"
             ? undefined
             : keyword.cursorOffsetFromEnd,
         replacementRange:
-          typeof keyword === "string" ? undefined : keyword.replacementRange,
+          explicitRange??(insertAfterKeyword?{start:options.cursorOffset,end:options.cursorOffset}:undefined),
         detail,
+        preserveInsertText: insertAfterKeyword|| (typeof keyword === "string" ? undefined : keyword.preserveInsertText),
         kind: CompletionItemKind.Keyword,
         sortText: `${sortGroup}:${String(index).padStart(4, "0")}`,
         source: "local" as const,
-      }));
+      });});
+  const continuation=(labels:string[],detail:string)=>keywordCandidates(labels.map(label=>({
+    label,insertText:`${/^[A-Z]/u.test(label)&&!/\s$/u.test(beforeCursor)?" ":""}${label}${label===")"?"":" "}`,
+    replacementRange:{start:options.cursorOffset,end:options.condition.slice(options.cursorOffset).startsWith(label)?options.cursorOffset+label.length:options.cursorOffset},
+  })),detail,"0",false);
 
-  if (betweenNeedsSeparator) {
+  if (context.phase==="between-separator") {
     const needsSpace = !/\s$/u.test(beforeCursor);
     return keywordCandidates(
       [{
@@ -425,7 +304,7 @@ export function localWhereCompletionCandidates(options: {
       false,
     );
   }
-  if (afterInValue) {
+  if (context.phase==="in-continuation") {
     return keywordCandidates(
       [
         {
@@ -450,15 +329,17 @@ export function localWhereCompletionCandidates(options: {
       false,
     );
   }
-  if (afterCompletedExpression) {
-    const needsSpace = !/\s$/u.test(beforeCursor);
+  if (context.phase==="continuation") {
+    const activeWord=!context.consumedKeyword&&replacement.start<options.cursorOffset&&/^[\p{L}_]/u.test(options.condition.slice(replacement.start,options.cursorOffset));
+    const start=activeWord?replacement.start:options.cursorOffset;
+    const needsSpace = !/\s$/u.test(options.condition.slice(0,start));
     return keywordCandidates(
-      WHERE_FOLLOW_UPS.map((label) => ({
+      [...WHERE_FOLLOW_UPS,...(context.canEscape?["ESCAPE"]:[])].map((label) => ({
         label,
         insertText: `${needsSpace ? " " : ""}${label} `,
         replacementRange: {
-          start: options.cursorOffset,
-          end: options.cursorOffset,
+          start,
+          end: activeWord?replacement.end:options.cursorOffset,
         },
       })),
       "WHERE continuation",
@@ -466,31 +347,34 @@ export function localWhereCompletionCandidates(options: {
       false,
     );
   }
-  if (afterIsKeyword) {
-    return keywordCandidates(WHERE_IS_PREDICATES, "IS predicate", "0");
+  let isKeywords:WhereCompletionCandidate[]=[];
+  if (context.phase==="is"||context.phase==="is-not") {
+    const profile=options.dialect??options.driver;
+    isKeywords=keywordCandidates(sqlIsPredicateLabels(context.type,profile,context.phase==="is-not"),"IS predicate","0");
+    if(!["sqlite","sqlite3"].includes(profile))return isKeywords;
   }
-  if (afterIsNotKeyword) {
-    return keywordCandidates(WHERE_IS_NOT_PREDICATES, "IS NOT predicate", "0");
+  if (context.phase==="distinct-from")return keywordCandidates(["FROM"],"Comparison operator","0");
+  if (context.phase==="similar-to")return keywordCandidates(["TO"],"Pattern operator","0");
+  if (context.phase==="not") {
+    return keywordCandidates([...WHERE_NOT_PREDICATES,...sqlNegatedPatternOperators(options.dialect??options.driver).map(label=>({label,insertText:label+" "}))], "NOT predicate", "0");
   }
-  if (afterNotKeyword && !afterNegatedOperand) {
-    return keywordCandidates(WHERE_NOT_PREDICATES, "NOT predicate", "0");
-  }
-  if (afterPredicateOperator) {
+  if (context.phase==="open-in")return keywordCandidates([{label:"(",insertText:"("}],"IN list","0",false);
+  if (context.phase==="case-when")return continuation(["WHEN"],"CASE branch");
+  if (context.phase==="case-then")return continuation(["THEN","AND","OR"],"CASE condition");
+  if (context.phase==="case-result")return continuation(["WHEN","ELSE","END"],"CASE result");
+  if (context.phase==="case-end")return continuation(["END"],"CASE result");
+  if (context.phase==="value") {
+    if(context.valueRole==="pattern-escape")return context.escapeSupported&&context.type?keywordCandidates(SQL_ESCAPE_VALUES,"Pattern escape character","0"):[];
     return keywordCandidates(
-      predicateValueCandidates(predicateColumn?.type),
-      predicateColumn?.type
-        ? `${predicateColumn.type} predicate value`
+      sqlValueTemplates(context.type,options.dialect??options.driver),
+      context.type&&context.type!==SQL_UNTYPED_STRING
+        ? `${context.type} predicate value`
         : "Predicate value",
       "0",
     );
   }
-  if (afterColumn) {
-    return WHERE_OPERATORS.filter(
-      (operator) =>
-        !("postgresOnly" in operator) ||
-        !operator.postgresOnly ||
-        options.driver === "postgres",
-    ).map((operator, index) => ({
+  if (context.phase==="operator"||context.phase==="argument-continuation") {
+    const operators=[...WHERE_OPERATORS,...sqlPatternOperators(options.dialect??options.driver).map(label=>({label,insertText:label+" "}))].map((operator, index) => ({
       label: operator.label,
       insertText: operator.insertText,
       detail: "Predicate operator",
@@ -498,35 +382,31 @@ export function localWhereCompletionCandidates(options: {
       sortText: `0:${String(index).padStart(4, "0")}`,
       source: "local" as const,
     }));
+    const logical=(options.logicalContinuation??sqlLogicalContinuation(context.type,options.dialect??options.driver))===true&&context.phase==="operator"
+      ?keywordCandidates(["AND","OR"].map(label=>({label,insertText:`${replacement.start>0&&!/\s$/u.test(options.condition.slice(0,replacement.start))?" ":""}${label} `,preserveInsertText:true})),"Logical continuation","0") :[];
+    return context.phase==="argument-continuation"?[...continuation([",",")"],"Function argument"),...operators]:[...logical,...operators];
   }
 
-  const columns: WhereCompletionCandidate[] = options.columns
-    .map((column) => ({
-      column,
-      score: fuzzyScore(column.name, typed),
-    }))
-    .filter(({ score }) => Number.isFinite(score))
-    .sort(
-      (left, right) =>
-        left.score - right.score ||
-        left.column.name.localeCompare(right.column.name, undefined, {
-          sensitivity: "base",
-          numeric: true,
-        }),
-    )
-    .map(({ column }, index) => ({
+  const qualifierEnd=/^["`\[]/u.test(fieldPrefix)?-1:fieldPrefix.lastIndexOf(".");
+  const fieldReplacement=context.consumedKeyword?{start:options.cursorOffset,end:options.cursorOffset}:qualifierEnd>=0?{start:replacement.start+qualifierEnd+1,end:replacement.end}:undefined;
+  const appendPredicate=qualifierEnd<0&&context.canAppendPredicate&&!options.condition.slice(replacement.end).trim();
+  const columns: WhereCompletionCandidate[] = rankColumns(options.columns, typed).items
+    .map(({ column, sortText }) => ({
       label: column.name,
-      insertText: `${safeColumnInsertText(
+      insertText: `${context.consumedKeyword&&!/\s$/u.test(beforeCursor)?" ":""}${safeColumnInsertText(
         options.driver,
         column.name,
         options.identifierQuote,
-      )} = `,
-      detail: column.type ? `${column.type} · current table` : "Current table column",
+      )}${appendPredicate?" = ":""}`,
+      replacementRange:fieldReplacement,
+      preserveInsertText:context.consumedKeyword,
+      detail: [column.type ? `${column.type} · current table` : "Current table column", boundedCachedComment(column.comment)].filter(Boolean).join(" · "),
       kind: CompletionItemKind.Field,
-      sortText: `0:${String(index).padStart(4, "0")}`,
+      sortText,
       source: "local" as const,
     }));
 
+  if(isKeywords.length)return [...isKeywords,...columns];
   const canStartNegatedPredicate =
     !afterNegatedOperand &&
     (!beforeToken || /(?:\(|\b(?:and|or))\s*$/iu.test(beforeToken));
@@ -546,21 +426,53 @@ export function localWhereCompletionCandidates(options: {
   ];
 }
 
+/** Load the shared pinyin dictionary only when this interaction searches fields. */
+export async function searchWhereCompletionCandidates(options: WhereCompletionOptions, token: {readonly isCancellationRequested?: boolean} = {}) {
+  if(token.isCancellationRequested)return [];
+  let query: string | undefined;
+  const syntax = localWhereCompletionCandidates(options, (_columns, typed) => {
+    query = typed;
+    return {items: [], incomplete: false};
+  });
+  if(query === undefined)return syntax;
+  const result = await searchCachedColumns(options.columns, query, token);
+  if(token.isCancellationRequested)return [];
+  return localWhereCompletionCandidates(options, () => result);
+}
+
 export function mergeWhereCompletionCandidates(
   local: WhereCompletionCandidate[],
   lspItems: CompletionItem[],
+  source?: {document:WhereCompletionDocument;condition:string},
 ) {
   const merged = new Map<string, WhereCompletionCandidate>();
+  const lines=source?.document.text.split("\n")??[],lineOffsets:number[]=[];
+  let lineOffset=0;
+  for(const line of lines){lineOffsets.push(lineOffset);lineOffset+=line.length+1;}
   for (const candidate of local) {
     merged.set(candidate.label.toLocaleLowerCase(), candidate);
   }
   for (const item of lspItems) {
+    // This input cannot apply edits to the virtual SELECT prefix or another
+    // document. Reject those items rather than silently accepting half an edit.
+    if(source&&item.additionalTextEdits?.length)continue;
+    let replacementRange:WhereReplacementRange|undefined;
+    if(source&&item.textEdit){
+      const range="range" in item.textEdit?item.textEdit.range:item.textEdit.replace;
+      const offset=(position:{line:number;character:number})=>{
+        if(!Number.isInteger(position.line)||!Number.isInteger(position.character)||position.line<0||position.line>=lines.length||position.character<0||position.character>lines[position.line]!.length)return -1;
+        return lineOffsets[position.line]!+position.character-source.document.conditionStart;
+      };
+      const start=offset(range.start),end=offset(range.end);
+      if(start<0||end<start||end>source.condition.length)continue;
+      replacementRange={start,end};
+    }
     const key = item.label.toLocaleLowerCase();
     const existing = merged.get(key);
     const lspInsertText = item.textEdit?.newText || item.insertText || item.label;
     const preserveLocalWorkflowInsert =
       existing?.source === "local" &&
-      (existing.kind === CompletionItemKind.Field ||
+      (existing.preserveInsertText || existing.kind === CompletionItemKind.Field ||
         existing.kind === CompletionItemKind.Operator ||
         existing.cursorOffsetFromEnd !== undefined ||
         existing.replacementRange !== undefined);
@@ -569,8 +481,10 @@ export function mergeWhereCompletionCandidates(
       insertText: preserveLocalWorkflowInsert
         ? existing.insertText
         : lspInsertText,
+      snippet:!preserveLocalWorkflowInsert&&item.insertTextFormat===2,
       cursorOffsetFromEnd: existing?.cursorOffsetFromEnd,
-      replacementRange: existing?.replacementRange,
+      preserveInsertText:existing?.preserveInsertText,
+      replacementRange: preserveLocalWorkflowInsert?existing?.replacementRange:replacementRange||existing?.replacementRange,
       detail: item.detail || existing?.detail,
       kind: item.kind || existing?.kind,
       sortText: item.sortText || existing?.sortText || `1:${key}`,

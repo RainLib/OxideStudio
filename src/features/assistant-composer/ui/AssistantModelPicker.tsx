@@ -67,7 +67,7 @@ export function AssistantModelPicker({
   return (
     <div
       data-assistant-model-view="models"
-      className="p-2 animate-in fade-in-0 slide-in-from-right-1 duration-200 motion-reduce:animate-none"
+      className="p-2"
     >
       <div className="mb-1 flex h-7 items-center gap-1 px-0.5">
         <button

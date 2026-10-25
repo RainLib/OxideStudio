@@ -109,7 +109,7 @@ export function AssistantConversationHistory({
         align="end"
         side="bottom"
         sideOffset={5}
-        className="w-[304px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.34)]"
+        className="w-[304px] p-0 text-[10px]"
         data-assistant-history-menu
       >
         <div className="flex h-9 items-center justify-between border-b border-[hsl(var(--wb-border-subtle))] px-3">

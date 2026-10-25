@@ -1,6 +1,7 @@
 import { createInlineCompletionRequestId } from "@/features/query-editor/model/completionProviderRuntime";
 import {
   inlineCompletionEdit,
+  inlineIdentifierSuffixLength,
   optionalInlineLspContext,
   optionalInlineLspValidation,
 } from "@/features/query-editor/model/inlineCompletionRuntime";
@@ -27,7 +28,10 @@ import { CompletionItemKind } from "@/services/lsp/types";
 import { aiService } from "@/services/tauri/ai.service";
 import { projectFilesService } from "@/services/tauri/project-files.service";
 import { useEffect } from "react";
-interface InlineCompletionProviderContext {
+import {captureInlineProviderRequest,watchInlineProviderContext} from "../model/inlineProviderContext";
+import type {LspProviderContextOptions} from "../model/lspProviderContext";
+import {documentInlineContext} from "../model/documentInlineContext";
+interface InlineCompletionProviderContext extends LspProviderContextOptions {
   editorSettings: import("@/lib/appSettings").AppSettings["editor"];
   isActivePane: boolean;
   monaco: typeof import("monaco-editor") | null;
@@ -107,6 +111,7 @@ export function useInlineCompletionProvider({
   inlineApiKey,
   inlineTimeoutMs,
   rankByUsage,
+  getSemanticContext,subscribeSemanticContext,
 }: InlineCompletionProviderContext) {
   useEffect(() => {
     const settings = editorSettings.inlineCompletion;
@@ -126,6 +131,12 @@ export function useInlineCompletionProvider({
     const emitInlineCompletionChange = () => {
       inlineCompletionListenersRef.current.forEach((listener) => listener());
     };
+    const releaseContext=watchInlineProviderContext({getSemanticContext,subscribeSemanticContext,editor:mountedEditor,
+      invalidate:()=>{
+        requestSequence++;inlineCompletionAbortRef.current?.abort();inlineCompletionAbortRef.current=null;
+        inlineCompletionCacheRef.current.clear();
+        setInlineCompletionStatus(inlineProviderConfig()?"ready":"unconfigured");emitInlineCompletionChange();
+      }});
     const disposables = providerLanguages.map((language) =>
       monaco.languages.registerInlineCompletionsProvider(language, {
         displayName: "OxideStudio AI",
@@ -153,12 +164,11 @@ export function useInlineCompletionProvider({
           const selection = mountedEditor?.getSelection?.();
           const hasSelection = Boolean(selection && !selection.isEmpty());
           const sequence = ++requestSequence;
-          const modelVersion = model.getVersionId();
-          const isCurrent = () =>
-            !disposed &&
-            !token.isCancellationRequested &&
-            sequence === requestSequence &&
-            model.getVersionId() === modelVersion;
+          inlineCompletionAbortRef.current?.abort();inlineCompletionAbortRef.current=null;
+          const captured=captureInlineProviderRequest({read:getSemanticContext,model,token,
+            isActive:()=>!disposed&&sequence===requestSequence&&(!mountedEditor?.getModel||mountedEditor.getModel()===model)});
+          const isCurrent=captured.isCurrent;
+          if(!isCurrent())return {items:[]};
           const offset = model.getOffsetAt(position);
           const value = model.getValue();
           const bounded = boundedInlineContext(value, offset);
@@ -170,6 +180,7 @@ export function useInlineCompletionProvider({
                 model,
                 position,
                 selectedSuggestion: context.selectedSuggestionInfo,
+                replaceSuffixLength,
               });
               return {
                 items: edit
@@ -264,8 +275,9 @@ export function useInlineCompletionProvider({
                   preferred: item.sortText?.startsWith("0:") || false,
                 }));
           const semantic = await optionalInlineLspContext({
-            available: lspReady && canUseLsp,
+            available: lspReady && canUseLsp && captured.metadataAllowed,
             load: async () => {
+              if(!isCurrent())throw new Error("Inline context changed");
               await syncLspModelBeforeCompletion({
                 uri,
                 model,
@@ -275,6 +287,7 @@ export function useInlineCompletionProvider({
                 documentVersions: documentVersionsRef.current,
                 documentTexts: documentTextsRef.current,
               });
+              if(!isCurrent())throw new Error("Inline context changed");
               return lspClient.getInlineCompletionContext(
                 uri,
                 position.lineNumber - 1,
@@ -283,7 +296,11 @@ export function useInlineCompletionProvider({
             },
           });
           if (!isCurrent()) return { items: [] };
-          const lspContext = semantic.context;
+          const lspContext = !semantic.context.candidates?.length&&!isElasticsearchConsole&&capabilities.supportsSqlQuery
+            ? {...semantic.context,...await documentInlineContext({model,position,monaco,prefix:bounded.prefix,driver,
+                sqlCompletion:editorSettings.sqlCompletion,sqlFormatting:editorSettings.sqlFormatting,token,isCurrent})}
+            : semantic.context;
+          if(!isCurrent())return {items:[]};
           const consoleContext = isElasticsearchConsole
             ? elasticsearchConsoleCompletionContext(value, offset)
             : null;
@@ -349,13 +366,16 @@ export function useInlineCompletionProvider({
                   scopedLspContext,
                 )
               : "";
+          const localSuffixLength=localText&&!isElasticsearchConsole?inlineIdentifierSuffixLength({
+            prefix:completionContext.prefix,text:localText,context:scopedLspContext,model,monaco,position,
+          }):0;
 
           // Mapping-aware LSP output is authoritative for Elasticsearch field
           // positions. Do not let a faster model response replace it with a
           // plausible but nonexistent field from another index.
           if (isElasticsearchConsole && localText) {
             setInlineCompletionStatus("local");
-            return inlineResult(localText);
+            return inlineResult(localText,localSuffixLength);
           }
 
           // Console syntax and mapping positions are deterministic. If the
@@ -371,7 +391,7 @@ export function useInlineCompletionProvider({
           const provider = inlineProviderConfig();
           if (!provider) {
             setInlineCompletionStatus("unconfigured");
-            return inlineResult(localText);
+            return inlineResult(localText,localSuffixLength);
           }
           const aiLspContext = settings.includeSchemaMetadata
             ? scopedLspContext
@@ -411,7 +431,6 @@ export function useInlineCompletionProvider({
             return inlineResult(cached);
           }
 
-          inlineCompletionAbortRef.current?.abort();
           const abortController = new AbortController();
           inlineCompletionAbortRef.current = abortController;
           const cancellationSubscription = token.onCancellationRequested(() => {
@@ -469,7 +488,7 @@ export function useInlineCompletionProvider({
               const nextDiagnostics = isElasticsearchConsole
                 ? validateElasticsearchConsole(nextText)
                 : await optionalInlineLspValidation({
-                    available: semantic.available,
+                    available: semantic.available && captured.metadataAllowed && isCurrent(),
                     load: () =>
                       lspClient.validateInlineCompletion(uri, nextText),
                   });
@@ -538,7 +557,7 @@ export function useInlineCompletionProvider({
           if (fastAiText) return inlineResult(fastAiText);
           // Keep "thinking" visible while a slower AI response is still pending.
           void aiPromise;
-          return inlineResult(localText);
+          return inlineResult(localText,localSuffixLength);
         },
         disposeInlineCompletions: () => undefined,
       }),
@@ -546,6 +565,7 @@ export function useInlineCompletionProvider({
 
     return () => {
       disposed = true;
+      releaseContext();
       inlineCompletionAbortRef.current?.abort();
       inlineCompletionAbortRef.current = null;
       disposables.forEach((disposable) => disposable.dispose());
@@ -582,5 +602,6 @@ export function useInlineCompletionProvider({
     preferredElasticsearchIndex,
     rankByUsage,
     usageScope,
+    getSemanticContext,subscribeSemanticContext,
   ]);
 }

@@ -4,6 +4,7 @@ mod commands;
 mod documents;
 mod driver;
 mod models;
+mod read_only;
 mod results;
 mod runtime;
 

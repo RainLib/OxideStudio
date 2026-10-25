@@ -88,8 +88,8 @@ export function fullComparisonFromServer(
           ]
         : result.degradationLevel === "sample"
           ? [
-              `The tables exceeded the full-compare ceiling. Oxide inspected ${result.sampledKeyCount.toLocaleString()} deterministic first/last keys (${(result.samplingRate * 100).toFixed(2)}% coverage); difference counts and checksums describe only that sampled key universe.`,
-              "Extreme-key sampling is deterministic but not random, so Oxide does not claim a statistical confidence score or whole-table equality.",
+              `The tables exceeded the full-compare ceiling. Oxide inspected ${result.sampledKeyCount.toLocaleString()} ${result.samplingStrategy === "stratified" ? "deterministic keys across ordered strata" : "deterministic first/last keys"} (${(result.samplingRate * 100).toFixed(2)}% minimum per-table row coverage); difference counts and checksums describe only that sampled key universe.`,
+              "Deterministic sampling is not random, so Oxide does not claim a statistical confidence score or whole-table equality. Unsampled differences can remain, and changing tables require a fresh comparison.",
             ]
           : [
               "The tables exceed the safe sampling ceiling. Only exact row counts were read; no row-level comparison or equality claim was produced.",

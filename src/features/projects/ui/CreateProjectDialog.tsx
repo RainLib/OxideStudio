@@ -91,7 +91,7 @@ export function CreateProjectDialog({
 }: CreateProjectDialogProps) {
   return (
     <Dialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen}>
-      <DialogContent className="max-h-[calc(100vh-32px)] w-[640px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.42)]">
+      <DialogContent layout="custom" className="max-h-[calc(100vh-32px)] w-[640px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
         <form
           onSubmit={handleCreateProject}
           className="flex min-h-0 flex-col overflow-hidden"

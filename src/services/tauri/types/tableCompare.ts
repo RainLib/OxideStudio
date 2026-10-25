@@ -52,7 +52,7 @@ export type TableDataCompareDegradationLevel =
   | "sample"
   | "skip_with_risk";
 
-export type TableDataCompareSamplingStrategy = "extremeValues";
+export type TableDataCompareSamplingStrategy = "extremeValues" | "stratified";
 
 export interface TableDataCompareDegradationThreshold {
   fullCompareMaxRows: number;
@@ -89,12 +89,14 @@ export interface TableDataCompareResult {
   detailsTruncated: boolean;
   degradationLevel: TableDataCompareDegradationLevel;
   samplingStrategy?: TableDataCompareSamplingStrategy;
+  /** Minimum observed row coverage across the nonempty endpoints. */
   samplingRate: number;
-  /** Omitted for deterministic extreme sampling, which has no statistical confidence claim. */
+  /** Omitted for deterministic sampling, which has no statistical confidence claim. */
   confidenceScore?: number;
   verificationMethod:
     | "full_keyset"
     | "extreme_key_sample"
+    | "stratified_key_sample"
     | "skipped_size_limit";
   countsExact: boolean;
   sampledKeyCount: number;

@@ -1,9 +1,10 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
+const read = (relativePath) => readSourceText(path.join(root, relativePath));
 const facade = read("src/features/database-explorer/ui/createConnectionTreeRenderer.tsx");
 const contract = read("src/features/database-explorer/ui/connection-tree/types.ts");
 const row = read("src/features/database-explorer/ui/connection-tree/ConnectionTreeRow.tsx");

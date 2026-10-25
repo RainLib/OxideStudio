@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import {useLspRuntimeSnapshot} from "./useLspRuntimeSnapshot";
 import type { DatabaseCapabilities, DatabaseDriver } from "@/services/tauri/types";
 import {
   ensureLspSession,
@@ -17,6 +18,7 @@ type LspRuntimeStatus =
 
 type UseLspClientOptions = {
   connectionId?: string | null;
+  documentSessionKey?: string;
   driver?: DatabaseDriver | null;
   capabilities?: DatabaseCapabilities;
   enabled?: boolean;
@@ -35,11 +37,12 @@ export function useLspClient(options: UseLspClientOptions = {}) {
       enabled
         ? getLspSessionDescriptor({
           connectionId: options.connectionId,
+          documentSessionKey: options.documentSessionKey,
           driver: options.driver,
           capabilities: options.capabilities,
           })
         : null,
-    [enabled, options.capabilities, options.connectionId, options.driver]
+    [enabled, options.capabilities, options.connectionId, options.documentSessionKey, options.driver]
   );
   const [isReady, setIsReady] = useState(
     () => descriptor?.client.isInitialized() ?? false
@@ -48,11 +51,13 @@ export function useLspClient(options: UseLspClientOptions = {}) {
   const [status, setStatus] = useState<LspRuntimeStatus>(
     descriptor ? (descriptor.client.isInitialized() ? "ready" : "idle") : "disabled"
   );
+  const client=descriptor?.client??lspClient;
+  const runtime=useLspRuntimeSnapshot(client);
 
   useEffect(() => {
     let mounted = true;
 
-    if (!descriptor || !options.connectionId || !options.driver) {
+    if (!descriptor || (!options.connectionId && !options.documentSessionKey) || !options.driver) {
       setIsReady(false);
       setError(null);
       setStatus("disabled");
@@ -66,9 +71,12 @@ export function useLspClient(options: UseLspClientOptions = {}) {
     setError(null);
     setStatus(descriptor.client.isInitialized() ? "ready" : "starting");
 
-    const startOrRecover = () =>
-      ensureLspSession({
+    let pendingStart:Promise<void>|undefined;
+    const startOrRecover = ():Promise<void> => {
+      if(pendingStart)return pendingStart;
+      pendingStart=ensureLspSession({
         connectionId: options.connectionId!,
+        documentSessionKey: options.documentSessionKey,
         driver: options.driver!,
         capabilities: options.capabilities,
       })
@@ -83,7 +91,15 @@ export function useLspClient(options: UseLspClientOptions = {}) {
           setIsReady(false);
           setStatus("error");
           setError(err instanceof Error ? err.message : String(err));
-        });
+        }).finally(()=>{pendingStart=undefined;});
+      return pendingStart;
+    };
+    const releaseRuntime=descriptor.client.subscribeRuntime(()=>{
+      if(!mounted)return;
+      const ready=descriptor.client.getRuntimeSnapshot().ready;
+      setIsReady(ready);setStatus(ready?"ready":"starting");
+      if(ready)setError(null);else void startOrRecover();
+    });
 
     void startOrRecover().then(() => {
       if (!mounted) return;
@@ -99,17 +115,19 @@ export function useLspClient(options: UseLspClientOptions = {}) {
 
     return () => {
       mounted = false;
+      releaseRuntime();
       if (healthTimer) clearInterval(healthTimer);
       releaseSession();
     };
-  }, [descriptor, options.capabilities, options.connectionId, options.driver]);
+  }, [descriptor, options.capabilities, options.connectionId, options.documentSessionKey, options.driver]);
 
   return {
-    isReady,
+    isReady:Boolean(descriptor&&isReady&&runtime.ready),
     error,
-    status,
+    status:!descriptor?"disabled":status==="ready"&&!runtime.ready?"starting":status,
+    runtime,
     profile: descriptor?.profile ?? null,
     sessionKey: descriptor?.key ?? "default",
-    client: descriptor?.client ?? lspClient,
+    client,
   };
 }

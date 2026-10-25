@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "enterprise/control-plane/src/store.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = [
   "access",
   "administration",
@@ -51,7 +52,7 @@ let typeMethods = 0;
 let tests = 0;
 for (const module of modules) {
   const file = `enterprise/control-plane/src/store/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   const productionSource = source.replace(/\n#\[cfg\(test\)\][\s\S]*$/, "\n");
   if (/\buse\s+super::\*|\buse\s+crate::store(?:::\w+)?::/.test(productionSource)) {
     throw new Error(`${file}: import directly from the owning control-plane store module.`);
@@ -84,10 +85,7 @@ for (const [symbol, owner] of Object.entries({
   verify_gateway_signature: "crypto",
   parse_membership_status: "support",
 })) {
-  const source = fs.readFileSync(
-    path.join(root, `enterprise/control-plane/src/store/${owner}.rs`),
-    "utf8",
-  );
+  const source = readSourceText(path.join(root, `enterprise/control-plane/src/store/${owner}.rs`));
   if (!new RegExp(`\\b${symbol}\\b`).test(source)) {
     throw new Error(`${symbol} must have one owner in ${owner}.`);
   }

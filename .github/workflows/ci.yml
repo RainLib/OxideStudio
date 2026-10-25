@@ -2,7 +2,39 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      live_databases:
+        description: "Run isolated live database version profiles"
+        type: boolean
+        default: false
+      desktop_updater:
+        description: "Install and remove uniquely named per-user NSIS update fixtures on Windows"
+        type: boolean
+        default: false
+      signed_driver_packages:
+        description: "Verify isolated signed native driver packages through the CLI and MCP"
+        type: boolean
+        default: false
+      mongo_documents:
+        description: "Verify public document reads against an isolated native MongoDB server"
+        type: boolean
+        default: false
+      json_imports:
+        description: "Verify bounded JSON import and million-row SQLite memory evidence"
+        type: boolean
+        default: false
+      xlsx_imports:
+        description: "Verify streamed XLSX cells, disk-backed strings and crash cleanup"
+        type: boolean
+        default: false
+      resumable_imports:
+        description: "Verify file snapshot import survives process termination and source removal"
+        type: boolean
+        default: false
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -14,9 +46,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sql-language-server:
+    name: SQL LSP semantics (${{ matrix.os }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache SQL LSP builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./vendor/sql-lsp -> target
+
+      - name: Check SQL LSP formatting
+        run: cargo fmt --manifest-path vendor/sql-lsp/Cargo.toml -- --check
+
+      - name: Lint SQL LSP and test targets
+        run: cargo clippy --locked --manifest-path vendor/sql-lsp/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test complex semantics and native LSP protocol
+        run: cargo test --locked --manifest-path vendor/sql-lsp/Cargo.toml --all-targets -- --test-threads=4
+
   frontend:
     name: Frontend and agent contracts
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -47,10 +121,392 @@ jobs:
       - name: Test Deep Agents host
         run: npm run test:agent-host
 
+      - name: Test frontend workbench
+        run: npm test -- --maxWorkers=2
+
       - name: Build frontend and admin console
         run: |
           npm run build
           npm run enterprise:admin:build
+
+  headless-agent:
+    name: Standalone CLI and MCP (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: src-tauri/target/headless
+      # Headless builds must not invoke the desktop Gateway code generator.
+      PROTOC: oxide-headless-must-not-require-protoc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js for external client conformance
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: clippy
+
+      - name: Cache headless Rust builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target/headless
+
+      - name: Test without Desktop or protobuf compiler
+        run: cargo test --locked --no-default-features --manifest-path src-tauri/Cargo.toml --lib --bin oxide-agent --test headless_tools --test headless_mongodb --test large_transfer_jobs
+
+      - name: Verify million-row migration after forced process exit
+        env:
+          OXIDE_LARGE_TRANSFER_EVIDENCE: ${{ runner.temp }}/large-transfer-evidence.json
+        run: cargo test --locked --no-default-features --manifest-path src-tauri/Cargo.toml --test large_transfer_jobs process::million_row_transfer_survives_process_kill -- --exact --ignored --nocapture
+
+      - name: Preserve bounded migration evidence
+        if: always()
+        # The test also prints its evidence to the job log. Optional attachment
+        # storage must not prevent the subsequent dependency and Clippy checks.
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-transfer-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/large-transfer-evidence.json
+          if-no-files-found: ignore
+
+      - name: Check standalone dependency graph
+        run: node scripts/verify-headless-dependencies.mjs
+
+      - name: Lint standalone targets
+        run: cargo clippy --locked --no-default-features --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  native-driver-sidecars:
+    name: Driver component (${{ matrix.driver }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [rqlite, clickhouse, duckdb, protocol]
+    env:
+      CARGO_TARGET_DIR: src-tauri/target/native-sidecars
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: clippy
+
+      - name: Cache native driver builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri/crates/oxide-driver-${{ matrix.driver }} -> ../../target/native-sidecars
+
+      - name: Test actual driver and protocol compatibility
+        run: cargo test --locked --manifest-path src-tauri/crates/oxide-driver-${{ matrix.driver }}/Cargo.toml -- --include-ignored
+
+      - name: Lint native driver
+        run: cargo clippy --locked --manifest-path src-tauri/crates/oxide-driver-${{ matrix.driver }}/Cargo.toml --all-targets -- -D warnings
+
+  signed-driver-packages:
+    name: Signed CLI and MCP driver packages (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && inputs.signed_driver_packages
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Cache fixture builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target/headless-driver-acceptance
+            ./src-tauri/crates/oxide-driver-duckdb -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch locked native dependencies
+        run: |
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+          cargo fetch --locked --manifest-path src-tauri/crates/oxide-driver-rqlite/Cargo.toml
+          cargo fetch --locked --manifest-path src-tauri/crates/oxide-driver-duckdb/Cargo.toml
+
+      - name: Verify signed package execution
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path signed-driver-artifacts -Force | Out-Null
+          node scripts/test-headless-driver-packages.mjs 2>&1 | Tee-Object -FilePath signed-driver-artifacts/run.log
+          $result = $LASTEXITCODE
+          $log = Get-Content -LiteralPath signed-driver-artifacts/run.log -Raw
+          $match = [regex]::Match($log, '(?:evidence:|fixture retained:)\s*([^\r\n]+)')
+          if ($match.Success) {
+            $source = Join-Path $match.Groups[1].Value.Trim() evidence.json
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination signed-driver-artifacts
+            }
+          }
+          exit $result
+
+      - name: Preserve sanitized evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-native-driver-evidence-${{ matrix.os }}
+          path: signed-driver-artifacts/
+          if-no-files-found: ignore
+
+  mongo-documents:
+    name: Native MongoDB document reads (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && inputs.mongo_documents
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: src-tauri/target/headless-mongodb
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Cache native headless builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target/headless-mongodb
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify actual native MongoDB and public MCP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path mongo-document-artifacts -Force | Out-Null
+          node scripts/test-headless-mongodb.mjs 2>&1 | Tee-Object -FilePath mongo-document-artifacts/run.log
+          $result = $LASTEXITCODE
+          $log = Get-Content -LiteralPath mongo-document-artifacts/run.log -Raw
+          $match = [regex]::Match($log, 'MongoDB document acceptance passed; evidence:\s*([^\r\n]+)')
+          if ($match.Success) {
+            Copy-Item -LiteralPath (Join-Path $match.Groups[1].Value.Trim() evidence.json) -Destination mongo-document-artifacts
+          }
+          exit $result
+
+      - name: Preserve run log and bounded evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mongo-document-evidence-${{ matrix.os }}
+          path: mongo-document-artifacts/
+          if-no-files-found: ignore
+
+  json-imports:
+    name: Structured file imports (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.json_imports || inputs.xlsx_imports || inputs.resumable_imports)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: src-tauri/target/json-import-acceptance
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev protobuf-compiler
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Setup Windows Protocol Buffers compiler
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache native structured import builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target/json-import-acceptance
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify million-row JSON import
+        if: inputs.json_imports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path json-import-artifacts -Force | Out-Null
+          node scripts/test-json-import.mjs | Tee-Object -FilePath json-import-artifacts/result.json
+          $runCode = $LASTEXITCODE
+          $result = Get-Content -LiteralPath json-import-artifacts/result.json -Raw | ConvertFrom-Json
+          $evidenceDirectory = Split-Path -Parent $result.evidence
+          foreach ($name in @('evidence.json', 'native-evidence.json', 'build.log', 'native.log')) {
+            $source = Join-Path $evidenceDirectory $name
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination json-import-artifacts
+            }
+          }
+          exit $runCode
+
+      - name: Verify million-row shared-string XLSX and process cleanup
+        if: inputs.xlsx_imports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path xlsx-import-artifacts -Force | Out-Null
+          node scripts/test-xlsx-import.mjs | Tee-Object -FilePath xlsx-import-artifacts/result.json
+          $runCode = $LASTEXITCODE
+          $result = Get-Content -LiteralPath xlsx-import-artifacts/result.json -Raw | ConvertFrom-Json
+          $evidenceDirectory = Split-Path -Parent $result.evidence
+          foreach ($name in @('evidence.json', 'native-evidence.json', 'build.log', 'native.log', 'crash.log')) {
+            $source = Join-Path $evidenceDirectory $name
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination xlsx-import-artifacts
+            }
+          }
+          exit $runCode
+
+      - name: Verify resumable million-row file import
+        if: inputs.resumable_imports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path resumable-import-artifacts -Force | Out-Null
+          node scripts/test-resumable-import.mjs | Tee-Object -FilePath resumable-import-artifacts/result.json
+          $runCode = $LASTEXITCODE
+          $result = Get-Content -LiteralPath resumable-import-artifacts/result.json -Raw | ConvertFrom-Json
+          $evidenceDirectory = Split-Path -Parent $result.evidence
+          foreach ($name in @('evidence.json', 'native-evidence.json', 'build.log', 'initial.log', 'resume.log')) {
+            $source = Join-Path $evidenceDirectory $name
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination resumable-import-artifacts
+            }
+          }
+          exit $runCode
+
+      - name: Verify interrupted preparation cleanup
+        if: inputs.resumable_imports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path import-preparation-artifacts -Force | Out-Null
+          node scripts/test-import-preparation-recovery.mjs | Tee-Object -FilePath import-preparation-artifacts/result.json
+          $runCode = $LASTEXITCODE
+          $result = Get-Content -LiteralPath import-preparation-artifacts/result.json -Raw | ConvertFrom-Json
+          $evidenceDirectory = Split-Path -Parent $result.evidence
+          foreach ($name in @('evidence.json', 'native-evidence.json', 'build.log', 'initial.log', 'recovery.log')) {
+            $source = Join-Path $evidenceDirectory $name
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination import-preparation-artifacts
+            }
+          }
+          exit $runCode
+
+      - name: Verify interrupted normalization resume
+        if: inputs.resumable_imports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path import-preparation-resume-artifacts -Force | Out-Null
+          node scripts/test-import-preparation-resume.mjs | Tee-Object -FilePath import-preparation-resume-artifacts/result.json
+          $runCode = $LASTEXITCODE
+          $result = Get-Content -LiteralPath import-preparation-resume-artifacts/result.json -Raw | ConvertFrom-Json
+          $evidenceDirectory = Split-Path -Parent $result.evidence
+          foreach ($name in @('evidence.json', 'native-evidence.json', 'build.log', 'initial.log', 'recovery.log')) {
+            $source = Join-Path $evidenceDirectory $name
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination import-preparation-resume-artifacts
+            }
+          }
+          exit $runCode
+
+      - name: Verify CSV, JSON and XLSX interrupted preparation and publication
+        if: inputs.resumable_imports
+        shell: pwsh
+        run: |
+          $handoffResult = 0
+          foreach ($format in @('csv', 'json', 'xlsx')) {
+            $artifactDirectory = Join-Path import-preparation-handoff-artifacts $format
+            New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+            node scripts/test-import-preparation-handoff.mjs --format $format | Tee-Object -FilePath (Join-Path $artifactDirectory result.json)
+            $runCode = $LASTEXITCODE
+            $result = Get-Content -LiteralPath (Join-Path $artifactDirectory result.json) -Raw | ConvertFrom-Json
+            $evidenceDirectory = Split-Path -Parent $result.evidence
+            foreach ($name in @('evidence.json', 'native-evidence.json', 'cursor-evidence.json', 'staging-ready.json', 'build.log', 'initial.log', 'prepare.log', 'staging.log', 'finish.log')) {
+              $source = Join-Path $evidenceDirectory $name
+              if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination $artifactDirectory
+              }
+            }
+            if ($runCode -ne 0) { $handoffResult = $runCode }
+          }
+          exit $handoffResult
+
+      - name: Preserve bounded structured import evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: structured-import-evidence-${{ matrix.os }}
+          path: |
+            json-import-artifacts/
+            xlsx-import-artifacts/
+            resumable-import-artifacts/
+            import-preparation-artifacts/
+            import-preparation-resume-artifacts/
+            import-preparation-handoff-artifacts/
+          if-no-files-found: ignore
 
   rust:
     name: Rust desktop and enterprise
@@ -77,6 +533,11 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             protobuf-compiler
+
+      - name: Setup Node.js for external client conformance
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@1.91.1
@@ -108,18 +569,148 @@ jobs:
           cargo clean --manifest-path src-tauri/Cargo.toml
           cargo clippy --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml --all-targets -- -D warnings
           cargo clean --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
-          cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clippy --manifest-path enterprise/Cargo.toml --workspace --all-targets --locked -- -D warnings
           cargo clean --manifest-path enterprise/Cargo.toml
 
       - name: Test Rust workspaces
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo test --manifest-path src-tauri/Cargo.toml --bin oxide-agent
+          cargo test --manifest-path src-tauri/Cargo.toml --test headless_tools
+          cargo test --manifest-path src-tauri/Cargo.toml --test backup_worker
+          cargo test --manifest-path src-tauri/Cargo.toml --test backup_worker -- --ignored --exact update_preparation_waits_for_process_exit_and_failed_installer_resumes_queue
+          node scripts/test-backup-worker-upgrade.mjs
           cargo clean --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
           cargo clean --manifest-path src-tauri/crates/oxide-sqlite-worker/Cargo.toml
-          cargo test --manifest-path enterprise/Cargo.toml --workspace
+          cargo test --manifest-path enterprise/Cargo.toml --workspace --locked
 
       - name: Show sccache stats
         if: always()
         continue-on-error: true
         run: sccache --show-stats
+
+  desktop-updater:
+    name: Windows signed updater acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_updater
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Setup Protocol Buffers compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache fixture Rust builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target/updater-acceptance
+
+      - name: Install dependencies and fetch locked crates
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+          exit $LASTEXITCODE
+
+      - name: Verify the packaged application update
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path desktop-updater-artifacts -Force | Out-Null
+          node scripts/test-desktop-updater.mjs 2>&1 | Tee-Object -FilePath desktop-updater-artifacts/run.log
+          $result = $LASTEXITCODE
+          $log = Get-Content -LiteralPath desktop-updater-artifacts/run.log -Raw
+          $match = [regex]::Match($log, '(?:evidence:|retained for review:)\s*([^\r\n]+)')
+          if ($match.Success) {
+            foreach ($name in @('evidence.json', 'events.ndjson')) {
+              $source = Join-Path $match.Groups[1].Value.Trim() $name
+              if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination desktop-updater-artifacts
+              }
+            }
+          }
+          exit $result
+
+      - name: Preserve sanitized updater evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-updater-evidence
+          path: desktop-updater-artifacts/
+          if-no-files-found: ignore
+
+  live-databases:
+    name: Live databases (${{ matrix.profile }})
+    if: github.event_name == 'workflow_dispatch' && inputs.live_databases
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: pg16-mysql80
+            postgres: postgres:16-alpine
+            mysql: mysql:8.0
+          - profile: pg17-mysql84
+            postgres: postgres:17-alpine
+            mysql: mysql:8.4
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+      OXIDE_LIVE_POSTGRES_IMAGE: ${{ matrix.postgres }}
+      OXIDE_LIVE_MYSQL_IMAGE: ${{ matrix.mysql }}
+      OXIDE_LIVE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.profile }}
+      OXIDE_LIVE_POSTGRES_MILLION: "1"
+      OXIDE_POSTGRES_TRANSFER_EVIDENCE: ${{ github.workspace }}/postgres-million-evidence.json
+      OXIDE_LIVE_MYSQL_MILLION: "1"
+      OXIDE_MYSQL_TRANSFER_EVIDENCE: ${{ github.workspace }}/mysql-million-evidence.json
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev protobuf-compiler
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Cache Rust builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Run isolated live database tests
+        run: bash scripts/test-live-databases.sh 2>&1 | tee live-database-results.log
+
+      - name: Preserve live database evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-databases-${{ matrix.profile }}
+          path: |
+            live-database-results.log
+            postgres-million-evidence.json
+            mysql-million-evidence.json
+          if-no-files-found: warn

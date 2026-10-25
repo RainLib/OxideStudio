@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/drivers/sqlite.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["backup", "driver", "models", "runtime", "values"];
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -27,7 +28,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/drivers/sqlite/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::drivers::sqlite(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning SQLite-driver module.`);
 
@@ -59,11 +60,11 @@ for (const [symbol, owner] of Object.entries({
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
 
-if (helpers !== 22 || typeMethods !== 32)
-  throw new Error(`Expected 22 SQLite-driver helpers and 32 type methods; found ${helpers} and ${typeMethods}.`);
+if (helpers !== 24 || typeMethods !== 32)
+  throw new Error(`Expected 24 SQLite-driver helpers and 32 type methods; found ${helpers} and ${typeMethods}.`);
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/drivers/sqlite/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/drivers/sqlite/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
-if (testCount !== 16) throw new Error(`Expected 16 SQLite-driver regression scenarios; found ${testCount}.`);
+if (testCount !== 19) throw new Error(`Expected 19 SQLite-driver regression scenarios; found ${testCount}.`);
 
 console.log(`Rust SQLite driver boundaries verified: ${modules.length} modules, ${helpers} helpers, ${typeMethods} type methods, ${testCount} tests, acyclic imports.`);

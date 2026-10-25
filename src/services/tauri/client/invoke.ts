@@ -2,12 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { ApiError, type ApiResponse } from "../types";
 import type { CommandArguments } from "./contracts";
 import { normalizeInvokeError, safeCommandContext } from "./errorNormalization";
+import {beginCommandSemanticOperation} from "./semanticOperation";
 
 /** Execute a Tauri command that returns the shared response envelope. */
 export async function invokeCommand<T>(
   command: string,
   args?: CommandArguments,
 ): Promise<T> {
+  const finishSemanticOperation=beginCommandSemanticOperation(command,args);
   try {
     const response = await invoke<ApiResponse<T>>(command, args);
 
@@ -36,6 +38,8 @@ export async function invokeCommand<T>(
     }
 
     throw normalizeInvokeError(command, args, error);
+  } finally {
+    finishSemanticOperation();
   }
 }
 

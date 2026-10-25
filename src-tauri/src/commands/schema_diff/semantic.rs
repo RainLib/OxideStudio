@@ -25,6 +25,8 @@ pub(super) fn semantic_schema_snapshot(snapshot: &SchemaSnapshot) -> SemanticSch
                     "autoIncrement": column.is_auto_increment,
                     "generated": column.is_generated,
                     "hidden": column.is_hidden,
+                    "characterSet": column.character_set,
+                    "collation": column.collation,
                     "hasDefault": column.default_value.is_some(),
                     "defaultFingerprint": descriptor_value_fingerprint(column.default_value.as_deref()),
                 })).collect::<Vec<_>>(),

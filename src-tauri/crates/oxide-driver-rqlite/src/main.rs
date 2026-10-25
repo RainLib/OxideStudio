@@ -107,6 +107,7 @@ fn handle_request(
                 // `/db/query` endpoint, which uses a SQLite read-only connection.
                 read_only_enforcement: true,
                 semantic_schema_migration: false,
+                ..DriverRuntimeCapabilities::default()
             },
         })),
         DriverRequest::Connect {
@@ -171,6 +172,8 @@ fn handle_request(
             "RQLite supports only request-scoped transactions, not interactive transaction sessions",
         )),
         DriverRequest::Cancel { .. } => Ok(DriverResult::Boolean(false)),
+        DriverRequest::QueryPage { .. } | DriverRequest::FetchQueryPage { .. }
+        | DriverRequest::CloseQuerySession { .. } => Err(protocol_error("QUERY_PAGING_UNSUPPORTED", "RQLite native query cursors are unavailable")),
         DriverRequest::Shutdown => {
             connections.clear();
             Ok(DriverResult::Empty)
@@ -428,6 +431,7 @@ fn metadata(
     request: MetadataRequest,
 ) -> Result<Value, DriverProtocolError> {
     match request {
+        MetadataRequest::SqlLookupContext { .. } => Ok(Value::Null),
         MetadataRequest::Databases => Ok(json!(["main"])),
         MetadataRequest::Schemas { .. } => Ok(json!(["main"])),
         MetadataRequest::Relations { namespace, .. } => {
@@ -481,9 +485,14 @@ fn metadata(
             require_main_namespace(&namespace)?;
             rqlite_referencing_foreign_keys(connection, &relation)
         }
-        MetadataRequest::Collections { .. } | MetadataRequest::Routines { .. } => {
-            Ok(Value::Array(Vec::new()))
-        }
+        MetadataRequest::Collections { .. }
+        | MetadataRequest::Routines { .. }
+        | MetadataRequest::SchemaObjects { .. }
+        | MetadataRequest::SchemaObjectMembers { .. } => Ok(Value::Array(Vec::new())),
+        MetadataRequest::ObjectSource { .. } => Err(protocol_error(
+            "UNSUPPORTED",
+            "RQLite object source is unavailable",
+        )),
     }
 }
 
@@ -713,8 +722,7 @@ fn row_bool(row: &[Value], index: usize) -> bool {
 }
 
 fn statement_type(sql: &str) -> String {
-    sql.trim_start()
-        .split_whitespace()
+    sql.split_whitespace()
         .next()
         .unwrap_or("UNKNOWN")
         .to_ascii_uppercase()
@@ -865,7 +873,14 @@ mod tests {
         .unwrap();
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /db/query HTTP/1.1\r\n"));
-        assert!(request.contains("Content-Type: application/json"));
+        let headers = request
+            .split_once("\r\n\r\n")
+            .unwrap()
+            .0
+            .to_ascii_lowercase();
+        assert!(headers
+            .lines()
+            .any(|line| line == "content-type: application/json"));
         assert!(request.ends_with("[[\"SELECT id FROM people WHERE id = ?\",7]]"));
         assert_eq!(result[0].columns[0].data_type, "integer");
         assert_eq!(result[0].rows, vec![vec![json!(7)]]);

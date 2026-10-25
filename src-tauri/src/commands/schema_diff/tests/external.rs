@@ -28,6 +28,25 @@ fn semantic_sidecar_snapshot_hashes_opaque_expressions_without_source_text() {
 }
 
 #[test]
+fn semantic_sidecar_snapshot_preserves_optional_column_character_attributes() {
+    let mut source = semantic_fixture_snapshot();
+    source.driver = "mysql".to_string();
+    let column = &mut source.relations[0].columns[0];
+    column.data_type = "varchar(80)".to_string();
+    column.character_set = Some("utf8mb4".to_string());
+    column.collation = Some("utf8mb4_bin".to_string());
+    let descriptor = semantic_schema_snapshot(&source).descriptor;
+    let column = &descriptor["relations"][0]["columns"][0];
+    assert_eq!(column["characterSet"], "utf8mb4");
+    assert_eq!(column["collation"], "utf8mb4_bin");
+
+    let legacy = semantic_schema_snapshot(&semantic_fixture_snapshot()).descriptor;
+    let column = &legacy["relations"][0]["columns"][0];
+    assert!(column["characterSet"].is_null());
+    assert!(column["collation"].is_null());
+}
+
+#[test]
 fn external_plan_exposes_host_id_and_preview_but_never_sidecar_tokens() {
     let source = semantic_fixture_snapshot();
     let target = semantic_fixture_snapshot();

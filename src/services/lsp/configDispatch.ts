@@ -9,6 +9,7 @@ import {
 import type { LspSchemaDefinition } from "./schemaConfig";
 
 export type LspConfigurationPayload = LspFileMappings & {
+  oxideAnalysisToken?:string;
   defaultDialect: string;
   completionPreferences: LspCompletionPreferences;
   formattingPreferences: LspFormattingPreferences;
@@ -22,6 +23,7 @@ export type LspConfigDispatchStatus =
   | "sent-stale";
 
 export type LspConfigDispatchResult = {
+  analysisToken?:string|null;
   status: LspConfigDispatchStatus;
   configKey?: string;
   lastConfigKey: string | null;
@@ -33,10 +35,12 @@ export async function dispatchLspConfiguration(options: {
   lspDialect: string;
   config: LspConfigurationPayload;
   lastConfigKey: string | null;
+  lastAnalysisToken?:string|null;
   syncGeneration: number;
   getCurrentGeneration: () => number;
   isCancelled?: () => boolean;
   updateConfiguration: (config: LspConfigurationPayload) => Promise<void>;
+  confirmConfiguration: (token: string) => Promise<boolean>;
 }): Promise<LspConfigDispatchResult> {
   const isStale = () =>
     options.isCancelled?.() === true ||
@@ -61,15 +65,18 @@ export async function dispatchLspConfiguration(options: {
   };
   const configKey = createLspConfigKey(keyInput);
 
-  if (options.lastConfigKey === configKey) {
-    return {
-      status: "duplicate",
-      configKey,
-      lastConfigKey: options.lastConfigKey,
+  if (options.lastConfigKey === configKey && options.lastAnalysisToken &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(options.lastAnalysisToken)) {
+    const applied = await options.confirmConfiguration(options.lastAnalysisToken);
+    if (isStale()) return { status: "stale", lastConfigKey: options.lastConfigKey };
+    if (applied) return {
+      analysisToken: options.lastAnalysisToken,
+      status: "duplicate", configKey, lastConfigKey: options.lastConfigKey,
     };
   }
 
-  await options.updateConfiguration(options.config);
+  const analysisToken=crypto.randomUUID();
+  await options.updateConfiguration({...options.config,oxideAnalysisToken:analysisToken});
 
   if (isStale()) {
     return {
@@ -79,7 +86,14 @@ export async function dispatchLspConfiguration(options: {
     };
   }
 
+  const applied = await options.confirmConfiguration(analysisToken);
+  if (isStale()) return {
+    status: "sent-stale", configKey, lastConfigKey: options.lastConfigKey,
+  };
+  if (!applied) throw new Error("LSP configuration has not been confirmed by the server");
+
   return {
+    analysisToken,
     status: "sent",
     configKey,
     lastConfigKey: configKey,

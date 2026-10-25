@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "src-tauri/src/core/driver";
-const facade = fs.readFileSync(path.join(root, `${base}.rs`), "utf8");
+const facade = readSourceText(path.join(root, `${base}.rs`));
 
 for (const required of [
   "mod contract;",
@@ -29,13 +30,13 @@ const ownership = {
 };
 
 for (const [module, symbols] of Object.entries(ownership)) {
-  const source = fs.readFileSync(path.join(root, `${base}/${module}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/${module}.rs`));
   if (symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`${module} must retain its Core driver ownership.`);
   }
 }
 
-const contract = fs.readFileSync(path.join(root, `${base}/contract.rs`), "utf8");
+const contract = readSourceText(path.join(root, `${base}/contract.rs`));
 if (!contract.includes("use super::models::*;") || !/use super::super::\s*\{[\s\S]*?\bprotocol::/.test(contract)) {
   throw new Error("Core driver contract must depend on models and core protocol directly.");
 }

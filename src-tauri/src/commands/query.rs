@@ -8,6 +8,7 @@ pub mod read_only;
 mod state;
 
 pub(crate) use read_only::execute_query_with_cancellation;
+pub(crate) use state::{sql_statement_at_cursor, SqlStatementSelection};
 pub use state::{ParserState, QueryCancellationState};
 
 #[cfg(test)]

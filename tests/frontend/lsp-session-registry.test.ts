@@ -9,6 +9,18 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("LSP session registry", () => {
+  it("isolates connection-free document sessions by document and driver", async () => {
+    mocks.invoke.mockImplementation(async command => command === "check_lsp_binary" ? { path: "/fixture/sql-lsp", exists: true } : command === "lsp_is_running" ? true : "ok");
+    const registry = await import("@/services/lsp/sessionRegistry");
+    const file = await registry.ensureLspSession({ documentSessionKey: "file-query:project:one", driver: "postgres" });
+    const database = registry.getLspSessionDescriptor({ connectionId: "file-query:project:one", driver: "postgres" });
+    const otherFile = registry.getLspSessionDescriptor({ documentSessionKey: "file-query:project:two", driver: "postgres" });
+    const otherDialect = registry.getLspSessionDescriptor({ documentSessionKey: "file-query:project:one", driver: "mysql" });
+    expect(file?.key).toMatch(/^document:/); expect(new Set([file?.key, database?.key, otherFile?.key, otherDialect?.key]).size).toBe(4);
+    expect(registry.getLspSessionDescriptor({ driver: "postgres" })).toBeNull();
+    expect(mocks.invoke.mock.calls.every(([command]) => ["check_lsp_binary", "lsp_initialize", "lsp_is_running"].includes(command))).toBe(true);
+    await registry.shutdownAllLspSessions();
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.resetModules();

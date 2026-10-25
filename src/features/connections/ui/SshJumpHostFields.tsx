@@ -131,7 +131,7 @@ export function SshJumpHostFields({
                         >
                           <SelectValue />
                         </SelectTrigger>
-                        <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                        <SelectContent className="">
                           <SelectItem value="password">Password</SelectItem>
                           <SelectItem value="privateKey">
                             Private key

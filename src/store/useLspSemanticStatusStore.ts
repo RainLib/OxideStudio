@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type {LspSemanticContext} from "@/services/lsp/semanticContext";
 
 export type LspSemanticCompletionState =
   | "syncing"
@@ -15,6 +16,7 @@ export interface LspSemanticCompletionStatus {
   failedObjects: number;
   updatedAt: number;
   message?: string;
+  context?: LspSemanticContext;
   /** Process-health counters; never contain SQL text or object metadata. */
   telemetry: {
     staleResponses: number;

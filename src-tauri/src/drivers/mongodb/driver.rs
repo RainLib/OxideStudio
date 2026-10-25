@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Bson, Document},
-    options::ClientOptions,
+    options::{ClientOptions, ServerMonitoringMode},
     results::CollectionType,
     Client,
 };
@@ -40,6 +40,12 @@ impl DatabaseDriver for MongoDbDriver {
             .with_context(|| format!("Failed to connect to MongoDB at {}", self.url))?;
         super::super::mongodb_oidc::configure_client_options(&mut options)
             .context("Failed to configure MongoDB OIDC authentication")?;
+        if self.agent_owned {
+            // Short-lived public tool connections must not wait for the SDK's
+            // ten-second streaming monitor interval during graceful shutdown.
+            options.server_monitoring_mode = Some(ServerMonitoringMode::Poll);
+            options.heartbeat_freq = Some(std::time::Duration::from_secs(1));
+        }
         let client = Client::with_options(options).context("Failed to create MongoDB client")?;
         client
             .database("admin")
@@ -65,10 +71,22 @@ impl DatabaseDriver for MongoDbDriver {
     }
 
     async fn disconnect(&self) -> Result<()> {
-        *self.client.lock().await = None;
+        let client = self.client.lock().await.take();
+        if self.agent_owned {
+            if let Some(client) = client {
+                client.shutdown().await;
+            }
+        }
         *self.active_database.lock().await = self.default_database.clone();
         *self.server_version.lock().await = None;
         Ok(())
+    }
+
+    async fn read_documents_read_only(
+        &self,
+        request: crate::core::document_read::DocumentReadRequest<'_>,
+    ) -> Result<crate::core::document_read::DocumentReadPage> {
+        self.read_only_documents(request).await
     }
 
     async fn server_version(&self) -> Option<String> {
