@@ -162,11 +162,13 @@ export function DataCompareOptions({
                 <>
                   <div>
                     {fullComparisonMeta.sampledKeyCount.toLocaleString()}{" "}
-                    deterministic extreme keys inspected
+                    {fullComparisonMeta.verificationMethod === "stratified_key_sample"
+                      ? "deterministic stratified keys inspected"
+                      : "deterministic extreme keys inspected"}
                   </div>
                   <div>
-                    {(fullComparisonMeta.samplingRate * 100).toFixed(2)}% key
-                    coverage · sampled counts only
+                    {(fullComparisonMeta.samplingRate * 100).toFixed(2)}% minimum
+                    table coverage · sampled counts only
                   </div>
                 </>
               ) : (

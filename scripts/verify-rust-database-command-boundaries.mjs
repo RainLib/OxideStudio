@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/database.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["capabilities", "models", "namespace", "packages", "runtime"];
 const modules = [...facade.matchAll(/^(?:pub )?mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -35,7 +36,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/commands/database/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::commands::database(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning database-command module.`);
 
@@ -93,10 +94,10 @@ const commandOwners = {
   ],
   namespace: ["create_database", "drop_database", "rename_database"],
 };
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 let commands = 0;
 for (const [module, symbols] of Object.entries(commandOwners)) {
-  const source = fs.readFileSync(path.join(root, `src-tauri/src/commands/database/${module}.rs`), "utf8");
+  const source = readSourceText(path.join(root, `src-tauri/src/commands/database/${module}.rs`));
   for (const symbol of symbols) {
     if (!new RegExp(`#\\[tauri::command\\]\\s+pub async fn ${symbol}\\b`).test(source))
       throw new Error(`${symbol} must remain a Tauri command in ${module}.`);
@@ -109,7 +110,7 @@ for (const [module, symbols] of Object.entries(commandOwners)) {
 if (helpers !== 41 || typeMethods !== 2 || commands !== 20)
   throw new Error(`Expected 41 database-command helpers, 2 type methods, and 20 Tauri commands; found ${helpers}, ${typeMethods}, and ${commands}.`);
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/commands/database/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/commands/database/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (testCount !== 15) throw new Error(`Expected 15 database-command regression scenarios; found ${testCount}.`);
 

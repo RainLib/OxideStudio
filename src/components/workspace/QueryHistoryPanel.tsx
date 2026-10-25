@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
 import {
@@ -117,9 +118,9 @@ export function QueryHistoryPanel({
 
   const handleClear = async () => {
     if (
-      !window.confirm(
+      !(await confirmAction(
         `Delete all ${history.length.toLocaleString()} query history entries for this project?`
-      )
+      ))
     ) {
       return;
     }

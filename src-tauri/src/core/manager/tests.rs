@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
 
+#[path = "semantic_dispatch_tests.rs"]
+mod semantic_dispatch_tests;
+
 #[derive(Clone)]
 struct BlockingDriver {
     entered: Arc<AtomicUsize>,
@@ -250,6 +253,8 @@ impl DatabaseDriver for DatabaseDiscoveryDriver {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         }])
     }
 

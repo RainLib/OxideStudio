@@ -5,6 +5,141 @@ use crate::core::{
 };
 use serde_json::Value;
 
+#[tokio::test]
+async fn sqlite_unsigned_parameters_reject_overflow_and_rollback_parameterized_batches() {
+    let mut driver = SqliteDriver::new(":memory:");
+    driver.connect().await.unwrap();
+    driver
+        .query("CREATE TABLE exact_values(value INTEGER)")
+        .await
+        .unwrap();
+    for value in [
+        Value::from(i64::MIN),
+        Value::from(i64::MAX),
+        Value::from(9007199254740993_u64),
+    ] {
+        driver
+            .execute_parameterized(
+                "INSERT INTO exact_values VALUES($1)",
+                &[QueryParameter {
+                    value,
+                    data_type: Some("INTEGER".into()),
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    let overflow = QueryParameter {
+        value: Value::from(u64::MAX),
+        data_type: Some("INTEGER".into()),
+    };
+    let error = driver
+        .execute_parameterized(
+            "INSERT INTO exact_values VALUES($1)",
+            std::slice::from_ref(&overflow),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("signed 64-bit range"));
+    assert!(driver
+        .query_parameterized("SELECT $1", std::slice::from_ref(&overflow))
+        .await
+        .is_err());
+    assert!(driver
+        .execute_parameterized_batch(&[
+            ParameterizedStatement {
+                sql: "INSERT INTO exact_values VALUES($1)".into(),
+                params: vec![QueryParameter {
+                    value: Value::from(42),
+                    data_type: Some("INTEGER".into())
+                }]
+            },
+            ParameterizedStatement {
+                sql: "INSERT INTO exact_values VALUES($1)".into(),
+                params: vec![overflow]
+            },
+        ])
+        .await
+        .is_err());
+    let result = driver
+        .query("SELECT value FROM exact_values ORDER BY rowid")
+        .await
+        .unwrap();
+    assert_eq!(
+        result[0].rows,
+        vec![
+            vec![Value::from(i64::MIN)],
+            vec![Value::from(i64::MAX)],
+            vec![Value::from(9007199254740993_i64)]
+        ]
+    );
+    driver.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_dynamic_results_decode_each_value_instead_of_first_row_column_type() {
+    let mut driver = SqliteDriver::new(":memory:");
+    driver.connect().await.unwrap();
+    let result=driver.query("SELECT NULL AS v UNION ALL SELECT 9007199254740993 UNION ALL SELECT 'café' UNION ALL SELECT X'00FF' UNION ALL SELECT 0.5;").await.unwrap();
+    assert_eq!(
+        result[0].rows,
+        vec![
+            vec![serde_json::json!(null)],
+            vec![serde_json::json!(9007199254740993_i64)],
+            vec![serde_json::json!("café")],
+            vec![serde_json::json!("0x00ff")],
+            vec![serde_json::json!(0.5)]
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sqlite_key_metadata_matches_rowid_alias_and_complete_unique_index_semantics() {
+    let mut driver = SqliteDriver::new(":memory:");
+    driver.connect().await.unwrap();
+    driver.query("CREATE TABLE alias(id INTEGER PRIMARY KEY); CREATE TABLE descending(id INTEGER PRIMARY KEY DESC); CREATE TABLE table_descending(id INTEGER,PRIMARY KEY(id DESC)); CREATE TABLE int_key(id INT PRIMARY KEY); CREATE TABLE composite(a INT,b INT,PRIMARY KEY(a,b)); CREATE TABLE indexed(a TEXT,b TEXT,c TEXT,d TEXT); CREATE UNIQUE INDEX complete_single ON indexed(a); CREATE UNIQUE INDEX partial_single ON indexed(b) WHERE b IS NOT NULL; CREATE UNIQUE INDEX composite_expression ON indexed(c,lower(d)); ATTACH DATABASE ':memory:' AS other; CREATE TABLE other.attached(id INTEGER PRIMARY KEY);").await.unwrap();
+    for (schema, table, nullable) in [
+        ("main", "alias", false),
+        ("main", "descending", true),
+        ("main", "table_descending", false),
+        ("main", "int_key", true),
+        ("other", "attached", false),
+    ] {
+        let columns = driver.get_columns(schema, table).await.unwrap();
+        assert_eq!(columns[0].is_nullable, nullable, "{schema}.{table}");
+        assert!(
+            columns[0].is_primary_key && columns[0].is_unique,
+            "single primary key remains unique: {table}"
+        );
+    }
+    let composite = driver.get_columns("main", "composite").await.unwrap();
+    assert!(composite
+        .iter()
+        .all(|column| column.is_primary_key && !column.is_unique && column.is_nullable));
+    let indexed = driver.get_columns("main", "indexed").await.unwrap();
+    assert!(
+        indexed
+            .iter()
+            .find(|column| column.name == "a")
+            .unwrap()
+            .is_unique
+    );
+    assert!(indexed
+        .iter()
+        .filter(|column| column.name != "a")
+        .all(|column| !column.is_unique));
+    driver.query("INSERT INTO alias(id) VALUES(NULL); INSERT INTO descending(id) VALUES(NULL); INSERT INTO int_key(id) VALUES(NULL);").await.unwrap();
+    let rows=driver.query("SELECT (SELECT id IS NULL FROM alias),(SELECT id IS NULL FROM descending),(SELECT id IS NULL FROM int_key)").await.unwrap();
+    assert_eq!(
+        rows[0].rows[0],
+        vec![
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(1)
+        ]
+    );
+}
+
 #[test]
 fn table_xinfo_codes_separate_hidden_and_generated_columns() {
     assert_eq!(sqlite_column_ownership(0), (false, false));

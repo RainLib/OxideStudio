@@ -39,6 +39,25 @@ fn validates_cancellable_request_tokens() {
 }
 
 #[test]
+fn generic_document_completion_keeps_cancellation_separate_from_rpc_params() {
+    let request: GenericLspRequest = serde_json::from_value(serde_json::json!({
+        "session_key":"file-query:isolated", "method":"oxide/documentCompletions",
+        "request_token":"document-completion-17", "params":{"version":7}
+    }))
+    .unwrap();
+    assert_eq!(
+        request.request_token.as_deref(),
+        Some("document-completion-17")
+    );
+    assert_eq!(request.params, serde_json::json!({"version":7}));
+    let legacy: GenericLspRequest = serde_json::from_value(serde_json::json!({
+        "method":"textDocument/documentSymbol", "params":{}
+    }))
+    .unwrap();
+    assert!(legacy.request_token.is_none());
+}
+
+#[test]
 fn parses_completion_insert_text() {
     let item = serde_json::json!({
         "label": "calculate_score",
@@ -283,6 +302,33 @@ fn resolved_completion_fields_preserve_original_identity_and_data() {
 
 #[test]
 fn generic_lsp_requests_are_strictly_allowlisted() {
+    assert!(is_allowed_generic_lsp_method("oxide/documentCompletions"));
+    for method in [
+        "oxide/documentCompletions/reset",
+        "oxide/DocumentCompletions",
+        "oxide/documentCompletions ",
+        "oxide/documentCompletions\n",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method));
+    }
+    assert!(is_allowed_generic_lsp_method("oxide/documentStructure"));
+    assert!(is_allowed_generic_lsp_method("oxide/documentSemantics"));
+    for method in [
+        "oxide/documentSemantics/reset",
+        "oxide/DocumentSemantics",
+        "oxide/documentSemantics ",
+        "oxide/documentSemantics\n",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method));
+    }
+    for method in [
+        "oxide/documentStructure/reset",
+        "oxide/documentstructure",
+        "oxide/documentStructure ",
+        "oxide/documentStructure\n",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method));
+    }
     assert!(is_allowed_generic_lsp_method("textDocument/signatureHelp"));
     assert!(is_allowed_generic_lsp_method("textDocument/rename"));
     assert!(is_allowed_generic_lsp_method(
@@ -292,4 +338,44 @@ fn generic_lsp_requests_are_strictly_allowlisted() {
     assert!(is_allowed_generic_lsp_method("workspace/symbol"));
     assert!(!is_allowed_generic_lsp_method("shutdown"));
     assert!(!is_allowed_generic_lsp_method("workspace/executeCommand"));
+}
+
+#[test]
+fn catalog_completion_snapshot_is_an_exact_allowlisted_method() {
+    assert!(is_allowed_generic_lsp_method("oxide/completionSnapshot"));
+    for method in [
+        "oxide/completionSnapshot/reset",
+        "oxide/CompletionSnapshot",
+        "oxide/completionSnapshot ",
+        "oxide/completionSnapshot\n",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method));
+    }
+}
+
+#[test]
+fn diagnostic_snapshot_has_a_narrow_generic_transport_grant() {
+    assert!(is_allowed_generic_lsp_method("oxide/documentDiagnostics"));
+    for method in [
+        "oxide/documentDiagnostics/execute",
+        "oxide/documentDiagnostics ",
+        "oxide/executeCommand",
+        "oxide/unknown",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method), "{method}");
+    }
+}
+
+#[test]
+fn configuration_receipt_has_an_exact_generic_transport_grant() {
+    assert!(is_allowed_generic_lsp_method("oxide/analysisConfiguration"));
+    for method in [
+        "oxide/analysisConfiguration/execute",
+        "oxide/analysisConfiguration ",
+        "oxide/AnalysisConfiguration",
+        "oxide/executeCommand",
+        "workspace/didChangeConfiguration",
+    ] {
+        assert!(!is_allowed_generic_lsp_method(method), "{method}");
+    }
 }

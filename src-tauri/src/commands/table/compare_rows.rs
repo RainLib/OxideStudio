@@ -362,71 +362,6 @@ pub(super) fn canonical_data_compare_key_values(values: &[Value]) -> Result<Stri
         .map_err(|error| format!("Could not encode sampled data compare key: {error}"))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn fetch_data_compare_extreme_keys(
-    app: &AppHandle,
-    manager: &ConnectionManager,
-    endpoint: &TableDataCompareEndpoint,
-    endpoint_name: &str,
-    compare_id: &str,
-    query_id: &str,
-    cancellation: &watch::Receiver<bool>,
-    kind: DatabaseKind,
-    key_columns: &[String],
-    sample_size: u32,
-) -> Result<Vec<Vec<Value>>, String> {
-    let selected = key_columns
-        .iter()
-        .map(|column| kind.quote_identifier(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let relation = kind.qualified_table(schema_option(&endpoint.schema), &endpoint.table);
-    let head_count = sample_size.div_ceil(2);
-    let tail_count = sample_size / 2;
-    let mut keys = BTreeMap::<String, Vec<Value>>::new();
-    for (direction, limit) in [("ASC", head_count), ("DESC", tail_count)] {
-        ensure_table_data_compare_not_cancelled(cancellation)?;
-        if limit == 0 {
-            continue;
-        }
-        let order = key_columns
-            .iter()
-            .map(|column| format!("{} {direction}", kind.quote_identifier(column)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("SELECT {selected} FROM {relation} ORDER BY {order} LIMIT {limit};");
-        let query_result =
-            query_data_compare_target_tracked(manager, endpoint, query_id, &sql).await;
-        ensure_table_data_compare_not_cancelled(cancellation)?;
-        let mut result = query_result.map_err(|error| error.to_string())?;
-        let page = result
-            .drain(..)
-            .next()
-            .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
-        for row in page.rows {
-            let values = data_compare_key_values(key_columns, &row)?;
-            if values.iter().any(Value::is_null) {
-                return Err(
-                    "Sampled data compare cannot continue from a NULL key value".to_string()
-                );
-            }
-            keys.entry(canonical_data_compare_key_values(&values)?)
-                .or_insert(values);
-        }
-        emit_running_table_data_compare_progress(
-            app,
-            compare_id,
-            TableDataCompareProgressPhase::SelectingSampleKeys,
-            Some(endpoint_name),
-            keys.len() as u64,
-            None,
-            None,
-            Some("Selecting deterministic boundary keys"),
-        );
-    }
-    Ok(keys.into_values().collect())
-}
-
 pub(super) fn merge_data_compare_sample_keys(
     source: Vec<Vec<Value>>,
     target: Vec<Vec<Value>>,
@@ -437,6 +372,22 @@ pub(super) fn merge_data_compare_sample_keys(
             .or_insert(values);
     }
     Ok(keys.into_values().collect())
+}
+
+pub(super) fn data_compare_sample_coverage(
+    source_sample_rows: usize,
+    target_sample_rows: usize,
+    source_rows: u64,
+    target_rows: u64,
+) -> f64 {
+    let rate = |sample: usize, rows: u64| {
+        if rows == 0 {
+            1.0
+        } else {
+            (sample as f64 / rows as f64).min(1.0)
+        }
+    };
+    rate(source_sample_rows, source_rows).min(rate(target_sample_rows, target_rows))
 }
 
 pub(super) fn data_compare_sample_key_predicate(
@@ -478,17 +429,15 @@ pub(super) fn data_compare_sample_key_predicate(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fetch_sampled_data_compare_rows(
-    app: &AppHandle,
     manager: &ConnectionManager,
     endpoint: &TableDataCompareEndpoint,
-    endpoint_name: &str,
-    compare_id: &str,
     cancellation: &watch::Receiver<bool>,
     kind: DatabaseKind,
     columns: &[String],
     column_metadata: &BTreeMap<String, ColumnInfo>,
     key_columns: &[String],
     sampled_keys: &[Vec<Value>],
+    mut progress: impl FnMut(u64),
 ) -> Result<Vec<BTreeMap<String, Value>>, String> {
     if sampled_keys.is_empty() {
         return Ok(Vec::new());
@@ -528,6 +477,7 @@ pub(super) async fn fetch_sampled_data_compare_rows(
     let keys_per_batch =
         (MAX_DATA_COMPARE_SAMPLE_QUERY_PARAMETERS / key_columns.len()).clamp(1, 500);
     let mut rows = Vec::with_capacity(sampled_keys.len());
+    let mut payload_bytes = 0_usize;
     for keys in sampled_keys.chunks(keys_per_batch) {
         ensure_table_data_compare_not_cancelled(cancellation)?;
         let (predicate, params) = data_compare_sample_key_predicate(
@@ -554,27 +504,28 @@ pub(super) async fn fetch_sampled_data_compare_rows(
             .drain(..)
             .next()
             .unwrap_or_else(|| QueryResult::rows(Vec::new(), Vec::new()));
+        if page.truncated {
+            return Err("Data compare sampled row lookup was truncated by the driver".into());
+        }
         if page.rows.len() > keys.len() {
             return Err(
                 "Sampled data compare observed duplicate rows for a declared unique key"
                     .to_string(),
             );
         }
-        rows.extend(
-            page.rows
-                .iter()
-                .map(|row| data_compare_row_values(columns, row)),
-        );
-        emit_running_table_data_compare_progress(
-            app,
-            compare_id,
-            TableDataCompareProgressPhase::FetchingRows,
-            Some(endpoint_name),
-            rows.len() as u64,
-            None,
-            None,
-            Some("Reading rows for the reviewed sample key universe"),
-        );
+        for row in &page.rows {
+            let values = data_compare_row_values(columns, row);
+            payload_bytes = payload_bytes.saturating_add(
+                serde_json::to_vec(&values)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+            );
+            if payload_bytes > 64 * 1024 * 1024 {
+                return Err("Data compare sampled values exceed their 64 MiB budget".into());
+            }
+            rows.push(values);
+        }
+        progress(rows.len() as u64);
     }
     Ok(rows)
 }

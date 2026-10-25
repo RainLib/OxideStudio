@@ -16,6 +16,8 @@ fn builds_create_index_statement_with_existing_columns() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
         ColumnInfo {
             name: "tenant_id".to_string(),
@@ -30,6 +32,8 @@ fn builds_create_index_statement_with_existing_columns() {
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         },
     ]);
 
@@ -76,6 +80,8 @@ fn rejects_create_index_for_unknown_columns() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert!(build_create_table_index_statement(
@@ -191,6 +197,8 @@ fn builds_unique_constraint_statement_with_existing_columns() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert_eq!(
@@ -222,6 +230,8 @@ fn builds_primary_key_constraint_statement_with_existing_columns() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert_eq!(
@@ -253,6 +263,8 @@ fn rejects_primary_key_constraint_on_nullable_columns() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert!(build_create_primary_key_statement(
@@ -304,6 +316,8 @@ fn builds_foreign_key_statement_with_referential_actions() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
     let referenced_columns = column_lookup(vec![ColumnInfo {
         name: "id".to_string(),
@@ -318,6 +332,8 @@ fn builds_foreign_key_statement_with_referential_actions() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
 
     assert_eq!(

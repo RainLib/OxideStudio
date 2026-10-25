@@ -44,7 +44,7 @@ export function AssistantModelCompactPanel({
   return (
     <div
       data-assistant-model-view="compact"
-      className="p-2 animate-in fade-in-0 slide-in-from-bottom-1 duration-200 motion-reduce:animate-none"
+      className="p-2"
     >
       <div className="flex items-center gap-1 px-0.5">
         <div className="flex h-7 w-7 shrink-0 items-center justify-center">

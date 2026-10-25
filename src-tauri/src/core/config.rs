@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -220,12 +221,19 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
+    #[cfg(feature = "desktop")]
     pub fn new(app: &AppHandle) -> Self {
         let config_dir = app
             .path()
             .app_config_dir()
             .expect("failed to get config dir");
         fs::create_dir_all(&config_dir).ok();
+        Self::from_directory(&config_dir)
+    }
+
+    /// Resolve the same profile files without initializing a desktop runtime
+    /// or creating the directory. Read-only clients may use this constructor.
+    pub fn from_directory(config_dir: &std::path::Path) -> Self {
         Self {
             config_path: config_dir.join("config.json"),
             settings_path: config_dir.join("settings.json"),
@@ -277,9 +285,39 @@ impl ConfigManager {
     /// this prevents the running process from changing the filesystem root of
     /// packages that may still own live sidecars.
     pub fn driver_package_store_path(&self, default_root: PathBuf) -> PathBuf {
-        let Ok(settings) = self.load_settings() else {
-            return default_root;
-        };
+        self.try_driver_package_store_path(default_root.clone())
+            .unwrap_or(default_root)
+    }
+
+    /// Execution clients must report an invalid selection rather than silently
+    /// falling back to another store and potentially another driver runtime.
+    pub fn try_driver_package_store_path(&self, default_root: PathBuf) -> Result<PathBuf, String> {
+        match fs::symlink_metadata(&self.settings_path) {
+            Ok(_) if !self.settings_path.exists() => {
+                return Err("settings.json exists but cannot be read".into())
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("Cannot inspect settings.json: {error}"))
+            }
+            _ => {}
+        }
+        let settings = self.load_settings()?;
+        if !settings.is_object() {
+            return Err("settings.json must contain an object".into());
+        }
+        if settings
+            .get("drivers")
+            .is_some_and(|value| !value.is_null() && !value.is_object())
+        {
+            return Err("settings.drivers must contain an object".into());
+        }
+        if settings
+            .get("drivers")
+            .and_then(|value| value.get("storePath"))
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err("Driver store path must be a string".into());
+        }
         let Some(value) = settings
             .get("drivers")
             .and_then(Value::as_object)
@@ -288,13 +326,15 @@ impl ConfigManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            return default_root;
+            return Ok(default_root);
         };
         let candidate = PathBuf::from(value);
         if !candidate.is_absolute() || candidate.parent().is_none() {
-            return default_root;
+            return Err(
+                "Driver store path must be an absolute directory below a filesystem root".into(),
+            );
         }
-        candidate
+        Ok(candidate)
     }
 
     pub fn set_driver_package_store_path(&self, path: &std::path::Path) -> Result<(), String> {
@@ -490,5 +530,45 @@ mod tests {
         let configured = directory.path().join("driver-store");
         manager.set_driver_package_store_path(&configured).unwrap();
         assert_eq!(manager.driver_package_store_path(fallback), configured);
+    }
+
+    #[test]
+    fn read_only_driver_store_resolution_rejects_invalid_settings_without_changing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ConfigManager::from_directory(directory.path());
+        let fallback = directory.path().join("database-drivers");
+        assert_eq!(
+            manager
+                .try_driver_package_store_path(fallback.clone())
+                .unwrap(),
+            fallback
+        );
+        assert!(!directory.path().join("settings.json").exists());
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!({"drivers":false}),
+            serde_json::json!({"drivers":{"storePath":"relative"}}),
+            serde_json::json!({"drivers":{"storePath":3}}),
+        ] {
+            manager.save_settings(&value).unwrap();
+            let before = fs::read(directory.path().join("settings.json")).unwrap();
+            assert!(manager
+                .try_driver_package_store_path(fallback.clone())
+                .is_err());
+            assert_eq!(
+                fs::read(directory.path().join("settings.json")).unwrap(),
+                before
+            );
+        }
+        manager
+            .save_settings(&serde_json::json!({"drivers":{"storePath":null}}))
+            .unwrap();
+        assert_eq!(
+            manager
+                .try_driver_package_store_path(fallback.clone())
+                .unwrap(),
+            fallback
+        );
     }
 }

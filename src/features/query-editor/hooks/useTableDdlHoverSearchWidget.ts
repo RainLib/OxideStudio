@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import {captureLspProviderRequest,watchLspProviderContext,type LspProviderContextOptions} from "../model/lspProviderContext";
+import {captureCompletionContext} from "@/services/lsp/semanticContext";
 import type { TableInfo } from "@/services/tauri";
 import {
   loadTableDdl,
@@ -14,7 +16,7 @@ import {
 const HOVER_DELAY_MS = 320;
 const FALLBACK_COLUMN_LIMIT = 200;
 
-export type TableDdlHoverSearchRuntime = {
+export type TableDdlHoverSearchRuntime = LspProviderContextOptions & {
   activeProjectId?: string | null;
   currentSchema?: string | null;
   databaseName?: string | null;
@@ -207,6 +209,9 @@ export function registerTableDdlHoverSearchWidget(options: {
     ownerKey: string,
   ) => {
     const runtime = getRuntime();
+    const model=editor.getModel();if(!model)return;
+    const context=captureLspProviderRequest({read:runtime.getSemanticContext,model});
+    if(!context.isCurrent()||!context.metadataAllowed)return;
     const schema = runtime.targetSchema || runtime.currentSchema;
     const connectionId = runtime.effectiveConnectionId;
     if (!schema || !connectionId || runtimeOwnerKey(runtime) !== ownerKey) return;
@@ -229,6 +234,7 @@ export function registerTableDdlHoverSearchWidget(options: {
     ]);
     if (
       currentRequest !== requestId ||
+      !context.isCurrent() ||
       runtimeOwnerKey(getRuntime()) !== ownerKey ||
       editor.getModel()?.uri?.toString() !== runtime.documentUri
     ) {
@@ -261,6 +267,7 @@ export function registerTableDdlHoverSearchWidget(options: {
       !model ||
       !runtime.showTableDdlHoverPreview ||
       !runtime.supportsTableBrowsing ||
+      !captureCompletionContext(runtime.getSemanticContext).metadataAllowed ||
       model.uri?.toString() !== runtime.documentUri
     ) {
       hide();
@@ -301,6 +308,11 @@ export function registerTableDdlHoverSearchWidget(options: {
   const contentChange = editor.onDidChangeModelContent(hide);
   const modelChange = editor.onDidChangeModel(hide);
   const scrollChange = editor.onDidScrollChange(hide);
+  const initialRuntime=getRuntime();
+  const releaseContext=watchLspProviderContext({
+    getSemanticContext:initialRuntime.getSemanticContext?()=>getRuntime().getSemanticContext!():undefined,
+    subscribeSemanticContext:initialRuntime.subscribeSemanticContext,
+  },hide);
   const outsidePointer = (event: PointerEvent) => {
     const target = event.target;
     if (target instanceof Node && dom.root.contains(target)) return;
@@ -334,6 +346,7 @@ export function registerTableDdlHoverSearchWidget(options: {
       contentChange.dispose();
       modelChange.dispose();
       scrollChange.dispose();
+      releaseContext();
       dom.input.removeEventListener("input", renderSearch);
       dom.root.removeEventListener("pointerdown", stopPropagation);
       dom.root.removeEventListener("mousedown", stopPropagation);

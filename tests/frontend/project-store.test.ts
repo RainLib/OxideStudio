@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
@@ -58,6 +59,7 @@ function deferred<T>() {
 describe("project store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(confirmAction).mockReset().mockResolvedValue(true);
     vi.stubGlobal("localStorage", createStorageMock());
     useConnectionStore.setState({ activeConnectionId: null });
     useSchemaStore.setState(useSchemaStore.getInitialState(), true);
@@ -157,7 +159,7 @@ describe("project store", () => {
     expect(mocks.deleteProject).not.toHaveBeenCalled();
   });
 
-  it("keeps the active project when a dirty file cannot be discarded", () => {
+  it("keeps the active project when a dirty file cannot be discarded", async () => {
     useProjectStore.setState({
       projects: [
         { id: "one", name: "One", created_at: 0, updated_at: 0 },
@@ -170,9 +172,9 @@ describe("project store", () => {
       .getState()
       .openProjectFileTab("one", "query.sql", "SELECT 1;", "revision-1");
     useTabStore.getState().updateTabSql(tabId, "SELECT 2;");
-    vi.stubGlobal("confirm", vi.fn(() => false));
+    vi.mocked(confirmAction).mockReset().mockResolvedValue(false);
 
-    expect(useProjectStore.getState().setActiveProject("two")).toBe(false);
+    expect((await useProjectStore.getState().setActiveProject("two"))).toBe(false);
     expect(useProjectStore.getState().activeProjectId).toBe("one");
     expect(useTabStore.getState().tabs).toHaveLength(1);
   });
@@ -224,7 +226,7 @@ describe("project store", () => {
       },
     ]);
 
-    expect(useProjectStore.getState().setActiveProject("two")).toBe(true);
+    expect((await useProjectStore.getState().setActiveProject("two"))).toBe(true);
     expect(useProjectStore.getState().activeProjectId).toBe("one");
     expect(useConnectionStore.getState().connections[0]?.id).toBe("old");
     expect(useTabStore.getState().activeTabId).toBe("tab-old");
@@ -249,3 +251,5 @@ describe("project store", () => {
     expect(mocks.disconnect).toHaveBeenCalledWith("old");
   });
 });
+
+vi.mock("@/lib/appDialogs", () => ({ confirmAction: vi.fn(async () => true) }));

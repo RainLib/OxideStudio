@@ -479,7 +479,9 @@ impl DatabaseDriver for MysqlDriver {
                 column_default AS cd,
                 column_key AS ck,
                 extra AS ex,
-                column_comment AS cc
+                column_comment AS cc,
+                character_set_name AS cs,
+                collation_name AS col
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
@@ -490,6 +492,15 @@ impl DatabaseDriver for MysqlDriver {
         .fetch_all(&pool)
         .await?;
 
+        // COLUMN_KEY=PRI includes every member of a composite primary key.
+        // Inspect complete physical unique indexes before marking one column
+        // independently unique (a prerequisite for stable compare pagination).
+        let unique_rows = sqlx::query("SELECT CAST(MAX(COLUMN_NAME) AS CHAR CHARACTER SET utf8mb4) AS cn FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING COUNT(*)=1 AND MAX(COLUMN_NAME) IS NOT NULL")
+            .bind(schema).bind(table).fetch_all(&pool).await?;
+        let unique_columns = unique_rows
+            .iter()
+            .filter_map(|row| mysql_string_by_name(row, "cn"))
+            .collect::<std::collections::HashSet<_>>();
         let cols = rows
             .iter()
             .map(|r| {
@@ -498,7 +509,8 @@ impl DatabaseDriver for MysqlDriver {
 
                 let column_key = mysql_string_by_name(r, "ck").unwrap_or_default();
                 let is_primary_key = column_key == "PRI";
-                let is_unique = column_key == "PRI" || column_key == "UNI";
+                let name = mysql_string_by_name(r, "cn").unwrap_or_default();
+                let is_unique = unique_columns.contains(&name);
                 let is_indexed = !column_key.is_empty();
                 let extra = mysql_string_by_name(r, "ex").unwrap_or_default();
                 let (is_generated, is_hidden) = mysql_column_ownership(&extra);
@@ -506,7 +518,7 @@ impl DatabaseDriver for MysqlDriver {
                     .and_then(|value| (!value.trim().is_empty()).then_some(value));
 
                 ColumnInfo {
-                    name: mysql_string_by_name(r, "cn").unwrap_or_default(),
+                    name,
                     data_type: mysql_string_by_name(r, "dt").unwrap_or_default(),
                     is_nullable,
                     is_primary_key,
@@ -516,6 +528,8 @@ impl DatabaseDriver for MysqlDriver {
                     identity_generation: None,
                     is_generated: Some(is_generated),
                     is_hidden: Some(is_hidden),
+                    character_set: mysql_string_by_name(r, "cs"),
+                    collation: mysql_string_by_name(r, "col"),
                     default_value: mysql_string_by_name(r, "cd"),
                     comment,
                 }
@@ -828,6 +842,7 @@ impl DatabaseDriver for MysqlDriver {
             functions[function_index]
                 .parameters
                 .push(FunctionParameterInfo {
+                    mode: (!parameter_mode.is_empty()).then_some(parameter_mode),
                     name: parameter_name.unwrap_or_else(|| format!("arg{position}")),
                     data_type: mysql_string_by_index(&row, 6)
                         .unwrap_or_else(|| "unknown".to_string()),

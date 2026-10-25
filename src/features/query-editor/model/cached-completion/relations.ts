@@ -1,49 +1,34 @@
 import type { CachedSqlJoinTargetContext, CachedSqlRelationReference } from "./types";
+import { cachedQueryScopes } from "./queryScopes";
+import { cachedIdentifierQualifier } from "./identifierFragments";
+import { cachedLocalDeclarations, localColumnList } from "./localDeclarations";
+import { matchingSqlParenthesis as matchingParenthesis, quotedSqlIdentifierEnd as quotedIdentifierEnd, isSqlComparisonFrom } from "./structure";
 import {
   currentTopLevelStatementBeforeCursor,
   NON_ALIAS_KEYWORDS,
   RELATION_KEYWORDS,
   splitQualifiedIdentifier,
   unquoteIdentifier,
+  type CachedSqlStatement,
 } from "./lexical";
 import {
   COMPLETE_QUALIFIED_IDENTIFIER_MATCHER,
-  CTE_DECLARATION_MATCHER,
   JOIN_TARGET_CONTEXT_MATCHER,
   RELATION_MATCHER,
+  COMMA_RELATION_MATCHER,
   RELATION_TARGET_CONTEXT_MATCHER,
   SQL_IDENTIFIER,
   SUBQUERY_RELATION_MATCHER,
   TABLE_FUNCTION_RELATION_MATCHER,
   TRAILING_AS_ALIAS_MATCHER,
   TRAILING_IMPLICIT_ALIAS_MATCHER,
-  TRAILING_QUALIFIER,
   splitDelimitedIdentifiers,
 } from "./syntax";
 
-function cteDeclarations(source: string) {
-  const declarations = new Map<string, string[]>();
-  for (const match of source.matchAll(CTE_DECLARATION_MATCHER)) {
-    const name = unquoteIdentifier(match[1]!);
-    if (!name) continue;
-    declarations.set(
-      name.toLocaleLowerCase(),
-      match[2] ? splitDelimitedIdentifiers(match[2]) : [],
-    );
-  }
-  return declarations;
-}
-
-function matchingParenthesis(source: string, openOffset: number) {
-  let depth = 0;
-  for (let index = openOffset; index < source.length; index += 1) {
-    if (source[index] === "(") depth += 1;
-    else if (source[index] === ")") {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
+function relationAlias(sql: string | undefined) {
+  if (!sql) return undefined;
+  const value = unquoteIdentifier(sql);
+  return /^["`[]/u.test(sql) || !NON_ALIAS_KEYWORDS.has(value.toLowerCase()) ? value : undefined;
 }
 
 export function topLevelSelectList(source: string, masked: string) {
@@ -53,11 +38,13 @@ export function topLevelSelectList(source: string, masked: string) {
   let depth = 0;
   for (let index = start; index < masked.length; index += 1) {
     const character = masked[index];
+    if (['"', '`', '['].includes(character!)) { index = quotedIdentifierEnd(masked, index); continue; }
     if (character === "(") depth += 1;
     else if (character === ")") depth = Math.max(0, depth - 1);
     else if (
       depth === 0 &&
       /^from\b/iu.test(masked.slice(index)) &&
+      !isSqlComparisonFrom(masked,index) &&
       (index === 0 || /\s/u.test(masked[index - 1]!))
     ) {
       return source.slice(start, index).replace(/^\s*distinct\b/iu, "");
@@ -114,8 +101,7 @@ function derivedColumnName(expression: string) {
     : null;
 }
 
-function derivedSubqueryRelations(source: string, masked: string) {
-  const relations: CachedSqlRelationReference[] = [];
+function derivedSubqueryRelations(source: string, masked: string, add:(relation:CachedSqlRelationReference,offset:number)=>void) {
   for (const match of masked.matchAll(SUBQUERY_RELATION_MATCHER)) {
     const openOffset = (match.index || 0) + match[0].lastIndexOf("(");
     const closeOffset = matchingParenthesis(masked, openOffset);
@@ -123,8 +109,9 @@ function derivedSubqueryRelations(source: string, masked: string) {
     const aliasMatch = source
       .slice(closeOffset + 1)
       .match(new RegExp(`^\\s*(?:as\\s+)?(${SQL_IDENTIFIER})`, "iu"));
-    const alias = aliasMatch?.[1] ? unquoteIdentifier(aliasMatch[1]) : "";
-    if (!alias || NON_ALIAS_KEYWORDS.has(alias.toLocaleLowerCase())) continue;
+    const alias = relationAlias(aliasMatch?.[1]);
+    if (!alias) continue;
+    const list = localColumnList(source, masked, closeOffset + 1 + aliasMatch![0].length);
     const selectList = topLevelSelectList(
       source.slice(openOffset + 1, closeOffset),
       masked.slice(openOffset + 1, closeOffset),
@@ -134,19 +121,18 @@ function derivedSubqueryRelations(source: string, masked: string) {
           .map(derivedColumnName)
           .filter((column): column is string => Boolean(column))
       : [];
-    relations.push({
+    add({
       table: alias,
       alias,
       aliasSql: aliasMatch?.[1],
       isDerived: true,
-      cteColumns: [...new Set(columns)],
-    });
+      cteColumns: list?.columns ?? [...new Set(columns)],
+      localSource: {kind:"query",start:openOffset+1,end:closeOffset,...(list?{columns:list.columns}:{})},
+    },match.index);
   }
-  return relations;
 }
 
-function tableFunctionRelations(source: string, masked: string) {
-  const relations: CachedSqlRelationReference[] = [];
+function tableFunctionRelations(source: string, masked: string, add:(relation:CachedSqlRelationReference,offset:number)=>void) {
   for (const match of masked.matchAll(TABLE_FUNCTION_RELATION_MATCHER)) {
     const openOffset = (match.index || 0) + match[0].lastIndexOf("(");
     const closeOffset = matchingParenthesis(masked, openOffset);
@@ -155,58 +141,96 @@ function tableFunctionRelations(source: string, masked: string) {
       .slice(closeOffset + 1)
       .match(
         new RegExp(
-          `^\\s*(?:as\\s+)?(${SQL_IDENTIFIER})(?:\\s*\\(([^)]*)\\))?`,
+          `^\\s*(?:as\\s+)?(${SQL_IDENTIFIER})`,
           "iu",
         ),
       );
-    const alias = aliasMatch?.[1] ? unquoteIdentifier(aliasMatch[1]) : "";
-    if (!alias || NON_ALIAS_KEYWORDS.has(alias.toLocaleLowerCase())) continue;
-    relations.push({
-      table: alias,
+    const alias = relationAlias(aliasMatch?.[1]);
+    const name = alias || splitQualifiedIdentifier(match[1]!)?.table;
+    if (!name) continue;
+    const list = alias ? localColumnList(source, masked, closeOffset + 1 + aliasMatch![0].length) : undefined;
+    add({
+      table: name,
       alias,
-      aliasSql: aliasMatch?.[1],
+      aliasSql: alias ? aliasMatch?.[1] : undefined,
       isDerived: true,
-      cteColumns: aliasMatch?.[2]
-        ? splitDelimitedIdentifiers(aliasMatch[2])
-        : [],
-    });
+      cteColumns: list?.columns ?? [],
+    },match.index);
   }
-  return relations;
 }
 
 export function cachedSqlRelationsBeforeCursor(
   textBeforeCursor: string,
 ): CachedSqlRelationReference[] {
-  const statement = currentTopLevelStatementBeforeCursor(textBeforeCursor);
-  const ctes = cteDeclarations(statement.masked);
-  const relations: CachedSqlRelationReference[] = [];
-  for (const match of statement.masked.matchAll(RELATION_MATCHER)) {
-    if (!RELATION_KEYWORDS.has(match[1]!.toLowerCase())) continue;
-    const relation = splitQualifiedIdentifier(match[2]!);
-    if (!relation) continue;
-    const alias = match[3] ? unquoteIdentifier(match[3]) : undefined;
-    const possibleAlias = alias?.toLowerCase();
-    const cteColumns = ctes.get(relation.table.toLocaleLowerCase());
-    relations.push({
-      ...relation,
-      ...(cteColumns
-        ? { isCte: true, cteColumns }
-        : {}),
-      alias:
-        possibleAlias && !NON_ALIAS_KEYWORDS.has(possibleAlias)
-          ? alias
-          : undefined,
-      aliasSql:
-        possibleAlias && !NON_ALIAS_KEYWORDS.has(possibleAlias)
-          ? match[3]
-          : undefined,
-    });
+  return scopedRelationsBeforeCursor(textBeforeCursor).relations.map(withoutLocalSource);
+}
+
+function withoutLocalSource(relation:CachedSqlRelationReference) {
+  const result={...relation};delete result.localSource;return result;
+}
+
+function scopedRelationsBeforeCursor(textBeforeCursor:string, bound=false, prepared?: CachedSqlStatement) {
+  const statement = prepared ?? currentTopLevelStatementBeforeCursor(textBeforeCursor);
+  const scopes=cachedQueryScopes(statement.masked, prepared?.cursorOffset);
+  const namedCtes = cachedLocalDeclarations(statement.source,statement.masked,offset=>scopes.isCteDeclaration(offset)&&(!bound||scopes.declarationAt(offset)!==undefined));
+  const recursiveOwners = new Set<number>();
+  for (const match of statement.masked.matchAll(/\bwith\s+recursive\b/giu)) {
+    const owner = scopes.declarationAt(match.index);
+    if (owner !== undefined) recursiveOwners.add(owner);
   }
-  relations.push(
-    ...derivedSubqueryRelations(statement.source, statement.masked),
-    ...tableFunctionRelations(statement.source, statement.masked),
-  );
-  return relations;
+  const ctes = prepared && bound ? cachedLocalDeclarations(statement.source,statement.masked, offset => {
+    const owner = scopes.declarationAt(offset);
+    return scopes.isCteDeclaration(offset) && owner !== undefined && (offset <= prepared.cursorOffset || recursiveOwners.has(owner));
+  }) : namedCtes;
+  const relations: CachedSqlRelationReference[] = [];
+  const owners=new Map<CachedSqlRelationReference,number>();
+  const offsets = new Map<CachedSqlRelationReference, number>();
+  const add=(relation:CachedSqlRelationReference,offset:number)=>{if(!scopes.isInputPosition(offset)&&!/^(?:update|into)\b/iu.test(statement.masked.slice(offset,offset+8)))return;const owner=scopes.relationAt(offset);if(bound&&owner===undefined)return;relations.push(relation);owners.set(relation,owner??0);offsets.set(relation,offset);};
+  const physical = (name: string, aliasSql: string | undefined, offset: number) => {
+    const relation = splitQualifiedIdentifier(name);
+    if (!relation) return;
+    const alias = relationAlias(aliasSql);
+    const cteName = relation.table.toLocaleLowerCase();
+    // An unavailable forward CTE must not become a physical metadata lookup.
+    const declaration = !relation.schema && !relation.server && !relation.schemaOmitted && !("database" in relation && relation.database) ? ctes.get(cteName) ?? (namedCtes.has(cteName) ? {columns:[]} : undefined) : undefined;
+    add({
+      ...relation,
+      ...(declaration
+        ? { isCte: true, cteColumns:declaration.columns,...("localSource" in declaration && declaration.localSource?{localSource:declaration.localSource}:{}) }
+        : {}),
+      alias,
+      aliasSql: alias ? aliasSql : undefined,
+    },offset);
+  };
+  const callOrColumnList = (match: RegExpExecArray, comma = false) => {
+    const aliasSql = match[comma ? 2 : 3], alias = relationAlias(aliasSql);
+    if (aliasSql && !alias) return false;
+    let end = match.index + match[0].length;
+    while (end < statement.masked.length && /\s/u.test(statement.masked[end]!)) end++;
+    if (statement.masked[end] !== '(') return false;
+    if (alias) {
+      const close = matchingParenthesis(statement.masked, end);
+      const columns = close < 0 ? [] : splitDelimitedIdentifiers(statement.source.slice(end + 1, close));
+      const physical = splitQualifiedIdentifier(match[comma?1:2]!);
+      const declaration = physical && !physical.schema && !physical.server && !physical.schemaOmitted && !("database" in physical && physical.database) ? ctes.get(physical.table.toLowerCase()) ?? (namedCtes.has(physical.table.toLowerCase()) ? {columns:[]} : undefined) : undefined;
+      const original = declaration && "localSource" in declaration ? declaration.localSource : undefined;
+      const renamed = declaration?.columns.length ? declaration.columns.map((name,index)=>columns[index]??name) : columns;
+      const localSource = original?.kind === "query" ? {...original,columns:renamed} : !declaration && physical ? {kind:"physical" as const,...physical,columns} : undefined;
+      add({table:alias,alias,aliasSql,isDerived:true,cteColumns:columns,...(localSource?{localSource}:{})}, match.index);
+    }
+    return true;
+  };
+  for (const match of statement.masked.matchAll(RELATION_MATCHER)) {
+    if (RELATION_KEYWORDS.has(match[1]!.toLowerCase()) && !callOrColumnList(match)) physical(match[2]!, match[3], match.index);
+  }
+  for (const match of statement.masked.matchAll(COMMA_RELATION_MATCHER)) {
+    if (scopes.isFromComma(match.index) && !callOrColumnList(match, true)) physical(match[1]!, match[2], match.index);
+  }
+  derivedSubqueryRelations(statement.source, statement.masked,add);
+  tableFunctionRelations(statement.source, statement.masked,add);
+  relations.sort((left, right) => offsets.get(left)! - offsets.get(right)!);
+  const covered = new Set(offsets.values());
+  return {relations,owners,ctes,activeOwner:scopes.activeOwner,inputsComplete:scopes.visibleInputPositions().every(offset=>covered.has(offset))};
 }
 
 /**
@@ -226,7 +250,7 @@ export function cachedSqlJoinTargetContext(
   const targetStart = statement.masked.length - maskedTarget.length;
   const sourceBeforeTarget = statement.source.slice(0, targetStart);
   const targetFragment = statement.source.slice(targetStart).trim();
-  const sourceRelations = cachedSqlRelationsBeforeCursor(sourceBeforeTarget);
+  const sourceRelations = scopedRelationsBeforeCursor(sourceBeforeTarget,true).relations;
   if (sourceRelations.length === 0) return null;
 
   return { sourceRelations, targetFragment };
@@ -237,16 +261,22 @@ export function cachedSqlJoinTargetContext(
  * keyword check, this remains true after `FROM cus` and supports Unicode and
  * qualified SQL Server names, which is required for pinyin-backed matching.
  */
-export function cachedSqlRelationTargetPrefix(textBeforeCursor: string) {
-  const statement = currentTopLevelStatementBeforeCursor(textBeforeCursor);
+export function cachedSqlRelationTargetPrefix(textBeforeCursor: string, prepared?: Pick<CachedSqlStatement, "source" | "masked">) {
+  const fragment = cachedSqlRelationTargetFragment(textBeforeCursor,prepared);
+  if(fragment===null)return null;
+  if(!fragment)return "";
+  const lastPart=splitQualifiedIdentifier(fragment)?.table??"";
+  return lastPart.replace(/^["`\[]/u, "").replace(/["`\]]$/u, "");
+}
+
+export function cachedSqlRelationTargetFragment(textBeforeCursor:string,prepared?:Pick<CachedSqlStatement,"source"|"masked">) {
+  const statement = prepared ?? currentTopLevelStatementBeforeCursor(textBeforeCursor);
   const match = statement.masked.match(RELATION_TARGET_CONTEXT_MATCHER);
   if (!match) return null;
   const fragment = statement.source
     .slice(statement.masked.length - (match[1]?.length || 0))
     .trim();
-  if (!fragment) return "";
-  const lastPart = fragment.split(".").pop()?.trim() || "";
-  return lastPart.replace(/^["`\[]/u, "").replace(/["`\]]$/u, "");
+  return fragment;
 }
 
 /**
@@ -257,41 +287,62 @@ export function cachedSqlRelationTargetPrefix(textBeforeCursor: string) {
  */
 export function cachedSqlRelationForFieldCompletion(
   textBeforeCursor: string,
+  prepared?: CachedSqlStatement,
 ): CachedSqlRelationReference | null {
-  const statement = currentTopLevelStatementBeforeCursor(textBeforeCursor);
-  const qualifierMatch = statement.source.match(TRAILING_QUALIFIER);
-  const qualifier = qualifierMatch?.[1]
-    ? unquoteIdentifier(qualifierMatch[1])
+  const statement = prepared ? { source: prepared.source.slice(0, prepared.cursorOffset), masked: prepared.masked.slice(0, prepared.cursorOffset) } : currentTopLevelStatementBeforeCursor(textBeforeCursor);
+  const qualifierText = cachedIdentifierQualifier(statement.source,statement.masked);
+  const qualifier = qualifierText
+    ? unquoteIdentifier(qualifierText)
     : undefined;
-  const ctes = cteDeclarations(statement.masked);
-  const relations = cachedSqlRelationsBeforeCursor(statement.source);
+  const bindings = scopedRelationsBeforeCursor(statement.source,true,prepared);
+  if (prepared && !bindings.inputsComplete) return null;
+  const result = cachedSqlBindingForQualifier(bindings, qualifier, !prepared || bindings.relations.length === 0);
+  return result && !prepared ? withoutLocalSource(result) : result;
+}
+
+export function cachedSqlFieldBindings(statement: CachedSqlStatement) {
+  return scopedRelationsBeforeCursor(statement.source, true, statement);
+}
+
+export function cachedSqlBindingForQualifier(
+  {ctes,relations,owners}: ReturnType<typeof cachedSqlFieldBindings>,
+  qualifier?: string,
+  allowUnreferencedCte = false,
+): CachedSqlRelationReference | null {
+  const nearest=(matches:CachedSqlRelationReference[])=>{
+    const depth=Math.max(...matches.map(relation=>owners.get(relation)??0));
+    const closest=matches.filter(relation=>(owners.get(relation)??0)===depth);
+    return closest.length===1?closest[0]!:null;
+  };
   if (qualifier) {
     const normalized = qualifier.toLowerCase();
     const reversed = relations.slice().reverse();
     // SQL aliases shadow relation names in the active query block. Resolve
     // them in a separate pass so `orders users JOIN users u ... users.` binds
     // to the alias even though a later physical table has the same name.
-    const aliased = reversed.find(
+    const aliased = reversed.filter(
       (relation) => relation.alias?.toLowerCase() === normalized,
     );
-    if (aliased) return aliased;
+    if (aliased.length) return nearest(aliased);
 
     // Keep the existing authoring fallback for a declared CTE before the
     // outer FROM clause is written. An explicitly aliased CTE is no longer
     // addressable by its declaration name, just like a physical relation.
-    const cteColumns = ctes.get(normalized);
+    const declaration = ctes.get(normalized);
     const cteWasAliased = reversed.some(
       (relation) =>
         relation.isCte &&
         relation.alias &&
         relation.table.toLowerCase() === normalized,
     );
-    if (cteColumns && !cteWasAliased) {
+    const cteIsReferenced = reversed.some(relation => relation.isCte && !relation.alias && relation.table.toLowerCase() === normalized);
+    if (declaration && !cteWasAliased && (allowUnreferencedCte || cteIsReferenced)) {
       return {
         table: qualifier,
         schema: undefined,
         isCte: true,
-        cteColumns,
+        cteColumns: declaration.columns,
+        localSource: declaration.localSource,
         alias: undefined,
       };
     }
@@ -300,10 +351,10 @@ export function cachedSqlRelationForFieldCompletion(
     // qualifier. Returning it here would fabricate columns for invalid SQL
     // and, in collision cases, query the wrong metadata target.
     return (
-      reversed.find(
+      nearest(reversed.filter(
         (relation) =>
           !relation.alias && relation.table.toLowerCase() === normalized,
-      ) || null
+      ))
     );
   }
   return relations.length === 1 ? relations[0]! : null;

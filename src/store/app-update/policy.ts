@@ -60,6 +60,6 @@ export function describeUpdateError(error: unknown): string {
 
 export function isUpdateBusy(status: AppUpdateStatus) {
   return (
-    status === "checking" || status === "downloading" || status === "installing"
+    status === "checking" || status === "downloading" || status === "preparing" || status === "installing" || status === "restart-required"
   );
 }

@@ -11,6 +11,7 @@ pub(super) const MONGODB_DATABASE_INITIALIZATION_COLLECTION: &str = "oxide_init"
 pub(super) const MONGODB_COLLECTION_COUNT_CONCURRENCY: usize = 8;
 
 pub struct MongoDbDriver {
+    pub(super) agent_owned: bool,
     pub(super) url: String,
     pub(super) default_database: String,
     pub(super) active_database: Mutex<String>,

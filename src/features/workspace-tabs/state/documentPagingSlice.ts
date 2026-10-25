@@ -1,4 +1,4 @@
-import { confirmDiscardTabChanges } from "@/features/workspace-tabs/model/tabLifecycle";
+import { confirmCurrentTabChanges } from "@/features/workspace-tabs/model/confirmTabAction";
 import { schemaService } from "@/services/tauri";
 import { ensureConnectionReady } from "@/store/useConnectionStore";
 import { useTaskStore } from "@/store/useTaskStore";
@@ -21,10 +21,10 @@ export const createDocumentPagingSlice: TabSlice<"loadDocumentPage"> = (
     }
     if (
       !options?.discardDraftsConfirmed &&
-      !confirmDiscardTabChanges(
-        [tab],
+      !(await confirmCurrentTabChanges(
+        () => get().tabs.filter((candidate) => candidate.id === tabId),
         options?.discardAction || "load another document page",
-      )
+      ))
     ) {
       return false;
     }

@@ -252,7 +252,7 @@ function RowMenu(props: {
           <MoreHorizontal size={11} />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="min-w-[150px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[10px]">
+      <DropdownMenuContent className="min-w-[150px] p-1 text-[10px]">
         {props.onOpen && <DropdownMenuItem className="h-7 text-[10px]" onClick={props.onOpen}>Open in editor</DropdownMenuItem>}
         {props.onNewQuery && <DropdownMenuItem className="h-7 text-[10px]" onClick={props.onNewQuery}>New query here</DropdownMenuItem>}
         {props.onNewFolder && <DropdownMenuItem className="h-7 text-[10px]" onClick={props.onNewFolder}>New subfolder</DropdownMenuItem>}

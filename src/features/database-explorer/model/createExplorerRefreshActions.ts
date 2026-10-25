@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import type { ConnectionConfig } from "@/features/connections/model/types";
 import {
@@ -347,9 +348,9 @@ export function createExplorerRefreshActions({
     connectionId: string,
     connectionName: string,
   ) => {
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Forget cached metadata for "${connectionName}"? The next refresh will introspect the data source again.`,
-    );
+    ));
     if (!confirmed) return;
 
     await forgetConnectionMetadata(connectionId);
@@ -366,9 +367,9 @@ export function createExplorerRefreshActions({
     driver: string | null | undefined,
     schema: string,
   ) => {
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Forget cached object metadata for "${schema}"? The schema will stay listed, but tables and routines will be loaded again on refresh.`,
-    );
+    ));
     if (!confirmed) return;
 
     await forgetSchemaMetadata(connectionId, schema);

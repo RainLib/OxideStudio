@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect } from "react";
 import { ThemeProvider } from "@/theme";
 import { AppPreferencesProvider } from "@/i18n";
+import { AppDialogHost } from "@/components/ui/AppDialogHost";
+import { AppTooltipHost } from "@/components/ui/AppTooltipHost";
 import { readStartupConnectionDisplayCache } from "@/startup/dataSourceDisplayCache";
 import { StartupWorkbenchShell } from "@/startup/StartupWorkbenchShell";
 import {
@@ -32,6 +34,8 @@ function App() {
   return (
     <ThemeProvider>
       <AppPreferencesProvider>
+        <AppDialogHost />
+        <AppTooltipHost />
         <Suspense
           fallback={
             <StartupWorkbenchShell

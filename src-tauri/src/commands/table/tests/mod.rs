@@ -1,4 +1,9 @@
 //! Shared database fixtures for table feature tests.
+mod import_jobs;
+mod import_jobs_native;
+mod import_preparation_formats;
+mod import_preparation_resume;
+mod import_preparation_resume_native;
 
 use super::access::{
     execute_target_parameterized_batch, get_target_columns, query_target,
@@ -80,13 +85,13 @@ use super::import_inference::{
     infer_materialized_import_columns, inferred_import_data_type, ImportInferredType,
 };
 
-use super::import_json::{is_json_lines_path, json_import_rows_with_cancel};
+use super::import_json_stream::is_json_lines_path;
 
 use super::import_preflight::{observe_json_import_preflight_row, JsonImportPreflightCounters};
 
 use super::import_preview::{
     read_csv_import_preview, read_json_import_preview, stream_json_document_rows,
-    validate_xlsx_headers, xlsx_cell_value, xlsx_import_rows_with_cancel,
+    validate_xlsx_headers, xlsx_cell_value,
 };
 
 use super::import_transaction::table_import_replace_statement;
@@ -523,6 +528,8 @@ fn target_column(name: &str) -> ColumnInfo {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }
 }
 
@@ -882,6 +889,8 @@ async fn parquet_export_writes_a_complete_file_with_type_metadata() {
 mod access;
 
 mod compare_rows;
+mod compare_sampling;
+mod compare_sampling_live;
 
 mod compare_sync;
 
@@ -908,6 +917,8 @@ mod import_csv;
 mod import_inference;
 
 mod import_json;
+mod import_json_stream;
+mod import_xlsx_stream;
 
 mod import_preview;
 

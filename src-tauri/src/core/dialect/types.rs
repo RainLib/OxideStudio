@@ -56,6 +56,10 @@ pub struct DatabaseCapabilities {
     /// mapping; table browsing alone must not make Parquet or Arrow appear.
     #[serde(default)]
     pub table_export_formats: Vec<String>,
+    /// Signed authorization for Host-owned temporary file-query sessions.
+    /// Query/table browsing alone never grants filesystem input access.
+    #[serde(default)]
+    pub file_query_formats: Vec<String>,
     /// Whether table rows can be inserted, updated, and deleted through the
     /// bounded Data Editor command surface.
     #[serde(default)]
@@ -203,6 +207,7 @@ impl DatabaseSpec {
             } else {
                 Vec::new()
             },
+            file_query_formats: Vec::new(),
             supports_table_row_mutation: self.supports_table_row_mutation,
             // The bundled table engines share the reviewed bounded transfer
             // implementation. External packages must opt in explicitly in

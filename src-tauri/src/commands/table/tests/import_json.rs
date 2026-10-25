@@ -8,16 +8,23 @@ fn materialized_import_parsers_observe_cancellation_before_database_writes() {
     ));
     fs::write(&json_path, r#"[{"id":1},{"id":2}]"#).unwrap();
     let checks = AtomicU64::new(0);
-    let error = json_import_rows_with_cancel(&json_path, &|| {
-        checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1
-    })
+    let error = stream_json_document_rows(
+        &json_path,
+        &|| checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1,
+        &mut |_, _| Ok(()),
+    )
     .unwrap_err();
     fs::remove_file(json_path).unwrap();
     assert!(error.starts_with(super::TABLE_IMPORT_CANCELLED));
 
     let missing_xlsx = std::env::temp_dir().join("oxide-import-cancel-missing.xlsx");
     assert_eq!(
-        xlsx_import_rows_with_cancel(&missing_xlsx, &|| true).unwrap_err(),
+        super::super::import_xlsx_stream::stream_xlsx_rows(
+            &missing_xlsx,
+            &|| true,
+            &mut |_, _| Ok(())
+        )
+        .unwrap_err(),
         super::TABLE_IMPORT_CANCELLED
     );
 }

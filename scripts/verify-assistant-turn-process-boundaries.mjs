@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "src/components/workspace/assistant";
-const facade = fs.readFileSync(path.join(root, `${base}/AssistantTurnProcess.tsx`), "utf8");
+const facade = readSourceText(path.join(root, `${base}/AssistantTurnProcess.tsx`));
 
 for (const required of [
   'from "./turn-process/approval"',
@@ -33,7 +34,7 @@ const ownership = {
 };
 
 for (const [module, symbols] of Object.entries(ownership)) {
-  const source = fs.readFileSync(path.join(root, `${base}/turn-process/${module}`), "utf8");
+  const source = readSourceText(path.join(root, `${base}/turn-process/${module}`));
   if (symbols.some((symbol) => !source.includes(symbol))) {
     throw new Error(`${module} must retain its Assistant turn-process ownership.`);
   }

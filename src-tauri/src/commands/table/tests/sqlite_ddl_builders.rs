@@ -91,6 +91,8 @@ fn sqlite_table_ddl_builders_use_native_syntax_and_guard_unsupported_forms() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }]);
     assert_eq!(
         build_sqlite_create_index_statement(

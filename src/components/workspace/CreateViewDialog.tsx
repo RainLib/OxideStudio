@@ -177,7 +177,7 @@ export function CreateViewDialog({
         if (!open) handleClose();
       }}
     >
-      <DialogContent className="w-[640px] max-w-[calc(100vw-32px)] rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+      <DialogContent className="w-[640px] max-w-[calc(100vw-32px)]">
         <DialogHeader>
           <DialogTitle>
             {isEditMode ? `Edit ${objectLabel}` : `Create New ${objectLabel}`}

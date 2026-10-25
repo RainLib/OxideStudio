@@ -31,6 +31,7 @@ interface JsonImportDialogProps {
   isSubmitting: boolean;
   onClose: () => void;
   onImport: (mode: TableImportMode) => Promise<void>;
+  onPrepareResumable?: (mode: TableImportMode) => void;
 }
 
 function previewValue(value: unknown) {
@@ -52,6 +53,7 @@ export function JsonImportDialog({
   isSubmitting,
   onClose,
   onImport,
+  onPrepareResumable,
 }: JsonImportDialogProps) {
   const [importMode, setImportMode] = useState<TableImportMode>("append");
   useEffect(() => {
@@ -71,7 +73,7 @@ export function JsonImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}>
-      <DialogContent className="h-[min(700px,calc(100vh-32px))] w-[min(1000px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="h-[min(700px,calc(100vh-32px))] w-[min(1000px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]">
@@ -132,7 +134,7 @@ export function JsonImportDialog({
         </main>
 
         <DialogFooter className="flex-row items-center justify-between border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 sm:justify-between sm:space-x-0">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3 pr-3">
             <Select value={importMode} onValueChange={(value) => setImportMode(value as TableImportMode)} disabled={isSubmitting}>
               <SelectTrigger aria-label="Import write mode" className="h-7 w-40 rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] text-[10px] focus:ring-0 focus:ring-offset-0">
                 <SelectValue />
@@ -148,8 +150,9 @@ export function JsonImportDialog({
                 : "Database errors roll back the full import transaction."}
             </span>
           </div>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <button type="button" className="wb-text-button h-7 px-3 text-[11px]" onClick={onClose} disabled={isSubmitting}>Cancel</button>
+            {onPrepareResumable && <button type="button" className="wb-text-button h-7 whitespace-nowrap px-3 text-[11px]" disabled={!canImport} onClick={() => onPrepareResumable(importMode)}>Prepare resumable…</button>}
             <button
               type="button"
               className="wb-primary-button h-7 min-w-[112px] justify-center px-3 text-[11px]"

@@ -89,7 +89,7 @@ export function ConnectionSshFields({
             <SelectTrigger className={fieldClass}>
               <SelectValue />
             </SelectTrigger>
-            <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+            <SelectContent className="">
               <SelectItem value="disable">Disable</SelectItem>
               <SelectItem value="prefer">Prefer</SelectItem>
               <SelectItem value="require">Require</SelectItem>
@@ -193,7 +193,7 @@ export function ConnectionSshFields({
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+            <SelectContent className="">
               <SelectItem value="password">Password</SelectItem>
               <SelectItem value="privateKey">Private key</SelectItem>
             </SelectContent>

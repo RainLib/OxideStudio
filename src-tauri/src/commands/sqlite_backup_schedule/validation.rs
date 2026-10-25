@@ -1,4 +1,3 @@
-use crate::core::manager::ConnectionManager;
 use std::path::PathBuf;
 
 use super::models::SqliteBackupDestinationIdentity;
@@ -229,27 +228,4 @@ pub(super) fn destination_identity_for_file(
     _file: &std::fs::File,
 ) -> Option<SqliteBackupDestinationIdentity> {
     None
-}
-
-pub(super) async fn confirm_bundled_sqlite(
-    manager: &ConnectionManager,
-    connection_id: &str,
-) -> Result<(), String> {
-    if manager
-        .package_capabilities(connection_id)
-        .await
-        .map_err(|_| "Cannot inspect the active SQLite driver".to_string())?
-        .is_some()
-    {
-        return Err("Scheduled backup requires Oxide's bundled SQLite driver".to_string());
-    }
-    let driver = manager
-        .connection_driver_id(connection_id)
-        .await
-        .map_err(|_| "Cannot inspect the active SQLite connection".to_string())?
-        .ok_or_else(|| "Connect the SQLite database before scheduling backups".to_string())?;
-    if !driver.trim().eq_ignore_ascii_case("sqlite") {
-        return Err("Scheduled backup is currently available for SQLite".to_string());
-    }
-    Ok(())
 }

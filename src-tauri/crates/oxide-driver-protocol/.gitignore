@@ -1,2 +1,2 @@
-/Cargo.lock
+# Keep Cargo.lock versioned for the standalone protocol compatibility CI job.
 /target/

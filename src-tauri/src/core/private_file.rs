@@ -1,10 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use std::{
-    fs,
-    io::Write,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+#[cfg(any(feature = "desktop", test))]
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io::Write, path::Path};
 
 pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
@@ -69,6 +66,7 @@ pub(crate) fn restrict_sqlite_database_permissions(database_path: &Path) {
 }
 
 /// Atomically replaces a user-private file.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn replace_private_file(path: &Path, contents: &[u8], temp_label: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -91,10 +89,8 @@ pub(crate) fn replace_private_file(path: &Path, contents: &[u8], temp_label: &st
     }
     drop(file);
 
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path).context("failed to replace private application file")?;
-    }
+    // rename replaces an existing file on Windows as well. Removing it first
+    // left a crash window in which a durable queue or credential file vanished.
     if let Err(error) = fs::rename(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(anyhow!(
@@ -188,6 +184,48 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn replacement_never_exposes_a_missing_or_partial_private_file_to_readers() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Barrier,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control.json");
+        replace_private_file(&path, &vec![0; 64 * 1024], "replace-test").unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(Barrier::new(2));
+        let reader_path = path.clone();
+        let reader_stop = stop.clone();
+        let reader_reads = reads.clone();
+        let reader_ready = ready.clone();
+        let reader = std::thread::spawn(move || {
+            reader_ready.wait();
+            while !reader_stop.load(Ordering::Acquire) {
+                let bytes =
+                    fs::read(&reader_path).expect("the published path must never disappear");
+                assert_eq!(bytes.len(), 64 * 1024);
+                assert!(
+                    bytes.iter().all(|byte| *byte == bytes[0]),
+                    "reader observed a partial replacement"
+                );
+                reader_reads.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        ready.wait();
+        while reads.load(Ordering::Relaxed) == 0 && !reader.is_finished() {
+            std::thread::yield_now();
+        }
+        for generation in 1..=64_u8 {
+            replace_private_file(&path, &vec![generation; 64 * 1024], "replace-test").unwrap();
+        }
+        stop.store(true, Ordering::Release);
+        reader.join().unwrap();
+        assert!(reads.load(Ordering::Relaxed) > 0);
+        assert_eq!(fs::read(&path).unwrap(), vec![64; 64 * 1024]);
     }
 
     #[cfg(unix)]

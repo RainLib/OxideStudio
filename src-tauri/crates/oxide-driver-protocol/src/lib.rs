@@ -4,6 +4,15 @@ use std::collections::BTreeMap;
 
 pub const DRIVER_PROTOCOL_VERSION: &str = "1.0";
 
+/// Effective session lookup context, not an Explorer selection. This v1
+/// contract carries no proof that metadata enumeration can establish absence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlLookupContext {
+    pub database: String,
+    pub default_schema: String,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretConnectionConfig {
@@ -45,6 +54,9 @@ pub struct HandshakeResponse {
 #[serde(default, rename_all = "camelCase")]
 pub struct DriverRuntimeCapabilities {
     pub metadata: bool,
+    /// Read-only effective SQL lookup context, resolved by the driver in the
+    /// requested database. Absence on older runtimes means unknown context.
+    pub sql_lookup_context: bool,
     pub query: bool,
     /// The sidecar can keep a bounded native result cursor and exposes its
     /// lifecycle through QueryPage/FetchQueryPage/CloseQuerySession. This is
@@ -80,6 +92,19 @@ pub struct DriverRuntimeCapabilities {
     /// `DriverQueryContext.read_only` is set. Agent-owned external drivers
     /// require this capability instead of trusting a host-side SQL parser.
     pub read_only_enforcement: bool,
+    /// File runtimes open the source read-only before any metadata or query.
+    /// Legacy query-only enforcement is insufficient: opening a missing file
+    /// must not create a database on behalf of an Agent.
+    pub read_only_connections: bool,
+    /// A distinct, connection-scoped file-query mode. It snapshots one local
+    /// CSV/JSON/Parquet input, exposes `data`, restricts external file access,
+    /// and enforces read-only SQL even without a per-query read-only flag.
+    /// This bit does not authorize a Host to send arbitrary source paths.
+    pub file_queries: bool,
+    /// Honors OXIDE_FILE_QUERY_WORKSPACE, holds driver.lock until process exit,
+    /// and stops running SQL on Host input EOF. File-query v1 alone does not
+    /// establish this Host-owned crash-cleanup contract.
+    pub host_managed_file_queries: bool,
     /// The sidecar owns the complete schema-migration state machine. A Host
     /// must also require the signed package contract before sending semantic
     /// snapshots; this runtime bit alone never enables execution.
@@ -242,6 +267,9 @@ pub enum SchemaMigrationMode {
 /// A normalized, descriptor-only schema snapshot. `descriptor` may contain
 /// relation, column, index and constraint metadata, but never credentials,
 /// SQL source, row values or local paths.
+/// Column descriptors may carry optional `characterSet` and `collation` names.
+/// Missing/null values mean unknown or inapplicable, never a request to reset
+/// the target's current character attributes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticSchemaSnapshot {
@@ -368,6 +396,10 @@ pub struct SchemaMigrationVerifyResult {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MetadataRequest {
     Databases,
+    SqlLookupContext {
+        #[serde(default)]
+        database: Option<String>,
+    },
     Schemas {
         #[serde(default)]
         database: Option<String>,
@@ -543,6 +575,43 @@ pub fn protocol_is_compatible(version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_context_wire_contract_is_optional_and_preserves_database_scope() {
+        let legacy: DriverRuntimeCapabilities =
+            serde_json::from_value(serde_json::json!({"metadata":true})).unwrap();
+        assert!(!legacy.sql_lookup_context);
+        let request = MetadataRequest::SqlLookupContext {
+            database: Some("Sales.DB".into()),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"kind":"sqlLookupContext","database":"Sales.DB"})
+        );
+        assert_eq!(
+            serde_json::from_value::<MetadataRequest>(wire).unwrap(),
+            request
+        );
+        let current: MetadataRequest =
+            serde_json::from_value(serde_json::json!({"kind":"sqlLookupContext"})).unwrap();
+        assert_eq!(
+            current,
+            MetadataRequest::SqlLookupContext { database: None }
+        );
+    }
+
+    #[test]
+    fn lookup_context_does_not_implicitly_grant_metadata_absence_proof() {
+        let context = SqlLookupContext {
+            database: "db".into(),
+            default_schema: "sales".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(context).unwrap(),
+            serde_json::json!({"database":"db","defaultSchema":"sales"})
+        );
+    }
 
     #[test]
     fn connection_debug_output_redacts_secrets() {
@@ -799,5 +868,22 @@ mod tests {
             serde_json::from_value::<MetadataRequest>(encoded).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn legacy_read_only_query_capability_does_not_grant_file_opening() {
+        let legacy: DriverRuntimeCapabilities = serde_json::from_value(serde_json::json!({
+            "query":true, "readOnlyEnforcement":true
+        }))
+        .unwrap();
+        assert!(legacy.read_only_enforcement);
+        assert!(!legacy.read_only_connections);
+        assert!(!legacy.file_queries);
+        assert!(!legacy.host_managed_file_queries);
+        let modern: DriverRuntimeCapabilities = serde_json::from_value(serde_json::json!({
+            "query":true, "readOnlyEnforcement":true, "readOnlyConnections":true
+        }))
+        .unwrap();
+        assert!(modern.read_only_connections);
     }
 }

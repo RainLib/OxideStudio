@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
@@ -114,7 +114,9 @@ function StatusMessage({
 function actionLabel(status: AppUpdateStatus) {
   if (status === "downloading") return "Downloading in Background...";
   if (status === "downloaded") return "Install and Restart";
+  if (status === "preparing") return "Waiting for backups...";
   if (status === "installing") return "Installing...";
+  if (status === "restart-required") return "Restart now";
   return "Download in Background";
 }
 
@@ -131,7 +133,17 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     installAndRestart,
     ignoreAvailableVersion,
     clearError,
+    nativeInstallation,
+    preparationCancelable,
+    cancelInstallationPreparation,
+    refreshInstallationStatus,
+    recoverBackupsAfterUpdate,
+    restartInstalledUpdate,
   } = useUpdateStore();
+  const [installerClosed, setInstallerClosed] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  useEffect(() => { if (open) void refreshInstallationStatus(); }, [open, refreshInstallationStatus]);
+  useEffect(() => { setInstallerClosed(false); }, [nativeInstallation?.installationId]);
   const activeTaskCount = useTaskStore((state) =>
     activeUpdateBlockingTaskCount(state.tasks),
   );
@@ -145,7 +157,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     status === "available" ||
     status === "downloading" ||
     status === "downloaded" ||
-    status === "installing";
+    status === "preparing" ||
+    status === "installing" ||
+    status === "restart-required";
+  const waitingForInstall = status === "preparing" || status === "installing" || status === "restart-required";
+  const needsRecovery = nativeInstallation?.recoveryRequired === true;
 
   const runPrimaryAction = () => {
     if (status === "available") {
@@ -153,6 +169,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       void downloadUpdate();
     }
     if (status === "downloaded") void installAndRestart();
+    if (status === "restart-required") void restartInstalledUpdate();
   };
 
   const ignoreVersion = () => {
@@ -168,7 +185,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="w-[560px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_20px_54px_rgba(0,0,0,0.48)] [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]">
+      <DialogContent layout="custom" className="w-[560px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0 [&>button]:right-3 [&>button]:top-3 [&>button]:text-[hsl(var(--wb-text-muted))]">
         <DialogHeader className="space-y-0 border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3 pr-11 text-left">
           <div className="flex items-start gap-2.5">
             <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px] bg-[hsl(var(--wb-active))] text-[hsl(var(--wb-accent))]">
@@ -187,7 +204,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           </div>
         </DialogHeader>
 
-        <div className="min-h-[276px]">
+        <div className={!update && (needsRecovery || waitingForInstall) ? "" : "min-h-[276px]"}>
+          {status === "idle" && !update && !needsRecovery && (
+            <StatusMessage icon={<RefreshCw size={24} />} title="Check for application updates">
+              Review the next release before downloading and installing it.
+            </StatusMessage>
+          )}
           {status === "checking" && (
             <StatusMessage
               icon={<LoaderCircle size={24} className="animate-spin" />}
@@ -261,6 +283,27 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           )}
         </div>
 
+        {waitingForInstall && !needsRecovery && (
+          <div role="status" aria-live="polite" className="flex items-start gap-2 border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3 text-[12px] leading-5 text-[hsl(var(--wb-text-muted))]">
+            <LoaderCircle size={14} className={`mt-0.5 shrink-0 ${status === "restart-required" ? "" : "animate-spin motion-reduce:animate-none"}`} />
+            <span>{status === "preparing" ? "Your current backup can finish. Close other OxideStudio instances to continue. Queued backups will resume after the update." : status === "restart-required" ? "The update is installed. Backups will resume when the updated application starts." : "Installing the update. Backups remain paused until the updated application starts."}</span>
+          </div>
+        )}
+
+        {needsRecovery && (
+          <div className="space-y-3 border-t border-[hsl(var(--wb-border-subtle))] px-4 py-3 text-[12px] leading-5">
+            <p role="status">The previous update has not completed. Finish installing the new version, or close its installer and resume backups. Your queue and background preference are kept.</p>
+            <label className="flex cursor-pointer items-start gap-2 text-[hsl(var(--wb-text-muted))]">
+              <input type="checkbox" checked={installerClosed} onChange={(event) => setInstallerClosed(event.target.checked)} className="mt-1" />
+              <span>I have closed the update installer.</span>
+            </label>
+            <button type="button" className="wb-text-button h-8 px-3" disabled={!installerClosed || recovering} onClick={() => {
+              setRecovering(true);
+              void recoverBackupsAfterUpdate().finally(() => setRecovering(false));
+            }}>{recovering ? "Resuming backups..." : "Resume backups"}</button>
+          </div>
+        )}
+
         {error && status !== "error" && (
           <div className="flex items-start gap-2 border-t border-red-400/20 bg-red-400/5 px-4 py-2 text-[11px] leading-4 text-red-300">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
@@ -280,7 +323,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         )}
 
         <DialogFooter className="flex-row items-center justify-end gap-2 border-t border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-panel))] px-4 py-3 sm:space-x-0">
-          {(status === "up-to-date" || status === "error") && (
+          {(status === "idle" || status === "up-to-date" || status === "error") && !needsRecovery && (
             <button
               type="button"
               className="wb-text-button h-7 gap-1.5 px-3"
@@ -299,26 +342,32 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
               Ignore {update.version}
             </button>
           )}
+          {status === "preparing" && preparationCancelable && (
+            <button type="button" className="wb-text-button h-7 px-3" onClick={() => void cancelInstallationPreparation()}>
+              Cancel update preparation
+            </button>
+          )}
           <button
             type="button"
             className="wb-text-button h-7 px-3"
             onClick={() => onOpenChange(false)}
             disabled={status === "installing"}
           >
-            {hasUpdate ? "Later" : "Close"}
+            {status === "preparing" ? "Keep waiting" : hasUpdate ? "Later" : "Close"}
           </button>
-          {hasUpdate && (
+          {hasUpdate && !needsRecovery && (
             <button
               type="button"
               className="inline-flex h-7 items-center gap-1.5 rounded-[4px] bg-[hsl(var(--wb-accent))] px-3 text-[12px] font-medium text-[hsl(var(--wb-accent-foreground))] transition-colors hover:brightness-110 disabled:pointer-events-none disabled:opacity-55"
               onClick={runPrimaryAction}
               disabled={
                 status === "downloading" ||
+                status === "preparing" ||
                 status === "installing" ||
                 (status === "downloaded" && activeTaskCount > 0)
               }
             >
-              {status === "downloaded" || status === "installing" ? (
+              {status === "downloaded" || waitingForInstall ? (
                 <RotateCw
                   size={13}
                   className={

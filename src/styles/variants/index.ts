@@ -51,3 +51,5 @@ export {
   valueEditorStateButtonVariants,
   type ValueEditorStateButtonVariants,
 } from "./valueEditor";
+
+export { popupVariants } from "./popup";

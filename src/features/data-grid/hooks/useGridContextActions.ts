@@ -1,3 +1,4 @@
+import { confirmAction, promptValue } from "@/lib/appDialogs";
 import type { FilterOperator } from "@/components/workspace/GridFilterRow";
 import type { GridTabSnapshot } from "@/features/data-grid/model/gridTypes";
 import { isTableColumnEditable } from "@/features/data-grid/model/tableColumnEditability";
@@ -321,15 +322,15 @@ export function useGridContextActions({
     closeContextMenu();
   }, [activeTab, closeContextMenu, setGridSort]);
 
-  const handleOpenColumnFilter = useCallback(() => {
+  const handleOpenColumnFilter = useCallback(async () => {
     if (!activeTab || !contextMenu.columnId) return;
 
     const currentValue =
       activeTab.gridState?.columnFilters?.[contextMenu.columnId]?.value || "";
-    const nextValue = window.prompt(
+    const nextValue = (await promptValue(
       `Filter "${contextMenu.columnName}" contains:`,
       currentValue,
-    );
+    ));
 
     if (nextValue === null) {
       closeContextMenu();
@@ -389,11 +390,11 @@ export function useGridContextActions({
 
   const handleDeleteSelectedRows = useCallback(async () => {
     if (!activeTab || selectedRowIndexes.length === 0) return;
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Delete ${selectedRowIndexes.length} selected row${
         selectedRowIndexes.length === 1 ? "" : "s"
       }?`,
-    );
+    ));
     if (!confirmed) return;
 
     await deleteRows(activeTab.id, selectedRowIndexes);

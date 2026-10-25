@@ -2,10 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{sqlite::SqliteConnectOptions, Pool, Row, Sqlite};
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+mod paths;
+pub use paths::resolve_data_dir;
 
 const APP_IDENTIFIER: &str = "com.houshuai.oxide-studio";
 
@@ -50,14 +50,30 @@ pub struct MetadataFilter<'a> {
     pub kind: Option<&'a str>,
     pub prefix: Option<&'a str>,
     pub limit: usize,
+    /// Unknown legacy provenance is excluded from a restricted database grant.
+    pub database_scope: Option<&'a [String]>,
+    /// Legacy DATABASE nodes represent schemas for PostgreSQL, databases for
+    /// namespace-oriented drivers. A schema name must never grant a database.
+    pub namespace_is_database: bool,
 }
 
 #[derive(Clone)]
 pub struct HeadlessStore {
     pool: Pool<Sqlite>,
+    data_dir: PathBuf,
 }
 
 impl HeadlessStore {
+    pub fn driver_packages(
+        &self,
+    ) -> Result<oxide_studio_lib::core::driver_package::DatabaseDriverPackageRegistry> {
+        let default_root = paths::default_driver_package_dir(&self.data_dir)?;
+        let root = oxide_studio_lib::core::config::ConfigManager::from_directory(&self.data_dir)
+            .try_driver_package_store_path(default_root)
+            .map_err(anyhow::Error::msg)?;
+        Ok(oxide_studio_lib::core::driver_package::DatabaseDriverPackageRegistry::new(root))
+    }
+
     pub async fn open(data_dir: &Path) -> Result<Self> {
         let database_path = data_dir.join("metadata.db");
         if !database_path.is_file() {
@@ -80,7 +96,10 @@ impl HeadlessStore {
                     database_path.display()
                 )
             })?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            data_dir: data_dir.to_path_buf(),
+        })
     }
 
     pub async fn require_project(&self, project_id: &str) -> Result<()> {
@@ -93,6 +112,57 @@ impl HeadlessStore {
             return Err(anyhow!("granted project does not exist: {project_id}"));
         }
         Ok(())
+    }
+
+    /// Load secrets only for the already resolved project/connection snapshot.
+    /// The Desktop read API migrates legacy rows, so it cannot be used on this
+    /// deliberately read-only SQLite pool.
+    pub async fn runtime_config(&self, connection: &StoredConnection) -> Result<Value> {
+        let has_credentials: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='connection_credentials'",
+        ).fetch_one(&self.pool).await?;
+        if has_credentials == 0 {
+            return Ok(connection.config.clone());
+        }
+        let row = sqlx::query(
+            "SELECT c.config, c.driver, c.updated_at, s.ciphertext, s.nonce
+             FROM connections c LEFT JOIN connection_credentials s
+               ON s.project_id=c.project_id AND s.connection_id=c.id
+             WHERE c.project_id=? AND c.id=?",
+        )
+        .bind(&connection.project_id)
+        .bind(&connection.id)
+        .fetch_optional(&self.pool)
+        .await?
+        .context("saved connection disappeared before execution")?;
+        let mut config: Value = row.try_get("config")?;
+        if config != connection.config
+            || row.try_get::<String, _>("driver")? != connection.driver
+            || row.try_get::<i64, _>("updated_at")? != connection.updated_at
+        {
+            return Err(anyhow!("saved connection changed; repeat the tool request"));
+        }
+        let ciphertext = row.try_get::<Option<Vec<u8>>, _>("ciphertext")?;
+        let nonce = row.try_get::<Option<Vec<u8>>, _>("nonce")?;
+        match (ciphertext, nonce) {
+            (Some(ciphertext), Some(nonce)) => {
+                oxide_studio_lib::core::store::restore_read_only_connection_credentials(
+                    &self.data_dir,
+                    &connection.project_id,
+                    &connection.id,
+                    &mut config,
+                    &ciphertext,
+                    &nonce,
+                )?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(anyhow!(
+                    "stored local connection credential record is incomplete"
+                ))
+            }
+        }
+        Ok(config)
     }
 
     pub async fn connections(&self, project_id: &str) -> Result<Vec<StoredConnection>> {
@@ -155,19 +225,53 @@ impl HeadlessStore {
         let prefix = escape_like(filter.prefix.unwrap_or_default());
         let pattern = format!("{prefix}%");
         let limit = filter.limit.clamp(1, 200) as i64;
+        let database_scope = filter
+            .database_scope
+            .map(|scope| serde_json::json!(scope).to_string());
         let rows = sqlx::query(
             r#"
-            SELECT id, connection_id, parent_id, kind, name, metadata, last_updated
-            FROM resources
-            WHERE project_id = ?
-              AND connection_id = ?
+            WITH RECURSIVE ancestry(resource_id, parent_id, database_name, depth) AS (
+                SELECT id, parent_id,
+                    COALESCE(
+                        CASE WHEN json_valid(metadata) THEN
+                            COALESCE(json_extract(metadata, '$.database'), json_extract(metadata, '$.databaseName'))
+                        END,
+                        CASE WHEN ? AND UPPER(kind) = 'DATABASE' THEN name END
+                    ), 0
+                FROM resources WHERE project_id = ? AND connection_id = ?
+                UNION ALL
+                SELECT ancestry.resource_id, parent.parent_id,
+                    COALESCE(ancestry.database_name,
+                        CASE WHEN json_valid(parent.metadata) THEN
+                            COALESCE(json_extract(parent.metadata, '$.database'), json_extract(parent.metadata, '$.databaseName'))
+                        END,
+                        CASE WHEN ? AND UPPER(parent.kind) = 'DATABASE' THEN parent.name END
+                    ), ancestry.depth + 1
+                FROM ancestry JOIN resources parent ON parent.id = ancestry.parent_id
+                WHERE parent.project_id = ? AND parent.connection_id = ? AND ancestry.depth < 32
+            )
+            SELECT r.id, r.connection_id, r.parent_id, r.kind, r.name, r.metadata, r.last_updated
+            FROM resources r
+            WHERE r.project_id = ?
+              AND r.connection_id = ?
               AND (? IS NULL OR parent_id = ?)
               AND (? IS NULL OR UPPER(kind) = UPPER(?))
               AND name LIKE ? ESCAPE '\'
+              AND (? IS NULL OR EXISTS (
+                  SELECT 1 FROM ancestry, json_each(?) allowed
+                  WHERE ancestry.resource_id = r.id
+                    AND LOWER(TRIM(ancestry.database_name, ' `"[]')) = LOWER(TRIM(allowed.value, ' `"[]'))
+              ))
             ORDER BY name
             LIMIT ?
             "#,
         )
+        .bind(filter.namespace_is_database)
+        .bind(project_id)
+        .bind(connection_id)
+        .bind(filter.namespace_is_database)
+        .bind(project_id)
+        .bind(connection_id)
         .bind(project_id)
         .bind(connection_id)
         .bind(parent_id.as_deref())
@@ -175,6 +279,8 @@ impl HeadlessStore {
         .bind(kind.as_deref())
         .bind(kind.as_deref())
         .bind(pattern)
+        .bind(database_scope.as_deref())
+        .bind(database_scope.as_deref())
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -196,40 +302,6 @@ impl HeadlessStore {
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()
             .context("failed to decode cached project metadata")
-    }
-}
-
-pub fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-    if let Some(path) = env::var_os("OXIDE_DATA_DIR").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = env::var_os("HOME").context("HOME is unavailable")?;
-        Ok(PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join(APP_IDENTIFIER))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let roaming = env::var_os("APPDATA").context("APPDATA is unavailable")?;
-        Ok(PathBuf::from(roaming).join(APP_IDENTIFIER))
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
-        {
-            return Ok(PathBuf::from(config_home).join(APP_IDENTIFIER));
-        }
-        let home = env::var_os("HOME").context("HOME is unavailable")?;
-        Ok(PathBuf::from(home).join(".config").join(APP_IDENTIFIER))
     }
 }
 

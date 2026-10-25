@@ -38,5 +38,11 @@ describe("data source driver choices", () => {
         availability: "installationRequired",
       }),
     );
+    for (const driver of ["solr", "couchdb", "gbase8s", "gbase8c", "transwarp", "nebula", "salesforce"]) {
+      expect(choices).toContainEqual(
+        expect.objectContaining({ driver, availability: "installationRequired" }),
+      );
+    }
+    expect(choices.some((choice) => choice.driver === "plugin")).toBe(false);
   });
 });

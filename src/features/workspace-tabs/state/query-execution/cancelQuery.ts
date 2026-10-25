@@ -1,10 +1,12 @@
 import { queryService } from "@/services/tauri";
 import type { TabSlice } from "../types";
+import { cancelFileQuery } from "./fileQuery";
 
 /** Owns best-effort query cancellation without taking over completion state. */
 export const createCancelQueryAction: TabSlice<"cancelTabQuery"> = (set, get) => ({
   cancelTabQuery: async (id) => {
     const tab = get().tabs.find((t) => t.id === id);
+    if (tab?.fileQuery) return cancelFileQuery(set, get, id);
     if (!tab?.runningQueryId) return;
     const queryId = tab.runningQueryId;
 

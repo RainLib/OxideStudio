@@ -1,19 +1,18 @@
-use crate::core::{driver::LocalDatabaseBackupControl, manager::ConnectionManager};
+use crate::core::driver::LocalDatabaseBackupControl;
 use chrono::Utc;
 
-use super::calendar::{schedule_is_due, schedule_next_run};
+use super::artifacts::ArtifactLedger;
+use super::calendar::advance_schedule;
+use super::control::claim_allowed;
 use super::files::{
     backup_file_path, compress_backup_file, compressed_backup_file_path, safe_run_error,
-    safe_run_file,
 };
-use super::models::{
-    SqliteBackupCompression, SqliteBackupRun, SqliteBackupRunStatus, SqliteBackupRunTrigger,
-    MAX_RUNS,
-};
+use super::models::{SqliteBackupCompression, SqliteBackupRun, SqliteBackupRunStatus};
+use super::source::backup_saved_connection;
 use super::state::SqliteBackupScheduleState;
 use super::validation::{
-    canonical_destination, confirm_bundled_sqlite, destination_identity_for_file,
-    require_destination_identity, validate_identity, verify_destination_identity,
+    canonical_destination, destination_identity_for_file, require_destination_identity,
+    verify_destination_identity,
 };
 
 pub(super) async fn finish_run(
@@ -25,39 +24,62 @@ pub(super) async fn finish_run(
     error: Option<String>,
 ) -> Result<SqliteBackupRun, String> {
     let completed = Utc::now();
-    let mut data = state.data.lock().await;
+    let mut data = state.lock_data().await?;
     let run_index = data
         .runs
         .iter()
         .position(|run| run.id == run_id)
         .ok_or_else(|| "The backup run no longer exists".to_string())?;
     let schedule_id = data.runs[run_index].schedule_id.clone();
-    data.runs[run_index].status = status;
-    data.runs[run_index].completed_at = Some(completed.to_rfc3339());
-    data.runs[run_index].progress_percent = if status == SqliteBackupRunStatus::Success {
-        100
+    let mut ledger = ArtifactLedger::open(state, &data).await?;
+    let mut finished = data.runs[run_index].clone();
+    if let Some(receipt) = ledger.terminal_receipt(&finished).await? {
+        finished = receipt;
+    } else if !finished.status.is_active() {
+        // Queued cancellation may win before the execution task claims it.
+        // Its late failure must not replace that already committed outcome.
+        ledger.close().await?;
+        return Ok(finished);
     } else {
-        data.runs[run_index].progress_percent.min(99)
-    };
-    data.runs[run_index].error = error;
-    if let Some(path) = published_path {
-        data.runs[run_index].file_path = Some(path.to_string_lossy().into_owned());
+        finished.status = status;
+        finished.completed_at = Some(completed.to_rfc3339());
+        finished.progress_percent = if status == SqliteBackupRunStatus::Success {
+            100
+        } else {
+            finished.progress_percent.min(99)
+        };
+        finished.error = error;
+        if receipt.is_none()
+            && matches!(
+                status,
+                SqliteBackupRunStatus::Failed | SqliteBackupRunStatus::Cancelled
+            )
+        {
+            finished.file_path = None;
+        }
+        if let Some(path) = published_path {
+            finished.file_path = Some(path.to_string_lossy().into_owned());
+        }
+        if let Some(receipt) = receipt {
+            finished.byte_len = Some(receipt.byte_len);
+            finished.integrity_check = Some(receipt.integrity_check);
+        }
+        if finished.status == SqliteBackupRunStatus::Success {
+            finished = ledger.register_completed(&finished).await?;
+        }
     }
-    if let Some(receipt) = receipt {
-        data.runs[run_index].byte_len = Some(receipt.byte_len);
-        data.runs[run_index].integrity_check = Some(receipt.integrity_check);
-    }
-    let finished = data.runs[run_index].clone();
+    data.runs[run_index] = finished.clone();
     if let Some(schedule) = data
         .schedules
         .iter_mut()
         .find(|schedule| schedule.id == schedule_id)
     {
         schedule.last_run_at = Some(completed.to_rfc3339());
-        schedule.last_run_status = Some(status);
-        schedule.next_run_at = schedule_next_run(schedule, completed).to_rfc3339();
+        schedule.last_run_status = Some(finished.status);
+        advance_schedule(schedule, completed);
     }
     state.persist(&data)?;
+    ledger.close().await?;
     Ok(finished)
 }
 
@@ -65,116 +87,109 @@ pub(super) async fn apply_retention(
     state: &SqliteBackupScheduleState,
     schedule_id: &str,
 ) -> Result<(), String> {
-    let mut data = state.data.lock().await;
-    let Some(schedule) = data
-        .schedules
-        .iter()
-        .find(|schedule| schedule.id == schedule_id)
-        .cloned()
-    else {
-        return Ok(());
-    };
-    let mut successful = data
-        .runs
-        .iter()
-        .filter(|run| {
-            run.schedule_id == schedule_id && run.status == SqliteBackupRunStatus::Success
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    successful.sort_by(|left, right| right.started_at.cmp(&left.started_at));
-    let stale = successful
-        .into_iter()
-        .skip(usize::from(schedule.retention_count.clamp(1, 100)))
-        .collect::<Vec<_>>();
-    if stale.is_empty() {
-        return Ok(());
-    }
-    let mut removed = Vec::new();
-    for run in stale {
-        let Some(path) = safe_run_file(&run) else {
-            continue;
+    let mut first_error = None;
+    let mut after = None;
+    let mut unavailable = std::collections::HashSet::new();
+    loop {
+        let mut data = state.lock_data().await?;
+        let Some(schedule) = data
+            .schedules
+            .iter()
+            .find(|schedule| schedule.id == schedule_id)
+            .cloned()
+        else {
+            return Ok(());
         };
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => continue,
-            Ok(_) => {
-                if std::fs::remove_file(&path).is_ok() {
-                    removed.push(run.id);
+        let mut ledger = ArtifactLedger::open(state, &data).await?;
+        ledger.archive_history(&data.runs).await?;
+        let stale = ledger
+            .stale(schedule_id, schedule.retention_count, after.as_ref())
+            .await?;
+        if stale.is_empty() {
+            ledger.close().await?;
+            return first_error.map_or(Ok(()), Err);
+        }
+        let mut removed = Vec::new();
+        after = stale.last().map(|artifact| artifact.run.clone());
+        let mut ledger_failed = false;
+        for artifact in stale {
+            if unavailable.contains(&artifact.run.destination_directory) {
+                continue;
+            }
+            match ledger.remove(&artifact).await {
+                Ok(()) => removed.push(artifact.run.id),
+                Err(error) => {
+                    if error.contains("destination is unavailable") {
+                        unavailable.insert(artifact.run.destination_directory);
+                    }
+                    ledger_failed = error == "Cannot access the backup file ledger";
+                    first_error.get_or_insert(error);
+                    if ledger_failed {
+                        break;
+                    }
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => removed.push(run.id),
-            Err(_) => {}
         }
+        if !removed.is_empty() {
+            data.runs.retain(|run| !removed.contains(&run.id));
+            state.persist(&data)?;
+            ledger.prune_tombstones(&data.runs).await?;
+        }
+        ledger.close().await?;
+        if ledger_failed {
+            return first_error.map_or(Ok(()), Err);
+        }
+        drop(data);
+        tokio::task::yield_now().await;
     }
-    if !removed.is_empty() {
-        data.runs.retain(|run| !removed.contains(&run.id));
-        state.persist(&data)?;
-    }
-    Ok(())
 }
 
 pub(super) async fn run_schedule(
     state: &SqliteBackupScheduleState,
-    manager: &ConnectionManager,
-    schedule_id: &str,
-    trigger: SqliteBackupRunTrigger,
+    run_id: &str,
+    control: &LocalDatabaseBackupControl,
 ) -> Result<SqliteBackupRun, String> {
-    let schedule_id = validate_identity(schedule_id, "backup schedule identity")?;
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let control = LocalDatabaseBackupControl::default();
-    {
-        let mut active = state.active.lock().await;
-        if active.contains_key(&schedule_id) {
-            return Err("This backup schedule is already running".to_string());
-        }
-        active.insert(schedule_id.clone(), control.clone());
-    }
-    let schedule = {
-        let data = state.data.lock().await;
-        data.schedules
+    uuid::Uuid::parse_str(run_id).map_err(|_| "Invalid backup run identity".to_string())?;
+    let (run, schedule) = {
+        let mut data = state.lock_data().await?;
+        let ledger = ArtifactLedger::open(state, &data).await?;
+        ledger.close().await?;
+        let index = data
+            .runs
             .iter()
-            .find(|schedule| schedule.id == schedule_id)
-            .cloned()
-    };
-    let Some(schedule) = schedule else {
-        state.active.lock().await.remove(&schedule_id);
-        return Err("The backup schedule no longer exists".to_string());
-    };
-    if trigger == SqliteBackupRunTrigger::Scheduled && !schedule_is_due(&schedule, Utc::now()) {
-        state.active.lock().await.remove(&schedule_id);
-        return Err("The SQLite backup schedule is not due".to_string());
-    }
-    let started = Utc::now();
-    let path = backup_file_path(&schedule, &run_id, started);
-    let run = SqliteBackupRun {
-        id: run_id.clone(),
-        schedule_id: schedule.id.clone(),
-        schedule_name: schedule.name.clone(),
-        project_id: schedule.project_id.clone(),
-        connection_id: schedule.connection_id.clone(),
-        destination_directory: schedule.destination_directory.clone(),
-        compression: schedule.compression,
-        trigger,
-        status: SqliteBackupRunStatus::Running,
-        started_at: started.to_rfc3339(),
-        completed_at: None,
-        file_path: Some(path.to_string_lossy().into_owned()),
-        byte_len: None,
-        integrity_check: None,
-        progress_percent: 0,
-        error: None,
-    };
-    {
-        let mut data = state.data.lock().await;
-        data.runs.insert(0, run);
-        data.runs.truncate(MAX_RUNS);
-        if let Err(error) = state.persist(&data) {
-            data.runs.retain(|run| run.id != run_id);
-            state.active.lock().await.remove(&schedule.id);
-            return Err(error);
+            .position(|run| run.id == run_id && run.status == SqliteBackupRunStatus::Queued)
+            .ok_or_else(|| "The queued SQLite backup no longer exists".to_string())?;
+        {
+            let instance = state
+                .worker_instance
+                .lock()
+                .map_err(|_| "Cannot inspect worker ownership")?;
+            if !claim_allowed(state.root(), &state.config_dir, instance.as_deref())? {
+                return Ok(data.runs[index].clone());
+            }
         }
+        let schedule = data
+            .schedules
+            .iter()
+            .find(|schedule| schedule.id == data.runs[index].schedule_id)
+            .cloned()
+            .ok_or_else(|| "The SQLite backup schedule no longer exists".to_string())?;
+        if schedule.project_id != data.runs[index].project_id
+            || schedule.connection_id != data.runs[index].connection_id
+        {
+            return Err("The queued backup source changed".to_string());
+        }
+        data.runs[index].status = SqliteBackupRunStatus::Running;
+        state.persist(&data)?;
+        (data.runs[index].clone(), schedule)
+    };
+    if run.cancel_requested {
+        control.cancel();
     }
-
+    let started = chrono::DateTime::parse_from_rfc3339(&run.started_at)
+        .map_err(|_| "Invalid backup run time".to_string())?
+        .with_timezone(&Utc);
+    let path = backup_file_path(&schedule, run_id, started);
     let result = async {
         let destination = canonical_destination(&schedule.destination_directory)?;
         if destination.to_string_lossy() != schedule.destination_directory {
@@ -185,14 +200,14 @@ pub(super) async fn run_schedule(
             schedule.destination_identity.as_ref(),
             Some(&current_identity),
         )?;
-        confirm_bundled_sqlite(manager, &schedule.connection_id).await?;
-        manager
-            .backup_local_database_controlled(&schedule.connection_id, &path, &control)
-            .await
-            .map_err(|error| error.to_string())
+        if path.exists() || compressed_backup_file_path(&path).exists() {
+            return Err("The backup job destination already exists".to_string());
+        }
+        backup_saved_connection(state, &schedule, &path, control).await
     }
     .await;
 
+    let created_backup = result.is_ok();
     let published = match result {
         Ok(receipt) if schedule.compression == SqliteBackupCompression::Gzip => {
             control.set_progress_percent(90);
@@ -228,7 +243,7 @@ pub(super) async fn run_schedule(
                 Ok(()) => {
                     finish_run(
                         state,
-                        &run_id,
+                        run_id,
                         SqliteBackupRunStatus::Success,
                         Some(receipt),
                         Some(&published_path),
@@ -240,7 +255,7 @@ pub(super) async fn run_schedule(
                     let _ = std::fs::remove_file(&published_path);
                     finish_run(
                         state,
-                        &run_id,
+                        run_id,
                         SqliteBackupRunStatus::Failed,
                         None,
                         None,
@@ -253,10 +268,12 @@ pub(super) async fn run_schedule(
         Err(error) => {
             let cancelled =
                 control.is_cancelled() || error.to_ascii_lowercase().contains("cancelled");
-            let _ = std::fs::remove_file(&path);
+            if created_backup {
+                let _ = std::fs::remove_file(&path);
+            }
             finish_run(
                 state,
-                &run_id,
+                run_id,
                 if cancelled {
                     SqliteBackupRunStatus::Cancelled
                 } else {
@@ -269,10 +286,18 @@ pub(super) async fn run_schedule(
             .await
         }
     };
-    state.active.lock().await.remove(&schedule.id);
-    let finished = finished_result?;
+    let mut finished = finished_result?;
     if finished.status == SqliteBackupRunStatus::Success {
-        apply_retention(state, &schedule.id).await?;
+        if let Err(error) = apply_retention(state, &schedule.id).await {
+            let warning =
+                format!("Backup completed, but retention cleanup needs attention: {error}");
+            let mut data = state.lock_data().await?;
+            if let Some(run) = data.runs.iter_mut().find(|run| run.id == run_id) {
+                run.error = Some(warning.clone());
+                state.persist(&data)?;
+            }
+            finished.error = Some(warning);
+        }
     }
     Ok(finished)
 }

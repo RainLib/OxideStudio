@@ -237,7 +237,7 @@ export function WorkbenchTitleTools({
               <TooltipContent
                 side="bottom"
                 sideOffset={7}
-                className="rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[11px] text-[hsl(var(--wb-text))] shadow-[0_10px_28px_rgba(0,0,0,0.34)]"
+                className="px-2.5 py-2 text-[11px]"
               >
                 <div className="font-medium leading-none">More tool windows</div>
                 <div className="mt-1 text-[9px] leading-none text-[hsl(var(--wb-text-muted))]">
@@ -248,7 +248,7 @@ export function WorkbenchTitleTools({
             <PopoverContent
               align="center"
               sideOffset={6}
-              className="w-[260px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[11px] shadow-[0_16px_38px_rgba(0,0,0,0.42)]"
+              className="w-[260px] p-1 text-[11px]"
             >
               {!commitPinned && (
                 <MoreTitleTool
@@ -357,7 +357,7 @@ function WorkbenchToolTooltip({
         align="center"
         sideOffset={7}
         collisionPadding={8}
-        className="min-w-[180px] rounded-[4px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[11px] text-[hsl(var(--wb-text))] shadow-[0_10px_28px_rgba(0,0,0,0.34)]"
+        className="min-w-[180px] px-2.5 py-2 text-[11px]"
       >
         <div className="flex items-center justify-between gap-4">
           <span className="font-medium leading-none">{label}</span>

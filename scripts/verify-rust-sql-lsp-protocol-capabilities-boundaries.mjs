@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = "vendor/sql-lsp/src/server/protocol";
-const protocol = fs.readFileSync(path.join(root, `${base}.rs`), "utf8");
-const capabilities = fs.readFileSync(path.join(root, `${base}/capabilities.rs`), "utf8");
+const protocol = readSourceText(path.join(root, `${base}.rs`));
+const capabilities = readSourceText(path.join(root, `${base}/capabilities.rs`));
 
 for (const required of [
   "mod capabilities;",
@@ -21,7 +22,7 @@ for (const required of [
 }
 for (const required of [
   "pub(super) fn initialize_result",
-  "client_supports_completion_documentation_resolve(&params)",
+  "client_supports_completion_documentation_resolve(params)",
   "TextDocumentSyncKind::INCREMENTAL",
   "completion_provider: Some(CompletionOptions",
   "signature_help_provider: Some(SignatureHelpOptions",

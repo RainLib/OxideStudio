@@ -129,7 +129,7 @@ export function cachedSqlProjectionSources(
   if (!selectList) return resultColumns.map(() => undefined);
   const relations = cachedSqlRelationsBeforeCursor(statement.source);
   const physicalRelations = relations.filter(
-    (relation) => !relation.isCte && !relation.isDerived,
+    (relation) => !relation.isCte && !relation.isDerived && !relation.server && !relation.schemaOmitted,
   );
   if (physicalRelations.length === 0) {
     return resultColumns.map(() => undefined);

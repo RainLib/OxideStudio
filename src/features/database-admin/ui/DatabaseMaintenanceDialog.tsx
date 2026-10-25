@@ -129,7 +129,7 @@ export function DatabaseMaintenanceDialog({
         onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="max-w-[620px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="max-w-[620px] p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-[13px]">
             <Wrench size={14} /> Maintain table

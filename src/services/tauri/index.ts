@@ -32,6 +32,8 @@ export * from "./settings.service";
 export * from "./store.service";
 export * from "./saved-sql.service";
 export * from "./table.service";
+export * from "./large-transfer.service";
+export * from "./file-import-jobs.service";
 export * from "./transaction.service";
 
 // 类型导出

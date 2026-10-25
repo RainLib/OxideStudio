@@ -1,3 +1,4 @@
+import { confirmAction, showMessage } from "@/lib/appDialogs";
 import type { TableOperationTarget } from "@/hooks/useTableOperations";
 import {
   isMaterializedViewObject,
@@ -69,7 +70,7 @@ export function createExplorerObjectActions({
     try {
       await navigator.clipboard.writeText(value);
     } catch (error: any) {
-      window.alert(`Failed to copy: ${error?.message || error}`);
+      showMessage(`Failed to copy: ${error?.message || error}`);
     }
   };
 
@@ -125,7 +126,7 @@ export function createExplorerObjectActions({
       setViewDialogInitialSql(definition);
       setIsCreateViewDialogOpen(true);
     } catch (e: any) {
-      window.alert(`Failed to load view definition: ${e}`);
+      showMessage(`Failed to load view definition: ${e}`);
     }
   };
 
@@ -134,9 +135,9 @@ export function createExplorerObjectActions({
     target?: TableOperationTarget,
   ) => {
     if (isReadOnlyRelationObject(table.type)) return;
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Empty all rows from "${table.name}"? This cannot be undone.`,
-    );
+    ));
     if (!confirmed) return;
     await truncateTable(table.name, target);
   };
@@ -146,9 +147,9 @@ export function createExplorerObjectActions({
     target?: TableOperationTarget,
   ) => {
     const label = relationObjectLabel(table.type).toLowerCase();
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Drop ${label} "${table.name}"? This will remove the ${label}.`,
-    );
+    ));
     if (!confirmed) return;
     await dropTable(table.name, table.type, target);
   };
@@ -161,7 +162,7 @@ export function createExplorerObjectActions({
     try {
       await refreshMaterializedView(table.name, table.type, target);
     } catch (e: any) {
-      window.alert(`Failed to refresh materialized view: ${e}`);
+      showMessage(`Failed to refresh materialized view: ${e}`);
     }
   };
 

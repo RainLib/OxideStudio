@@ -7,7 +7,7 @@ export type CachedLspTableDefinition = CachedLspMetadata<LspTableDefinition>;
 export type ProjectDocumentClient = Pick<
   LspClient,
   "getSessionKey" | "didOpen" | "didChange" | "didClose"
->;
+> & Partial<Pick<LspClient,"getRuntimeSnapshot">>;
 
 export type OpenProjectLspDocument = {
   client: ProjectDocumentClient;

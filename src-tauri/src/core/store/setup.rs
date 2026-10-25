@@ -8,8 +8,8 @@ use anyhow::Result;
 use sqlx::sqlite::SqlitePoolOptions;
 #[cfg(test)]
 use sqlx::{Pool, Sqlite};
-use tauri::AppHandle;
-use tauri::Manager;
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, Manager};
 #[cfg(test)]
 use zeroize::Zeroizing;
 
@@ -22,11 +22,19 @@ impl MetaStore {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub async fn new(app: &AppHandle) -> Result<Self> {
         let app_dir = app
             .path()
             .app_config_dir()
             .context("failed to get app config dir")?;
+        Self::open(&app_dir).await
+    }
+
+    /// Open the shared metadata store without creating a GUI runtime. Public
+    /// read-only agents use HeadlessStore instead and never call this writable
+    /// initialization path.
+    pub async fn open(app_dir: &std::path::Path) -> Result<Self> {
         let db_path = app_dir.join("metadata.db");
         let credential_key =
             load_or_create_credential_key(&app_dir.join(CONNECTION_CREDENTIAL_KEY_FILE))?;

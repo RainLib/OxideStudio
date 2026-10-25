@@ -52,7 +52,7 @@ export function RemoteSqliteWorkerFields({
                 <SelectTrigger className={fieldClass}>
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                <SelectContent className="">
                   <SelectItem value="session">
                     Session only · remove on disconnect
                   </SelectItem>

@@ -36,7 +36,7 @@ import {
   completionUsageScore,
   usageRankedCompletionSortText,
 } from "@/lib/completionUsage";
-import { lspLanguageId } from "@/lib/databaseDialect";
+import { lspLanguageId, lspServerDialectForCapabilities } from "@/lib/databaseDialect";
 import {
   elasticsearchConsoleCompletionContext,
   elasticsearchConsoleRequestContext,
@@ -62,9 +62,14 @@ import {
 } from "@/lib/redisCompletionSource";
 import { extractLspDocumentIdentity } from "@/services/lsp";
 import type { LspCancellationToken } from "@/services/lsp/client";
+import {bindCompletionContext, completionContextForSuggestion, type CompletionContextState} from "@/services/lsp/semanticContext";
+import {captureLspDocumentRequest} from "./lspProviderContext";
+import {rememberIncompleteCompletionInteraction} from "./completionContextRefresh";
 
 interface QueryCompletionProviderContext {
-  monaco: typeof import("monaco-editor") | null;
+  syncDocument?:(model:any)=>Promise<void>;
+  getCompletionContext?: () => CompletionContextState;
+  monaco: Pick<typeof import("monaco-editor"), "Range" | "languages"> | null;
   completionTriggerOriginRef: React.RefObject<"explicit" | "chained" | null>;
   documentUri: string;
   effectiveConnectionId: string | null;
@@ -99,6 +104,8 @@ interface QueryCompletionProviderContext {
 }
 
 export function createQueryCompletionProvider({
+  syncDocument,
+  getCompletionContext,
   monaco,
   completionTriggerOriginRef,
   documentUri,
@@ -132,7 +139,10 @@ export function createQueryCompletionProvider({
     context: any,
     token: LspCancellationToken,
   ) => {
-    if (!monaco) return { suggestions: [] };
+    const semanticContext = captureLspDocumentRequest({read:getCompletionContext,model,token,
+      isActive:()=>isCurrentLspModelUri(model.uri.toString())&&(!mountedEditor?.getModel||mountedEditor.getModel()===model)});
+    if (!semanticContext.isCurrent()) return {suggestions:[]};
+    if (!monaco||token?.isCancellationRequested) return { suggestions: [] };
     const completionStartedAt = performance.now();
     // Metadata/FK fallback work can outlive an LSP response. Capture
     // this before either branch starts so no older cursor revision can
@@ -154,9 +164,11 @@ export function createQueryCompletionProvider({
       "mongodb",
       "redis",
     ].includes(completionDriver);
+    if(isSqlCompletionDocument&&!semanticContext.metadataAllowed)rememberIncompleteCompletionInteraction(mountedEditor,model,position);
     const explicitCompletion = completionTriggerOriginRef.current !== null;
     completionTriggerOriginRef.current = null;
     if (isRedisCompletionDocument) {
+      if(!semanticContext.metadataAllowed)return {suggestions:[]};
       if (
         completionUri !== documentUri ||
         !effectiveConnectionId ||
@@ -177,6 +189,7 @@ export function createQueryCompletionProvider({
         metadataVersion,
       );
       if (
+        !semanticContext.isCurrent() ||
         token?.isCancellationRequested ||
         model.getVersionId() !== initialModelVersion
       ) {
@@ -206,6 +219,7 @@ export function createQueryCompletionProvider({
         }
       }
       if (
+        !semanticContext.isCurrent() ||
         token?.isCancellationRequested ||
         model.getVersionId() !== initialModelVersion
       ) {
@@ -240,7 +254,7 @@ export function createQueryCompletionProvider({
         sortText: item.sortText,
         range,
       }));
-      return { suggestions, incomplete: false };
+      return { suggestions:suggestions.map(item=>bindCompletionContext(item,semanticContext)), incomplete: false };
     }
     if (isSqlCompletionDocument) {
       const trigger = sqlCompletionTriggerDecision(
@@ -275,7 +289,7 @@ export function createQueryCompletionProvider({
       requestGeneration,
     );
     const isCompletionCurrent = () =>
-      isCompletionRequestCurrent({
+      semanticContext.isCurrent() && isCompletionRequestCurrent({
         model,
         modelVersion: initialModelVersion,
         token,
@@ -284,6 +298,7 @@ export function createQueryCompletionProvider({
         requestGeneration,
       });
     const cachedCompletion = createCachedSqlCompletionRequest({
+      context: semanticContext,
       completionDriver,
       model,
       monaco,
@@ -390,6 +405,7 @@ export function createQueryCompletionProvider({
       reason?: string,
       incomplete = false,
     ) => {
+      if (!isCompletionCurrent()) return {suggestions:[]};
       let presentedSuggestions = suggestions;
       const batchMode = isSqlCompletionDocument
         ? sqlBatchColumnMode(textBeforeCursor, driver)
@@ -433,6 +449,7 @@ export function createQueryCompletionProvider({
             mode: batchMode,
             candidates,
             range,
+            context: semanticContext,
             replacedText,
           };
           batchColumnSessionsRef.current.clear();
@@ -468,7 +485,7 @@ export function createQueryCompletionProvider({
         suggestionCount: presentedSuggestions.length,
         reason,
       });
-      return { suggestions: presentedSuggestions, incomplete };
+      return { suggestions: presentedSuggestions.map(item=>bindCompletionContext(item,semanticContext)), incomplete };
     };
     try {
       const uri = completionUri;
@@ -511,6 +528,7 @@ export function createQueryCompletionProvider({
           suggestions,
           suggestions.length > 0 ? "fallback" : "empty",
           suggestions.length > 0 ? "lspNotReady" : "lspNotReadyNoFallback",
+          cachedCompletion.isIncomplete?.() ?? false,
         );
       }
       const languageId =
@@ -519,7 +537,8 @@ export function createQueryCompletionProvider({
           : identity?.driver
             ? lspLanguageId(identity.driver)
             : "sql";
-      await syncLspModelBeforeCompletion({
+      if(syncDocument)await syncDocument(model);
+      else await syncLspModelBeforeCompletion({
         uri,
         model,
         languageId,
@@ -530,13 +549,25 @@ export function createQueryCompletionProvider({
       });
 
       // Now request completions with synchronized state
-      const completionList = await lspClient.getCompletionList(
+      if(!semanticContext.isCurrent()||token?.isCancellationRequested||model.getVersionId()!==initialModelVersion)return {suggestions:[]};
+      const shadowVersion=documentVersionsRef.current.get(uri),shadowText=documentTextsRef.current.get(uri);
+      // Local requests use the exact owner-committed version, with inline
+      // preferences and the signed capability's concrete parser identity.
+      // Renderer cache readiness never authorizes the physical RPC here.
+      const completionList = semanticContext.lspAllowed ? await lspClient.getCompletionList(
         uri,
         position.lineNumber - 1, // LSP uses 0-indexed lines
         position.column - 1, // LSP uses 0-indexed columns
         toLspCompletionContext(context),
         token,
-      );
+      ) : shadowVersion!==undefined&&shadowText===model.getValue() ? await lspClient.getDocumentCompletions({
+        uri,version:shadowVersion,dialect:lspServerDialectForCapabilities(capabilities),
+        position:{line:position.lineNumber-1,character:position.column-1},
+        preferences:{keywordCase:editorSettings.sqlCompletion.keywordCase,functionCase:editorSettings.sqlCompletion.functionCase,tableAlias:editorSettings.sqlCompletion.tableAlias},
+      },token) : null;
+      if(!isCompletionCurrent())return {suggestions:[]};
+      if(!completionList){const suggestions=await fallbackSuggestions();return result(suggestions,suggestions.length?"fallback":"empty","documentCompletionUnavailable",cachedCompletion.isIncomplete?.()??false);}
+      if(!semanticContext.lspAllowed&&(documentVersionsRef.current.get(uri)!==shadowVersion||documentTextsRef.current.get(uri)!==shadowText))return {suggestions:[]};
       const items = markResolvableLspCompletionItems(
         completionList.items,
         completionList.resolveProvider,
@@ -698,7 +729,7 @@ export function createQueryCompletionProvider({
           boundedSuggestions,
           "lsp",
           undefined,
-          completionList.isIncomplete,
+          completionList.isIncomplete || (cachedCompletion.isIncomplete?.() ?? false),
         );
       }
       const fallback = await fallbackSuggestions();
@@ -706,7 +737,7 @@ export function createQueryCompletionProvider({
         fallback,
         fallback.length > 0 ? "fallback" : "empty",
         fallback.length > 0 ? "emptyLsp" : "emptyLspNoFallback",
-        completionList.isIncomplete,
+        completionList.isIncomplete || (cachedCompletion.isIncomplete?.() ?? false),
       );
     } catch (error) {
       console.error("[LSP] Completion failed:", error);
@@ -715,6 +746,7 @@ export function createQueryCompletionProvider({
         fallback,
         "error",
         fallback.length > 0 ? "lspErrorFallback" : "lspErrorEmpty",
+        cachedCompletion.isIncomplete?.() ?? false,
       );
     }
   };
@@ -724,11 +756,13 @@ export function createQueryCompletionProvider({
     token: LspCancellationToken,
   ) => {
     const sourceItem = sourceLspCompletionItem(suggestion);
+    const semanticContext = completionContextForSuggestion(suggestion);
     const resolveContext = completionResolveRequestContext(suggestion);
     const model = mountedEditor?.getModel();
     if (
       !monaco ||
       !sourceItem ||
+      semanticContext?.isCurrent() === false ||
       token?.isCancellationRequested ||
       (resolveContext &&
         (!model ||
@@ -744,6 +778,7 @@ export function createQueryCompletionProvider({
     const currentModel = mountedEditor?.getModel();
     if (
       token?.isCancellationRequested ||
+      semanticContext?.isCurrent() === false ||
       (resolveContext &&
         (!currentModel ||
           currentModel.uri.toString() !== resolveContext.uri ||

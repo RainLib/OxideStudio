@@ -7,6 +7,25 @@ use regex::Regex;
 
 use super::statement::StatementScanDialect;
 
+/// Identifier qualification is independent from statement scanning. SQLite
+/// and RQLite use database.table even with the PostgreSQL-compatible scanner.
+#[derive(Debug, Clone, Copy)]
+pub enum RelationNamespace {
+    Database,
+    CatalogAndSchema,
+    SqlServer,
+}
+
+impl From<StatementScanDialect> for RelationNamespace {
+    fn from(dialect: StatementScanDialect) -> Self {
+        match dialect {
+            StatementScanDialect::Mysql => Self::Database,
+            StatementScanDialect::Postgres => Self::CatalogAndSchema,
+            StatementScanDialect::SqlServer => Self::SqlServer,
+        }
+    }
+}
+
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
 const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,3}";
 
@@ -59,6 +78,14 @@ pub fn assess_sql_database_references(
     dialect: StatementScanDialect,
     active_database: &str,
 ) -> DatabaseReferenceAssessment {
+    assess_sql_database_references_with_namespace(sql, dialect.into(), active_database)
+}
+
+pub fn assess_sql_database_references_with_namespace(
+    sql: &str,
+    namespace: RelationNamespace,
+    active_database: &str,
+) -> DatabaseReferenceAssessment {
     let cleaned = sql_scope_text(sql);
     let current_database = normalize_database_name(active_database);
     let mut assessment = DatabaseReferenceAssessment::default();
@@ -71,7 +98,7 @@ pub fn assess_sql_database_references(
     {
         collect_pattern_databases(
             statement,
-            dialect,
+            namespace,
             &cleaned.quoted_identifiers,
             &current_database,
             &mut assessment,
@@ -79,7 +106,7 @@ pub fn assess_sql_database_references(
         );
         collect_pattern_databases(
             statement,
-            dialect,
+            namespace,
             &cleaned.quoted_identifiers,
             &current_database,
             &mut assessment,
@@ -87,7 +114,7 @@ pub fn assess_sql_database_references(
         );
         assessment.uncertain |= collect_comma_separated_from_databases(
             statement,
-            dialect,
+            namespace,
             &cleaned.quoted_identifiers,
             &current_database,
             &mut assessment.databases,
@@ -108,12 +135,26 @@ pub fn sql_references_disallowed_database(
     active_database: &str,
     allowed_databases: &[String],
 ) -> bool {
+    sql_references_disallowed_database_with_namespace(
+        sql,
+        dialect.into(),
+        active_database,
+        allowed_databases,
+    )
+}
+
+pub fn sql_references_disallowed_database_with_namespace(
+    sql: &str,
+    namespace: RelationNamespace,
+    active_database: &str,
+    allowed_databases: &[String],
+) -> bool {
     let allowed = allowed_databases
         .iter()
         .map(|database| normalize_database_name(database))
         .filter(|database| !database.is_empty())
         .collect::<HashSet<_>>();
-    let assessment = assess_sql_database_references(sql, dialect, active_database);
+    let assessment = assess_sql_database_references_with_namespace(sql, namespace, active_database);
     assessment.uncertain
         || assessment
             .databases
@@ -123,7 +164,7 @@ pub fn sql_references_disallowed_database(
 
 fn collect_pattern_databases(
     statement: &str,
-    dialect: StatementScanDialect,
+    namespace: RelationNamespace,
     quoted_identifiers: &HashMap<String, String>,
     current_database: &str,
     assessment: &mut DatabaseReferenceAssessment,
@@ -136,7 +177,7 @@ fn collect_pattern_databases(
         };
         match database_from_qualified_name(
             target.as_str(),
-            dialect,
+            namespace,
             quoted_identifiers,
             current_database,
         ) {
@@ -150,7 +191,7 @@ fn collect_pattern_databases(
 
 fn collect_comma_separated_from_databases(
     statement: &str,
-    dialect: StatementScanDialect,
+    namespace: RelationNamespace,
     quoted_identifiers: &HashMap<String, String>,
     current_database: &str,
     databases: &mut BTreeSet<String>,
@@ -172,7 +213,7 @@ fn collect_comma_separated_from_databases(
                 .and_then(|target| {
                     database_from_qualified_name(
                         target.as_str(),
-                        dialect,
+                        namespace,
                         quoted_identifiers,
                         current_database,
                     )
@@ -209,7 +250,7 @@ fn split_top_level_comma_separated_targets(value: &str) -> Vec<&str> {
 
 fn database_from_qualified_name(
     qualified_name: &str,
-    dialect: StatementScanDialect,
+    namespace: RelationNamespace,
     quoted_identifiers: &HashMap<String, String>,
     current_database: &str,
 ) -> Option<String> {
@@ -221,11 +262,13 @@ fn database_from_qualified_name(
     if parts.len() < 2 {
         return (!current_database.is_empty()).then(|| current_database.to_string());
     }
-    match dialect {
-        StatementScanDialect::Mysql => parts.first().cloned(),
-        StatementScanDialect::SqlServer if parts.len() >= 4 => parts.get(1).cloned(),
-        StatementScanDialect::SqlServer if parts.len() >= 3 => parts.first().cloned(),
-        StatementScanDialect::SqlServer | StatementScanDialect::Postgres => {
+    match namespace {
+        RelationNamespace::Database => parts.first().cloned(),
+        RelationNamespace::SqlServer if parts.len() >= 4 => parts.get(1).cloned(),
+        RelationNamespace::SqlServer | RelationNamespace::CatalogAndSchema if parts.len() >= 3 => {
+            parts.first().cloned()
+        }
+        RelationNamespace::SqlServer | RelationNamespace::CatalogAndSchema => {
             (!current_database.is_empty()).then(|| current_database.to_string())
         }
     }
@@ -437,7 +480,10 @@ fn finish_quoted_identifier(
 
 #[cfg(test)]
 mod tests {
-    use super::{assess_sql_database_references, sql_references_disallowed_database};
+    use super::{
+        assess_sql_database_references, sql_references_disallowed_database,
+        sql_references_disallowed_database_with_namespace, RelationNamespace,
+    };
     use crate::core::statement::StatementScanDialect;
 
     fn allowed() -> Vec<String> {
@@ -540,6 +586,34 @@ mod tests {
             StatementScanDialect::Postgres,
             "reporting",
             &allowed(),
+        ));
+    }
+
+    #[test]
+    fn sqlite_style_two_part_names_use_database_scope_independently_of_the_sql_scanner() {
+        for sql in [
+            "SELECT * FROM outside.items",
+            "SELECT * FROM main.items JOIN \"outside\".items ON 1=1",
+            "SELECT * FROM main.items, [outside].[items]",
+        ] {
+            assert!(sql_references_disallowed_database_with_namespace(
+                sql,
+                RelationNamespace::Database,
+                "main",
+                &["main".into()]
+            ));
+        }
+        assert!(!sql_references_disallowed_database_with_namespace(
+            "SELECT * FROM `main`.`items`",
+            RelationNamespace::Database,
+            "main",
+            &["main".into()]
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM outside.public.items",
+            StatementScanDialect::Postgres,
+            "main",
+            &["main".into()]
         ));
     }
 }

@@ -2,10 +2,13 @@
 
 mod conversions;
 mod driver;
+mod lookup_context;
 mod migration;
 mod models;
 mod runtime;
 
+#[cfg(feature = "desktop")]
+pub(crate) use conversions::external_statement_scan_dialect;
 pub use models::ExternalDriver;
 
 #[cfg(test)]

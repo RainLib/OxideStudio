@@ -41,6 +41,7 @@ export function createUpdateCheckActions(set: AppUpdateSet, get: AppUpdateGet) {
           status: ignored ? "up-to-date" : update ? "available" : "up-to-date",
           downloadedBytes: 0,
           totalBytes: null,
+          packageDownloaded: false,
           lastCheckedAt: checkedAt,
         });
       } catch (error) {

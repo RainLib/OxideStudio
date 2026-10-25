@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { agentHostService } from "@/services/tauri/agent-host.service";
 import { aiService } from "@/services/tauri/ai.service";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
@@ -330,9 +331,9 @@ export function useAiSettingsController(
   };
 
   const clearCurrentProjectAgentState = async () => {
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Clear saved AI conversations and checkpoints for “${activeProjectName}”? This cannot be undone.`,
-    );
+    ));
     if (!confirmed) return;
     setIsClearingAgentState(true);
     setAgentStateMessage(null);

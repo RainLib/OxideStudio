@@ -48,13 +48,39 @@ impl ExternalDriver {
                 "External driver package does not enforce Agent read-only queries"
             ));
         }
+        let file = self
+            .package
+            .manifest
+            .capabilities
+            .clone()
+            .or_else(|| {
+                crate::core::dialect::database_capabilities_for_driver(
+                    &self.package.manifest.driver_id,
+                )
+                .ok()
+            })
+            .is_some_and(|caps| {
+                caps.connection_mode == crate::core::dialect::DatabaseConnectionMode::File
+            });
+        if self.agent_read_only && file && !sidecar.capabilities().read_only_connections {
+            sidecar.terminate().await;
+            return Err(anyhow!(
+                "External file driver does not enforce read-only connections"
+            ));
+        }
         let connect = sidecar
             .request(
                 DriverRequest::Connect {
                     connection_id: self.connection_id.clone(),
                     config: SecretConnectionConfig {
                         url: self.url.clone(),
-                        options: Default::default(),
+                        options: if self.agent_read_only {
+                            [("readOnly".to_string(), "true".to_string())]
+                                .into_iter()
+                                .collect()
+                        } else {
+                            Default::default()
+                        },
                     },
                 },
                 CONNECTION_TIMEOUT,

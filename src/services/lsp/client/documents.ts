@@ -2,6 +2,7 @@ import { redactSecrets } from "@/lib/redaction";
 import type { InlineLspContext } from "@/services/tauri/ai.service";
 import type { LspClientBridge } from "./contracts";
 import { isObject } from "./parsing";
+import { queueLspConfiguration } from "./configurationQueue";
 
 export async function getLspInlineCompletionContext(
   client: LspClientBridge,
@@ -55,6 +56,10 @@ export async function updateLspConfiguration(
   client: LspClientBridge,
   config: any,
 ): Promise<void> {
+  return queueLspConfiguration(client, () => sendLspConfiguration(client, config));
+}
+
+async function sendLspConfiguration(client: LspClientBridge, config: any): Promise<void> {
   if (!client.isInitialized()) return;
   try {
     await client.invoke<string>("lsp_did_change_configuration", {
@@ -112,6 +117,7 @@ export async function notifyLspDidOpen(
     console.log("[LSP] ✓ didOpen sent");
   } catch (error) {
     console.error("[LSP] ✗ didOpen failed:", error);
+    throw error;
   }
 }
 
@@ -137,6 +143,7 @@ export async function notifyLspDidChange(
     console.log("[LSP] ✓ didChange sent");
   } catch (error) {
     console.error("[LSP] ✗ didChange failed:", error);
+    throw error;
   }
 }
 

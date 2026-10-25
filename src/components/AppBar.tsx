@@ -79,6 +79,7 @@ export function AppBar({ center, right }: AppBarProps) {
   );
   const updateTotalBytes = useUpdateStore((state) => state.totalBytes);
   const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
+  const updateNeedsBackupRecovery = useUpdateStore((state) => state.nativeInstallation?.recoveryRequired === true);
   useAppUpdatePolling();
   // Detect if we're on macOS
   const isMacOS =
@@ -110,16 +111,18 @@ export function AppBar({ center, right }: AppBarProps) {
     setSettingsMenuOpen(false);
     setUpdateDialogOpen(true);
     if (
-      updateStatus === "idle" ||
-      updateStatus === "up-to-date" ||
-      updateStatus === "error" ||
-      updateStatus === "unsupported"
+      !updateNeedsBackupRecovery &&
+      (updateStatus === "idle" ||
+        updateStatus === "up-to-date" ||
+        updateStatus === "error" ||
+        updateStatus === "unsupported")
     ) {
       void checkForUpdates({ force: true });
     }
   };
 
   const updateMenuLabel = (() => {
+    if (updateNeedsBackupRecovery) return "Resume backups after update...";
     if (updateStatus === "checking") return "Checking for Updates...";
     if (updateStatus === "downloading") {
       const progress =
@@ -134,6 +137,9 @@ export function AppBar({ center, right }: AppBarProps) {
         : `Downloading Update... ${progress}%`;
     }
     if (updateStatus === "downloaded") return "Restart to Update...";
+    if (updateStatus === "preparing") return "Waiting for backups...";
+    if (updateStatus === "installing") return "Installing update...";
+    if (updateStatus === "restart-required") return "Restart updated application...";
     if (availableUpdate) return `Update to ${availableUpdate.version}...`;
     return "Check for Updates...";
   })();
@@ -147,11 +153,11 @@ export function AppBar({ center, right }: AppBarProps) {
     return RefreshCw;
   })();
   const showUpdateBadge =
-    updateStatus === "available" || updateStatus === "downloaded";
+    updateStatus === "available" || updateStatus === "downloaded" || updateStatus === "restart-required" || updateNeedsBackupRecovery;
   const showUpdateStatusButton =
     updateStatus === "available" ||
     updateStatus === "downloading" ||
-    updateStatus === "downloaded";
+    updateStatus === "downloaded" || updateStatus === "preparing" || updateStatus === "installing" || updateStatus === "restart-required" || updateNeedsBackupRecovery;
   const updateProgress =
     updateStatus === "downloading" && updateTotalBytes && updateTotalBytes > 0
       ? Math.min(1, updateDownloadedBytes / updateTotalBytes)
@@ -286,7 +292,7 @@ export function AppBar({ center, right }: AppBarProps) {
             <PopoverContent
               align="end"
               sideOffset={6}
-              className="w-[238px] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[13px] text-[hsl(var(--wb-text))] shadow-[0_18px_44px_rgba(0,0,0,0.46)]"
+              className="w-[238px] p-1 text-[13px]"
             >
               <SettingsMenuItem
                 icon={AppWindow}
@@ -351,6 +357,7 @@ function isSettingsSection(value: string): value is SettingsSection {
     "editor",
     "dataEditor",
     "databaseExplorer",
+    "drivers",
     "ai",
   ].includes(value);
 }

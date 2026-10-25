@@ -1,8 +1,13 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "649ca09cd8d5d9d844ff8d3e91057e7b58a0b0f9",
-  "sourceDirty": false,
-  "sha256": "616ef87abb142f927e0034a3742f68091d207356436a2cb8562b66f9361ad259",
+  "sourceRevision": "8c80923dc9e8e756e46eb21ce9f6e04d7a2f4735",
+  "sourceDirty": true,
+  "sourceFingerprint": {
+    "kind": "sql-lsp-runtime-inputs-v1",
+    "files": 293,
+    "sha256": "d3c9d8aa32a980aff193b5ef4ca7b48ab4d0674fbbf6c62ceba70d248b7c571d"
+  },
+  "sha256": "5655cbee4e7bc0dbe481e2ad430ae2a149e04402cbf2a84c49c3e88c2aa8cd4f",
   "platform": "win32",
   "architecture": "x64",
   "profile": "release"

@@ -1,3 +1,4 @@
+import { confirmAction, promptValue, showMessage } from "@/lib/appDialogs";
 import type { ConnectionConfig } from "@/features/connections/model/types";
 import { searchIndexClearTouched } from "@/features/database-explorer/model/elasticsearchIndexActions";
 import type { TabData, TabType } from "@/features/workspace-tabs/model/types";
@@ -102,7 +103,7 @@ export function createExplorerCollectionActions({
     try {
       await navigator.clipboard.writeText(collectionPreviewSql(collection));
     } catch (err: any) {
-      window.alert(`Failed to copy preview request: ${err?.message || err}`);
+      showMessage(`Failed to copy preview request: ${err?.message || err}`);
     }
   };
 
@@ -125,20 +126,20 @@ export function createExplorerCollectionActions({
     await Promise.allSettled(tabs.map((tab) => loadDocumentPage(tab.id, 0)));
   };
 
-  const handleDeleteCollectionClick = (collection: CollectionInfo) => {
+  const handleDeleteCollectionClick = async (collection: CollectionInfo) => {
     if (!activeConnectionId) return;
 
     const sql = collectionDeleteSql(collection);
     if (!sql) {
-      window.alert(
+      showMessage(
         `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} deletion is not supported.`,
       );
       return;
     }
 
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Delete ${collectionLabel.toLowerCase()} "${collection.name}"? This cannot be undone.`,
-    );
+    ));
     if (!confirmed) return;
 
     const tabId = createTab("query", `Delete ${collection.name}`, sql, {
@@ -150,7 +151,7 @@ export function createExplorerCollectionActions({
     void runCollectionMutation(tabId, sql);
   };
 
-  const handleCreateCollectionClick = () => {
+  const handleCreateCollectionClick = async () => {
     if (!activeConnectionId) return;
 
     if (
@@ -161,7 +162,7 @@ export function createExplorerCollectionActions({
       return;
     }
 
-    const rawName = window.prompt(`New ${collectionLabel.toLowerCase()} name:`);
+    const rawName = (await promptValue(`New ${collectionLabel.toLowerCase()} name:`));
     if (rawName === null) return;
 
     const name = rawName.trim();
@@ -169,7 +170,7 @@ export function createExplorerCollectionActions({
 
     const sql = collectionCreateSql(name);
     if (!sql) {
-      window.alert(
+      showMessage(
         `${activeCapabilities.displayName} ${collectionLabel.toLowerCase()} creation is not supported.`,
       );
       return;

@@ -1,5 +1,5 @@
 export const EXPLORER_MENU_CONTENT_CLASS =
-  "w-72 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_14px_32px_rgba(0,0,0,0.35)]";
+  "w-72 p-1 text-[12px]";
 
 export const EXPLORER_MENU_ITEM_CLASS =
   "h-7 rounded-[3px] px-2 text-[12px] text-[hsl(var(--wb-text))] focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]";

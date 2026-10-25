@@ -21,9 +21,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::backup::{
-    copy_sqlite_database, copy_sqlite_database_controlled, prepare_backup_destination,
-    publish_sqlite_backup, replace_backup_file, sqlite_connection_integrity, sync_file,
-    temporary_backup_path, validate_restore_source,
+    copy_sqlite_database, prepare_backup_destination, publish_sqlite_backup,
+    publish_sqlite_backup_controlled, sqlite_connection_integrity, validate_restore_source,
 };
 use super::models::{sqlite_column_ownership, SqliteDriver};
 use super::runtime::validate_sqlite_rebuild_statements;
@@ -110,43 +109,8 @@ impl DatabaseDriver for SqliteDriver {
         self.ensure_no_active_transactions().await?;
         let pool = self.pool().await?;
         prepare_backup_destination(&pool, destination).await?;
-        if control.is_cancelled() {
-            return Err(anyhow!("SQLite backup was cancelled"));
-        }
-        control.set_progress_percent(1);
-
-        let temporary = temporary_backup_path(destination)?;
-        let result = async {
-            let options = SqliteConnectOptions::new()
-                .filename(&temporary)
-                .create_if_missing(true)
-                .disable_statement_logging();
-            let mut backup = SqliteConnection::connect_with(&options).await?;
-            let mut source = pool.acquire().await?;
-            copy_sqlite_database_controlled(&mut source, &mut backup, Some(control)).await?;
-            control.set_progress_percent(92);
-            let integrity_check = sqlite_connection_integrity(&mut backup).await?;
-            control.set_progress_percent(96);
-            backup.close().await?;
-            sync_file(&temporary).await?;
-            control.set_progress_percent(99);
-            if control.is_cancelled() {
-                return Err(anyhow!("SQLite backup was cancelled"));
-            }
-            replace_backup_file(&temporary, destination)?;
-            control.set_progress_percent(100);
-            let byte_len = std::fs::metadata(destination)?.len();
-            Ok(LocalDatabaseFileReceipt {
-                byte_len,
-                integrity_check,
-            })
-        }
-        .await;
-
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        let mut source = pool.acquire().await?;
+        publish_sqlite_backup_controlled(&mut source, destination, control).await
     }
 
     async fn restore_local_database(&self, source: &Path) -> Result<LocalDatabaseFileReceipt> {
@@ -229,24 +193,29 @@ impl DatabaseDriver for SqliteDriver {
         statements: &[ParameterizedStatement],
     ) -> Result<Vec<u64>> {
         let pool = self.pool().await?;
-        let mut connection = pool.acquire().await?;
-        (&mut *connection).execute("BEGIN").await?;
-        let mut affected = Vec::with_capacity(statements.len());
-        for statement in statements {
-            let mut query = sqlx::query(&statement.sql).persistent(false);
-            for parameter in &statement.params {
-                query = bind_sqlite_parameter(query, parameter)?;
-            }
-            match query.execute(&mut *connection).await {
-                Ok(result) => affected.push(result.rows_affected()),
-                Err(error) => {
-                    let _ = (&mut *connection).execute("ROLLBACK").await;
-                    return Err(error.into());
+        let mut transaction = pool.begin().await?;
+        let result = async {
+            let mut affected = Vec::with_capacity(statements.len());
+            for statement in statements {
+                let mut query = sqlx::query(&statement.sql).persistent(false);
+                for parameter in &statement.params {
+                    query = bind_sqlite_parameter(query, parameter)?;
                 }
+                affected.push(query.execute(&mut *transaction).await?.rows_affected());
+            }
+            Ok::<_, anyhow::Error>(affected)
+        }
+        .await;
+        match result {
+            Ok(affected) => {
+                transaction.commit().await?;
+                Ok(affected)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
             }
         }
-        (&mut *connection).execute("COMMIT").await?;
-        Ok(affected)
     }
 
     async fn execute_sqlite_rebuild_batch(
@@ -514,22 +483,45 @@ impl DatabaseDriver for SqliteDriver {
             .fetch_all(&self.pool().await?)
             .await?;
         let indexes = self.get_indexes(schema_name, table).await?;
+        // PRAGMA notnull does not describe the implicit NOT NULL of a rowid
+        // alias. A real INTEGER PRIMARY KEY has no separate primary index;
+        // INTEGER PRIMARY KEY DESC and ordinary INT keys do have one.
+        let rowid_primary = rows
+            .iter()
+            .filter(|row| row.try_get::<i64, _>("pk").unwrap_or(0) > 0)
+            .count()
+            == 1
+            && !indexes.iter().any(|index| index.is_primary);
+        // A partial/expression/composite unique index cannot establish that
+        // one of its named columns is independently unique for every row.
+        let single_unique_indexes = sqlx::query_scalar::<_, String>(
+            "SELECT il.name FROM pragma_index_list(?1,?2) il WHERE il.\"unique\"=1 AND il.partial=0 AND (SELECT COUNT(*) FROM pragma_index_info(il.name,?2))=1 AND NOT EXISTS(SELECT 1 FROM pragma_index_info(il.name,?2) WHERE cid<0)"
+        ).bind(table).bind(schema_name).fetch_all(&self.pool().await?).await?;
         Ok(rows
             .iter()
             .map(|row| {
                 let name: String = row.try_get("name").unwrap_or_default();
                 let hidden = row.try_get::<i64, _>("hidden").unwrap_or(0);
                 let (is_generated, is_hidden) = sqlite_column_ownership(hidden);
+                let rowid_alias = rowid_primary
+                    && row.try_get::<i64, _>("pk").unwrap_or(0) > 0
+                    && row
+                        .try_get::<&str, _>("type")
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("INTEGER");
                 ColumnInfo {
                     name: name.clone(),
                     data_type: row
                         .try_get::<String, _>("type")
                         .unwrap_or_else(|_| "TEXT".to_string()),
-                    is_nullable: row.try_get::<i64, _>("notnull").unwrap_or(0) == 0,
+                    is_nullable: row.try_get::<i64, _>("notnull").unwrap_or(0) == 0 && !rowid_alias,
                     is_primary_key: row.try_get::<i64, _>("pk").unwrap_or(0) > 0,
-                    is_unique: indexes.iter().any(|index| {
-                        index.is_unique && index.columns.iter().any(|column| column == &name)
-                    }),
+                    is_unique: rowid_alias
+                        || indexes.iter().any(|index| {
+                            single_unique_indexes.contains(&index.name)
+                                && index.columns.iter().any(|column| column == &name)
+                        }),
                     is_indexed: indexes
                         .iter()
                         .any(|index| index.columns.iter().any(|column| column == &name)),
@@ -537,6 +529,8 @@ impl DatabaseDriver for SqliteDriver {
                     identity_generation: None,
                     is_generated: Some(is_generated),
                     is_hidden: Some(is_hidden),
+                    character_set: None,
+                    collation: None,
                     default_value: row.try_get("dflt_value").ok(),
                     comment: None,
                 }

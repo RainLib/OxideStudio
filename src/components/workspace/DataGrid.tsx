@@ -1,3 +1,4 @@
+import { PopupPresence } from "@/components/ui/PopupPresence";
 import {
   ColumnFormatterDialog,
   DataGridContextMenu,
@@ -615,7 +616,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 showSearch={showSearch}
                 onSearchClose={() => setShowSearch(false)}
               />
-              {columnLookupOpen && (
+              <PopupPresence open={columnLookupOpen}>
                 <GridColumnLookup
                   columnLookupInputRef={columnLookupInputRef}
                   columnLookupQuery={columnLookupQuery}
@@ -626,7 +627,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   setColumnLookupSelectedIndex={setColumnLookupSelectedIndex}
                   selectColumnLookupItem={selectColumnLookupItem}
                 />
-              )}
+              </PopupPresence>
               {visualRows.length === 0 && (
                 <div className="absolute inset-x-0 top-12 bottom-0 flex items-center justify-center pointer-events-none">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
@@ -642,14 +643,14 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             </>
           )}
 
-          {contextMenu.type && (
+          <PopupPresence open={Boolean(contextMenu.type)}>
             <DataGridContextMenu
               x={contextMenu.x}
               y={contextMenu.y}
               items={contextMenuItems}
               onClose={closeContextMenu}
             />
-          )}
+          </PopupPresence>
 
           <DataGridHoverTooltip tooltip={hoverTooltip} />
 

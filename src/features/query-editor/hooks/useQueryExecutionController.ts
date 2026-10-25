@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import {
   useCallback,
   useEffect,
@@ -358,7 +359,7 @@ export function useQueryExecutionController({
   ]);
 
   const handleExplain = useCallback(
-    (mode: "estimate" | "analyze") => {
+    async (mode: "estimate" | "analyze") => {
       if (
         !canExecute ||
         !supportsExplainPlan ||
@@ -376,9 +377,9 @@ export function useQueryExecutionController({
       if (!sql.trim() || extractSqlParameters(sql, driver).length > 0) return;
       if (
         mode === "analyze" &&
-        !window.confirm(
+        !(await confirmAction(
           "Explain Analyze executes this query to collect actual timing and row counts. It runs in a backend-enforced read-only transaction, but it can still be expensive. Continue?",
-        )
+        ))
       ) {
         return;
       }

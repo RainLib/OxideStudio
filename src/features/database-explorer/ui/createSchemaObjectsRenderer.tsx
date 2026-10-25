@@ -1,3 +1,4 @@
+import { showMessage } from "@/lib/appDialogs";
 import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import {
   explorerDirectoryGroupForObjectType,
@@ -408,7 +409,7 @@ export function createSchemaObjectsRenderer({
           setDdlViewerOpen(true);
         })
         .catch((error) => {
-          window.alert(
+          showMessage(
             `Unable to load ${object.objectType.toLowerCase()} definition: ${error instanceof Error ? error.message : String(error)}`,
           );
         });

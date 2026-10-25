@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 /** @vitest-environment happy-dom */
 import { describe, expect, it, vi } from "vitest";
 import type { IndexInfo } from "@/services/tauri/types";
@@ -110,7 +111,7 @@ describe("table editing store: metadata refresh and draft protection", () => {
   });
 
   it("keeps drafts and avoids loading when page replacement is declined", async () => {
-    vi.mocked(confirm).mockReturnValueOnce(false);
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
 
     const loaded = await useTabStore.getState().loadTablePage("tab-1", 1);
 
@@ -119,11 +120,11 @@ describe("table editing store: metadata refresh and draft protection", () => {
     expect(mocks.previewTablePage).not.toHaveBeenCalled();
     expect(tab.pendingEdits).toEqual(new Map([["0:0", "new@example.test"]]));
     expect(tab.tablePage).toBeUndefined();
-    expect(vi.mocked(confirm).mock.calls[0]?.[0]).toContain("Submit Changes");
+    expect(vi.mocked(confirmAction).mock.calls[0]?.[0]).toContain("Submit Changes");
   });
 
   it("does not apply a server sort when discarding drafts is declined", async () => {
-    vi.mocked(confirm).mockReturnValueOnce(false);
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
 
     const sorted = await useTabStore
       .getState()
@@ -136,13 +137,13 @@ describe("table editing store: metadata refresh and draft protection", () => {
     expect(tab.pendingEdits?.size).toBe(1);
   });
 
-  it("protects table drafts when closing and does not restore discarded drafts", () => {
-    vi.mocked(confirm).mockReturnValueOnce(false);
-    useTabStore.getState().closeTab("tab-1");
+  it("protects table drafts when closing and does not restore discarded drafts", async () => {
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
+    (await useTabStore.getState().closeTab("tab-1"));
     expect(useTabStore.getState().tabs).toHaveLength(1);
 
-    vi.mocked(confirm).mockReturnValueOnce(true);
-    useTabStore.getState().closeTab("tab-1");
+    vi.mocked(confirmAction).mockResolvedValueOnce(true);
+    (await useTabStore.getState().closeTab("tab-1"));
     expect(useTabStore.getState().tabs).toHaveLength(0);
     expect(useTabStore.getState().closedTabsStack[0]?.pendingEdits?.size).toBe(
       0,
@@ -175,11 +176,11 @@ describe("table editing store: metadata refresh and draft protection", () => {
     expect(useTabStore.getState().tabs[0]?.pendingEdits).toEqual(
       new Map([["0:0", "new@example.test"]]),
     );
-    expect(confirm).not.toHaveBeenCalled();
+    expect(confirmAction).not.toHaveBeenCalled();
   });
 
   it("keeps drafts when a table-wide metadata refresh is declined", async () => {
-    vi.mocked(confirm).mockReturnValueOnce(false);
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
 
     await useTabStore
       .getState()

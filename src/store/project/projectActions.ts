@@ -22,11 +22,11 @@ export function createProjectActions(
   get: ProjectGet,
 ): ProjectActions {
   return {
-    setActiveProject: (projectId) => {
+    setActiveProject: async (projectId) => {
       const project =
         get().projects.find((item) => item.id === projectId) || DEFAULT_PROJECT;
       if (project.id === get().activeProjectId) return true;
-      if (!confirmDiscardAllTabChanges("switch projects")) return false;
+      if (!(await confirmDiscardAllTabChanges("switch projects"))) return false;
 
       const switchId = beginProjectSwitch();
       const connectionRequest =
@@ -62,7 +62,7 @@ export function createProjectActions(
       ) {
         throw new Error("This directory is already linked to another project.");
       }
-      if (!confirmDiscardAllTabChanges("switch to the new project")) {
+      if (!(await confirmDiscardAllTabChanges("switch to the new project"))) {
         throw new Error(
           "Project creation was cancelled to keep unsaved files open.",
         );
@@ -106,7 +106,7 @@ export function createProjectActions(
       const isActiveProject = state.activeProjectId === projectId;
       if (
         isActiveProject &&
-        !confirmDiscardAllTabChanges("delete the active project")
+        !(await confirmDiscardAllTabChanges("delete the active project"))
       ) {
         throw new Error(
           "Project deletion was cancelled to keep unsaved files open.",

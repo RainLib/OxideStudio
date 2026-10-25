@@ -73,7 +73,7 @@ export function AssistantContextPopover({
         align="start"
         side="top"
         sideOffset={6}
-        className="max-h-[min(620px,calc(100vh-24px))] w-[360px] overflow-y-auto rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.38)]"
+        className="max-h-[min(620px,calc(100vh-24px))] w-[360px] overflow-y-auto p-0 text-[10px]"
       >
         <div className="border-b border-[hsl(var(--wb-border-subtle))] px-3 py-2.5">
           <div className="flex items-center justify-between gap-2">

@@ -115,7 +115,7 @@ export function AssistantModelControl({
           window.requestAnimationFrame(() => triggerRef.current?.focus());
         }}
         onCloseAutoFocus={(event) => event.preventDefault()}
-        className="w-[min(304px,calc(100vw-20px))] overflow-visible rounded-[12px] border-0 bg-transparent p-0 text-[hsl(var(--wb-text))] shadow-none data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-1 data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100 motion-reduce:duration-0"
+        className="w-[min(304px,calc(100vw-20px))] overflow-visible p-0 motion-reduce:duration-0"
       >
         <AssistantModelPanel
           model={model}

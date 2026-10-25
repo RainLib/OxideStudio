@@ -1,4 +1,4 @@
-import type { AppUpdateInfo } from "@/services/appUpdateService";
+import type { AppUpdateInfo, AppUpdateInstallationStatus } from "@/services/appUpdateService";
 import type { StoreApi } from "zustand";
 
 export type AppUpdateStatus =
@@ -8,7 +8,9 @@ export type AppUpdateStatus =
   | "available"
   | "downloading"
   | "downloaded"
+  | "preparing"
   | "installing"
+  | "restart-required"
   | "unsupported"
   | "error";
 
@@ -25,9 +27,16 @@ export interface AppUpdateState {
   error: string | null;
   lastCheckedAt: number | null;
   ignoredVersion: string | null;
+  nativeInstallation: AppUpdateInstallationStatus | null;
+  preparationCancelable: boolean;
+  packageDownloaded: boolean;
   checkForUpdates: (options?: CheckForUpdatesOptions) => Promise<void>;
   downloadUpdate: () => Promise<void>;
   installAndRestart: () => Promise<void>;
+  cancelInstallationPreparation: () => Promise<void>;
+  refreshInstallationStatus: () => Promise<void>;
+  recoverBackupsAfterUpdate: () => Promise<void>;
+  restartInstalledUpdate: () => Promise<void>;
   ignoreAvailableVersion: () => void;
   clearError: () => void;
 }

@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -9,7 +10,7 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) =>
-  fs.readFileSync(path.join(root, relativePath), "utf8");
+  readSourceText(path.join(root, relativePath));
 const facadePath = "src/store/useEditorGroupStore.ts";
 const base = "src/store/editor-groups";
 const facade = read(facadePath);

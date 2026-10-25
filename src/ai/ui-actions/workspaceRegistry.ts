@@ -36,13 +36,13 @@ export function createWorkspaceUiActionRegistry() {
     description:
       "Switch to an existing project using the normal unsaved-change guard.",
     validateTarget: requireFields("projectId"),
-    execute: (target, context) => {
+    execute: async (target, context) => {
       const project = useProjectStore
         .getState()
         .projects.find((candidate) => candidate.id === target.projectId);
       if (!project)
         return notFound(context.actionId, "Project", target.projectId);
-      if (!useProjectStore.getState().setActiveProject(project.id)) {
+      if (!(await useProjectStore.getState().setActiveProject(project.id))) {
         return uiActionResult(
           context.actionId,
           "error",

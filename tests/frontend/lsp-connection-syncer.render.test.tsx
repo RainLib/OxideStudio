@@ -14,9 +14,14 @@ import { useConnectionStore } from "@/store/useConnectionStore";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { useTabStore } from "@/store/useTabStore";
+import { useLspSemanticStatusStore } from "@/store/useLspSemanticStatusStore";
+import {useConnectionSemanticStore} from "@/services/lsp/connectionSemanticState";
 
 const mocks = vi.hoisted(() => ({
+  processSnapshot:{ready:true,generation:{}},processListeners:new Set<()=>void>(),confirmConfig:vi.fn(async()=>true),
+  getRuntimeSnapshot:vi.fn(),subscribeRuntime:vi.fn(()=>()=>{}),
   updateConfiguration: vi.fn(async () => undefined),
+  getConnectionSemanticState: vi.fn(),
   didOpen: vi.fn(async () => undefined),
   didChange: vi.fn(async () => undefined),
   didClose: vi.fn(async () => undefined),
@@ -44,12 +49,15 @@ const mocks = vi.hoisted(() => ({
   getResources: vi.fn(async () => []),
   saveResources: vi.fn(async () => undefined),
 }));
+vi.mock("@/services/tauri/semantic-context.service",()=>({getConnectionSemanticState:mocks.getConnectionSemanticState,listenConnectionSemanticState:vi.fn(async()=>()=>{})}));
 
 vi.mock("@/hooks/useLspClient", () => ({
   useLspClient: () => ({
     isReady: true,
     error: null,
     client: {
+      confirmAnalysisConfiguration: mocks.confirmConfig,
+      getRuntimeSnapshot:()=>mocks.processSnapshot,subscribeRuntime:mocks.subscribeRuntime,
       updateConfiguration: mocks.updateConfiguration,
       didOpen: mocks.didOpen,
       didChange: mocks.didChange,
@@ -61,7 +69,8 @@ vi.mock("@/hooks/useLspClient", () => ({
 
 vi.mock("@/services/lsp", () => ({
   lspClient: {
-    updateConfiguration: mocks.updateConfiguration,
+    confirmAnalysisConfiguration: mocks.confirmConfig,
+      updateConfiguration: mocks.updateConfiguration,
   },
 }));
 
@@ -110,7 +119,11 @@ describe("LspConnectionSyncer render integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mocks.processSnapshot={ready:true,generation:{}};mocks.processListeners.clear();mocks.confirmConfig.mockReset().mockResolvedValue(true);
+    mocks.subscribeRuntime.mockImplementation(listener=>{mocks.processListeners.add(listener);return ()=>{mocks.processListeners.delete(listener);};});
     localStorage.clear();
+    useConnectionSemanticStore.setState({enabled:false,owner:null,transport:"loading",byConnectionId:{}});
+    mocks.getConnectionSemanticState.mockImplementation(async(id:string)=>useConnectionSemanticStore.getState().byConnectionId[id]?.state||null);
 
     mocks.getDatabaseCapabilities.mockResolvedValue(
       defaultDatabaseCapabilities("postgres"),
@@ -200,6 +213,7 @@ describe("LspConnectionSyncer render integration", () => {
         },
       ],
       activeConnectionId: "postgres-1",
+      connectionRuntimeStates: {},
       isConnected: true,
       isLoading: false,
       selectedConnection: null,
@@ -258,6 +272,117 @@ describe("LspConnectionSyncer render integration", () => {
     container.remove();
     resetRuntimeDatabaseCatalogForTests();
     vi.useRealTimers();
+  });
+
+  it("revalidates a same-id replacement session and bypasses its persisted table metadata", async () => {
+    const runtime = {status: "connected" as const, updatedAt: 1};
+    useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": runtime}});
+    await act(async () => { root = createRoot(container); root.render(<LspConnectionSyncer />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    const oldResource = mocks.saveResources.mock.calls.at(-1)?.[0];
+    expect(oldResource).toBeDefined();
+    mocks.getResources.mockResolvedValue(oldResource);
+    mocks.getColumns.mockResolvedValue([{name: "new_session_value", data_type: "bigint", is_nullable: false, is_generated: false, is_hidden: false}]);
+    mocks.getServerVersion.mockResolvedValue("17.0");
+    await act(async () => {
+      useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connecting", updatedAt: 1}}});
+      await flushAsyncWork();
+    });
+    expect(mocks.updateConfiguration.mock.calls.at(-1)?.[0]).toMatchObject({schemas: []});
+    const requestsWhileConnecting = mocks.getConnectionDatabaseCapabilityContext.mock.calls.length;
+    await act(async () => {
+      useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 1}}});
+      await flushAsyncWork();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    expect(mocks.getConnectionDatabaseCapabilityContext.mock.calls.length).toBe(requestsWhileConnecting + 1);
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+    const config = mocks.updateConfiguration.mock.calls.at(-1)?.[0];
+    expect(config.schemas[0].tables[0].columns).toMatchObject([{name: "new_session_value", data_type: "bigint"}]);
+    // Unrelated store publications cannot force a third metadata scan.
+    await act(async () => { useConnectionStore.setState({isLoading: true}); await vi.advanceTimersByTimeAsync(1000); });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not publish a late table response from a replaced session", async () => {
+    let finishOld!: (columns: unknown[]) => void;
+    mocks.getColumns.mockImplementationOnce(() => new Promise(resolve => {finishOld = resolve;}));
+    useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 1}}});
+    await act(async () => { root = createRoot(container); root.render(<LspConnectionSyncer />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    expect(finishOld).toBeDefined();
+    mocks.getColumns.mockResolvedValue([{name: "replacement_value", data_type: "text", is_nullable: true, is_generated: false, is_hidden: false}]);
+    await act(async () => {
+      useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 1}}});
+      await flushAsyncWork();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    const afterReplacement = mocks.updateConfiguration.mock.calls.length;
+    await act(async () => { finishOld([{name: "stale_value", data_type: "integer", is_nullable: false}]); await flushAsyncWork(); });
+    expect(mocks.updateConfiguration).toHaveBeenCalledTimes(afterReplacement);
+    expect(mocks.updateConfiguration.mock.calls.at(-1)?.[0].schemas[0].tables[0].columns).toMatchObject([{name: "replacement_value"}]);
+  });
+
+  it("refreshes columns after a metadata revision instead of republishing persisted pre-DDL fields", async () => {
+    await act(async () => { root = createRoot(container); root.render(<LspConnectionSyncer />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    const oldResource = mocks.saveResources.mock.calls.at(-1)?.[0];
+    mocks.getResources.mockResolvedValue(oldResource);
+    mocks.getColumns.mockResolvedValue([{name: "after_ddl", data_type: "text", is_nullable: true, is_generated: false, is_hidden: false}]);
+    await act(async () => { useSchemaStore.getState().bumpMetadataVersion(); await flushAsyncWork(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+    expect(mocks.updateConfiguration.mock.calls.at(-1)?.[0].schemas[0].tables[0].columns).toMatchObject([{name: "after_ddl"}]);
+  });
+
+  it("waits for the previous context to be cleared before loading replacement metadata", async () => {
+    useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 1}}});
+    await act(async () => { root = createRoot(container); root.render(<LspConnectionSyncer />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    let finishReset!: () => void;
+    mocks.updateConfiguration.mockImplementationOnce(() => new Promise<void>(resolve => {finishReset = resolve;}));
+    await act(async () => {
+      useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 2}}});
+      await flushAsyncWork();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    await act(async () => { finishReset(); await flushAsyncWork(); });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports reset failure and does not claim a synchronized replacement context", async () => {
+    useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 1}}});
+    await act(async () => { root = createRoot(container); root.render(<LspConnectionSyncer />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    mocks.updateConfiguration.mockRejectedValueOnce(new Error("reset transport failed"));
+    await act(async () => {
+      useConnectionStore.setState({connectionRuntimeStates: {"postgres-1": {status: "connected", updatedAt: 2}}});
+      await flushAsyncWork();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await flushAsyncWork(); });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    expect(useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.state).toBe("error");
+  });
+
+  it("coalesces a burst of same-connection operations into one fresh idle metadata scan",async()=>{
+    const owner={},authority=useConnectionSemanticStore.getState();authority.claim(owner);authority.listening(owner);
+    const advance=(revision:number,activeOperations=0,connectionId="postgres-1")=>authority.accept(owner,{connectionId,session:"session",revision,activeOperations,openTransactions:0,connected:true,uncertain:false});
+    advance(1);await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    await act(async()=>{for(let i=2;i<42;i++)advance(i,i%2===0?1:0);await flushAsyncWork();});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(499);});expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(1);await flushAsyncWork();});expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+    expect(useSchemaStore.getState().metadataVersion).toBe(1);
+    await act(async()=>{advance(100,0,"other");await vi.advanceTimersByTimeAsync(1000);});expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+  });
+  it("holds metadata during transactions and uncertain cancellation until a replacement session is observed",async()=>{
+    const owner={},authority=useConnectionSemanticStore.getState();authority.claim(owner);authority.listening(owner);
+    const initial={connectionId:"postgres-1",session:"old",revision:1,activeOperations:0,openTransactions:1,connected:true,uncertain:false};authority.accept(owner,initial);
+    await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);await vi.advanceTimersByTimeAsync(1000);});expect(mocks.getColumns).not.toHaveBeenCalled();
+    await act(async()=>{authority.accept(owner,{...initial,revision:2,openTransactions:0,uncertain:true});await vi.advanceTimersByTimeAsync(1000);});expect(mocks.getColumns).not.toHaveBeenCalled();
+    await act(async()=>{authority.accept(owner,{...initial,session:"new",revision:3,openTransactions:0});await flushAsyncWork();});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});expect(mocks.getColumns).toHaveBeenCalledTimes(1);
   });
 
   it("sends store-derived schema configuration through the LSP client", async () => {
@@ -831,4 +956,39 @@ describe("LspConnectionSyncer render integration", () => {
       "oxide://database-object/object",
     );
   });
+  it("reacquires an LSP process receipt while reusing unchanged database metadata",async()=>{
+    await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);});await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});
+    const oldToken=useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.context?.analysisToken;
+    expect(oldToken).toBeTruthy();const reads=mocks.getColumns.mock.calls.length+mocks.getDatabaseColumns.mock.calls.length,capabilities=mocks.getConnectionDatabaseCapabilityContext.mock.calls.length;
+    await act(async()=>{mocks.processSnapshot={ready:true,generation:{}};for(const listener of mocks.processListeners)listener();await flushAsyncWork();});
+    expect(useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.context?.analysisToken).not.toBeTruthy();
+    await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});
+    const status=useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]!;
+    expect(status.context?.analysisToken).toBeTruthy();expect(status.context?.analysisToken).not.toBe(oldToken);expect(status.context?.identity.lspRuntime).toBe(mocks.processSnapshot.generation);
+    expect(mocks.getColumns.mock.calls.length+mocks.getDatabaseColumns.mock.calls.length).toBe(reads);expect(mocks.getConnectionDatabaseCapabilityContext).toHaveBeenCalledTimes(capabilities);
+  });
+  it("does not mark a newly sent configuration ready before server confirmation",async()=>{
+    let confirm!:(value:boolean)=>void;mocks.confirmConfig.mockImplementation(()=>new Promise<boolean>(resolve=>{confirm=resolve;}));
+    await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);});await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});
+    const status=useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]!;expect(mocks.updateConfiguration).toHaveBeenCalled();expect(mocks.confirmConfig).toHaveBeenCalled();
+    expect(status.context?.analysisToken).toBeUndefined();expect(status.context?.sourcesReady).toBe(false);expect(status.context?.metadataReady).toBe(false);
+    mocks.confirmConfig.mockResolvedValue(true);await act(async()=>{confirm(true);await flushAsyncWork();});expect(useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.context?.sourcesReady).toBe(true);
+  });
+  it("rejects an old pending configuration confirmation after a quick process replacement",async()=>{
+    let finish!:(value:boolean)=>void;mocks.confirmConfig.mockImplementationOnce(()=>new Promise<boolean>(resolve=>{finish=resolve;}));
+    await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);});await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});
+    const oldToken=(mocks.updateConfiguration.mock.calls[0] as any[])[0].oxideAnalysisToken;
+    await act(async()=>{mocks.processSnapshot={ready:true,generation:{}};for(const listener of mocks.processListeners)listener();await flushAsyncWork();});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});const fresh=useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.context?.analysisToken;
+    expect(fresh).toBeTruthy();expect(fresh).not.toBe(oldToken);await act(async()=>{finish(true);await flushAsyncWork();});
+    expect(useLspSemanticStatusStore.getState().byConnectionId["postgres-1"]?.context?.analysisToken).toBe(fresh);
+  });
+  it("reopens unchanged project documents after the same client gets a new process",async()=>{
+    useProjectStore.setState({projects:[{id:"sqls",name:"sqls",created_at:0,updated_at:0,root_path:"C:/workspace"}]});
+    mocks.getLspDocuments.mockResolvedValue([{relativePath:"queries/current.sql",content:"SELECT 1"}] as never);
+    await act(async()=>{root=createRoot(container);root.render(<LspConnectionSyncer/>);});await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});const opens=mocks.didOpen.mock.calls.length;expect(opens).toBeGreaterThan(0);
+    await act(async()=>{mocks.processSnapshot={ready:true,generation:{}};for(const listener of mocks.processListeners)listener();await flushAsyncWork();});
+    await act(async()=>{await vi.advanceTimersByTimeAsync(500);await flushAsyncWork();});expect(mocks.didOpen.mock.calls.length).toBeGreaterThan(opens);expect(mocks.didClose).toHaveBeenCalled();
+  });
+
 });

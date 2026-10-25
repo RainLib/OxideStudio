@@ -502,11 +502,11 @@ describe("AssistantSidebar Agent Host path: composer", () => {
       '[data-assistant-model-view="compact"]',
     );
     expect(compactView).not.toBeNull();
-    expect(compactView?.className).toMatch(/transition|animate/);
+
     expect(
       modelPopover!.querySelectorAll('[data-assistant-model-panel="true"]'),
     ).toHaveLength(1);
-    expect(modelPopover!.className).toContain("bg-transparent");
+    expect(modelPopover!.className).toContain("wb-popup");
     const compactPickerToggle = compactView?.querySelector<HTMLButtonElement>(
       '[data-assistant-quick-advanced-toggle="true"]',
     );
@@ -594,7 +594,7 @@ describe("AssistantSidebar Agent Host path: composer", () => {
       '[data-assistant-model-view="models"]',
     );
     expect(modelsView).not.toBeNull();
-    expect(modelsView?.className).toMatch(/transition|animate/);
+
     expect(
       document.body.querySelectorAll("[data-assistant-model-popover]"),
     ).toHaveLength(1);

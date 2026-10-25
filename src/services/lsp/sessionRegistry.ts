@@ -36,18 +36,22 @@ const clientsBySessionKey = new Map<string, LspSessionEntry>();
 let binaryInfoPromise: Promise<LspBinaryInfo> | null = null;
 export const LSP_SESSION_IDLE_SHUTDOWN_MS = 30_000;
 
-export function getLspSessionDescriptor(options: {
-  connectionId: string | null | undefined;
-  driver: DatabaseDriver | null | undefined;
+export type LspSessionOptions = {
+  connectionId?: string | null;
+  /** Connection-free virtual documents get a separate namespace and lifetime. */
+  documentSessionKey?: string;
+  driver?: DatabaseDriver | null;
   capabilities?: DatabaseCapabilities;
-}): LspSessionDescriptor | null {
-  if (!options.connectionId || !options.driver) return null;
+};
+
+export function getLspSessionDescriptor(options: LspSessionOptions): LspSessionDescriptor | null {
+  if ((!options.connectionId && !options.documentSessionKey) || !options.driver) return null;
 
   const profile = builtInLspProfileForDriver(options.driver, options.capabilities);
   if (!profile || profile.activationPolicy === "off") return null;
 
-  const key = lspSessionKeyForDriver({
-    connectionId: options.connectionId,
+  const key = options.documentSessionKey ? `document:${encodeURIComponent(String(options.driver))}:${encodeURIComponent(options.documentSessionKey)}` : lspSessionKeyForDriver({
+    connectionId: options.connectionId!,
     driver: options.driver,
   });
   let entry = clientsBySessionKey.get(key);
@@ -63,11 +67,7 @@ export function getLspSessionDescriptor(options: {
   return { key, profile, client: entry.client };
 }
 
-export async function ensureLspSession(options: {
-  connectionId: string;
-  driver: DatabaseDriver;
-  capabilities?: DatabaseCapabilities;
-}) {
+export async function ensureLspSession(options: LspSessionOptions) {
   const descriptor = getLspSessionDescriptor(options);
   if (!descriptor) return null;
 
@@ -93,7 +93,7 @@ export async function ensureLspSession(options: {
   const restarting = descriptor.client.isInitialized();
   const recoveryStartedAt = restarting ? Date.now() : null;
   await descriptor.client.initialize(binaryInfo.path);
-  if (restarting) {
+  if (restarting && options.connectionId && !options.documentSessionKey) {
     useLspSemanticStatusStore
       .getState()
       .recordTelemetry(options.connectionId, "restart", Date.now() - recoveryStartedAt!);

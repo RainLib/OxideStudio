@@ -50,8 +50,11 @@ pub(super) fn routine_sort_key(routine: &SchemaRoutineSnapshot) -> String {
             .parameters
             .iter()
             .map(|parameter| format!(
-                "{}:{}:{}",
-                parameter.name, parameter.data_type, parameter.optional
+                "{}:{}:{}:{}",
+                parameter.name,
+                parameter.data_type,
+                parameter.optional,
+                parameter.mode.as_deref().unwrap_or_default()
             ))
             .collect::<Vec<_>>()
             .join(","),

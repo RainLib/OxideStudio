@@ -6,15 +6,12 @@ use super::import_csv::{
     csv_import_source_columns, csv_record_values, resolve_csv_import_columns,
     resolve_csv_import_row_range,
 };
-use super::import_json::is_json_lines_path;
-use super::import_preview::{
-    stream_json_document_rows, validate_import_file, verify_import_file_digest,
-};
+use super::import_json_stream::stream_json_rows;
+use super::import_preview::{validate_import_file, verify_import_file_digest};
 use super::import_types::{
     default_table_import_mode, TableCsvImportOptions, TableCsvImportPreflight, TableImportFormat,
     TableImportMode, TableImportRowIssue, TableJsonImportPreflight,
 };
-use super::limits::MAX_IMPORT_ROWS;
 use super::policy::table_data_dialect_for_connection;
 use super::reports::table_import_mapping_digest;
 use super::row_sql::{build_insert_mutation, column_lookup};
@@ -24,9 +21,6 @@ use crate::core::protocol::ColumnInfo;
 use crate::core::protocol::Response;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::path::PathBuf;
 use tauri::State;
 
@@ -186,7 +180,6 @@ pub async fn preflight_table_json_import(
     let kind = table_data_dialect_for_connection(&manager, &connection_id, &driver, true).await?;
     let path = PathBuf::from(file_path.trim());
     validate_import_file(&path, TableImportFormat::Json)?;
-    verify_import_file_digest(&path, expected_file_digest.as_deref())?;
     let target_columns = get_target_columns(
         &manager,
         &connection_id,
@@ -197,6 +190,30 @@ pub async fn preflight_table_json_import(
     .await
     .map_err(|error| error.to_string())?;
     let columns = column_lookup(target_columns);
+    tokio::task::spawn_blocking(move || {
+        verify_import_file_digest(&path, expected_file_digest.as_deref())?;
+        scan_json_import_preflight(
+            &path,
+            kind,
+            &schema,
+            &table,
+            &columns,
+            mode.unwrap_or_else(default_table_import_mode),
+        )
+        .map(Response::ok)
+    })
+    .await
+    .map_err(|error| format!("JSON preflight worker failed: {error}"))?
+}
+
+pub(super) fn scan_json_import_preflight(
+    path: &std::path::Path,
+    kind: DatabaseKind,
+    schema: &str,
+    table: &str,
+    columns: &BTreeMap<String, ColumnInfo>,
+    mode: TableImportMode,
+) -> Result<TableJsonImportPreflight, String> {
     let mut total_rows = 0_u64;
     let mut accepted_rows = 0_u64;
     let mut rejected_rows = 0_u64;
@@ -206,9 +223,9 @@ pub async fn preflight_table_json_import(
             row_number,
             row,
             kind,
-            &schema,
-            &table,
-            &columns,
+            schema,
+            table,
+            columns,
             JsonImportPreflightCounters {
                 total_rows: &mut total_rows,
                 accepted_rows: &mut accepted_rows,
@@ -217,40 +234,16 @@ pub async fn preflight_table_json_import(
             },
         )
     };
-    if is_json_lines_path(&path) {
-        let reader = BufReader::new(File::open(&path).map_err(|error| error.to_string())?);
-        for (line_index, line) in reader.lines().enumerate() {
-            let line = line.map_err(|error| error.to_string())?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let row = serde_json::from_str::<BTreeMap<String, Value>>(&line).map_err(|error| {
-                format!("Invalid JSON object on line {}: {error}", line_index + 1)
-            })?;
-            observe_row(line_index as u64 + 1, row)?;
-        }
-    } else {
-        stream_json_document_rows(&path, &|| false, &mut observe_row)?;
-    }
+    stream_json_rows(path, &|| false, &mut observe_row)?;
     if total_rows == 0 {
         return Err("The JSON file does not contain any object rows".to_string());
     }
-    if total_rows > MAX_IMPORT_ROWS as u64 {
-        return Err(format!(
-            "Imports are limited to {MAX_IMPORT_ROWS} rows per transaction"
-        ));
-    }
-    Ok(Response::ok(TableJsonImportPreflight {
-        mapping_digest: table_import_mapping_digest(
-            TableImportFormat::Json,
-            mode.unwrap_or_else(default_table_import_mode),
-            None,
-            None,
-        )?,
+    Ok(TableJsonImportPreflight {
+        mapping_digest: table_import_mapping_digest(TableImportFormat::Json, mode, None, None)?,
         total_rows,
         accepted_rows,
         rejected_rows,
         issues_truncated: rejected_rows > issues.len() as u64,
         issues,
-    }))
+    })
 }

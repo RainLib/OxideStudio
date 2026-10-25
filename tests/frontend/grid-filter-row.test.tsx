@@ -3,14 +3,50 @@
  */
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GridFilterRow } from "@/components/workspace/GridFilterRow";
+import {useConnectionStore} from "@/store/useConnectionStore";
+import {useSchemaStore} from "@/store/useSchemaStore";
+import {useTabStore} from "@/store/useTabStore";
+import {useProjectStore} from "@/store/useProjectStore";
+import {useLspSemanticStatusStore} from "@/store/useLspSemanticStatusStore";
+import {useConnectionSemanticStore} from "@/services/lsp/connectionSemanticState";
+import {semanticConnectionToken,semanticTabRoute} from "@/services/lsp/semanticContext";
+const lsp=vi.hoisted(()=>{const runtime={generation:{},ready:true};return {runtime,client:{getRuntimeSnapshot:()=>runtime,subscribeRuntime:()=>()=>{},didOpen:vi.fn().mockResolvedValue(undefined),didChange:vi.fn().mockResolvedValue(undefined),didClose:vi.fn().mockResolvedValue(undefined),getCompletions:vi.fn().mockResolvedValue([]),getDocumentCompletions:vi.fn().mockResolvedValue({items:[]})}};});
+const metadata=vi.hoisted(()=>({getColumns:vi.fn(),getDatabaseColumns:vi.fn()}));
+vi.mock("@/services/tauri/schema/catalog",()=>({getColumns:metadata.getColumns}));
+vi.mock("@/services/tauri/schema/relations",()=>({getDatabaseColumns:metadata.getDatabaseColumns}));
+vi.mock("@/hooks/useLspClient",()=>({useLspClient:()=>({isReady:true,sessionKey:"grid",client:lsp.client,runtime:lsp.runtime})}));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("GridFilterRow", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
+  beforeEach(()=>{
+    metadata.getColumns.mockResolvedValue(["status","created_at","name","age"].map(name=>({name,data_type:name==="age"?"integer":"varchar",is_nullable:true,is_primary_key:false})));
+    const connection={id:"grid",driver:"postgres",name:"grid"} as any,runtime={status:"connected" as const,updatedAt:1};
+    const tab={id:"table-users",type:"table",connectionId:"grid",schemaName:"public",tableName:"users"};
+    useConnectionSemanticStore.setState({enabled:false,owner:null,transport:"loading",byConnectionId:{}});
+    useConnectionStore.setState({connections:[connection],activeConnectionId:"grid",connectionRuntimeStates:{grid:runtime}});
+    useSchemaStore.setState({metadataVersion:1,currentSchema:"public"});useTabStore.setState({tabs:[tab as any]});useProjectStore.setState({activeProjectId:"grid"});
+    useLspSemanticStatusStore.setState({byConnectionId:{grid:{state:"full",totalObjects:1,cacheHits:0,cacheMisses:0,failedObjects:0,updatedAt:1,context:{identity:{connection:semanticConnectionToken(connection),runtime,lspRuntime:lsp.runtime.generation,metadataVersion:1,projectId:"grid",currentSchema:"public",routes:{[tab.id]:semanticTabRoute(tab)}},analysisToken:"grid-confirmed",sourcesReady:true,metadataReady:true}}}});
+  });
+
+  it("never treats a freshly mapped old result array as newly fetched metadata",async()=>{
+    container=document.createElement("div");document.body.appendChild(container);root=createRoot(container);
+    const resultColumns=[{name:"status"}];
+    const render=()=>root!.render(<GridFilterRow columns={resultColumns.map(column=>({id:column.name,title:column.name}))} mode="sql" visualFilters={[]} sqlFilter="" onModeChange={vi.fn()} onVisualFiltersChange={vi.fn()} onSqlFilterChange={vi.fn()} driver="postgres" connectionId="grid" tabId="table-users" schemaName="public" tableName="users"/>);
+    await act(async()=>render());const input=container.querySelector("input")!;
+    const trigger=()=>{input.focus();input.setSelectionRange(0,0);input.dispatchEvent(new KeyboardEvent("keydown",{key:" ",code:"Space",ctrlKey:true,bubbles:true}));};
+    await act(async()=>trigger());
+    const state=useLspSemanticStatusStore.getState().byConnectionId.grid!;
+    metadata.getColumns.mockResolvedValue([{name:"status_new",data_type:"integer",is_nullable:true,is_primary_key:false}]);
+    await act(async()=>{useLspSemanticStatusStore.getState().setStatus("grid",{...state,context:{...state.context!,analysisToken:"new-confirmed-token"}});render();});
+    await act(async()=>trigger());
+    const labels=Array.from(container.querySelectorAll("[role=option] .font-mono")).map(value=>value.textContent);
+    expect(labels).not.toContain("status");expect(labels).toContain("status_new");
+  });
 
   afterEach(() => {
     act(() => root?.unmount());
@@ -86,9 +122,7 @@ describe("GridFilterRow", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
 
-    await act(async () => {
-      root = createRoot(container);
-      root.render(
+    function Controlled(){const [filter,setFilter]=useState("");return (
         <GridFilterRow
           columns={[
             { id: "status", title: "status", width: 120 },
@@ -96,21 +130,23 @@ describe("GridFilterRow", () => {
           ]}
           mode="sql"
           visualFilters={[]}
-          sqlFilter=""
+          sqlFilter={filter}
           onModeChange={vi.fn()}
           onVisualFiltersChange={vi.fn()}
-          onSqlFilterChange={onSqlFilterChange}
+          onSqlFilterChange={value=>{onSqlFilterChange(value);setFilter(value);}}
           onSearch={vi.fn()}
+          connectionId="grid"
           driver="postgres"
           tabId="table-users"
           schemaName="public"
           tableName="users"
-        />,
-      );
-    });
+        />
+    );}
+    await act(async()=>{root=createRoot(container);root.render(<Controlled/>);});
 
     const input = container.querySelector("input")!;
     await act(async () => {
+      input.focus();input.setSelectionRange(input.value.length,input.value.length);
       input.dispatchEvent(
         new KeyboardEvent("keydown", {
           code: "Space",
@@ -151,6 +187,7 @@ describe("GridFilterRow", () => {
           onVisualFiltersChange={vi.fn()}
           onSqlFilterChange={setFilter}
           onSearch={vi.fn()}
+          connectionId="grid"
           driver="postgres"
           tabId="table-users"
           schemaName="public"
@@ -169,6 +206,7 @@ describe("GridFilterRow", () => {
 
     const input = container.querySelector("input")!;
     await act(async () => {
+      input.focus();input.setSelectionRange(input.value.length,input.value.length);
       input.dispatchEvent(
         new KeyboardEvent("keydown", {
           code: "Space",
@@ -213,6 +251,7 @@ describe("GridFilterRow", () => {
           onVisualFiltersChange={vi.fn()}
           onSqlFilterChange={setFilter}
           onSearch={vi.fn()}
+          connectionId="grid"
           driver="postgres"
           tabId="table-users"
           schemaName="public"
@@ -230,6 +269,7 @@ describe("GridFilterRow", () => {
 
     const input = container.querySelector("input")!;
     await act(async () => {
+      input.focus();input.setSelectionRange(input.value.length,input.value.length);
       input.dispatchEvent(
         new KeyboardEvent("keydown", {
           code: "Space",

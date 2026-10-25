@@ -1,3 +1,4 @@
+import { confirmAction, promptValue } from "@/lib/appDialogs";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { databaseService } from "@/services/tauri";
 import type {
@@ -118,10 +119,10 @@ export function createExplorerNamespaceActions({
       return;
     }
 
-    const nextName = window.prompt(
+    const nextName = (await promptValue(
       `Rename ${targetNamespaceLabel} to:`,
       targetSchema,
-    );
+    ));
     if (nextName === null) return;
 
     const trimmedName = nextName.trim();
@@ -162,9 +163,9 @@ export function createExplorerNamespaceActions({
       return;
     }
 
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Drop ${targetNamespaceLabel} "${targetSchema}" and all contained objects? This cannot be undone.`,
-    );
+    ));
     if (!confirmed) return;
 
     setNamespaceError(null);

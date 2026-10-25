@@ -7,6 +7,7 @@ use super::policy::schema_option;
 use super::row_sql::column_for;
 use super::sqlite_ddl::sqlite_qualified_relation;
 use crate::core::dialect::DatabaseKind;
+use crate::core::mysql_character::{is_mysql_character_type, render_mysql_character_clause};
 use crate::core::protocol::ColumnInfo;
 use std::collections::BTreeMap;
 
@@ -67,6 +68,8 @@ pub(super) fn render_column_type(column: &CreateTableColumn) -> Result<String, S
 pub(super) struct TableColumnRenderOptions<'a> {
     pub(super) default_value: Option<&'a str>,
     pub(super) identity_generation: Option<&'a str>,
+    pub(super) character_set: Option<&'a str>,
+    pub(super) collation: Option<&'a str>,
     pub(super) inline_primary_key: bool,
 }
 
@@ -94,6 +97,13 @@ pub(super) fn render_table_column_definition(
         kind.quote_identifier(column_name),
         render_column_type(column)?
     );
+    if kind == DatabaseKind::Mysql {
+        definition.push_str(&render_mysql_character_clause(
+            &data_type,
+            options.character_set,
+            options.collation,
+        )?);
+    }
 
     if column.is_auto_increment && options.default_value.is_some() {
         return Err(format!(
@@ -199,6 +209,7 @@ pub(super) fn build_create_table_statements_with_defaults(
         columns,
         default_expressions,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -209,6 +220,7 @@ pub(super) fn build_create_table_statements_with_transfer_metadata(
     columns: &[CreateTableColumn],
     default_expressions: &BTreeMap<String, String>,
     identity_generations: &BTreeMap<String, String>,
+    character_metadata: &BTreeMap<String, (Option<String>, Option<String>)>,
 ) -> Result<Vec<String>, String> {
     let table = table.trim();
     if table.is_empty() {
@@ -231,6 +243,12 @@ pub(super) fn build_create_table_statements_with_transfer_metadata(
             TableColumnRenderOptions {
                 default_value: default_expressions.get(&column.name).map(String::as_str),
                 identity_generation: identity_generations.get(&column.name).map(String::as_str),
+                character_set: character_metadata
+                    .get(&column.name)
+                    .and_then(|value| value.0.as_deref()),
+                collation: character_metadata
+                    .get(&column.name)
+                    .and_then(|value| value.1.as_deref()),
                 inline_primary_key: false,
             },
             &mut comment_statements,
@@ -684,6 +702,13 @@ pub(super) fn build_alter_table_column_statements(
 
                 let is_not_null = changes.is_not_null.unwrap_or(!existing.is_nullable);
                 let mut definition = format!("{quoted_column} {data_type}");
+                if is_mysql_character_type(&data_type) {
+                    definition.push_str(&render_mysql_character_clause(
+                        &data_type,
+                        existing.character_set.as_deref(),
+                        existing.collation.as_deref(),
+                    )?);
+                }
                 definition.push_str(if is_not_null { " NOT NULL" } else { " NULL" });
 
                 if existing.is_auto_increment {

@@ -1,5 +1,5 @@
+import { runAfterDiscardConfirmation } from "@/features/workspace-tabs/model/confirmTabAction";
 import {
-  confirmDiscardTabChanges,
   releaseTabRuntimeResources,
   tabAfterReleasingRuntimePayload,
 } from "@/features/workspace-tabs/model/tabLifecycle";
@@ -20,166 +20,187 @@ export const createLifecycleSlice: TabSlice<
   | "reopenTab"
 > = (set, get) => ({
   closeTab: (id: string) => {
-    let closing: TabData[] = [];
-    set((state) => {
-      const tab = state.tabs.find((t) => t.id === id);
-      if (!tab) return state;
-      // Don't close pinned tabs with regular close
-      if (tab.isPinned) return state;
-      if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
-      closing = [tab];
+    const select = () => get().tabs.filter((tab) => tab.id === id && !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closing: TabData[] = [];
+      set((state) => {
+        const tab = state.tabs.find((t) => t.id === id);
+        if (!tab) return state;
+        // Don't close pinned tabs with regular close
+        if (tab.isPinned) return state;
+        closing = [tab];
 
-      const newTabs = state.tabs.filter((t) => t.id !== id);
-      let newActiveId = state.activeTabId;
+        const newTabs = state.tabs.filter((t) => t.id !== id);
+        let newActiveId = state.activeTabId;
 
-      if (id === state.activeTabId) {
-        newActiveId =
-          newTabs.length > 0 && newTabs[newTabs.length - 1]
-            ? newTabs[newTabs.length - 1]!.id
-            : null;
-      }
+        if (id === state.activeTabId) {
+          newActiveId =
+            newTabs.length > 0 && newTabs[newTabs.length - 1]
+              ? newTabs[newTabs.length - 1]!.id
+              : null;
+        }
 
-      return {
-        tabs: newTabs,
-        activeTabId: newActiveId,
-        closedTabsStack: [
-          tabAfterReleasingRuntimePayload(tab),
-          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
-        ].slice(0, 20), // Keep last 20
-      };
+        return {
+          tabs: newTabs,
+          activeTabId: newActiveId,
+          closedTabsStack: [
+            tabAfterReleasingRuntimePayload(tab),
+            ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
+          ].slice(0, 20), // Keep last 20
+        };
+      });
+      releaseTabRuntimeResources(closing);
+
     });
-    releaseTabRuntimeResources(closing);
   },
 
   forceCloseTab: (id: string) => {
-    let closing: TabData[] = [];
-    set((state) => {
-      const tab = state.tabs.find((t) => t.id === id);
-      if (!tab) return state;
-      if (!confirmDiscardTabChanges([tab], "close the tab")) return state;
-      closing = [tab];
+    const select = () => get().tabs.filter((tab) => tab.id === id);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closing: TabData[] = [];
+      set((state) => {
+        const tab = state.tabs.find((t) => t.id === id);
+        if (!tab) return state;
+        closing = [tab];
 
-      const newTabs = state.tabs.filter((t) => t.id !== id);
-      let newActiveId = state.activeTabId;
+        const newTabs = state.tabs.filter((t) => t.id !== id);
+        let newActiveId = state.activeTabId;
 
-      if (id === state.activeTabId) {
-        newActiveId =
-          newTabs.length > 0 && newTabs[newTabs.length - 1]
-            ? newTabs[newTabs.length - 1]!.id
-            : null;
-      }
+        if (id === state.activeTabId) {
+          newActiveId =
+            newTabs.length > 0 && newTabs[newTabs.length - 1]
+              ? newTabs[newTabs.length - 1]!.id
+              : null;
+        }
 
-      return {
-        tabs: newTabs,
-        activeTabId: newActiveId,
-        closedTabsStack: [
-          tabAfterReleasingRuntimePayload(tab),
-          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
-        ].slice(0, 20),
-      };
+        return {
+          tabs: newTabs,
+          activeTabId: newActiveId,
+          closedTabsStack: [
+            tabAfterReleasingRuntimePayload(tab),
+            ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
+          ].slice(0, 20),
+        };
+      });
+      releaseTabRuntimeResources(closing);
+
     });
-    releaseTabRuntimeResources(closing);
   },
 
   closeOtherTabs: (id: string) => {
-    let closed: TabData[] = [];
-    set((state) => {
-      const closing = state.tabs.filter(
-        (tab) => tab.id !== id && !tab.isPinned,
-      );
-      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
-      closed = closing;
-      return {
-        tabs: state.tabs.filter((tab) => tab.id === id || tab.isPinned),
-        activeTabId: id,
-      };
+    const select = () => get().tabs.filter((tab) => tab.id !== id && !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closed: TabData[] = [];
+      set((state) => {
+        const closing = state.tabs.filter(
+          (tab) => tab.id !== id && !tab.isPinned,
+        );
+        closed = closing;
+        return {
+          tabs: state.tabs.filter((tab) => tab.id === id || tab.isPinned),
+          activeTabId: id,
+        };
+      });
+      releaseTabRuntimeResources(closed);
+
     });
-    releaseTabRuntimeResources(closed);
   },
 
   closeAllTabs: () => {
-    let closed: TabData[] = [];
-    set((state) => {
-      const pinnedTabs = state.tabs.filter((t) => t.isPinned);
-      const closing = state.tabs.filter((tab) => !tab.isPinned);
-      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
-      closed = closing;
-      return {
-        tabs: pinnedTabs,
-        activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
-      };
+    const select = () => get().tabs.filter((tab) => !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closed: TabData[] = [];
+      set((state) => {
+        const pinnedTabs = state.tabs.filter((t) => t.isPinned);
+        const closing = state.tabs.filter((tab) => !tab.isPinned);
+        closed = closing;
+        return {
+          tabs: pinnedTabs,
+          activeTabId: pinnedTabs.length > 0 ? pinnedTabs[0]!.id : null,
+        };
+      });
+      releaseTabRuntimeResources(closed);
+
     });
-    releaseTabRuntimeResources(closed);
   },
 
   closeTabsToLeft: (id: string) => {
-    let closed: TabData[] = [];
-    set((state) => {
-      const index = state.tabs.findIndex((t) => t.id === id);
-      if (index === -1) return state;
-      const closing = state.tabs.slice(0, index).filter((tab) => !tab.isPinned);
-      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
-      closed = closing;
+    const select = () => get().tabs.filter((tab, index, tabs) => tabs.some((item) => item.id === id) && index < tabs.findIndex((item) => item.id === id) && !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closed: TabData[] = [];
+      set((state) => {
+        const index = state.tabs.findIndex((t) => t.id === id);
+        if (index === -1) return state;
+        const closing = state.tabs.slice(0, index).filter((tab) => !tab.isPinned);
+        closed = closing;
 
-      const newTabs = [
-        ...state.tabs.slice(0, index).filter((t) => t.isPinned),
-        ...state.tabs.slice(index),
-      ];
+        const newTabs = [
+          ...state.tabs.slice(0, index).filter((t) => t.isPinned),
+          ...state.tabs.slice(index),
+        ];
 
-      return { tabs: newTabs };
+        return { tabs: newTabs };
+      });
+      releaseTabRuntimeResources(closed);
+
     });
-    releaseTabRuntimeResources(closed);
   },
 
   closeTabsToRight: (id: string) => {
-    let closed: TabData[] = [];
-    set((state) => {
-      const index = state.tabs.findIndex((t) => t.id === id);
-      if (index === -1) return state;
-      const closing = state.tabs
-        .slice(index + 1)
-        .filter((tab) => !tab.isPinned);
-      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
-      closed = closing;
+    const select = () => get().tabs.filter((tab, index, tabs) => tabs.some((item) => item.id === id) && index > tabs.findIndex((item) => item.id === id) && !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      let closed: TabData[] = [];
+      set((state) => {
+        const index = state.tabs.findIndex((t) => t.id === id);
+        if (index === -1) return state;
+        const closing = state.tabs
+          .slice(index + 1)
+          .filter((tab) => !tab.isPinned);
+        closed = closing;
 
-      const newTabs = [
-        ...state.tabs.slice(0, index + 1),
-        ...state.tabs.slice(index + 1).filter((t) => t.isPinned),
-      ];
+        const newTabs = [
+          ...state.tabs.slice(0, index + 1),
+          ...state.tabs.slice(index + 1).filter((t) => t.isPinned),
+        ];
 
-      return { tabs: newTabs };
+        return { tabs: newTabs };
+      });
+      releaseTabRuntimeResources(closed);
+
     });
-    releaseTabRuntimeResources(closed);
   },
 
   closeTabsByIds: (ids, fallbackTabId) => {
-    const requestedIds = new Set(ids);
-    let closed: TabData[] = [];
-    set((state) => {
-      const closing = state.tabs.filter(
-        (tab) => requestedIds.has(tab.id) && !tab.isPinned,
-      );
-      if (closing.length === 0) return state;
-      if (!confirmDiscardTabChanges(closing, "close the tabs")) return state;
-      closed = closing;
-      const closingIds = new Set(closing.map((tab) => tab.id));
-      const tabs = state.tabs.filter((tab) => !closingIds.has(tab.id));
-      const activeTabId =
-        state.activeTabId && closingIds.has(state.activeTabId)
-          ? fallbackTabId && tabs.some((tab) => tab.id === fallbackTabId)
-            ? fallbackTabId
-            : tabs[tabs.length - 1]?.id || null
-          : state.activeTabId;
-      return {
-        tabs,
-        activeTabId,
-        closedTabsStack: [
-          ...closing.map(tabAfterReleasingRuntimePayload).reverse(),
-          ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
-        ].slice(0, 20),
-      };
+    const select = () => get().tabs.filter((tab) => ids.includes(tab.id) && !tab.isPinned);
+    return runAfterDiscardConfirmation(select(), "close the tabs", select, () => {
+      const requestedIds = new Set(ids);
+      let closed: TabData[] = [];
+      set((state) => {
+        const closing = state.tabs.filter(
+          (tab) => requestedIds.has(tab.id) && !tab.isPinned,
+        );
+        if (closing.length === 0) return state;
+        closed = closing;
+        const closingIds = new Set(closing.map((tab) => tab.id));
+        const tabs = state.tabs.filter((tab) => !closingIds.has(tab.id));
+        const activeTabId =
+          state.activeTabId && closingIds.has(state.activeTabId)
+            ? fallbackTabId && tabs.some((tab) => tab.id === fallbackTabId)
+              ? fallbackTabId
+              : tabs[tabs.length - 1]?.id || null
+            : state.activeTabId;
+        return {
+          tabs,
+          activeTabId,
+          closedTabsStack: [
+            ...closing.map(tabAfterReleasingRuntimePayload).reverse(),
+            ...state.closedTabsStack.map(tabAfterReleasingRuntimePayload),
+          ].slice(0, 20),
+        };
+      });
+      releaseTabRuntimeResources(closed);
+
     });
-    releaseTabRuntimeResources(closed);
   },
 
   togglePinTab: (id: string) => {

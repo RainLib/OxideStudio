@@ -35,6 +35,21 @@ use super::models::{
 
 #[async_trait]
 impl DatabaseDriver for ExternalDriver {
+    async fn sql_lookup_context(
+        &self,
+        database: Option<&str>,
+    ) -> Result<Option<oxide_driver_protocol::SqlLookupContext>> {
+        if !self.capabilities.lock().await.sql_lookup_context {
+            return Ok(None);
+        }
+        let context: Option<oxide_driver_protocol::SqlLookupContext> = self
+            .metadata(MetadataRequest::SqlLookupContext {
+                database: database.map(str::to_owned),
+            })
+            .await?;
+        super::lookup_context::validate_context(context, database)
+    }
+
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
         external_statement_scan_dialect(
             &self.package.manifest.driver_id,

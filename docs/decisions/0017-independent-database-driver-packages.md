@@ -13,6 +13,23 @@ query, parameter, metadata, transaction and cancellation operations through the
 same verified process. Builds without a trusted driver public key display
 external packages as untrusted and cannot execute them.
 
+The public standalone CLI/MCP now uses the same signed registry, exact pins and
+selected-package rules. A corrupt activation marker or missing selected version
+is an execution error; only an absent selection permits the bundled channel.
+Exact-version resolution inspects its own directory instead of scanning and
+hashing other installed versions. Runtime target checks accept the actual Cargo
+target triple as well as the existing OS/architecture aliases; the ABI is not
+guessed from the operating system name.
+
+Agent-owned sidecars must advertise `readOnlyEnforcement` before receiving
+connection configuration. File packages additionally need `readOnlyConnections`;
+the Host passes `readOnly: "true"` and rejects older query-only file runtimes.
+The DuckDB implementation opens the existing file with the engine's read-only
+mode, disables external access/autoloading and restores catalog/schema context
+after each query. This contract does not grant public mutation tools. Native
+sidecar builds and the isolated signed-package acceptance are covered by the
+CI configuration; remote jobs have not yet been run for this change.
+
 The Driver Store location can now be migrated from Settings. Migration copies the
 entire store to a fresh absolute destination, rejects links/special files and
 oversized trees, re-reads the staged package layout, atomically publishes the

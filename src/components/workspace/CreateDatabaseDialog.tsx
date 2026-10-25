@@ -283,7 +283,7 @@ export function CreateDatabaseDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && !isSubmitting && onClose()}>
-      <DialogContent className="w-[760px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="w-[760px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
         <form onSubmit={(event) => void handleCreate(event)}>
           <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
             <div className="flex items-center gap-2">
@@ -345,7 +345,7 @@ export function CreateDatabaseDialog({
                     <span className={labelClass}>Character set</span>
                     <Select value={charset || "__default"} onValueChange={handleCharsetChange} disabled={isSubmitting}>
                       <SelectTrigger className={fieldClass}><SelectValue /></SelectTrigger>
-                      <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                      <SelectContent className="">
                         <SelectItem value="__default">Server default</SelectItem>
                         {MYSQL_CHARSETS.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
                       </SelectContent>
@@ -358,7 +358,7 @@ export function CreateDatabaseDialog({
                       disabled={isSubmitting || !charset}
                     >
                       <SelectTrigger className={fieldClass}><SelectValue /></SelectTrigger>
-                      <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                      <SelectContent className="">
                         <SelectItem value="__default">Default for character set</SelectItem>
                         {(MYSQL_COLLATIONS[charset] || []).map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
                       </SelectContent>

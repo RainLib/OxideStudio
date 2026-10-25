@@ -39,7 +39,7 @@ pub(super) fn backup_file_path(
     PathBuf::from(&schedule.destination_directory).join(format!(
         "{BACKUP_FILE_PREFIX}{}__{stamp}__{}.sqlite",
         safe_file_segment(&schedule.name),
-        &run_id[..8]
+        run_id
     ))
 }
 
@@ -123,6 +123,9 @@ pub(super) fn compress_backup_file(
 
 pub(super) fn safe_run_file(run: &SqliteBackupRun) -> Option<PathBuf> {
     let path = PathBuf::from(run.file_path.as_deref()?);
+    if !path.is_absolute() || !std::path::Path::new(&run.destination_directory).is_absolute() {
+        return None;
+    }
     let file_name = path.file_name()?.to_str()?;
     if !file_name.starts_with(BACKUP_FILE_PREFIX)
         || !(file_name.ends_with(".sqlite") || file_name.ends_with(".sqlite.gz"))
@@ -136,26 +139,6 @@ pub(super) fn safe_run_file(run: &SqliteBackupRun) -> Option<PathBuf> {
     (parent == destination).then_some(path)
 }
 
-/// Deletes only a history entry's verified backup artifact. Keeping this
-/// separate from the command makes compressed-file behavior testable without
-/// opening the persisted schedule store, and preserves the same symlink/type
-/// protections for `.sqlite` and `.sqlite.gz` artifacts.
-pub(super) fn delete_safe_run_file(run: &SqliteBackupRun) -> Result<(), String> {
-    let Some(path) = safe_run_file(run) else {
-        return Ok(());
-    };
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("Backup history points to an unsafe file type".to_string())
-        }
-        Ok(_) => {
-            std::fs::remove_file(path).map_err(|_| "Cannot delete the backup file".to_string())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("Cannot inspect the backup file".to_string()),
-    }
-}
-
 pub(super) fn safe_run_error(error: &str, cancelled: bool) -> String {
     let normalized = error.to_ascii_lowercase();
     if cancelled || normalized.contains("cancelled") {
@@ -164,6 +147,8 @@ pub(super) fn safe_run_error(error: &str, cancelled: bool) -> String {
         "There is not enough free disk space for this backup".to_string()
     } else if normalized.contains("permission") || normalized.contains("access is denied") {
         "Oxide cannot write to the selected backup directory".to_string()
+    } else if normalized.contains("saved sqlite") || normalized.contains("saved connection") {
+        "The saved SQLite source is unavailable; review its project, driver, file and local credential key".to_string()
     } else if normalized.contains("active connection")
         || normalized.contains("connect the sqlite")
         || normalized.contains("not found")

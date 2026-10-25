@@ -3,6 +3,7 @@ import {
   type CompletionItem,
 } from "@/services/lsp/types";
 import { sqlStatementBeforeCursor } from "@/lib/queryEditorCachedCompletion";
+import { cachedIdentifierFragment, cachedIdentifierQualifier } from "./cached-completion/identifierFragments";
 import {
   sqlCommandSnippetCompletions,
   type SqlCommandSnippetOptions,
@@ -120,7 +121,9 @@ function currentStatementFragment(textBeforeCursor: string) {
 }
 
 function trailingWord(text: string) {
-  return text.match(/([A-Za-z_][A-Za-z0-9_]*)$/)?.[1]?.toUpperCase() || "";
+  const fragment = cachedIdentifierFragment(text);
+  if (fragment.openingQuote || fragment.unsupported || cachedIdentifierQualifier(text)) return "";
+  return fragment.prefix.toUpperCase();
 }
 
 function grammarItems(

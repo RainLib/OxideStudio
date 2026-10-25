@@ -1,14 +1,19 @@
 /**
- * Conservative relation extraction used only while SQL LSP is unavailable.
- * It deliberately recognizes a narrow, top-level SQL surface so the editor
- * can reuse one table's cached metadata without pretending to parse a full
- * vendor grammar in the renderer.
+ * Scoped cached metadata relations merged by the editor completion provider.
+ * The native LSP remains responsible for complete vendor grammar and typing.
  */
+export type CachedSqlLocalSource =
+  | { kind: "query"; start: number; end: number; columns?: string[] }
+  | { kind: "physical"; table: string; schema?: string; database?: string; server?: string; schemaOmitted?: true; columns: string[] };
+
 export type CachedSqlRelationReference = {
   table: string;
   schema?: string;
   /** Optional catalog/database from a three-part relation identifier. */
   database?: string;
+  /** Never discard a linked-server identity or guess an omitted default schema. */
+  server?: string;
+  schemaOmitted?: true;
   alias?: string;
   /** Exact SQL spelling of the alias, including its original delimiters. */
   aliasSql?: string;
@@ -16,8 +21,10 @@ export type CachedSqlRelationReference = {
   isCte?: boolean;
   /** A closed FROM/JOIN subquery with a visible alias and derived columns. */
   isDerived?: boolean;
-  /** Only explicit CTE column lists are trusted by this lightweight fallback. */
+  /** Declared names remain available when detailed provenance is unknown. */
   cteColumns?: string[];
+  /** Offsets belong to the same prepared statement, never a detached SQL copy. */
+  localSource?: CachedSqlLocalSource;
 };
 
 export type CachedSqlJoinTargetContext = {

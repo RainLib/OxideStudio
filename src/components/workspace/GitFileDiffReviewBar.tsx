@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import type { GitFileDiffPreview } from "@/lib/projectGitDiff";
 import { openProjectGitDiffInEditor } from "@/lib/projectFileOpen";
 import { unifiedDiffHunkPatch, unifiedDiffLines } from "@/lib/unifiedDiff";
@@ -137,8 +138,8 @@ export function GitFileDiffReviewBar({ preview }: { preview: GitFileDiffPreview 
                 type="button"
                 className="wb-text-button h-5 px-1.5 text-[8px] text-red-400"
                 disabled={!activeHunkPatch || Boolean(operation)}
-                onClick={() => {
-                  if (!activeHunkPatch || !window.confirm(`Discard this hunk from ${preview.relativePath}?`)) return;
+                onClick={async () => {
+                  if (!activeHunkPatch || !(await confirmAction(`Discard this hunk from ${preview.relativePath}?`))) return;
                   void apply(
                     "discard-hunk",
                     (patch) => projectGitService.applyPatch(
@@ -184,8 +185,8 @@ export function GitFileDiffReviewBar({ preview }: { preview: GitFileDiffPreview 
               type="button"
               className="wb-text-button h-5 px-1.5 text-[8px] text-red-400"
               disabled={!diff?.patch || Boolean(operation)}
-              onClick={() => {
-                if (!window.confirm(`Discard all working-tree changes in ${preview.relativePath}?`)) return;
+              onClick={async () => {
+                if (!(await confirmAction(`Discard all working-tree changes in ${preview.relativePath}?`))) return;
                 void apply("discard-file", (patch) =>
                   projectGitService.applyPatch(preview.projectId, patch, true, preview.expectedRoot));
               }}

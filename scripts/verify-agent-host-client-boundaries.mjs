@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -8,7 +9,7 @@ import {
 } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
+const read = (relativePath) => readSourceText(path.join(root, relativePath));
 const facadePath = "src/services/tauri/agent-host.service.ts";
 const base = "src/services/tauri/agent-host";
 const facade = read(facadePath);

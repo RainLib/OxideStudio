@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 import { DatabaseBrandIcon } from "@/components/icons/DatabaseBrandIcon";
 import { Switch } from "@/components/ui/switch";
@@ -638,11 +639,11 @@ export function ExplorerSidebarView({
                               name: group.name,
                             })
                           }
-                          onDelete={() => {
+                          onDelete={async () => {
                             if (
-                              window.confirm(
+                              (await confirmAction(
                                 `Delete connection group “${group.name}”?`,
-                              )
+                              ))
                             ) {
                               deleteExplorerConnectionGroup(
                                 explorerStateScope,

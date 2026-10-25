@@ -1,4 +1,6 @@
-use super::execution::{execute_shell_command, macos_workspace_profile};
+use super::execution::execute_shell_command;
+#[cfg(target_os = "macos")]
+use super::execution::macos_workspace_profile;
 use super::policy_engine::evaluate_shell_command_policy;
 use super::types::{CommandPolicyDecision, CommandPreflightResult, ShellSandboxMode};
 use serde_json::json;

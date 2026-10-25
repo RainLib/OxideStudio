@@ -6,7 +6,7 @@
 use duckdb::{
     params_from_iter,
     types::{Value as DuckdbValue, ValueRef},
-    Connection,
+    AccessMode, Config, Connection,
 };
 use oxide_driver_protocol::{
     DriverColumn, DriverProtocolError, DriverQueryResult, DriverRequest, DriverRequestEnvelope,
@@ -19,19 +19,52 @@ use std::{
     io::{self, BufRead, Write},
 };
 
+mod file_query;
+mod file_query_sql;
+mod managed_io;
+mod query_types;
+
+struct SessionConnection {
+    connection: Connection,
+    // Dropped after the connection, including on Disconnect, Shutdown and EOF.
+    file_workspace: Option<tempfile::TempDir>,
+}
+
+impl std::ops::Deref for SessionConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
 const PACKAGE_ID: &str = "oxide.duckdb";
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DRIVER_ID: &str = "duckdb";
 
 fn main() {
+    if let Some(workspace) = std::env::var_os("OXIDE_FILE_QUERY_WORKSPACE") {
+        if let Err(error) = managed_io::run(std::path::Path::new(&workspace)) {
+            eprintln!("Managed file-query runtime stopped: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let stdin = io::stdin();
+    run_requests(stdin.lock().lines());
+}
+
+fn run_requests(lines: impl Iterator<Item = io::Result<String>>) {
     let mut connections = HashMap::new();
-    for line in stdin.lock().lines() {
+    for line in lines {
         let response = match line {
             Ok(line) => handle_line(&line, &mut connections),
             Err(error) => DriverResponseEnvelope {
                 id: 0,
-                response: DriverResponse::Error(protocol_error("INPUT_READ_FAILED", error.to_string())),
+                response: DriverResponse::Error(protocol_error(
+                    "INPUT_READ_FAILED",
+                    error.to_string(),
+                )),
             },
         };
         let serialized = serde_json::to_string(&response);
@@ -49,14 +82,19 @@ fn main() {
 
 fn handle_line(
     line: &str,
-    connections: &mut HashMap<String, Connection>,
+    connections: &mut HashMap<String, SessionConnection>,
 ) -> DriverResponseEnvelope {
     let request: DriverRequestEnvelope = match serde_json::from_str(line) {
         Ok(request) => request,
-        Err(error) => return DriverResponseEnvelope {
-            id: 0,
-            response: DriverResponse::Error(protocol_error("INVALID_REQUEST", error.to_string())),
-        },
+        Err(error) => {
+            return DriverResponseEnvelope {
+                id: 0,
+                response: DriverResponse::Error(protocol_error(
+                    "INVALID_REQUEST",
+                    error.to_string(),
+                )),
+            }
+        }
     };
     let id = request.id;
     let response = match handle_request(request.request, connections) {
@@ -68,7 +106,7 @@ fn handle_line(
 
 fn handle_request(
     request: DriverRequest,
-    connections: &mut HashMap<String, Connection>,
+    connections: &mut HashMap<String, SessionConnection>,
 ) -> Result<DriverResult, DriverProtocolError> {
     match request {
         DriverRequest::Handshake(request) => Ok(DriverResult::Handshake(HandshakeResponse {
@@ -94,17 +132,69 @@ fn handle_request(
                 // Agent connections set `context.read_only`; this sidecar
                 // validates it before handing the statement to DuckDB.
                 read_only_enforcement: true,
+                read_only_connections: true,
+                file_queries: true,
+                host_managed_file_queries: true,
                 semantic_schema_migration: false,
+                ..DriverRuntimeCapabilities::default()
             },
         })),
         DriverRequest::Connect {
             connection_id,
             config,
         } => {
+            if let Some(format) = config.options.get("fileQueryFormat") {
+                if config.options.get("readOnly").map(String::as_str) != Some("true") {
+                    return Err(protocol_error(
+                        "CONNECT_FAILED",
+                        "File queries require readOnly=true",
+                    ));
+                }
+                let session = file_query::open_with_header(
+                    &config.url,
+                    format,
+                    config
+                        .options
+                        .get("fileQueryCsvHeader")
+                        .map(String::as_str)
+                        .unwrap_or("present"),
+                )?;
+                connections.insert(connection_id, session);
+                return Ok(DriverResult::Empty);
+            }
             let path = duckdb_path(&config.url)?;
-            let connection = Connection::open(path)
-                .map_err(|error| protocol_error("CONNECT_FAILED", error.to_string()))?;
-            connections.insert(connection_id, connection);
+            let connection = if config
+                .options
+                .get("readOnly")
+                .is_some_and(|value| value == "true")
+            {
+                let flags = Config::default()
+                    .access_mode(AccessMode::ReadOnly)
+                    .and_then(|flags| flags.enable_external_access(false))
+                    .and_then(|flags| flags.enable_autoload_extension(false))
+                    .map_err(|error| protocol_error("CONNECT_FAILED", error.to_string()))?;
+                Connection::open_with_flags(path, flags)
+            } else {
+                if config
+                    .options
+                    .get("readOnly")
+                    .is_some_and(|value| value != "false")
+                {
+                    return Err(protocol_error(
+                        "CONNECT_FAILED",
+                        "Invalid readOnly connection option",
+                    ));
+                }
+                Connection::open(path)
+            }
+            .map_err(|error| protocol_error("CONNECT_FAILED", error.to_string()))?;
+            connections.insert(
+                connection_id,
+                SessionConnection {
+                    connection,
+                    file_workspace: None,
+                },
+            );
             Ok(DriverResult::Empty)
         }
         DriverRequest::Disconnect { connection_id } => {
@@ -141,6 +231,17 @@ fn handle_request(
             context,
             ..
         } => {
+            let file_query = connections
+                .get(&connection_id)
+                .is_some_and(|session| session.file_workspace.is_some());
+            if file_query {
+                return file_query::query(
+                    connection(connections, &connection_id)?,
+                    &statement,
+                    &parameters,
+                )
+                .map(DriverResult::Query);
+            }
             if context.read_only && !is_read_only_statement(&statement) {
                 return Err(protocol_error(
                     "READ_ONLY_REJECTED",
@@ -150,6 +251,7 @@ fn handle_request(
             query_in_database_context(
                 connection(connections, &connection_id)?,
                 context.database.as_deref(),
+                context.schema.as_deref(),
                 &statement,
                 &parameters,
             )
@@ -171,6 +273,12 @@ fn handle_request(
             execute(connection(connections, &connection_id)?, "ROLLBACK")
         }
         DriverRequest::Cancel { .. } => Ok(DriverResult::Boolean(false)),
+        DriverRequest::QueryPage { .. }
+        | DriverRequest::FetchQueryPage { .. }
+        | DriverRequest::CloseQuerySession { .. } => Err(protocol_error(
+            "QUERY_PAGING_UNSUPPORTED",
+            "DuckDB native query cursors are unavailable",
+        )),
         DriverRequest::Shutdown => {
             connections.clear();
             Ok(DriverResult::Empty)
@@ -179,11 +287,12 @@ fn handle_request(
 }
 
 fn connection<'a>(
-    connections: &'a mut HashMap<String, Connection>,
+    connections: &'a mut HashMap<String, SessionConnection>,
     connection_id: &str,
 ) -> Result<&'a mut Connection, DriverProtocolError> {
     connections
         .get_mut(connection_id)
+        .map(|session| &mut session.connection)
         .ok_or_else(|| protocol_error("CONNECTION_NOT_FOUND", "Connection is not open"))
 }
 
@@ -194,23 +303,36 @@ fn connection<'a>(
 fn query_in_database_context(
     connection: &mut Connection,
     database: Option<&str>,
+    schema: Option<&str>,
     statement: &str,
     parameters: &[oxide_driver_protocol::DriverQueryParameter],
 ) -> Result<Vec<DriverQueryResult>, DriverProtocolError> {
-    let Some(database) = database.map(str::trim).filter(|value| !value.is_empty()) else {
-        return query(connection, statement, parameters);
-    };
-
-    let previous: String = connection
-        .query_row("SELECT current_database()", [], |row| row.get(0))
-        .map_err(|error| protocol_error("DATABASE_SCOPE_FAILED", error.to_string()))?;
-    if previous.eq_ignore_ascii_case(database) {
+    let database = database.map(str::trim).filter(|value| !value.is_empty());
+    let schema = schema.map(str::trim).filter(|value| !value.is_empty());
+    if database.is_none() && schema.is_none() {
         return query(connection, statement, parameters);
     }
 
-    use_database(connection, database)?;
+    let previous: (String, String) = connection
+        .query_row("SELECT current_database(), current_schema()", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|error| protocol_error("DATABASE_SCOPE_FAILED", error.to_string()))?;
+    let database = database.unwrap_or(&previous.0);
+    let schema = schema.unwrap_or_else(|| {
+        if database.eq_ignore_ascii_case(&previous.0) {
+            &previous.1
+        } else {
+            "main"
+        }
+    });
+    if previous.0.eq_ignore_ascii_case(database) && previous.1.eq_ignore_ascii_case(schema) {
+        return query(connection, statement, parameters);
+    }
+
+    use_namespace(connection, database, schema)?;
     let result = query(connection, statement, parameters);
-    let restore = use_database(connection, &previous);
+    let restore = use_namespace(connection, &previous.0, &previous.1);
     match (result, restore) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), Ok(())) => Err(error),
@@ -219,8 +341,16 @@ fn query_in_database_context(
     }
 }
 
-fn use_database(connection: &Connection, database: &str) -> Result<(), DriverProtocolError> {
-    let identifier = quote_identifier(database);
+fn use_namespace(
+    connection: &Connection,
+    database: &str,
+    schema: &str,
+) -> Result<(), DriverProtocolError> {
+    let identifier = format!(
+        "{}.{}",
+        quote_identifier(database),
+        quote_identifier(schema)
+    );
     connection
         .execute_batch(&format!("USE {identifier}"))
         .map_err(|error| protocol_error("DATABASE_SCOPE_FAILED", error.to_string()))
@@ -261,6 +391,15 @@ fn query(
     sql: &str,
     parameters: &[oxide_driver_protocol::DriverQueryParameter],
 ) -> Result<Vec<DriverQueryResult>, DriverProtocolError> {
+    query_bounded(connection, sql, parameters, None)
+}
+
+fn query_bounded(
+    connection: &Connection,
+    sql: &str,
+    parameters: &[oxide_driver_protocol::DriverQueryParameter],
+    limits: Option<(usize, usize)>,
+) -> Result<Vec<DriverQueryResult>, DriverProtocolError> {
     let parameters = duckdb_parameters(parameters)?;
     let statement_type = statement_type(sql);
     if !is_row_returning_statement(&statement_type) {
@@ -291,29 +430,87 @@ fn query(
         .ok_or_else(|| protocol_error("QUERY_FAILED", "Query statement was released unexpectedly"))?
         .column_names()
         .into_iter()
-        .map(|name| DriverColumn {
+        .enumerate()
+        .map(|(index, name)| DriverColumn {
             name: name.to_string(),
-            data_type: "UNKNOWN".to_string(),
+            data_type: query_types::column_type(&rows.as_ref().unwrap().column_type(index)),
         })
         .collect::<Vec<_>>();
+    if limits.is_some() && columns.len() > 256 {
+        return Err(protocol_error(
+            "FILE_QUERY_RESULT_LIMIT",
+            "File-query results are limited to 256 columns",
+        ));
+    }
     let mut values = Vec::new();
+    let mut encoded_bytes = serde_json::to_vec(&columns)
+        .map_err(|error| protocol_error("QUERY_ENCODE_FAILED", error.to_string()))?
+        .len();
+    if limits.is_some_and(|(_, max_bytes)| encoded_bytes > max_bytes) {
+        return Err(protocol_error(
+            "FILE_QUERY_RESULT_LIMIT",
+            "File-query columns exceed the result byte budget",
+        ));
+    }
+    let mut truncated = false;
     while let Some(row) = rows
         .next()
         .map_err(|error| protocol_error("QUERY_FAILED", error.to_string()))?
     {
+        if limits.is_some_and(|(rows, _)| values.len() >= rows) {
+            truncated = true;
+            break;
+        }
         let mut item = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
-            item.push(value_to_json(row.get_ref(index).map_err(|error| {
-                protocol_error("QUERY_DECODE_FAILED", error.to_string())
-            })?));
+        for (index, column) in columns.iter().enumerate() {
+            let value = row
+                .get_ref(index)
+                .map_err(|error| protocol_error("QUERY_DECODE_FAILED", error.to_string()))?;
+            if let Some((_, max_bytes)) = limits {
+                let oversized = match value {
+                    ValueRef::Text(bytes) => bytes.len() > max_bytes,
+                    ValueRef::Blob(bytes) | ValueRef::Geometry(bytes) => {
+                        bytes.len() > max_bytes / 2
+                    }
+                    _ => false,
+                };
+                if oversized {
+                    return Err(protocol_error(
+                        "FILE_QUERY_RESULT_LIMIT",
+                        "File-query cell exceeds the result byte budget",
+                    ));
+                }
+            }
+            let mut value = value_to_json(value);
+            if column.data_type == "TIMESTAMP WITH TIME ZONE" {
+                if let Value::String(text) = &mut value {
+                    if text.contains(' ') {
+                        text.push_str("+00:00");
+                    }
+                }
+            }
+            item.push(value);
+        }
+        if let Some((_, max_bytes)) = limits {
+            encoded_bytes = encoded_bytes.saturating_add(
+                serde_json::to_vec(&item)
+                    .map_err(|error| protocol_error("QUERY_ENCODE_FAILED", error.to_string()))?
+                    .len(),
+            );
+            if encoded_bytes > max_bytes {
+                return Err(protocol_error(
+                    "FILE_QUERY_RESULT_LIMIT",
+                    "File-query result exceeds its byte budget",
+                ));
+            }
         }
         values.push(item);
     }
     Ok(vec![DriverQueryResult {
         columns,
         rows: values,
-        truncated: false,
-        row_limit: None,
+        truncated,
+        row_limit: limits.map(|(rows, _)| rows as u64),
         rows_affected: None,
         statement_type: Some(statement_type),
         message: None,
@@ -363,6 +560,7 @@ fn metadata(
     request: MetadataRequest,
 ) -> Result<Value, DriverProtocolError> {
     match request {
+        MetadataRequest::SqlLookupContext { .. } => Ok(Value::Null),
         MetadataRequest::Databases => query_string_column(
             connection,
             "SELECT database_name FROM duckdb_databases() ORDER BY database_name",
@@ -394,13 +592,16 @@ fn metadata(
             database,
             namespace,
             relation,
-        } => duckdb_referencing_foreign_keys(
-            connection,
-            database.as_deref(),
-            &namespace,
-            &relation,
-        ),
-        MetadataRequest::Routines { .. } => Ok(Value::Array(Vec::new())),
+        } => {
+            duckdb_referencing_foreign_keys(connection, database.as_deref(), &namespace, &relation)
+        }
+        MetadataRequest::Routines { .. }
+        | MetadataRequest::SchemaObjects { .. }
+        | MetadataRequest::SchemaObjectMembers { .. } => Ok(Value::Array(Vec::new())),
+        MetadataRequest::ObjectSource { .. } => Err(protocol_error(
+            "UNSUPPORTED",
+            "DuckDB object source is unavailable",
+        )),
         MetadataRequest::Collections { .. } => Ok(Value::Array(Vec::new())),
     }
 }
@@ -617,12 +818,22 @@ fn value_to_json(value: ValueRef<'_>) -> Value {
         ValueRef::TinyInt(value) => json!(value),
         ValueRef::SmallInt(value) => json!(value),
         ValueRef::Int(value) => json!(value),
+        ValueRef::BigInt(value)
+            if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value) =>
+        {
+            Value::String(value.to_string())
+        }
         ValueRef::BigInt(value) => json!(value),
         ValueRef::UTinyInt(value) => json!(value),
         ValueRef::USmallInt(value) => json!(value),
         ValueRef::UInt(value) => json!(value),
+        ValueRef::UBigInt(value) if value > 9_007_199_254_740_991 => {
+            Value::String(value.to_string())
+        }
         ValueRef::UBigInt(value) => json!(value),
+        ValueRef::Float(value) if !value.is_finite() => Value::String(value.to_string()),
         ValueRef::Float(value) => json!(value),
+        ValueRef::Double(value) if !value.is_finite() => Value::String(value.to_string()),
         ValueRef::Double(value) => json!(value),
         ValueRef::HugeInt(value) => Value::String(value.to_string()),
         ValueRef::UHugeInt(value) => Value::String(value.to_string()),
@@ -642,9 +853,9 @@ fn value_to_json(value: ValueRef<'_>) -> Value {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         )),
-        ValueRef::Timestamp(unit, value) => Value::String(format!("{unit:?}:{value}")),
-        ValueRef::Date32(value) => json!(value),
-        ValueRef::Time64(unit, value) => Value::String(format!("{unit:?}:{value}")),
+        ValueRef::Timestamp(unit, value) => Value::String(query_types::timestamp(unit, value)),
+        ValueRef::Date32(value) => Value::String(query_types::date(value)),
+        ValueRef::Time64(unit, value) => Value::String(query_types::time(unit, value)),
         ValueRef::Interval {
             months,
             days,
@@ -659,11 +870,9 @@ fn value_to_json(value: ValueRef<'_>) -> Value {
 }
 
 fn statement_type(sql: &str) -> String {
-    sql.trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("UNKNOWN")
-        .to_ascii_uppercase()
+    read_only_sql_tokens(sql)
+        .first()
+        .map_or_else(|| "UNKNOWN".into(), |token| token.to_ascii_uppercase())
 }
 
 fn is_row_returning_statement(statement_type: &str) -> bool {
@@ -810,6 +1019,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scoped_query_honors_schema_and_restores_it_after_errors() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE SCHEMA analytics; CREATE TABLE analytics.items(id INTEGER); INSERT INTO analytics.items VALUES(42)").unwrap();
+        assert_eq!(
+            query_in_database_context(
+                &mut connection,
+                None,
+                Some("analytics"),
+                "SELECT id FROM items",
+                &[]
+            )
+            .unwrap()[0]
+                .rows,
+            vec![vec![json!(42)]]
+        );
+        assert!(query_in_database_context(
+            &mut connection,
+            None,
+            Some("analytics"),
+            "SELECT id FROM missing",
+            &[]
+        )
+        .is_err());
+        assert_eq!(
+            query(&connection, "SELECT current_schema()", &[]).unwrap()[0].rows,
+            vec![vec![json!("main")]]
+        );
+    }
+
+    #[test]
+    fn read_only_connections_preserve_the_file_and_reject_engine_writes_and_missing_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.duckdb");
+        {
+            let writer = Connection::open(&source).unwrap();
+            writer
+                .execute_batch("CREATE TABLE sample(id INTEGER); INSERT INTO sample VALUES(42)")
+                .unwrap();
+        }
+        let before = std::fs::read(&source).unwrap();
+        let mut connections = HashMap::new();
+        let read_only = |path: &std::path::Path| DriverRequest::Connect {
+            connection_id: "read-only".to_string(),
+            config: oxide_driver_protocol::SecretConnectionConfig {
+                url: path.to_string_lossy().into_owned(),
+                options: [("readOnly".into(), "true".into())].into_iter().collect(),
+            },
+        };
+        handle_request(read_only(&source), &mut connections).unwrap();
+        let reader = connections.get("read-only").unwrap();
+        assert!(
+            reader
+                .execute_batch("INSERT INTO sample VALUES(99)")
+                .is_err(),
+            "the engine must reject writes even without the SQL guard"
+        );
+        assert_eq!(
+            query(reader, "SELECT id FROM sample", &[]).unwrap()[0].rows,
+            vec![vec![json!(42)]]
+        );
+        drop(connections);
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        let missing = directory.path().join("missing.duckdb");
+        assert!(handle_request(read_only(&missing), &mut HashMap::new()).is_err());
+        assert!(
+            !missing.exists(),
+            "read-only connect must not create a database"
+        );
+    }
+
+    #[test]
     fn normalizes_memory_and_file_urls_without_exposing_connection_text() {
         assert_eq!(duckdb_path(":memory:").unwrap(), ":memory:");
         assert_eq!(
@@ -952,14 +1232,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(references
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reference| {
-                reference["table"] == "metrics"
-                    && reference["referenced_table"] == "metric_owner"
-            }));
+        assert!(references.as_array().unwrap().iter().any(|reference| {
+            reference["table"] == "metrics" && reference["referenced_table"] == "metric_owner"
+        }));
 
         connection
             .execute_batch(
@@ -1066,7 +1341,9 @@ mod tests {
         };
         let response = handle_line(&serde_json::to_string(&request).unwrap(), &mut connections);
         assert_eq!(response.id, 21);
-        assert!(matches!(response.response, DriverResponse::Error(error) if error.code == "CONNECTION_NOT_FOUND"));
+        assert!(
+            matches!(response.response, DriverResponse::Error(error) if error.code == "CONNECTION_NOT_FOUND")
+        );
     }
 
     #[test]
@@ -1086,6 +1363,7 @@ mod tests {
             panic!("expected handshake response");
         };
         assert!(handshake.capabilities.read_only_enforcement);
+        assert!(handshake.capabilities.file_queries);
     }
 
     #[test]
@@ -1119,8 +1397,7 @@ mod tests {
             },
             &mut connections,
         )
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("expected a DuckDB server version");
         };
         assert!(!version.trim().is_empty());
@@ -1178,8 +1455,7 @@ mod tests {
             },
             &mut connections,
         )
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("expected a query result after rollback");
         };
         assert_eq!(results[0].rows, vec![vec![json!(0)]]);

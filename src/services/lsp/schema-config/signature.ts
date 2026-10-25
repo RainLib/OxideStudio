@@ -4,6 +4,11 @@ export function lspSchemaSignature(schemaDefinitions: LspSchemaDefinition[]) {
   const canonicalSchemas = schemaDefinitions
     .map((schema) => ({
       id: schema.id,
+      server: schema.server ?? null,
+      namespace: schema.namespace ? {
+        default_schema: schema.namespace.default_schema,
+        tables_complete: schema.namespace.tables_complete ?? false,
+      } : null,
       catalog: schema.catalog ?? null,
       database: schema.database,
       driver: schema.driver ?? null,

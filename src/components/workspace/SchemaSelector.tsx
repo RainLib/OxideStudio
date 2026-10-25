@@ -122,7 +122,7 @@ export function SchemaSelector({
       <PopoverContent
         align="end"
         sideOffset={4}
-        className="w-64 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]"
+        className="w-64 p-1 text-[12px]"
       >
         <div className="relative mb-1 flex h-7 items-center">
           <Search size={12} className="pointer-events-none absolute left-2 wb-muted" />

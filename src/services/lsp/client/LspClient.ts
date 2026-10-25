@@ -54,10 +54,20 @@ import {
   requestSessionPayload,
 } from "./transport";
 import type { InlineLspContext } from "@/services/tauri/ai.service";
+import {getLspDiagnosticSnapshot,type DiagnosticSnapshotRequest} from "./diagnostics";
+import {createLspRuntimeObservation} from "./runtimeObservation";
+import { confirmLspAnalysisConfiguration } from "./analysisConfiguration";
+import {getLspDocumentStructure,type DocumentStructureKind,type DocumentStructureRequest} from "./documentStructure";
+import {getLspDocumentSemantics,type DocumentSemanticKind,type DocumentSemanticRequest} from "./documentSemantics";
+import {getLspDocumentCompletions,type DocumentCompletionRequest} from "./documentCompletions";
+import {getLspCompletionSnapshot,type CompletionSnapshotRequest} from "./completionSnapshot";
 
 /** Manages one scoped sql-lsp process session through Tauri commands. */
 export class LspClient {
   private initialized = false;
+  private readonly runtimeObservation=createLspRuntimeObservation();
+  readonly getRuntimeSnapshot=this.runtimeObservation.getSnapshot;
+  readonly subscribeRuntime=this.runtimeObservation.subscribe;
   private binaryPath: string | null = null;
   private initializationPromise: Promise<void> | null = null;
   private requestSequence = 0;
@@ -71,7 +81,7 @@ export class LspClient {
       invoke: <T>(command: string, payload?: Record<string, unknown>) =>
         this.invokeCommand<T>(command, payload),
       invokeCancellable: <T>(
-        command: "lsp_get_completions" | "lsp_resolve_completion",
+        command: "lsp_get_completions" | "lsp_resolve_completion" | "lsp_request",
         request: Record<string, unknown>,
         token?: LspCancellationToken,
       ) => this.invokeCancellable<T>(command, request, token),
@@ -88,7 +98,7 @@ export class LspClient {
     return commandSessionPayload(this.sessionKey);
   }
 
-  private nextRequestToken(kind: "completion" | "resolve"): string {
+  private nextRequestToken(kind: "completion" | "resolve" | "document-completion"): string {
     this.requestSequence += 1;
     return `${kind}-${Date.now().toString(36)}-${this.requestSequence.toString(36)}`;
   }
@@ -101,14 +111,14 @@ export class LspClient {
   }
 
   private async invokeCancellable<T>(
-    command: "lsp_get_completions" | "lsp_resolve_completion",
+    command: "lsp_get_completions" | "lsp_resolve_completion" | "lsp_request",
     request: Record<string, unknown>,
     token?: LspCancellationToken,
   ): Promise<T> {
     return await invokeCancellableLspCommand({
       sessionKey: this.sessionKey,
       requestToken: this.nextRequestToken(
-        command === "lsp_get_completions" ? "completion" : "resolve",
+        command === "lsp_get_completions" ? "completion" : command === "lsp_request" ? "document-completion" : "resolve",
       ),
       command,
       request,
@@ -146,6 +156,7 @@ export class LspClient {
       });
       this.initialized = true;
       this.binaryPath = binaryPath;
+      this.runtimeObservation.setReady(true,true);
       console.log("[LSP] Initialized:", result);
     } catch (error) {
       console.error("[LSP] Initialization failed:", error);
@@ -163,8 +174,7 @@ export class LspClient {
       console.error("[LSP] Shutdown failed:", error);
       throw error;
     } finally {
-      this.initialized = false;
-      this.binaryPath = null;
+      this.markDisconnected();
       this.initializationPromise = null;
     }
   }
@@ -186,6 +196,7 @@ export class LspClient {
   markDisconnected(): void {
     this.initialized = false;
     this.binaryPath = null;
+    this.runtimeObservation.setReady(false);
   }
 
   async getCompletions(
@@ -267,8 +278,9 @@ export class LspClient {
     uri: string,
     tabSize: number,
     insertSpaces: boolean,
+    throwOnError = false,
   ): Promise<TextEdit[]> {
-    return await formatLspDocument(this.bridge, uri, tabSize, insertSpaces);
+    return await formatLspDocument(this.bridge, uri, tabSize, insertSpaces, throwOnError);
   }
 
   async formatRange(
@@ -317,6 +329,26 @@ export class LspClient {
   async getDocumentSymbols(uri: string): Promise<LspDocumentSymbol[]> {
     return await getLspDocumentSymbols(this.bridge, uri);
   }
+  async getDocumentCompletions(request:DocumentCompletionRequest,token?:LspCancellationToken){
+    const runtime=this.getRuntimeSnapshot();if(!runtime.ready)return null;
+    const result=await getLspDocumentCompletions(this.bridge,request,token);
+    return this.getRuntimeSnapshot()===runtime?result:null;
+  }
+  async getCompletionSnapshot(request:CompletionSnapshotRequest,token?:LspCancellationToken){
+    const runtime=this.getRuntimeSnapshot();if(!runtime.ready)return null;
+    const result=await getLspCompletionSnapshot(this.bridge,request,token);
+    return this.getRuntimeSnapshot()===runtime?result:null;
+  }
+  async getDocumentStructure<K extends DocumentStructureKind>(request:DocumentStructureRequest<K>){
+    const runtime=this.getRuntimeSnapshot();if(!runtime.ready)return null;
+    const result=await getLspDocumentStructure(this.bridge,request);
+    return this.getRuntimeSnapshot()===runtime?result:null;
+  }
+  async getDocumentSemantics<K extends DocumentSemanticKind>(request:DocumentSemanticRequest<K>){
+    const runtime=this.getRuntimeSnapshot();if(!runtime.ready)return null;
+    const result=await getLspDocumentSemantics(this.bridge,request);
+    return this.getRuntimeSnapshot()===runtime?result:null;
+  }
 
   async getFoldingRanges(uri: string): Promise<LspFoldingRange[]> {
     return await getLspFoldingRanges(this.bridge, uri);
@@ -336,6 +368,9 @@ export class LspClient {
   async getInlayHints(uri: string, range: Range): Promise<LspInlayHint[]> {
     return await getLspInlayHints(this.bridge, uri, range);
   }
+  async getDiagnosticSnapshot(request:DiagnosticSnapshotRequest){
+    return getLspDiagnosticSnapshot(this.bridge,request);
+  }
 
   async searchWorkspaceSymbols(query: string): Promise<LspWorkspaceSymbol[]> {
     return await searchLspWorkspaceSymbols(this.bridge, query);
@@ -351,6 +386,12 @@ export class LspClient {
       console.error(`[LSP] ${method} failed:`, error);
       throw error;
     }
+  }
+
+  async confirmAnalysisConfiguration(token: string): Promise<boolean> {
+    const runtime = this.getRuntimeSnapshot();
+    const applied = await confirmLspAnalysisConfiguration(this.bridge, token);
+    return applied && runtime.ready && this.getRuntimeSnapshot() === runtime;
   }
 
   async updateConfiguration(config: any): Promise<void> {

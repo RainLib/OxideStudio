@@ -1,9 +1,10 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const read = (file) => readSourceText(path.join(root, file));
 const facade = read("src/services/postgresDatabaseCatalogCache.ts");
 const moduleRoot = "src/services/postgres-database-catalog";
 const contracts = read(`${moduleRoot}/contracts.ts`);

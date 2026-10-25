@@ -105,6 +105,7 @@ pub(super) async fn resolve_table_data_transfer_target_plan(
         create_columns,
         default_expressions,
         identity_generations,
+        character_metadata,
         warnings: mut target_column_warnings,
     } = target_columns_plan;
     let can_execute = columns
@@ -144,6 +145,7 @@ pub(super) async fn resolve_table_data_transfer_target_plan(
             &create_columns,
             &default_expressions,
             &identity_generations,
+            &character_metadata,
         )?
     };
     let confirmation_token = if can_execute {

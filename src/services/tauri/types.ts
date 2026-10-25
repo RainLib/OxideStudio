@@ -66,6 +66,10 @@ export type {
   SaveSqliteBackupScheduleRequest,
   SqliteBackupSchedule,
   SqliteBackupRun,
+  SqliteBackupWorkerStatus,
+  SqliteBackupArtifactQuery,
+  SqliteBackupArtifactPage,
+  SqliteBackupDeletePreview,
 } from "./types/sqliteBackup";
 export type {
   ColumnDef,
@@ -284,3 +288,5 @@ export type {
   ColumnsRequest,
   SetSchemaRequest,
 } from "./types/requests";
+export * from "./types/largeTransfer";
+export * from "./types/resumableImport";

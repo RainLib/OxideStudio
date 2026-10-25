@@ -250,6 +250,8 @@ fn portable_schema_restore_maps_only_structured_btree_unique_and_foreign_keys() 
             comment: None,
             is_generated: Some(false),
             is_hidden: Some(false),
+            character_set: None,
+            collation: None,
         })
         .collect::<Vec<_>>();
 
@@ -294,6 +296,8 @@ fn portable_schema_restore_fails_closed_for_dialect_specific_objects() {
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }];
     let expression_index = IndexInfo {
         name: "orders_email_lower_idx".to_string(),

@@ -53,6 +53,8 @@ pub struct GenericLspRequest {
     pub session_key: Option<String>,
     pub method: String,
     pub params: Value,
+    #[serde(default)]
+    pub request_token: Option<String>,
 }
 
 /// Completion response

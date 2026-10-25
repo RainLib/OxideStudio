@@ -30,7 +30,7 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::path::Path;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[allow(unused_imports)]
 use tauri::{AppHandle, Manager};
 #[cfg(test)]
@@ -52,6 +52,7 @@ mod saved_sql;
 mod setup;
 mod telemetry;
 
+pub use credential_crypto::restore_read_only_connection_credentials;
 pub use models::{
     AssistantTaskCheckpoint, AssistantTaskCompletedStep, AssistantTaskContextBinding,
     AssistantTaskExecutionReceipt, AssistantTaskPlanStep, AssistantTaskRecord,

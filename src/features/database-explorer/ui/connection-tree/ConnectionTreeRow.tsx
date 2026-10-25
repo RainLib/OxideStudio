@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { ConnectionGlyph } from "@/components/icons/ConnectionGlyph";
 import {
   ContextMenuContent,
@@ -339,11 +340,11 @@ export function createConnectionTreeRowRenderer({
                 name: assignedGroup.name,
               })
             }
-            onDelete={() => {
+            onDelete={async () => {
               if (
-                window.confirm(
+                (await confirmAction(
                   `Delete connection group “${assignedGroup.name}”? Connections will be moved to Ungrouped.`,
-                )
+                ))
               ) {
                 deleteExplorerConnectionGroup(
                   explorerStateScope,

@@ -1,4 +1,5 @@
 import { AppBar } from "@/components/AppBar";
+import { FileQueryOpenDialog } from "@/features/file-query/FileQueryOpenDialog";
 import { QueryShortcuts } from "@/components/workspace/QueryShortcuts";
 import { TabBar } from "@/components/workspace/TabBar";
 import {
@@ -6,7 +7,6 @@ import {
   WorkbenchStatusBar,
   WorkbenchTitleTools,
 } from "@/components/workspace/WorkbenchChrome";
-import { useSqliteBackupScheduler } from "@/features/database-admin/model/useSqliteBackupScheduler";
 import { useWorkbenchSessionLifecycle } from "@/features/workbench/hooks/useWorkbenchSessionLifecycle";
 import { useWorkbenchSurfaceEvents } from "@/features/workbench/hooks/useWorkbenchSurfaceEvents";
 import { useWorkbenchWindowNavigation } from "@/features/workbench/hooks/useWorkbenchWindowNavigation";
@@ -52,7 +52,6 @@ import { useShallow } from "zustand/react/shallow";
 export function WorkspaceRuntime() {
   useShortcuts();
   useUnsavedChangesGuard();
-  useSqliteBackupScheduler();
   const activeTab = useTabStore(
     useShallow((state) => {
       const tab = state.tabs.find((item) => item.id === state.activeTabId);
@@ -241,6 +240,7 @@ export function WorkspaceRuntime() {
       }
     >
       <WorkspaceStartupHydration />
+      <FileQueryOpenDialog />
       <DeferredQueryHistorySync />
       {hasLspSurface && (
         <Suspense fallback={null}>

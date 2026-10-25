@@ -1,5 +1,5 @@
 import { AlertTriangle } from "lucide-react";
-import type { ComponentProps } from "react";
+import { useRef, type ComponentProps } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,7 @@ export function DangerousSqlConfirmDialog({
   onDecision,
   onCloseAutoFocus,
 }: DangerousSqlConfirmDialogProps) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
   return (
     <Dialog
       open={open}
@@ -37,11 +38,13 @@ export function DangerousSqlConfirmDialog({
       }}
     >
       <DialogContent
-        className="max-w-md border-destructive/45"
+        className="max-w-md"
         onCloseAutoFocus={onCloseAutoFocus}
+        onOpenAutoFocus={(event) => { event.preventDefault(); cancelRef.current?.focus(); }}
+        onPointerDownOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-destructive">
+          <DialogTitle className="flex items-center gap-2" data-popup-danger>
             <AlertTriangle className="size-5" aria-hidden="true" />
             Confirm destructive SQL
           </DialogTitle>
@@ -54,7 +57,7 @@ export function DangerousSqlConfirmDialog({
           statement in the editor before continuing.
         </p>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onDecision(false)}>
+          <Button ref={cancelRef} variant="outline" onClick={() => onDecision(false)}>
             Cancel
           </Button>
           <Button variant="destructive" onClick={() => onDecision(true)}>

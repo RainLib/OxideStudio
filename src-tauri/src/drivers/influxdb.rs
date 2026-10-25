@@ -737,6 +737,8 @@ fn influx_column(name: &str, data_type: &str, nullable: bool, primary_key: bool)
         identity_generation: None,
         is_generated: None,
         is_hidden: None,
+        character_set: None,
+        collation: None,
         is_primary_key: primary_key,
         default_value: None,
         comment: None,

@@ -114,7 +114,7 @@ export function AssistantProviderControl({
         sideOffset={5}
         role="dialog"
         aria-label={t("assistant.provider.choose")}
-        className="w-[220px] rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[10px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.34)]"
+        className="w-[220px] p-1 text-[10px]"
       >
         <div className="space-y-0.5">
           {ASSISTANT_PROVIDER_DEFINITIONS.map((candidate) => (

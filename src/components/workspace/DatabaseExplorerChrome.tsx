@@ -42,7 +42,7 @@ import type {
 } from "@/store/useDatabaseExplorerStore";
 
 const menuContentClass =
-  "min-w-[238px] rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_16px_40px_rgba(0,0,0,0.42)]";
+  "min-w-[238px] p-1 text-[12px]";
 const menuItemClass =
   "h-7 cursor-default rounded-[3px] px-2 text-[12px] focus:bg-[hsl(var(--wb-active-strong))] focus:text-[hsl(var(--wb-text))]";
 

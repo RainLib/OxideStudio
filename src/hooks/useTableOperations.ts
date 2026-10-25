@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 import { useConnectionStore } from "@/store/useConnectionStore";
 import { useEffect, useRef, useState } from "react";
 import { useSchemaStore } from "@/store/useSchemaStore";
@@ -302,9 +303,9 @@ export function useTableOperations() {
       ],
     });
     if (typeof selected !== "string") return;
-    const confirmed = window.confirm(
+    const confirmed = (await confirmAction(
       `Import ${format.toUpperCase()} rows into "${tableName}"?\n\nExisting rows are not replaced. Each imported record will be inserted as a new row.`,
-    );
+    ));
     if (!confirmed) return;
 
     const taskStore = useTaskStore.getState();

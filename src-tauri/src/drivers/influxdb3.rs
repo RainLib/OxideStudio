@@ -402,6 +402,8 @@ fn influxdb3_columns(rows: &[Value]) -> Vec<ColumnInfo> {
                 identity_generation: None,
                 is_generated: None,
                 is_hidden: None,
+                character_set: None,
+                collation: None,
                 default_value: None,
                 comment: None,
             })

@@ -94,7 +94,7 @@ export function SqlLibraryPanelHeader({
               <MoreHorizontal size={13} />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent className="min-w-[170px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[10px]">
+          <DropdownMenuContent className="min-w-[170px] p-1 text-[10px]">
             <DropdownMenuItem className="h-7 text-[10px]" onClick={onImport}>
               <Download size={11} className="mr-2" /> Import directory
             </DropdownMenuItem>

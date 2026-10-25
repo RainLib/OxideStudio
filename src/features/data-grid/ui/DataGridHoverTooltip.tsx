@@ -1,5 +1,8 @@
 import type { GridCell, GridMouseEventArgs } from "@glideapps/glide-data-grid";
 import { createPortal } from "react-dom";
+import { PopupPresence } from "@/components/ui/PopupPresence";
+import { popupVariants } from "@/styles/variants/popup";
+import { cn } from "@/lib/utils";
 
 export interface DataGridHoverTooltipState {
   key: string;
@@ -61,6 +64,10 @@ export function gridHoverTooltipPosition(
 export function DataGridHoverTooltip({
   tooltip,
 }: DataGridHoverTooltipProps) {
+  return <PopupPresence open={Boolean(tooltip)}><GridTooltipContent tooltip={tooltip}/></PopupPresence>;
+}
+
+function GridTooltipContent({ tooltip, "data-state": popupState = "open" }: DataGridHoverTooltipProps & { "data-state"?: "open" | "closed" }) {
   if (!tooltip || typeof document === "undefined") return null;
 
   const left = Math.max(8, Math.min(tooltip.x + 12, window.innerWidth - 340));
@@ -70,7 +77,8 @@ export function DataGridHoverTooltip({
     <div
       key={tooltip.key}
       role="tooltip"
-      className="pointer-events-none fixed z-[70] max-h-40 w-max max-w-[320px] overflow-hidden rounded-[4px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[11px] text-[hsl(var(--wb-text))] shadow-[0_3px_8px_rgba(0,0,0,0.28)]"
+      data-state={popupState}
+      className={cn(popupVariants({ kind: "tooltip" }), "pointer-events-none fixed z-[70] max-h-40 w-max max-w-[min(320px,calc(100vw-16px))] overflow-hidden px-2.5 py-2 text-[11px]")}
       style={{ left, top }}
     >
       <div className="flex min-w-0 items-baseline gap-2">

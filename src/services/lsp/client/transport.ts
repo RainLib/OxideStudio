@@ -19,7 +19,7 @@ export async function invokeLspCommand<T>(
 export async function invokeCancellableLspCommand<T>(options: {
   sessionKey: string;
   requestToken: string;
-  command: "lsp_get_completions" | "lsp_resolve_completion";
+  command: "lsp_get_completions" | "lsp_resolve_completion" | "lsp_request";
   request: Record<string, unknown>;
   token?: LspCancellationToken;
 }): Promise<T> {

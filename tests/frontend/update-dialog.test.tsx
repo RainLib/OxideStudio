@@ -13,6 +13,7 @@ vi.mock("@/services/appUpdateService", () => ({
   checkForAppUpdate: vi.fn(),
   downloadAppUpdate: vi.fn(),
   installAppUpdateAndRestart: vi.fn(),
+  getAppUpdateInstallationStatus: vi.fn(async () => ({ installationId: null, phase: "idle", recoveryRequired: false, message: null })),
 }));
 
 describe("UpdateDialog", () => {
@@ -35,6 +36,8 @@ describe("UpdateDialog", () => {
       totalBytes: null,
       error: null,
       lastCheckedAt: null,
+      nativeInstallation: null,
+      preparationCancelable: false,
     });
   });
 
@@ -72,6 +75,29 @@ describe("UpdateDialog", () => {
     expect(document.body.textContent).toContain("Ready to install");
     expect(document.body.textContent).toContain("Install and Restart");
     expect(document.body.textContent).toContain("100%");
+  });
+
+  it("lets the owner cancel preparation while keeping the queued backups", async () => {
+    const cancel = vi.fn(async () => {});
+    useUpdateStore.setState({ status: "preparing", preparationCancelable: true, cancelInstallationPreparation: cancel });
+    await act(async () => { root = createRoot(container); root.render(<UpdateDialog open onOpenChange={vi.fn()} />); });
+    expect(document.body.textContent).toContain("Your current backup can finish");
+    const button = Array.from(document.querySelectorAll("button")).find((candidate) => candidate.textContent === "Cancel update preparation");
+    await act(async () => { button?.click(); });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("requires the installer-closed acknowledgement before backup recovery", async () => {
+    const recover = vi.fn(async () => {});
+    const refresh = vi.fn(async () => {});
+    useUpdateStore.setState({ status: "idle", update: null, nativeInstallation: { installationId: "failed", phase: "installing", recoveryRequired: true, message: "close installer" }, recoverBackupsAfterUpdate: recover, refreshInstallationStatus: refresh });
+    await act(async () => { root = createRoot(container); root.render(<UpdateDialog open onOpenChange={vi.fn()} />); });
+    const button = Array.from(document.querySelectorAll("button")).find((candidate) => candidate.textContent === "Resume backups");
+    expect(button?.disabled).toBe(true);
+    await act(async () => { (document.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+    expect(button?.disabled).toBe(false);
+    await act(async () => { button?.click(); });
+    expect(recover).toHaveBeenCalledOnce();
   });
 });
 

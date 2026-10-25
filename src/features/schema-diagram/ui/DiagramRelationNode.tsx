@@ -188,7 +188,7 @@ export function DiagramRelationNode({
           )}
         </button>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+      <ContextMenuContent className="w-56">
         <ContextMenuItem className="gap-2 text-[10px]" onClick={onReveal}>
           <ExternalLink size={11} /> Reveal in Explorer
         </ContextMenuItem>
@@ -199,7 +199,7 @@ export function DiagramRelationNode({
             relation
             {contextRelationNames.length === 1 ? "" : "s"} to area
           </ContextMenuSubTrigger>
-          <ContextMenuSubContent className="max-h-72 w-52 overflow-y-auto border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+          <ContextMenuSubContent className="max-h-72 w-52 overflow-y-auto">
             <ContextMenuItem
               className="gap-2 text-[10px]"
               onClick={() => onCreateArea(contextRelationNames)}

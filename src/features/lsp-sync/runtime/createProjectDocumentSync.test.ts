@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createProjectDocumentSync } from "./createProjectDocumentSync";
+import {createLspRuntimeObservation} from "@/services/lsp/client/runtimeObservation";
 
 function deferred() {
   let resolve!: () => void;
@@ -35,14 +36,22 @@ function request(lspClient = client(), content = "select 1") {
 }
 
 describe("project LSP document ownership", () => {
+  it("reopens unchanged project content when the same client has a replacement process",async()=>{
+    const process=createLspRuntimeObservation();process.setReady(true);const transport=Object.assign(client(),{getRuntimeSnapshot:process.getSnapshot}),session=createProjectDocumentSync();
+    await session.synchronize(request(transport));process.setReady(true,true);await session.synchronize(request(transport));
+    expect(transport.didOpen).toHaveBeenCalledTimes(2);expect(transport.didOpen.mock.calls.map(call=>call[2])).toEqual([1,1]);await session.closeAll();
+  });
+  it("does not mistake a replacement client with the same session name for the same transport",async()=>{
+    const session=createProjectDocumentSync(),a=client(),b=client();await session.synchronize(request(a));await session.synchronize(request(b));
+    expect(a.didClose).toHaveBeenCalledOnce();expect(b.didOpen).toHaveBeenCalledOnce();await session.closeAll();
+  });
   it("closes an in-flight open before a new context can reopen the same document", async () => {
     const session = createProjectDocumentSync();
     const opening = deferred();
     const transport = client();
     transport.didOpen.mockImplementationOnce(() => opening.promise);
     const first = session.synchronize(request(transport));
-    await Promise.resolve();
-    expect(transport.didOpen).toHaveBeenCalledOnce();
+    await vi.waitFor(()=>expect(transport.didOpen).toHaveBeenCalledOnce());
     const closing = session.closeAll();
     const next = session.synchronize(request(transport));
     opening.resolve();

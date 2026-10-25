@@ -45,7 +45,7 @@ export function AssistantModelPanel({
     <section
       aria-label={t("assistant.model.controls")}
       data-assistant-model-panel="true"
-      className="overflow-hidden rounded-[12px] border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] shadow-[0_6px_8px_rgba(0,0,0,0.36)]"
+      className="overflow-hidden"
     >
       <AssistantModelCatalogNotice
         status={status}

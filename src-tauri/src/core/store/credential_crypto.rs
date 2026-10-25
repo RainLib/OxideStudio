@@ -1,5 +1,9 @@
-use super::models::CONNECTION_CREDENTIAL_KEY_BYTES;
+use super::models::{CONNECTION_CREDENTIAL_KEY_BYTES, CONNECTION_CREDENTIAL_KEY_FILE};
 use crate::core::private_file::create_private_file;
+use aes_gcm::{
+    aead::{Aead, Payload},
+    Aes256Gcm, KeyInit, Nonce,
+};
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use rand::rngs::OsRng;
@@ -148,4 +152,67 @@ pub(super) fn restore_ssh_tunnel_secrets(
             }
         }
     }
+}
+
+/// Restore only an existing, authenticated credential record. Never create a key
+/// or migrate plaintext records while a headless client is reading the store.
+pub fn restore_read_only_connection_credentials(
+    directory: &Path,
+    project_id: &str,
+    connection_id: &str,
+    config: &mut serde_json::Value,
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<()> {
+    let key = Zeroizing::new(
+        read_credential_key(&directory.join(CONNECTION_CREDENTIAL_KEY_FILE))?
+            .context("local connection credential key is unavailable")?,
+    );
+    restore_connection_config_with_key(&key, project_id, connection_id, config, ciphertext, nonce)
+}
+
+pub(super) fn restore_connection_config_with_key(
+    key: &[u8; CONNECTION_CREDENTIAL_KEY_BYTES],
+    project_id: &str,
+    connection_id: &str,
+    config: &mut serde_json::Value,
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<()> {
+    let nonce_bytes: [u8; 12] = nonce
+        .try_into()
+        .map_err(|_| anyhow!("local connection credential nonce is invalid"))?;
+    let cipher = Aes256Gcm::new_from_slice(key).context("invalid local credential key")?;
+    let nonce = Nonce::from(nonce_bytes);
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: &connection_credential_aad(project_id, connection_id),
+                },
+            )
+            .map_err(|_| anyhow!("local connection credentials could not be authenticated"))?,
+    );
+    let secrets: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&plaintext).context("local connection credentials are invalid")?;
+    let object = config
+        .as_object_mut()
+        .context("stored local connection config is invalid")?;
+    for (key, value) in secrets {
+        if key == "sshTunnel" {
+            let tunnel = object
+                .entry("sshTunnel")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .context("stored SSH tunnel config is invalid")?;
+            if let Some(values) = value.as_object() {
+                restore_ssh_tunnel_secrets(tunnel, values);
+            }
+        } else {
+            object.insert(key, value);
+        }
+    }
+    Ok(())
 }

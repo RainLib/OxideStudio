@@ -1,4 +1,4 @@
-import { confirmDiscardTabChanges } from "@/features/workspace-tabs/model/tabLifecycle";
+import { confirmCurrentTabChanges } from "@/features/workspace-tabs/model/confirmTabAction";
 import type { TabState } from "@/features/workspace-tabs/model/types";
 import { createCreationSlice } from "@/features/workspace-tabs/state/creationSlice";
 import { createDocumentPagingSlice } from "@/features/workspace-tabs/state/documentPagingSlice";
@@ -62,21 +62,20 @@ export const useTabStore = create<TabState>((set, get) => ({
   ...createGridLayoutSlice(set, get),
 }));
 
-export function confirmDiscardTableChanges(tabId: string, action: string) {
-  const tab = useTabStore.getState().tabs.find((item) => item.id === tabId);
-  return !tab || confirmDiscardTabChanges([tab], action);
+export async function confirmDiscardTableChanges(tabId: string, action: string) {
+  return confirmCurrentTabChanges(() => useTabStore.getState().tabs.filter((item) => item.id === tabId), action);
 }
 
-export function confirmDiscardAllTabChanges(action: string) {
-  return confirmDiscardTabChanges(useTabStore.getState().tabs, action);
+export async function confirmDiscardAllTabChanges(action: string) {
+  return confirmCurrentTabChanges(() => useTabStore.getState().tabs, action);
 }
 
-export function confirmDiscardProjectFileChanges(
+export async function confirmDiscardProjectFileChanges(
   projectId: string,
   action: string,
 ) {
-  return confirmDiscardTabChanges(
-    useTabStore
+  return confirmCurrentTabChanges(
+    () => useTabStore
       .getState()
       .tabs.filter((tab) => tab.fileProjectId === projectId),
     action,

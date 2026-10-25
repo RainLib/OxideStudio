@@ -10,6 +10,7 @@ import { useTransferSourceInventory } from "@/features/table-transfer/hooks/useT
 import { createTransferExecutionActions } from "@/features/table-transfer/model/createTransferExecutionActions";
 import { createTransferReviewActions } from "@/features/table-transfer/model/createTransferReviewActions";
 import { createTransferTargetActions } from "@/features/table-transfer/model/createTransferTargetActions";
+import { buildLargeTransferRequest } from "@/features/table-transfer/model/largeTransferPolicy";
 import {
   canExecuteTableDataTransfer,
   createTableDataTransferId,
@@ -32,7 +33,6 @@ import type {
 import { useEffect, useMemo, useState } from "react";
 import type { TableDataTransferDialogProps } from "@/features/table-transfer/model/tableDataTransferDialogTypes";
 
-
 export function useTableDataTransferDialogController({
   open,
   projectId,
@@ -47,6 +47,10 @@ export function useTableDataTransferDialogController({
   onTransferred,
 }: TableDataTransferDialogProps) {
   const [targetConnectionId, setTargetConnectionId] = useState("");
+  const [resumableOpen, setResumableOpen] = useState(false);
+  useEffect(() => {
+    setResumableOpen(false);
+  }, [open, projectId]);
   const [transferId, setTransferId] = useState(createTableDataTransferId);
   const [targetDatabase, setTargetDatabase] = useState("");
   const [targetSchema, setTargetSchema] = useState("");
@@ -236,6 +240,35 @@ export function useTableDataTransferDialogController({
     targetTableMode,
     targetCapabilities,
   });
+
+  const largeTransferRequest = useMemo(
+    () =>
+      buildLargeTransferRequest(
+        request,
+        !isBatchTransfer &&
+          targetTableMode === "existing" &&
+          !sourceConnection?.driverPackageVersion &&
+          !targetConnection?.driverPackageVersion &&
+          !sourceConnection?.sshTunnel?.enabled &&
+          !targetConnection?.sshTunnel?.enabled &&
+          !externalTransferConnectionIds.has(source.connectionId) &&
+          !externalTransferConnectionIds.has(targetConnectionId) &&
+          targetDistribution !== "external",
+      ),
+    [
+      request,
+      isBatchTransfer,
+      targetTableMode,
+      sourceConnection?.driverPackageVersion,
+      targetConnection?.driverPackageVersion,
+      sourceConnection?.sshTunnel?.enabled,
+      targetConnection?.sshTunnel?.enabled,
+      externalTransferConnectionIds,
+      source.connectionId,
+      targetConnectionId,
+      targetDistribution,
+    ],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -551,8 +584,12 @@ export function useTableDataTransferDialogController({
     reviewReady,
   });
 
-
   return {
+    resumableOpen,
+    setResumableOpen,
+    largeTransferRequest,
+    projectId,
+    onTransferred,
     open,
     onClose,
     source,

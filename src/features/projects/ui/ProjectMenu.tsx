@@ -14,7 +14,7 @@ interface ProjectMenuProps {
   activeProjectName: string;
   projectGroups: [string, Project[]][];
   activeProjectId: string;
-  setActiveProject: (projectId: string) => boolean;
+  setActiveProject: (projectId: string) => Promise<boolean>;
   setProjectDeleteError: React.Dispatch<React.SetStateAction<string | null>>;
   setProjectToDelete: React.Dispatch<React.SetStateAction<Project | null>>;
   activeProject: Project | null;
@@ -50,7 +50,7 @@ export function ProjectMenu({
       <PopoverContent
         align="start"
         sideOffset={6}
-        className="w-80 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.35)]"
+        className="w-80 p-1 text-[12px]"
       >
         <div className="max-h-72 overflow-y-auto">
           {projectGroups.map(([group, groupedProjects]) => (
@@ -74,8 +74,8 @@ export function ProjectMenu({
                     <button
                       type="button"
                       className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[hsl(var(--wb-accent))]"
-                      onClick={() => {
-                        if (setActiveProject(project.id)) {
+                      onClick={async () => {
+                        if (await setActiveProject(project.id)) {
                           setProjectMenuOpen(false);
                         }
                       }}

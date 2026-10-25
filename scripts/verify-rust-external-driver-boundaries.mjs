@@ -1,12 +1,13 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/drivers/external.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
-const expectedModules = ["conversions", "driver", "migration", "models", "runtime"];
+const facade = readSourceText(path.join(root, entry));
+const expectedModules = ["conversions", "driver", "migration", "lookup_context", "models", "runtime"];
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
   .filter((name) => name !== "tests");
@@ -25,7 +26,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/drivers/external/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::drivers::external(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning external-driver module.`);
 
@@ -56,10 +57,10 @@ for (const [symbol, owner] of Object.entries({
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
 
-if (helpers !== 16 || typeMethods !== 73)
-  throw new Error(`Expected 16 external-driver helpers and 73 type methods; found ${helpers} and ${typeMethods}.`);
+if (helpers !== 17 || typeMethods !== 74)
+  throw new Error(`Expected 17 external-driver helpers and 74 type methods; found ${helpers} and ${typeMethods}.`);
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/drivers/external/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/drivers/external/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (testCount !== 9) throw new Error(`Expected 9 external-driver regression scenarios; found ${testCount}.`);
 

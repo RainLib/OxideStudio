@@ -52,9 +52,17 @@ const candidate = (
   source,
 });
 
-// The 80 DBX reference types, plus five widely used compatible SQL products.
-// The latter are intentionally labelled compatibility instead of pretending
-// that DBX itself ships a profile for them.
+export const DBX_REFERENCE_BASELINE = {
+  repository: "https://github.com/t8y2/dbx",
+  revision: "eeab128d738e59bbc4bd16646998275b921e16d2",
+  catalogPath: "apps/desktop/src/types/generated/databaseTypes.ts",
+} as const;
+
+// The plugin type is an extension entry point, not a database connection.
+export const DBX_REFERENCE_EXTENSION_IDS = ["plugin"] as const;
+
+// 87 database products from the pinned DBX catalog, plus five compatible SQL
+// products and the independently shipped RocketMQ agent.
 export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("mysql", "MySQL / MariaDB", "relational", "bundled"),
   candidate("postgres", "PostgreSQL", "relational", "bundled"),
@@ -72,6 +80,8 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("elasticsearch", "Elasticsearch", "search", "bundled", "elasticsearch-dsl"),
   candidate("easysearch", "Easysearch", "search", "http", "elasticsearch-dsl"),
   candidate("meilisearch", "Meilisearch", "search", "bundled"),
+  candidate("solr", "Apache Solr", "search", "http"),
+  candidate("couchdb", "Apache CouchDB", "document", "http"),
   candidate("hbase", "Apache HBase", "wideColumn", "jdbc"),
   candidate("qdrant", "Qdrant", "search", "http"),
   candidate("milvus", "Milvus", "search", "http"),
@@ -107,6 +117,9 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("opengauss", "openGauss", "relational", "jdbc"),
   candidate("oceanbase-oracle", "OceanBase (Oracle mode)", "relational", "jdbc"),
   candidate("gbase", "GBase", "relational", "jdbc"),
+  // Each GBase product needs its own vendor JDBC package and conformance.
+  candidate("gbase8s", "GBase 8s", "relational", "jdbc"),
+  candidate("gbase8c", "GBase 8c", "relational", "jdbc"),
   candidate("access", "Microsoft Access", "relational", "jdbc"),
   candidate("h2", "H2", "relational", "jdbc"),
   candidate("snowflake", "Snowflake", "relational", "jdbc"),
@@ -115,11 +128,13 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("hive", "Apache Hive", "relational", "jdbc"),
   candidate("kyuubi", "Apache Kyuubi", "relational", "jdbc"),
   candidate("argo", "ArgoDB (Transwarp)", "relational", "jdbc"),
+  candidate("transwarp", "Transwarp Inceptor", "relational", "jdbc"),
   candidate("impala", "Apache Impala", "relational", "jdbc"),
   candidate("spark", "Apache Spark SQL", "relational", "jdbc"),
   candidate("db2", "IBM Db2", "relational", "jdbc"),
   candidate("informix", "IBM Informix", "relational", "jdbc"),
   candidate("neo4j", "Neo4j", "graph", "jdbc"),
+  candidate("nebula", "NebulaGraph", "graph", "native"),
   candidate("cassandra", "Apache Cassandra", "wideColumn", "jdbc"),
   candidate("bigquery", "Google BigQuery", "relational", "jdbc"),
   candidate("spanner", "Google Cloud Spanner", "relational", "jdbc"),
@@ -152,6 +167,9 @@ export const REFERENCE_DATABASE_DRIVER_CANDIDATES = [
   candidate("questdb", "QuestDB", "timeSeries", "http", "sql"),
   candidate("jdbc", "Generic JDBC", "relational", "jdbc"),
   candidate("mq", "Message Queue administration", "queue", "http"),
+  // Salesforce exposes relational records, but SOQL requires a dedicated
+  // provider. It must not inherit the generic SQL editor route.
+  candidate("salesforce", "Salesforce", "relational", "http", null),
   // DBX ships RocketMQ as an independent native agent with a dedicated
   // operational workspace (topics, consumer groups, lag, messages and ACLs),
   // rather than a SQL/HTTP driver. Keep it selectable as its own package
@@ -423,10 +441,7 @@ export function referenceDriverDeliveryPlan(
     };
   }
 
-  if (
-    candidate.dataModel === "relational" ||
-    candidate.genericLspLanguageId === "sql"
-  ) {
+  if (candidate.genericLspLanguageId === "sql") {
     const compatibilityBaseline =
       SQL_LSP_COMPATIBILITY_BASELINE_BY_DRIVER[candidate.driver];
     if (compatibilityBaseline) {

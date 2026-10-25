@@ -1,4 +1,5 @@
 import { useEditorDiagnostics } from "@/features/query-editor/hooks/useEditorDiagnostics";
+import { lspServerDialectForCapabilities } from "@/features/database-drivers/model/lspRouting";
 import { useInlineCompletionProvider } from "@/features/query-editor/hooks/useInlineCompletionProvider";
 import { useLspCoreProviderCoordinator } from "@/features/query-editor/hooks/useLspCoreProviderCoordinator";
 import { useLspHoverProviderCoordinator } from "@/features/query-editor/hooks/useLspHoverProviderCoordinator";
@@ -19,9 +20,15 @@ import type {
 import type { TableInfo } from "@/services/tauri/types/schemaCatalog";
 import { useAiSettingsStore } from "@/store/useAiSettingsStore";
 import { useProjectFilesStore } from "@/store/useProjectFilesStore";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import {useConnectionStore} from "@/store/useConnectionStore";
+import {semanticTabRoute} from "@/services/lsp/semanticContext";
+import {createCompletionContextReader,subscribeCompletionContext} from "../model/completionContextState";
+import {syncLspModelBeforeCompletion} from "../model/lspDocumentSync";
+import type {DiagnosticSnapshotRequest} from "@/services/lsp/client/diagnostics";
 
 interface EditorLanguageServicesOptions {
+  syncDocument?:(model:any)=>Promise<void>;
   activeProjectId: string;
   canUseLsp: boolean;
   documentUri: string;
@@ -52,6 +59,7 @@ interface EditorLanguageServicesOptions {
 }
 
 export function useEditorLanguageServices({
+  syncDocument:ownedSyncDocument,
   activeProjectId,
   canUseLsp,
   documentUri,
@@ -80,6 +88,18 @@ export function useEditorLanguageServices({
   lspSessionKey,
   setLspDiagnostics,
 }: EditorLanguageServicesOptions) {
+  const connection=useConnectionStore(state=>state.connections.find(value=>value.id===effectiveConnectionId));
+  const route=semanticTabRoute(activeTab);
+  const getSemanticContext=useMemo(()=>createCompletionContextReader({
+    connectionId:effectiveConnectionId,tabId:activeTab?.id,connection,
+    lspClient,metadataVersion,projectId:activeProjectId,currentSchema,route,
+  }),[effectiveConnectionId,activeTab?.id,connection,metadataVersion,activeProjectId,currentSchema,route,lspClient]);
+  const subscribeContext=useMemo(()=>(listener:()=>void)=>subscribeCompletionContext(listener,lspClient),[lspClient]);
+  const syncDocument=useMemo(()=>ownedSyncDocument??((model:any)=>syncLspModelBeforeCompletion({
+    uri:documentUri,model,languageId:documentLanguageId,client:lspClient,
+    openedDocuments:openedDocumentsRef.current,documentVersions:documentVersionsRef.current,documentTexts:documentTextsRef.current,
+  })),[ownedSyncDocument,documentUri,documentLanguageId,lspClient,openedDocumentsRef,documentVersionsRef,documentTextsRef]);
+  const requestDiagnosticSnapshot=useMemo(()=>(request:DiagnosticSnapshotRequest)=>lspClient.getDiagnosticSnapshot(request),[lspClient]);
   const rankByUsage = editorSettings.sqlCompletion.rankByUsage;
   const inlineProviderConfig = useAiSettingsStore(
     (state) => state.inlineProviderConfig,
@@ -105,16 +125,26 @@ export function useEditorLanguageServices({
   });
 
   useLspCoreProviderCoordinator({
+    getSemanticContext,
+    subscribeSemanticContext:subscribeContext,
+    editor:mountedEditor,
+    syncDocument,
     activeProjectId,
     canUseLsp,
     documentUri,
     editorLanguageId,
+    serverDialect: lspServerDialectForCapabilities(capabilities),
+    documentVersionsRef,
+    documentTextsRef,
     isActivePane,
     lspClient,
     monaco,
   });
 
   useLspHoverProviderCoordinator({
+    serverDialect:lspServerDialectForCapabilities(capabilities),
+    getSemanticContext,
+    subscribeSemanticContext:subscribeContext,
     activeProjectId,
     canUseLsp,
     currentSchema,
@@ -144,6 +174,7 @@ export function useEditorLanguageServices({
   });
 
   useInlineCompletionProvider({
+    getSemanticContext,subscribeSemanticContext:subscribeContext,
     editorSettings,
     isActivePane,
     monaco,
@@ -180,6 +211,9 @@ export function useEditorLanguageServices({
   });
 
   useEditorDiagnostics({
+    diagnosticDialect:lspServerDialectForCapabilities(capabilities),requestDiagnosticSnapshot,
+    syntaxContextKey:JSON.stringify([activeProjectId,activeTab?.id,semanticTabRoute(activeTab)]),
+    documentUri,getSemanticContext,subscribeSemanticContext:subscribeContext,
     monaco,
     lspReady,
     lspSessionKey,

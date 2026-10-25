@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { compileProjectFileFilter, DEFAULT_PROJECT_FILE_FILTER } from "@/lib/projectFileFilter";
 import { openProjectFileInEditor } from "@/lib/projectFileOpen";
+import { fileQueryFormat } from "@/features/file-query/model";
+import { useFileQueryStore } from "@/features/file-query/store";
 import { useProjectStore } from "@/store/useProjectStore";
 import { useWorkbenchLayoutStore } from "@/store/useWorkbenchLayoutStore";
 import {
@@ -179,10 +181,10 @@ export function useProjectFilesSidebarController() {
       });
       if (typeof selected === "string" && selected !== rootPath) {
         if (
-          !confirmDiscardProjectFileChanges(
+          !(await confirmDiscardProjectFileChanges(
             activeProjectId,
             "change the project directory"
-          )
+          ))
         ) {
           return;
         }
@@ -234,6 +236,15 @@ export function useProjectFilesSidebarController() {
     }
   };
 
+  const queryNode = (node: ProjectFileTreeNode) => {
+    if (!rootPath || node.kind !== "file" || node.isSymlink || !fileQueryFormat(node.name)) return;
+    void useFileQueryStore.getState().show({ kind: "project", projectId: activeProjectId, expectedRoot: rootPath, relativePath: node.relativePath });
+  };
+  const openDataFile = () => void useFileQueryStore.getState().show({ kind: "picker", projectId: activeProjectId });
+  const openAsText = async (node: ProjectFileTreeNode) => {
+    try { await openProjectFileInEditor(node.relativePath); } catch { /* file store presents the read error */ }
+  };
+
   const openNode = async (node: ProjectFileTreeNode) => {
     if (isLoading || isMutating) return;
     if (node.kind === "directory") {
@@ -241,6 +252,7 @@ export function useProjectFilesSidebarController() {
       return;
     }
     if (node.isSymlink) return;
+    if (["csv", "parquet"].includes(fileQueryFormat(node.name) ?? "")) { queryNode(node); return; }
 
     try {
       await openProjectFileInEditor(node.relativePath);
@@ -396,6 +408,7 @@ export function useProjectFilesSidebarController() {
   const hideSidebar = () => setToolWindowVisible("projectFiles", false);
 
   return {
+    queryNode, openDataFile, openAsText,
     rootPath,
     rootDisplayName,
     isLoading,

@@ -1,6 +1,6 @@
 use super::credential_crypto::{
     config_contains_plaintext_credentials, connection_credential_aad, extract_ssh_tunnel_secrets,
-    restore_ssh_tunnel_secrets, ProtectedConnectionCredentials,
+    restore_connection_config_with_key, ProtectedConnectionCredentials,
 };
 use super::models::{MetaStore, SavedConnection};
 use aes_gcm::aead::Aead;
@@ -273,43 +273,14 @@ impl MetaStore {
         ciphertext: &[u8],
         nonce: &[u8],
     ) -> Result<()> {
-        let nonce_bytes: [u8; 12] = nonce
-            .try_into()
-            .map_err(|_| anyhow!("local connection credential nonce is invalid"))?;
-        let cipher = Aes256Gcm::new_from_slice(self.credential_key.as_ref())
-            .context("invalid local credential key")?;
-        let nonce = Nonce::from(nonce_bytes);
-        let mut plaintext = cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: ciphertext,
-                    aad: &connection_credential_aad(project_id, connection_id),
-                },
-            )
-            .map_err(|_| anyhow!("local connection credentials could not be authenticated"))?;
-        let secrets: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_slice(&plaintext)
-                .context("local connection credentials are invalid")?;
-        plaintext.zeroize();
-        let object = config
-            .as_object_mut()
-            .context("stored local connection config is invalid")?;
-        for (key, value) in secrets {
-            if key == "sshTunnel" {
-                let tunnel = object
-                    .entry("sshTunnel")
-                    .or_insert_with(|| serde_json::json!({}))
-                    .as_object_mut()
-                    .context("stored SSH tunnel config is invalid")?;
-                if let Some(values) = value.as_object() {
-                    restore_ssh_tunnel_secrets(tunnel, values);
-                }
-            } else {
-                object.insert(key, value);
-            }
-        }
-        Ok(())
+        restore_connection_config_with_key(
+            &self.credential_key,
+            project_id,
+            connection_id,
+            config,
+            ciphertext,
+            nonce,
+        )
     }
 
     pub(super) async fn save_protected_credentials(

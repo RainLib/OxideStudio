@@ -87,7 +87,7 @@ export function DiagramDialogs({
           if (!open) setRenamingAreaId(null);
         }}
       >
-        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_8px_20px_rgba(0,0,0,0.35)]">
+        <DialogContent layout="custom" className="w-[420px] max-w-[calc(100vw-32px)] gap-0 overflow-hidden p-0">
           <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
             <DialogTitle className="text-[13px] font-semibold">
               Rename area

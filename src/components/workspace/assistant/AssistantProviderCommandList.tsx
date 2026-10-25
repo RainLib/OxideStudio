@@ -116,7 +116,7 @@ function AssistantProviderCommandOption({
             align="start"
             sideOffset={7}
             collisionPadding={12}
-            className="pointer-events-none max-w-[min(320px,calc(100vw-24px))] whitespace-normal break-words border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-2.5 py-2 text-[10px] leading-4 text-[hsl(var(--wb-text))] shadow-[0_4px_8px_rgba(0,0,0,0.32)]"
+            className="pointer-events-none max-w-[min(320px,calc(100vw-24px))] whitespace-normal break-words px-2.5 py-2 text-[10px] leading-4"
           >
             <span className="font-mono text-[hsl(var(--wb-accent))]">
               /{command.name}

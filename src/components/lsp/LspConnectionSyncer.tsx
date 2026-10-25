@@ -1,4 +1,5 @@
 import { useDebouncedLspTabSnapshot } from "@/features/lsp-sync/hooks/useDebouncedLspTabSnapshot";
+import {useConnectionSemanticEvents} from "@/features/lsp-sync/hooks/useConnectionSemanticEvents";
 import { useLspCapabilityContext } from "@/features/lsp-sync/hooks/useLspCapabilityContext";
 import { useLspSchemaSync } from "@/features/lsp-sync/hooks/useLspSchemaSync";
 import { useLspClient } from "@/hooks/useLspClient";
@@ -23,7 +24,11 @@ export function LspConnectionSyncer() {
     (state) => state.activeConnectionId,
   );
   const connections = useConnectionStore((state) => state.connections);
+  const activeConnectionRuntime = useConnectionStore((state) =>
+    activeConnectionId ? state.connectionRuntimeStates[activeConnectionId] : undefined,
+  );
   const schemas = useSchemaStore((state) => state.schemas);
+  const executionObservation=useConnectionSemanticEvents(activeConnectionId,activeConnectionRuntime);
   const tables = useSchemaStore((state) => state.tables);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
@@ -86,6 +91,8 @@ export function LspConnectionSyncer() {
   const { resolvedCapabilityContext, lspCapabilities } =
     useLspCapabilityContext({
       activeConnection,
+      activeConnectionRuntime,
+      semanticSession:executionObservation?.state?.session,
       driverCatalogStatus,
     });
 
@@ -110,10 +117,12 @@ export function LspConnectionSyncer() {
 
   // Track if we've already sent config for this connection+schema
   useLspSchemaSync({
+    executionObservation,
     activeConnectionId,
     metadataVersion,
     isReady,
     activeConnection,
+    activeConnectionRuntime,
     activeProjectRoot,
     hasConnectionLspTab,
     lspCapabilities,

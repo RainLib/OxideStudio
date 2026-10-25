@@ -11,7 +11,7 @@ export type LspClientBridge = {
   commandSessionPayload(): Record<string, string>;
   invoke<T>(command: string, payload?: Record<string, unknown>): Promise<T>;
   invokeCancellable<T>(
-    command: "lsp_get_completions" | "lsp_resolve_completion",
+    command: "lsp_get_completions" | "lsp_resolve_completion" | "lsp_request",
     request: Record<string, unknown>,
     token?: LspCancellationToken,
   ): Promise<T>;

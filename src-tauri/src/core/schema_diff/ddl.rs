@@ -3,6 +3,7 @@ use super::postgres_refs::{rewrite_postgres_schema_qualified_references, sql_str
 use super::render::relation_flags;
 use super::types::SchemaRelationSnapshot;
 use crate::core::dialect::DatabaseKind;
+use crate::core::mysql_character::{is_mysql_character_type, render_mysql_character_clause};
 use crate::core::protocol::{ColumnInfo, ConstraintInfo, IndexInfo};
 use anyhow::Result;
 
@@ -82,6 +83,16 @@ pub(super) fn create_relation_sql(
                 relation.name
             )],
         );
+    }
+    if kind == DatabaseKind::Mysql {
+        for column in &relation.columns {
+            if let Err(warning) = mysql_character_clause(column) {
+                warnings.push(warning);
+            }
+        }
+        if !warnings.is_empty() {
+            return (Vec::new(), true, warnings);
+        }
     }
     let mut definitions = relation
         .columns
@@ -233,6 +244,27 @@ pub(crate) fn create_index_sql(
     ))
 }
 
+pub(super) fn mysql_character_clause(column: &ColumnInfo) -> Result<String, String> {
+    render_mysql_character_clause(
+        &column.data_type,
+        column.character_set.as_deref(),
+        column.collation.as_deref(),
+    )
+    .map_err(|warning| format!("{warning} for column {}.", column.name))
+}
+
+pub(super) fn mysql_character_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
+    let changed = |source: Option<&str>, target: Option<&str>| {
+        source.is_some_and(|source| {
+            !target.is_some_and(|target| source.trim().eq_ignore_ascii_case(target.trim()))
+        })
+    };
+    changed(
+        source.character_set.as_deref(),
+        target.character_set.as_deref(),
+    ) || changed(source.collation.as_deref(), target.collation.as_deref())
+}
+
 pub(super) fn column_definition(
     kind: DatabaseKind,
     source_schema: &str,
@@ -254,6 +286,20 @@ pub(super) fn column_definition(
         data_type.trim()
     );
     let mut warnings = Vec::new();
+    if kind == DatabaseKind::Mysql {
+        match mysql_character_clause(column) {
+            Ok(clause) => {
+                if clause.is_empty() && is_mysql_character_type(&column.data_type) {
+                    warnings.push(format!(
+                        "Column {} has no captured character metadata; target defaults require review.",
+                        column.name
+                    ));
+                }
+                definition.push_str(&clause);
+            }
+            Err(warning) => warnings.push(warning),
+        }
+    }
     if column.is_generated == Some(true) {
         warnings.push(format!(
             "{} is generated/computed; its generation expression is not synthesized as a default.",
@@ -393,13 +439,29 @@ pub(super) fn alter_column_sql(
     }
 
     if kind == DatabaseKind::Mysql {
+        let mut desired = source.clone();
+        let preserve_target = is_mysql_character_type(&source.data_type)
+            && source.character_set.is_none()
+            && source.collation.is_none()
+            && (target.character_set.is_some() || target.collation.is_some());
+        if preserve_target {
+            desired.character_set = target.character_set.clone();
+            desired.collation = target.collation.clone();
+        }
+        if let Err(warning) = mysql_character_clause(&desired) {
+            return (Vec::new(), true, vec![warning]);
+        }
         let (definition, definition_warnings) =
-            column_definition(kind, source_schema, schema, source);
+            column_definition(kind, source_schema, schema, &desired);
         warnings.extend(definition_warnings);
         sql.push(format!(
             "ALTER TABLE {relation} MODIFY COLUMN {definition};"
         ));
-        return (sql, !warnings.is_empty(), warnings);
+        return (
+            sql,
+            !warnings.is_empty() || mysql_character_changed(source, target) || preserve_target,
+            warnings,
+        );
     }
 
     if source.data_type != target.data_type {
@@ -660,7 +722,11 @@ pub(super) fn is_foreign_constraint(constraint: &ConstraintInfo) -> bool {
         .contains("FOREIGN")
 }
 
-pub(super) fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo) -> bool {
+pub(super) fn column_structure_changed(
+    kind: DatabaseKind,
+    source: &ColumnInfo,
+    target: &ColumnInfo,
+) -> bool {
     source.data_type != target.data_type
         || source.is_nullable != target.is_nullable
         || source.is_auto_increment != target.is_auto_increment
@@ -669,6 +735,7 @@ pub(super) fn column_structure_changed(source: &ColumnInfo, target: &ColumnInfo)
         || source.is_hidden != target.is_hidden
         || source.default_value != target.default_value
         || source.comment != target.comment
+        || (kind == DatabaseKind::Mysql && mysql_character_changed(source, target))
 }
 
 pub(super) fn index_structure_changed(source: &IndexInfo, target: &IndexInfo) -> bool {

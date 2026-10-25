@@ -392,6 +392,7 @@ export function useQueryEditorController(props: QueryEditorProps = {}) {
     documentVersionsRef,
     documentTextsRef,
     completionRequestGenerationRef,
+    syncDocument:syncOwnedLspDocument,
   } = useLspDocumentLifecycle({
     activeTabId: activeTab?.id,
     activeDocumentText: activeDocumentSql,
@@ -521,6 +522,7 @@ export function useQueryEditorController(props: QueryEditorProps = {}) {
     batchColumnSession,
     setBatchColumnSession,
   } = useQuerySqlCompletion({
+    syncDocument:syncOwnedLspDocument,
     activeProjectId,
     effectiveConnectionId,
     currentSchema,
@@ -550,6 +552,7 @@ export function useQueryEditorController(props: QueryEditorProps = {}) {
   });
 
   const { inlineCompletionStatus } = useEditorLanguageServices({
+    syncDocument:syncOwnedLspDocument,
     activeProjectId,
     canUseLsp,
     documentUri,

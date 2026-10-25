@@ -1,11 +1,14 @@
 //! Import transaction for table operations.
 
 use super::import_csv::{
-    csv_delimiter, csv_import_reader, csv_import_row_selected, csv_import_source_columns,
-    csv_record_values, resolve_csv_import_columns, resolve_csv_import_row_range,
+    canonical_import_columns, csv_delimiter, csv_import_reader, csv_import_row_selected,
+    csv_import_source_columns, csv_record_values, resolve_csv_import_columns,
+    resolve_csv_import_row_range,
 };
-use super::import_types::{TableCsvImportOptions, TableImportExecutionContext, TableImportMode};
-use super::limits::IMPORT_BATCH_SIZE;
+use super::import_types::{
+    TableCsvImportOptions, TableImportExecutionContext, TableImportFormat, TableImportMode,
+};
+use super::limits::{IMPORT_BATCH_SIZE, TABLE_IMPORT_CANCELLED};
 use super::policy::schema_option;
 use super::row_sql::build_insert_mutation;
 use crate::core::dialect::DatabaseKind;
@@ -15,6 +18,7 @@ use crate::core::protocol::ParameterizedStatement;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
+use tokio::sync::watch;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_import_transaction_batch(
@@ -66,23 +70,30 @@ pub(super) fn table_import_replace_statement(
     }
 }
 
-/// Writes already-parsed records through a single explicit transaction. This
-/// is shared by bounded JSON-array and XLSX imports so a later row failure
-/// never leaves an earlier batch committed.
+/// JSON and XLSX share one transaction while consuming bounded parsed batches.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn import_materialized_rows_in_transaction(
+pub(super) async fn import_streamed_rows_in_transaction(
     manager: &ConnectionManager,
     connection_id: &str,
     kind: DatabaseKind,
     schema: &str,
     table: &str,
     columns: &BTreeMap<String, ColumnInfo>,
-    rows: Vec<BTreeMap<String, Value>>,
+    path: &Path,
+    format: TableImportFormat,
     database: Option<&str>,
     mode: TableImportMode,
-    context: &TableImportExecutionContext,
+    cancel: &watch::Receiver<bool>,
+    on_progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<(u64, u64), String> {
-    context.ensure_not_cancelled()?;
+    let check_cancel = || {
+        if *cancel.borrow() {
+            Err(TABLE_IMPORT_CANCELLED.to_string())
+        } else {
+            Ok(())
+        }
+    };
+    check_cancel()?;
     let transaction_id = format!("table-import-{}", uuid::Uuid::new_v4());
     match database {
         Some(database) => {
@@ -91,46 +102,37 @@ pub(super) async fn import_materialized_rows_in_transaction(
                     connection_id,
                     &transaction_id,
                     database,
-                    Some(schema.to_string()),
+                    Some(schema.into()),
                 )
                 .await
         }
         None => {
             manager
-                .begin_transaction(connection_id, &transaction_id, Some(schema.to_string()))
+                .begin_transaction(connection_id, &transaction_id, Some(schema.into()))
                 .await
         }
     }
-    .map_err(|error| error.to_string())?;
-
-    let import_result = async {
-        let mut rows_imported = 0_u64;
-        let mut batches = 0_u64;
+    .map_err(|e| e.to_string())?;
+    let (mut receiver, worker) =
+        super::import_row_stream::row_batch_stream(path.to_path_buf(), cancel.clone(), format);
+    let mut worker = Some(worker);
+    let result = async {
+        let mut rows_imported = 0;
+        let mut batches = 0;
         let mut replace_pending = mode == TableImportMode::Truncate;
-        let mut pending_rows = Vec::with_capacity(IMPORT_BATCH_SIZE);
-        for row in rows {
-            context.ensure_not_cancelled()?;
-            pending_rows.push(row);
-            if pending_rows.len() == IMPORT_BATCH_SIZE {
-                rows_imported += execute_import_transaction_batch(
-                    manager,
-                    connection_id,
-                    &transaction_id,
-                    kind,
-                    schema,
-                    table,
-                    columns,
-                    &mut pending_rows,
-                    replace_pending,
-                )
-                .await?;
-                replace_pending = false;
-                batches += 1;
-                context.emit_running(rows_imported, batches);
+        while let Some(rows) = receiver.recv().await {
+            check_cancel()?;
+            let mut canonical_rows = Vec::with_capacity(rows.len());
+            for row in rows {
+                let headers = row.keys().cloned().collect::<Vec<_>>();
+                let targets = canonical_import_columns(&headers, columns)?;
+                canonical_rows.push(
+                    row.into_values()
+                        .zip(targets)
+                        .map(|(value, target)| (target, value))
+                        .collect(),
+                );
             }
-        }
-        if !pending_rows.is_empty() {
-            context.ensure_not_cancelled()?;
             rows_imported += execute_import_transaction_batch(
                 manager,
                 connection_id,
@@ -139,28 +141,39 @@ pub(super) async fn import_materialized_rows_in_transaction(
                 schema,
                 table,
                 columns,
-                &mut pending_rows,
+                &mut canonical_rows,
                 replace_pending,
             )
             .await?;
+            replace_pending = false;
             batches += 1;
-            context.emit_running(rows_imported, batches);
+            on_progress(rows_imported, batches);
         }
-        context.ensure_not_cancelled()?;
+        // A closed queue alone does not prove a valid document: malformed
+        // tails and worker panics must reject the transaction before commit.
+        worker
+            .take()
+            .expect("JSON parser worker")
+            .await
+            .map_err(|e| format!("JSON parser worker failed: {e}"))??;
+        check_cancel()?;
         manager
             .commit_transaction(connection_id, &transaction_id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
         Ok((rows_imported, batches))
     }
     .await;
-
-    if import_result.is_err() {
+    drop(receiver); // unblocks a producer if validation/database execution failed
+    if let Some(worker) = worker {
+        let _ = worker.await;
+    }
+    if result.is_err() {
         let _ = manager
             .rollback_transaction(connection_id, &transaction_id)
             .await;
     }
-    import_result
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

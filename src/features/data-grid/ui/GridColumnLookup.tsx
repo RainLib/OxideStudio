@@ -1,6 +1,9 @@
 import type { DataGridColumnLookupItem } from "@/features/data-grid/model/columnLookup";
+import { popupVariants } from "@/styles/variants/popup";
+import { cn } from "@/lib/utils";
 
 interface GridColumnLookupProps {
+  "data-state"?: "open" | "closed";
   columnLookupInputRef: React.RefObject<HTMLInputElement | null>;
   columnLookupQuery: string;
   setColumnLookupQuery: React.Dispatch<React.SetStateAction<string>>;
@@ -20,10 +23,12 @@ export function GridColumnLookup({
   columnLookupSelectedIndex,
   setColumnLookupSelectedIndex,
   selectColumnLookupItem,
+  "data-state": popupState = "open",
 }: GridColumnLookupProps) {
   return (
     <div
-      className="absolute right-3 top-3 z-20 w-72 overflow-hidden rounded-md border border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-surface-raised))] shadow-xl animate-in fade-in-0 zoom-in-95"
+      data-state={popupState}
+      className={cn(popupVariants({ kind: "menu" }), "absolute right-3 top-3 z-20 w-72 overflow-hidden")}
       role="dialog"
       aria-label="Go to column"
     >

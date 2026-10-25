@@ -7,6 +7,7 @@ use super::transfer_runtime::normalized_transfer_driver_id;
 use super::transfer_target_types::transfer_target_column_type;
 use super::transfer_types::{TableDataTransferCompatibility, TableDataTransferTargetColumn};
 use crate::core::dialect::DatabaseKind;
+use crate::core::mysql_character::{is_mysql_character_type, render_mysql_character_clause};
 use crate::core::protocol::ColumnInfo;
 use std::collections::BTreeMap;
 
@@ -16,6 +17,7 @@ pub(super) struct TransferTargetColumnsPlan {
     pub(super) create_columns: Vec<CreateTableColumn>,
     pub(super) default_expressions: BTreeMap<String, String>,
     pub(super) identity_generations: BTreeMap<String, String>,
+    pub(super) character_metadata: BTreeMap<String, (Option<String>, Option<String>)>,
     pub(super) warnings: Vec<String>,
 }
 
@@ -351,6 +353,9 @@ pub(super) fn build_transfer_target_columns(
     let mut create_columns = Vec::with_capacity(source_columns.len());
     let mut default_expressions = BTreeMap::new();
     let mut identity_generations = BTreeMap::new();
+    let mut character_metadata = BTreeMap::new();
+    let same_mysql = normalized_transfer_driver_id(source_driver) == "mysql"
+        && normalized_transfer_driver_id(target_driver) == "mysql";
     let mut retained_identity_columns = Vec::new();
     let mut omitted_identity_columns = Vec::new();
     let mut retained_default_columns = Vec::new();
@@ -434,6 +439,33 @@ pub(super) fn build_transfer_target_columns(
             }
             compatibility = review_transfer_compatibility(compatibility);
         }
+        if same_mysql && is_mysql_character_type(&mapping.data_type) {
+            match render_mysql_character_clause(
+                &mapping.data_type,
+                source.character_set.as_deref(),
+                source.collation.as_deref(),
+            ) {
+                Ok(clause) if !clause.is_empty() => {
+                    character_metadata.insert(
+                        source.name.clone(),
+                        (source.character_set.clone(), source.collation.clone()),
+                    );
+                    reasons.push("Captured character set and collation are retained; verify that the target server supports them.".to_string());
+                    compatibility = review_transfer_compatibility(compatibility);
+                }
+                Ok(_) => {
+                    reasons.push("Source character metadata is unavailable; review the target database defaults.".to_string());
+                    compatibility = review_transfer_compatibility(compatibility);
+                }
+                Err(reason) => {
+                    reasons.push(reason);
+                    compatibility = TableDataTransferCompatibility::Unsupported;
+                }
+            }
+        } else if source.character_set.is_some() || source.collation.is_some() {
+            reasons.push("Source character semantics require a product-specific mapping; target defaults are not a lossless translation.".to_string());
+            compatibility = review_transfer_compatibility(compatibility);
+        }
         planned.push(TableDataTransferTargetColumn {
             name: source.name.clone(),
             source_data_type: source.data_type.clone(),
@@ -502,6 +534,7 @@ pub(super) fn build_transfer_target_columns(
         create_columns,
         default_expressions,
         identity_generations,
+        character_metadata,
         warnings,
     })
 }

@@ -300,7 +300,7 @@ pub(super) fn sql_statement_ranges_utf16(
         .collect()
 }
 
-pub(super) fn sql_statement_at_cursor(
+pub(crate) fn sql_statement_at_cursor(
     sql: &str,
     dialect: StatementScanDialect,
     cursor_utf16_offset: usize,

@@ -42,7 +42,7 @@ export function SqlLibraryPanelDialogs({
   return (
     <>
       <Dialog open={Boolean(dialog)} onOpenChange={onDialogOpenChange}>
-        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)]">
           <form onSubmit={onDialogSubmit}>
             <DialogHeader>
               <DialogTitle className="text-[13px]">
@@ -77,7 +77,7 @@ export function SqlLibraryPanelDialogs({
       </Dialog>
 
       <Dialog open={Boolean(deleteTarget)} onOpenChange={onDeleteOpenChange}>
-        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)] rounded-[6px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <DialogContent className="w-[420px] max-w-[calc(100vw-32px)]">
           <DialogHeader>
             <DialogTitle className="text-[13px]">Delete {deleteTarget?.item.name}?</DialogTitle>
             <DialogDescription className="text-[10px] leading-5">

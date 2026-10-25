@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "enterprise/control-plane/src/api.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = ["access", "admin", "gateway", "identity", "models", "support"];
 const declared = [...facade.matchAll(/^mod (\w+);$/gm)].map((match) => match[1]);
 if (
@@ -28,7 +29,7 @@ const dependencies = {
 const graph = new Map();
 for (const module of modules) {
   const file = `enterprise/control-plane/src/api/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+crate::api(?:::\w+)?::/.test(source)) {
     throw new Error(`${file}: import directly from its API owner.`);
   }
@@ -53,16 +54,13 @@ for (const [symbol, owner] of Object.entries({
   normalize_certificate_fingerprint: "support",
   require_admin: "support",
 })) {
-  const source = fs.readFileSync(
-    path.join(root, `enterprise/control-plane/src/api/${owner}.rs`),
-    "utf8",
-  );
+  const source = readSourceText(path.join(root, `enterprise/control-plane/src/api/${owner}.rs`));
   if (!new RegExp(`\\b${symbol}\\b`).test(source)) {
     throw new Error(`${symbol} must have one owner in ${owner}.`);
   }
 }
 const tests = [
-  ...fs.readFileSync(path.join(root, "enterprise/control-plane/src/api/tests.rs"), "utf8")
+  ...readSourceText(path.join(root, "enterprise/control-plane/src/api/tests.rs"))
     .matchAll(/^\s*#\[(?:tokio::)?test\]$/gm),
 ].length;
 if (tests !== 10) throw new Error(`Expected 10 control-plane API tests; found ${tests}.`);

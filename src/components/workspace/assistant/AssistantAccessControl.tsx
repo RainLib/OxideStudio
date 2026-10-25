@@ -65,7 +65,7 @@ export function AssistantAccessControl({
           align="end"
           side="top"
           sideOffset={7}
-          className="w-[220px] rounded-[10px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1.5 text-[hsl(var(--wb-text))] shadow-[0_6px_8px_rgba(0,0,0,0.36)]"
+          className="w-[220px] p-1.5"
         >
           <p className="px-1.5 pb-1 pt-0.5 text-[10px] font-medium text-[hsl(var(--wb-text-muted))]">
             {t("assistant.access.title")}
@@ -116,7 +116,7 @@ export function AssistantAccessControl({
       </Popover>
 
       <Dialog open={confirmationOpen} onOpenChange={setConfirmationOpen}>
-        <DialogContent className="w-[420px] max-w-[calc(100vw-24px)] gap-0 rounded-[12px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))] shadow-[0_6px_8px_rgba(0,0,0,0.42)]">
+        <DialogContent layout="custom" className="w-[420px] max-w-[calc(100vw-24px)] gap-0 p-0">
           <DialogHeader className="space-y-2 px-5 pb-4 pt-5 text-left">
             <DialogTitle className="text-[15px] font-semibold leading-5 tracking-normal">
               {t("assistant.access.confirmTitle")}

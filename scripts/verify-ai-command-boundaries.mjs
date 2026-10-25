@@ -1,10 +1,11 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/ai.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
   .filter((name) => name !== "tests");
@@ -25,7 +26,7 @@ const definitions = new Map();
 const commandDefinitions = new Map();
 for (const module of modules) {
   const file = `src-tauri/src/commands/ai/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|crate::commands::ai::/.test(source)) {
     throw new Error(`${file}: use explicit imports and keep implementation out of the facade.`);
   }
@@ -48,7 +49,7 @@ for (const [name, module] of Object.entries({
 })) {
   if (definitions.get(name) !== module) throw new Error(`${name} must belong to ${module}.`);
 }
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 const registered = new Set([...lib.matchAll(/commands::ai::(\w+)/g)]
   .map((match) => match[1])
   .filter((name) => name !== "AiCancellationState"));

@@ -1,3 +1,4 @@
+import { confirmAction } from "@/lib/appDialogs";
 /**
  * @vitest-environment happy-dom
  */
@@ -42,7 +43,7 @@ describe("project file tab lifecycle", () => {
       error: null,
       revisionConflict: null,
     });
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.mocked(confirmAction).mockReset().mockResolvedValue(true);
   });
 
   it("reuses an open project file and tracks dirty and saved revisions", () => {
@@ -308,7 +309,7 @@ describe("project file tab lifecycle", () => {
     expect(writeFile).not.toHaveBeenCalled();
   });
 
-  it("prevents closing a dirty file when discard is declined", () => {
+  it("prevents closing a dirty file when discard is declined", async () => {
     const id = useTabStore.getState().openProjectFileTab(
       "project-1",
       "query.sql",
@@ -316,13 +317,13 @@ describe("project file tab lifecycle", () => {
       "revision-1"
     );
     useTabStore.getState().updateTabSql(id, "SELECT 2;");
-    vi.mocked(confirm).mockReturnValueOnce(false);
+    vi.mocked(confirmAction).mockResolvedValueOnce(false);
 
-    useTabStore.getState().closeTab(id);
+    (await useTabStore.getState().closeTab(id));
     expect(useTabStore.getState().tabs).toHaveLength(1);
 
-    vi.mocked(confirm).mockReturnValueOnce(true);
-    useTabStore.getState().closeTab(id);
+    vi.mocked(confirmAction).mockResolvedValueOnce(true);
+    (await useTabStore.getState().closeTab(id));
     expect(useTabStore.getState().tabs).toHaveLength(0);
   });
 
@@ -441,3 +442,5 @@ describe("project file tab lifecycle", () => {
     });
   });
 });
+
+vi.mock("@/lib/appDialogs", () => ({ confirmAction: vi.fn(async () => true) }));

@@ -43,7 +43,7 @@ export function ConnectionElasticsearchFields({
                 >
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+                <SelectContent className="">
                   <SelectItem value="direct">Direct HTTP</SelectItem>
                   <SelectItem value="kibana">
                     Kibana / OpenSearch Console proxy

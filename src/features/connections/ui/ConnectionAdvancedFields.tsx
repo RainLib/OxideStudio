@@ -37,7 +37,7 @@ export function ConnectionAdvancedFields({
         <SelectTrigger className={fieldClass}>
           <SelectValue />
         </SelectTrigger>
-        <SelectContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+        <SelectContent className="">
           {driverChoices.map((choice) => (
             <SelectItem key={choice.driver} value={choice.driver}>
               {choice.label}

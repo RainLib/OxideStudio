@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IRange, languages } from "monaco-editor";
-import { inlineCompletionEdit, optionalInlineLspContext, optionalInlineLspValidation } from "./inlineCompletionRuntime";
+import { inlineCompletionEdit, inlineIdentifierSuffixLength, optionalInlineLspContext, optionalInlineLspValidation } from "./inlineCompletionRuntime";
 
 describe("optional inline semantic context", () => {
   afterEach(() => vi.useRealTimers());
@@ -43,6 +43,31 @@ describe("optional inline semantic context", () => {
     });
     await vi.advanceTimersByTimeAsync(600);
     expect(await pending).toEqual([]);
+  });
+});
+
+describe("known inline identifier replacement",()=>{
+  class Range {constructor(public startLineNumber:number,public startColumn:number,public endLineNumber:number,public endColumn:number){}}
+  it.each(["Suffix","𐐀尾巴","Suffix.next","Suffix /* keep */"])("consumes only the SQL member suffix: %s",suffix=>{
+    const prefix="SELECT q.fi",source=prefix+suffix,position={lineNumber:1,column:prefix.length+1};
+    const model={getWordUntilPosition:()=>({word:"fi",startColumn:10,endColumn:12}),getLineContent:()=>source};
+    const length=inlineIdentifierSuffixLength({prefix,text:"eld",context:{candidates:[{label:"field",kind:5}]},model,position,monaco:{Range}});
+    expect(length).toBe(suffix.split(/[. /]/)[0]!.length);
+  });
+  it.each([3,14,15,undefined])("does not give non-field AI/snippet/keyword output a suffix range: %s",kind=>{
+    expect(inlineIdentifierSuffixLength({prefix:"SELECT fi",text:"eld",context:{candidates:[{label:"field",kind}]},model:{},position:{lineNumber:1,column:10},monaco:{Range}})).toBe(0);
+  });
+  it("replaces a known suffix while retaining the surrounding SQL",()=>{
+    const source="SELECT fiSuffix FROM data",result=inlineCompletionEdit({text:"eld",position:{lineNumber:1,column:10},replaceSuffixLength:6,
+      model:{getLineMaxColumn:()=>source.length+1,getValueInRange:r=>source.slice(r.startColumn-1,r.endColumn-1)}})!;
+    expect(source.slice(0,result.range.startColumn-1)+result.insertText+source.slice(result.range.endColumn-1)).toBe("SELECT field FROM data");
+    expect(result.isInlineEdit).toBe(true);
+  });
+  it("uses the selected menu item's range without restoring the consumed suffix",()=>{
+    const source="SELECT fiSuffix",result=inlineCompletionEdit({text:"eld",position:{lineNumber:1,column:10},replaceSuffixLength:6,
+      selectedSuggestion:{range:{startLineNumber:1,startColumn:8,endLineNumber:1,endColumn:16},text:"field",isSnippetText:false,completionKind:4} as languages.SelectedSuggestionInfo,
+      model:{getLineMaxColumn:()=>source.length+1,getValueInRange:r=>source.slice(r.startColumn-1,r.endColumn-1)}})!;
+    expect(result.insertText).toBe("field");expect(result.range.endColumn).toBe(16);
   });
 });
 

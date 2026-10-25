@@ -249,7 +249,6 @@ export function GridFilterRow({
         </button>
         <WhereCompletionInput
           value={sqlFilter}
-          columns={columns}
           onChange={onSqlFilterChange}
           onApply={onSearch}
           connectionId={connectionId}

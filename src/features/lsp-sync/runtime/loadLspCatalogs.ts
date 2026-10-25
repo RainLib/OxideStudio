@@ -83,6 +83,7 @@ export async function loadLspCatalogs({
             name: parameter.name,
             data_type: parameter.data_type || "unknown",
             optional: !!parameter.optional,
+            mode: parameter.mode ?? null,
           })),
           return_type: func.return_type || "unknown",
           description: func.description || null,

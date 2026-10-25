@@ -1,5 +1,13 @@
 # CVA 样式系统使用指南
 
+## 弹出层统一约定
+
+应用弹窗统一使用 `Dialog`，菜单、下拉和提示使用 `components/ui/` 对应组件；自绘弹层复用 `popupVariants`。配色、字号、密度和动效由 `src/styles/overlays.css` 管理，不在业务组件重复设置底色、圆角或阴影。复杂弹窗使用 `DialogContent layout="custom"`，自行管理布局与操作栏；普通弹窗使用默认布局。
+
+确认、文本输入和消息提示使用 `@/lib/appDialogs` 的 `confirmAction`、`promptValue`、`showMessage`，不要使用 `window.confirm/prompt/alert`。确认与输入均为异步操作，必须 `await` 用户的决定再执行后续操作；取消输入返回 `null`，空字符串是有效输入。可通过 options 配置标题、操作文案、危险样式和 AbortSignal。原生 `title` 属性由 `AppTooltipHost` 统一展示，图标按钮仍应显式提供 `aria-label`。
+
+弹窗进入/退出为 180/120ms，菜单为 120/80ms，Tooltip 为 100/80ms。不要叠加旧的 zoom/slide 动画类。应用和系统减少动态设置覆盖 Portal 与自绘弹层；系统文件选择器保持平台外观。
+
 ## 快速开始
 
 ### 导入方式

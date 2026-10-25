@@ -112,3 +112,21 @@ fn xlsx_headers_reject_empty_and_case_insensitive_duplicates() {
     assert!(validate_xlsx_headers(&["id".to_string(), " ID ".to_string()]).is_err());
     assert!(validate_xlsx_headers(&["".to_string()]).is_err());
 }
+
+#[test]
+fn json_preview_preserves_unsafe_integer_text_without_changing_native_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("integers.json");
+    fs::write(&path,br#"[{"big":9007199254740993,"safe":9007199254740991,"minimum":-9223372036854775808,"nested":[18446744073709551615]}]"#).unwrap();
+    let preview = read_json_import_preview(&path).unwrap();
+    let row = &preview.sample_rows[0];
+    assert_eq!(row["big"], json!("9007199254740993"));
+    assert_eq!(row["safe"], json!(9007199254740991_i64));
+    assert_eq!(row["minimum"], json!("-9223372036854775808"));
+    assert_eq!(row["nested"], json!(["18446744073709551615"]));
+    stream_json_document_rows(&path, &|| false, &mut |_, row| {
+        assert_eq!(row["big"], json!(9007199254740993_i64));
+        Ok(())
+    })
+    .unwrap();
+}

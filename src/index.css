@@ -3,9 +3,11 @@
  * large read-only reference projects and must never affect desktop build time
  * or CSS output. */
 @import "tailwindcss" source(none);
+@import "./styles/overlays.css";
 @source ".";
 
-@theme {
+/* Resolve semantic colors at each surface, including body-mounted portals. */
+@theme inline {
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
 
@@ -91,7 +93,7 @@
     --wb-hover: 220 13% 90%;
     --wb-active: 214 90% 92%;
     --wb-active-strong: 215 80% 86%;
-    --wb-accent: 217 88% 54%;
+    --wb-accent: 217 88% 53%;
     --wb-accent-foreground: 0 0% 100%;
     --wb-border: 220 13% 82%;
     --wb-border-subtle: 220 12% 88%;
@@ -181,6 +183,12 @@
   --wb-active-strong: 38 37% 31%;
   --wb-brand: 38 72% 52%;
 }
+
+/* Accent preferences must retain readable foregrounds in the light workbench. */
+:root:not(.dark)[data-appearance-accent="blue"] { --wb-accent: 217 88% 53%; --wb-active: 214 90% 92%; --wb-active-strong: 215 80% 86%; }
+:root:not(.dark)[data-appearance-accent="violet"] { --wb-accent: 270 57% 51%; --wb-active: 270 72% 94%; --wb-active-strong: 270 65% 89%; }
+:root:not(.dark)[data-appearance-accent="teal"] { --wb-accent: 175 89% 25%; --wb-active: 175 45% 93%; --wb-active-strong: 175 40% 86%; }
+:root:not(.dark)[data-appearance-accent="amber"] { --wb-accent: 37 100% 28%; --wb-active: 38 85% 93%; --wb-active-strong: 38 80% 86%; }
 
 @layer base {
   * {

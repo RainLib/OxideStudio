@@ -54,7 +54,7 @@ export function ColumnHeaderMenu({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+      <ContextMenuContent className="w-56">
         <ContextMenuItem onClick={onSetNull} className="text-[hsl(var(--wb-text))]">
           Set as NULL
         </ContextMenuItem>
@@ -99,7 +99,7 @@ export function ColumnHeaderMenu({
           <ContextMenuSubTrigger className="text-[hsl(var(--wb-text))]">
             Resize columns
           </ContextMenuSubTrigger>
-          <ContextMenuSubContent className="border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+          <ContextMenuSubContent className="">
             <ContextMenuItem
               onClick={onResizeToMatch}
               className="text-[hsl(var(--wb-text))]"

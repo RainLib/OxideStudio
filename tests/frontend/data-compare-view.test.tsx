@@ -493,7 +493,10 @@ describe("DataCompareView", () => {
     expect(container.textContent).toContain("complete shared primary key");
   });
 
-  it("labels degraded results as deterministic samples without claiming exact totals", async () => {
+  it.each([
+    { strategy: "extremeValues" as const, method: "extreme_key_sample", label: "extreme" },
+    { strategy: "stratified" as const, method: "stratified_key_sample", label: "stratified" },
+  ])("labels $strategy results as samples without claiming exact totals", async ({ strategy, method, label }) => {
     const [leftTab, rightTab] = useTabStore.getState().tabs.filter(
       (tab) => tab.type === "table",
     );
@@ -534,9 +537,9 @@ describe("DataCompareView", () => {
       detailLimitPerStatus: 1_000,
       detailsTruncated: false,
       degradationLevel: "sample",
-      samplingStrategy: "extremeValues",
+      samplingStrategy: strategy,
       samplingRate: 0.01,
-      verificationMethod: "extreme_key_sample",
+      verificationMethod: method,
       countsExact: false,
       sampledKeyCount: 20_000,
       checksumsMatch: true,
@@ -551,8 +554,8 @@ describe("DataCompareView", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("20,000 deterministic extreme keys inspected");
-    expect(container.textContent).toContain("1.00% key coverage · sampled counts only");
+    expect(container.textContent).toContain(`20,000 deterministic ${label} keys inspected`);
+    expect(container.textContent).toContain("1.00% minimum table coverage · sampled counts only");
     expect(container.textContent).toContain("does not claim a statistical confidence score");
     expect(container.textContent).toContain("Inspected-column checksums match");
     compare.mockRestore();

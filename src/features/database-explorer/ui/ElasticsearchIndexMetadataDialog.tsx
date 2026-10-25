@@ -91,7 +91,7 @@ export function ElasticsearchIndexMetadataDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="flex h-[min(720px,82vh)] w-[min(840px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-0 text-[hsl(var(--wb-text))]">
+      <DialogContent layout="custom" className="flex h-[min(720px,82vh)] w-[min(840px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border))] px-5 py-4">
           <DialogTitle className="flex min-w-0 items-center gap-2 text-[13px] font-semibold tracking-normal">
             <Braces size={15} className="shrink-0 text-cyan-400" />

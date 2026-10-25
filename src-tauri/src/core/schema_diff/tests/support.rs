@@ -14,6 +14,8 @@ pub(super) fn column(name: &str, data_type: &str, nullable: bool) -> ColumnInfo 
         comment: None,
         is_generated: Some(false),
         is_hidden: Some(false),
+        character_set: None,
+        collation: None,
     }
 }
 
@@ -54,6 +56,7 @@ pub(super) fn routine(name: &str, return_type: &str) -> SchemaRoutineSnapshot {
         name: name.to_string(),
         routine_type: Some("FUNCTION".to_string()),
         parameters: vec![FunctionParameterInfo {
+            mode: None,
             name: "input".to_string(),
             data_type: "text".to_string(),
             optional: false,

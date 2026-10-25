@@ -41,6 +41,7 @@ export function useBatchColumnSelection({
         const session = batchColumnSessionsRef.current.get(sessionId);
         const model = mountedEditor?.getModel();
         if (!session || !model || model.uri.toString() !== session.uri) return;
+        if (session.context?.isCurrent() === false) return;
         if (model.getValueInRange(session.range) !== session.replacedText)
           return;
         setBatchColumnSession({
@@ -58,6 +59,7 @@ export function useBatchColumnSelection({
     const model = editor?.getModel();
     if (
       !session ||
+      session.context?.isCurrent() === false ||
       !monaco ||
       !editor ||
       !model ||

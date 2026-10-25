@@ -49,7 +49,7 @@ enum McpCommand {
 
 #[derive(Debug, Subcommand)]
 enum ToolsCommand {
-    /// List available first-release tools.
+    /// List available public read-only tools.
     List,
     /// Print one tool's contract.
     Inspect { name: String },

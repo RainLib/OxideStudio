@@ -14,6 +14,18 @@ export async function getDatabases(connectionId: string): Promise<string[]> {
   });
 }
 
+/** Driver-confirmed effective SQL context; null means unavailable. */
+export type SqlLookupContext = { database: string; defaultSchema: string };
+export async function getSqlLookupContext(
+  connectionId: string,
+  database?: string | null,
+): Promise<SqlLookupContext | null> {
+  return invokeWithInterceptors<SqlLookupContext | null>("get_sql_lookup_context", {
+    connectionId,
+    database: database ?? null,
+  });
+}
+
 /**
  * Schema 和表结构服务
  * 管理数据库 schema、表和列的元数据

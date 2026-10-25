@@ -340,3 +340,27 @@ Default timeout is 5 seconds. Long-running requests will fail.
 - [lsp_sqls Repository](https://github.com/RainLib/lsp_sqls)
 - [LSP Specification](https://microsoft.github.io/language-server-protocol/)
 - [Monaco Editor API](https://microsoft.github.io/monaco-editor/api/index.html)
+
+
+## Driver-confirmed SQL lookup context
+
+The optional driver runtime capability `sqlLookupContext` enables the metadata
+request `{"kind":"sqlLookupContext","database":"db"}`. Its response is either
+`null` or `{"database":"db","defaultSchema":"sales"}`. The selected Explorer
+schema is not part of this contract. Omitted capability bits remain false, and
+native/older drivers return unknown without issuing an unsupported request.
+
+The SQL Server JDBC Agent resolves the context using its own fixed engine query
+inside the verified database context and restores that context on success or
+failure. The Host routes this through `get_sql_lookup_context`; it does not
+generate catalog SQL for external packages. The production sync job validates
+scope, loads the actual default schema, binds the current catalog consistently,
+and discards obsolete async results.
+
+This response carries no object-absence proof. Generated LSP namespace metadata
+sets `tables_complete: false`; visible table enumeration cannot automatically
+authorize a dbo fallback. Installed JDBC packages must be rebuilt and signed to
+advertise this capability. Current tests cover the JVM protocol boundary and a
+real WebView/Host/LSP/Monaco pipeline with a metadata fixture driver, not a live
+SQL Server or installed package. See the batch 53 audit for exact evidence and
+remaining context, privilege, deployment and dialect work.

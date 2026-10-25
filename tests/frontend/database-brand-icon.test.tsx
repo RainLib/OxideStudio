@@ -4,6 +4,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   DatabaseBrandIcon,
   databaseBrandAssetFile,
@@ -27,6 +29,10 @@ describe("database brand icons", () => {
   it("covers every DBX reference and compatibility product without a generic fallback", () => {
     for (const candidate of REFERENCE_DATABASE_DRIVER_CANDIDATES) {
       expect(hasDatabaseBrandIcon(candidate.driver), candidate.driver).toBe(true);
+      const asset = databaseBrandAssetFile(candidate.driver);
+      if (asset) {
+        expect(existsSync(resolve("public/database-icons", asset)), asset).toBe(true);
+      }
     }
   });
 

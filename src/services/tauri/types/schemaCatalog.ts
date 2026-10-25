@@ -52,6 +52,9 @@ export interface ColumnInfo {
   is_generated?: boolean;
   /** Absent when the driver cannot prove hidden/invisible-column status. */
   is_hidden?: boolean;
+  /** Database-reported character metadata; absence does not request a reset. */
+  character_set?: string | null;
+  collation?: string | null;
   default_value?: string;
   comment?: string;
 }
@@ -92,6 +95,7 @@ export interface ForeignKeyReferenceInfo {
 }
 
 export interface FunctionParameterInfo {
+  mode?: string | null;
   name: string;
   data_type: string;
   optional?: boolean;

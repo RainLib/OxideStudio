@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/commands/lsp.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1]).filter((module) => module !== "tests");
 const allowed = {
@@ -30,7 +31,7 @@ const definitions = new Map();
 const commands = new Set();
 for (const module of modules) {
   const file = `src-tauri/src/commands/lsp/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|crate::commands::lsp::/.test(source))
     throw new Error(`${file}: import directly from an owning module.`);
   const dependencies = new Set();
@@ -56,7 +57,7 @@ for (const [symbol, module] of Object.entries({
   send_position_request: "position_commands",
 })) if (definitions.get(symbol) !== module)
   throw new Error(`${symbol} must have exactly one owner in ${module}.`);
-const lib = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 const registered = new Set([...lib.matchAll(/commands::lsp::(\w+)/g)]
   .map((match) => match[1]).filter((name) => name !== "LspState"));
 if (registered.size !== commands.size ||

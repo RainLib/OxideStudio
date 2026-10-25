@@ -10,6 +10,22 @@ import { CompletionItemKind } from "@/services/lsp/types";
 
 describe("table WHERE completion", () => {
   it.each([
+    ["t.sta|Suffix > 0","t.status > 0"],
+    ['"odd.alias".sta|Suffix > 0','"odd.alias".status > 0'],
+    ['t."sta|Suffix" > 0','t.status > 0'],
+    ['coalesce(t.sta|Suffix, 0) > 0','coalesce(t.status, 0) > 0'],
+  ])("preserves the qualifier when accepting a local field inside %s",(marked,expected)=>{
+    const condition=marked.replace("|",""),cursorOffset=marked.indexOf("|");const candidate=localWhereCompletionCandidates({condition,cursorOffset,driver:"postgres",columns:[{name:"status",type:"integer"}]}).find(item=>item.label==="status")!;
+    const range=candidate.replacementRange??whereReplacementRange(condition,cursorOffset);expect(condition.slice(0,range.start)+candidate.insertText+condition.slice(range.end)).toBe(expected);
+  });
+  it.each([
+    "staSuffix > 0","staSuffix = 1","staSuffix IS NOT NULL","staSuffix BETWEEN 1 AND 2",
+    "staSuffix LIKE 'x%'","COALESCE(staSuffix, 0) > 1","t.staSuffix > 0","(staSuffix > 0)",
+  ])("completes the existing expression without appending an extra predicate: %s",condition=>{
+    const start=condition.indexOf("staSuffix"),candidate=localWhereCompletionCandidates({condition,cursorOffset:start+3,driver:"postgres",columns:[{name:"status",type:"integer"}]}).find(item=>item.label==="status");
+    expect(candidate?.insertText).toBe("status");
+  });
+  it.each([
     ["postgres", 'SELECT * FROM "public"."users" WHERE status = 1;'],
     ["mysql", "SELECT * FROM `app`.`users` WHERE status = 1;"],
   ] as const)("builds a dialect-aware virtual %s document", (driver, text) => {
@@ -135,12 +151,13 @@ describe("table WHERE completion", () => {
       }).map((item) => item.label);
 
     expect(complete("status IS ")).toEqual(
-      expect.arrayContaining(["NULL", "NOT NULL", "TRUE", "FALSE"]),
+      expect.arrayContaining(["NULL", "NOT NULL", "DISTINCT FROM", "NOT DISTINCT FROM"]),
     );
     expect(complete("status NOT ")).toEqual(
       expect.arrayContaining(["IN", "LIKE", "BETWEEN"]),
     );
     expect(complete("status IS ")).not.toContain("status");
+    expect(complete("status IS ")).not.toContain("TRUE");
     expect(complete("status NOT ")).not.toContain("status");
   });
 
@@ -299,14 +316,14 @@ describe("WHERE completion context matrix", () => {
     );
     expect(candidateLabels(completeMatrix("status NOT "))).toEqual([
       "IN",
-      "LIKE",
       "BETWEEN",
+      "LIKE",
+      "ILIKE",
+      "SIMILAR TO",
     ]);
     expect(candidateLabels(completeMatrix("status IS NOT "))).toEqual([
       "NULL",
-      "TRUE",
-      "FALSE",
-      "UNKNOWN",
+      "DISTINCT FROM",
     ]);
   });
 

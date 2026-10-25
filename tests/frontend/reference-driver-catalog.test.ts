@@ -10,6 +10,7 @@ import {
   referenceDriverDeliveryPlan,
   referenceDriverCandidate,
 } from "@/features/database-drivers";
+import baseline from "@/features/database-drivers/model/__fixtures__/dbx-catalog-2026-10-21.json";
 
 describe("reference database driver catalogue", () => {
   it("keeps the complete DBX reference roster plus explicitly labelled compatibility targets", () => {
@@ -18,21 +19,10 @@ describe("reference database driver catalogue", () => {
     );
 
     expect(new Set(ids).size).toBe(ids.length);
-    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(86);
-    expect(DBX_REFERENCE_DRIVER_IDS).toEqual([
-      "mysql", "postgres", "sqlite", "rqlite", "redis", "duckdb",
-      "clickhouse", "sqlserver", "mongodb", "dynamodb", "oracle", "elasticsearch",
-      "easysearch", "meilisearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb",
-      "doris", "starrocks", "manticoresearch", "databend", "redshift",
-      "dameng", "kingbase", "highgo", "uxdb", "vastbase", "goldendb",
-      "gaussdb", "kwdb", "yashandb", "databricks", "saphana", "teradata",
-      "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle",
-      "gbase", "access", "h2", "snowflake", "trino", "prestosql", "hive",
-      "kyuubi", "argo", "impala", "spark", "db2", "informix", "neo4j", "cassandra", "bigquery", "spanner", "kylin",
-      "ignite", "ignite3", "sundb", "oscar", "tdengine", "xugu", "iotdb", "etcd", "zookeeper",
-      "nacos", "consul", "mqtt", "iris", "turso", "cloudflare-d1", "influxdb", "influxdb3", "victoriametrics", "questdb", "jdbc",
-      "mq",
-    ]);
+    expect(REFERENCE_DATABASE_DRIVER_CANDIDATES).toHaveLength(93);
+    expect([...DBX_REFERENCE_DRIVER_IDS].sort()).toEqual(
+      baseline.databaseTypes.filter((id) => id !== "plugin").sort(),
+    );
     expect(ids).toEqual(
       expect.arrayContaining([
         "mysql",
@@ -87,7 +77,13 @@ describe("reference database driver catalogue", () => {
       expect(["bundled", "signedSidecar", "signedJdbc", "dedicatedWorkspace"])
         .toContain(plan.runtimeRoute);
 
-      if (candidate.dataModel === "relational" || candidate.genericLspLanguageId === "sql") {
+      if (candidate.driver === "salesforce") {
+        expect(plan).toMatchObject({
+          runtimeRoute: "signedSidecar",
+          lspRoute: "notApplicable",
+          lspLanguageId: null,
+        });
+      } else if (candidate.genericLspLanguageId === "sql") {
         expect(["dedicated", "compatibleSql", "genericSql"]).toContain(plan.lspRoute);
         expect(plan.lspLanguageId).toBeTruthy();
       } else if (candidate.genericLspLanguageId) {

@@ -141,7 +141,16 @@ export interface CompletionResponse {
   items: CompletionItem[];
   isIncomplete: boolean;
   resolveProvider: boolean;
+  constraints?: CompletionKeywordConstraints;
+  valueType?: string;
+  valueRole?: CompletionValueRole;
+  logicalContinuation?: boolean;
+  /** Bound optional ESCAPE support for a completed matching predicate. */
+  patternEscape?: boolean;
 }
+export type CompletionValueRole="pattern-escape";
+
+export type CompletionKeywordConstraints={slot:"is"|"is-not"|"distinct-from";allowedKeywords:string[];truthTests?:boolean};
 
 export interface CompletionContext {
   triggerKind: 1 | 2 | 3;
@@ -185,6 +194,7 @@ export interface LspServerNotification {
 }
 
 export interface PublishDiagnosticsParams {
+  oxideAnalysisToken?:string;
   uri: string;
   diagnostics: Diagnostic[];
   /** LSP document version, when the server can associate diagnostics with one. */

@@ -257,14 +257,14 @@ export function TabBarView({ allowSplit = true, compact = false, onCloseGroup, .
                     )}
                   </div>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent className="w-48 bg-background-elevated border-border text-foreground">
+                <DropdownMenuContent className="w-48 border-border text-foreground">
                   {allowSplit && tab.type === "query" && (
                     <DropdownMenuSub>
                       <DropdownMenuSubTrigger className="text-[11px] cursor-pointer focus:bg-background-tertiary">
                         <PanelRight size={12} className="mr-2" />
                         Split Editor
                       </DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent className="w-40 bg-background-elevated border-border text-foreground">
+                      <DropdownMenuSubContent className="w-40 border-border text-foreground">
                         {(
                           [
                             ["left", "Split Left", PanelLeft],
@@ -295,7 +295,7 @@ export function TabBarView({ allowSplit = true, compact = false, onCloseGroup, .
                           <Rows3 size={12} className="mr-2" />
                           Compare Data With
                         </DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto bg-background-elevated border-border text-foreground">
+                        <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto border-border text-foreground">
                           {compareTargets.map((candidate) => (
                             <DropdownMenuItem
                               key={candidate.id}
@@ -439,7 +439,7 @@ export function TabBarView({ allowSplit = true, compact = false, onCloseGroup, .
                     : "right"
                   : "bottom"
               }
-              className="w-56 bg-background-elevated border-border text-foreground max-h-[400px] overflow-y-auto"
+              className="w-56 border-border text-foreground max-h-[400px] overflow-y-auto"
             >
               {organizedTabs.map((organized) => {
                 const tab = organized.tab;

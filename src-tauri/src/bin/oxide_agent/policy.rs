@@ -330,7 +330,7 @@ fn validate_tool_name(value: String) -> Result<String, PolicyError> {
     Ok(value)
 }
 
-fn database_names_match(left: &str, right: &str) -> bool {
+pub(super) fn database_names_match(left: &str, right: &str) -> bool {
     left.trim()
         .trim_matches(|character| matches!(character, '`' | '"' | '[' | ']'))
         .eq_ignore_ascii_case(

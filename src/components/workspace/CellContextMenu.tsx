@@ -46,7 +46,7 @@ export function CellContextMenu({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-56 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+      <ContextMenuContent className="w-56">
         <ContextMenuItem onClick={onEditModal} className="text-[hsl(var(--wb-text))]">
           Edit in modal
           <ContextMenuShortcut>⌅Enter</ContextMenuShortcut>

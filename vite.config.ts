@@ -40,7 +40,7 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri` and external repo
-      ignored: ["**/src-tauri/**", "**/beekeeper-studio/**"],
+      ignored: ["**/src-tauri/**", "**/beekeeper-studio/**", "**/sources/**"],
     },
   },
   optimizeDeps: {

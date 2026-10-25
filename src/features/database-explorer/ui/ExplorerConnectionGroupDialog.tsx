@@ -46,7 +46,7 @@ export function ExplorerConnectionGroupDialog({
         if (!open) setConnectionGroupDraft(null);
       }}
     >
-      <DialogContent className="w-[380px] max-w-[calc(100vw-32px)] gap-4 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-5 text-[hsl(var(--wb-text))] shadow-[0_14px_36px_rgba(0,0,0,0.42)]">
+      <DialogContent className="w-[380px] max-w-[calc(100vw-32px)] gap-4 p-5">
         <form
           className="space-y-4"
           onSubmit={(event) => {

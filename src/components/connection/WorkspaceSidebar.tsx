@@ -172,7 +172,7 @@ export function WorkspaceSidebar() {
           </TooltipTrigger>
           <TooltipContent
             side="right"
-            className="ml-3 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-3 py-1.5 text-xs font-medium text-[hsl(var(--wb-text))] shadow-md"
+            className="ml-3 px-3 py-1.5 text-xs font-medium"
             sideOffset={5}
           >
             <p>All Connections</p>
@@ -223,7 +223,7 @@ export function WorkspaceSidebar() {
                   </TooltipTrigger>
                   <TooltipContent
                     side="right"
-                    className="ml-2 flex min-w-[150px] flex-col gap-1 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-3 text-[hsl(var(--wb-text))] shadow-lg"
+                    className="ml-2 flex min-w-[150px] flex-col gap-1 p-3"
                   >
                     <div className="flex items-center gap-2">
                       <div
@@ -250,7 +250,7 @@ export function WorkspaceSidebar() {
               </ContextMenuTrigger>
 
               {/* RIGHT CLICK MENU */}
-              <ContextMenuContent className="w-48 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))] shadow-2xl">
+              <ContextMenuContent className="w-48">
                 <ContextMenuItem
                   className="cursor-pointer focus:bg-[hsl(var(--wb-hover))] focus:text-[hsl(var(--wb-text))]"
                   onSelect={() =>
@@ -271,7 +271,7 @@ export function WorkspaceSidebar() {
                     <Palette size={14} className="mr-2" /> Change Color
                   </ContextMenuSubTrigger>
                   <ContextMenuSubContent
-                    className="grid w-36 grid-cols-4 gap-1 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1"
+                    className="grid w-36 grid-cols-4 gap-1 p-1"
                   >
                     {COLORS.map((color) => (
                       <ContextMenuItem
@@ -300,7 +300,7 @@ export function WorkspaceSidebar() {
                     <Briefcase size={14} className="mr-2" /> Change Icon
                   </ContextMenuSubTrigger>
                   <ContextMenuSubContent
-                    className="grid w-40 grid-cols-4 gap-1 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] p-1 text-[hsl(var(--wb-text))]"
+                    className="grid w-40 grid-cols-4 gap-1 p-1"
                   >
                     {ICONS.map((icon) => (
                       <ContextMenuItem
@@ -348,7 +348,7 @@ export function WorkspaceSidebar() {
             </TooltipTrigger>
             <TooltipContent
               side="right"
-              className="ml-2 border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] font-medium text-[hsl(var(--wb-text))]"
+              className="ml-2 font-medium"
             >
               Create Workspace
             </TooltipContent>
@@ -357,7 +357,7 @@ export function WorkspaceSidebar() {
 
         {/* CREATE DIALOG */}
         <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-          <DialogContent className="w-[448px] max-w-[calc(100vw-32px)] rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+          <DialogContent className="w-[448px] max-w-[calc(100vw-32px)]">
             <DialogHeader>
               <DialogTitle>Create Workspace</DialogTitle>
             </DialogHeader>
@@ -431,7 +431,7 @@ export function WorkspaceSidebar() {
 
         {/* RENAME/EDIT DIALOG */}
         <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
-          <DialogContent className="w-[384px] max-w-[calc(100vw-32px)] rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+          <DialogContent className="w-[384px] max-w-[calc(100vw-32px)]">
             <DialogHeader>
               <DialogTitle>Edit Workspace</DialogTitle>
             </DialogHeader>
@@ -480,7 +480,7 @@ export function WorkspaceSidebar() {
 
         {/* DELETE CONFIRMATION DIALOG */}
         <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-          <DialogContent className="w-[384px] max-w-[calc(100vw-32px)] rounded-[7px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] text-[hsl(var(--wb-text))]">
+          <DialogContent className="w-[384px] max-w-[calc(100vw-32px)]">
             <DialogHeader>
               <DialogTitle>Delete Workspace</DialogTitle>
             </DialogHeader>
@@ -522,7 +522,7 @@ export function WorkspaceSidebar() {
             </TooltipTrigger>
             <TooltipContent
               side="right"
-              className="ml-2 rounded-[5px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel-raised))] px-3 py-1.5 text-xs font-medium text-[hsl(var(--wb-text))] shadow-md"
+              className="ml-2 px-3 py-1.5 text-xs font-medium"
               sideOffset={5}
             >
               <p>Settings</p>

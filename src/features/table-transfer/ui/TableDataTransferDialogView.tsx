@@ -122,7 +122,7 @@ export function TableDataTransferDialogView({
       open={open}
       onOpenChange={(nextOpen) => !nextOpen && !isSubmitting && onClose()}
     >
-      <DialogContent className="flex h-[min(740px,calc(100vh-32px))] max-h-none w-[min(960px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden rounded-[8px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-editor))] p-0 text-[12px] text-[hsl(var(--wb-text))] shadow-[0_12px_36px_rgba(0,0,0,0.4)]">
+      <DialogContent layout="custom" className="flex h-[min(740px,calc(100vh-32px))] max-h-none w-[min(960px,calc(100vw-32px))] max-w-none flex-col gap-0 overflow-hidden p-0 text-[12px]">
         <DialogHeader className="relative flex h-10 shrink-0 items-center justify-center border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-frame))] px-4 py-0">
           <DialogTitle className="text-[12px] font-semibold tracking-normal text-[hsl(var(--wb-text-muted))]">
             Data transfer
@@ -163,11 +163,23 @@ export function TableDataTransferDialogView({
                     : "existing target table"}
                 </p>
               </div>
-              <span
-                className={`shrink-0 rounded-[3px] px-1.5 py-0.5 text-[9px] ${hasCurrentReview ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]" : "bg-[hsl(var(--wb-hover))] text-[hsl(var(--wb-text-muted))]"}`}
-              >
-                {hasCurrentReview ? "Reviewed" : "Draft"}
-              </span>
+              <div className="flex shrink-0 items-center gap-2">
+                {source.driver === "sqlite" && controller.projectId && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={isSubmitting}
+                    onClick={() => controller.setResumableOpen(true)}
+                  >
+                    Full transfer &amp; saved jobs
+                  </Button>
+                )}
+                <span
+                  className={`shrink-0 rounded-[3px] px-1.5 py-0.5 text-[9px] ${hasCurrentReview ? "bg-[hsl(var(--wb-active-strong))] text-[hsl(var(--wb-accent))]" : "bg-[hsl(var(--wb-hover))] text-[hsl(var(--wb-text-muted))]"}`}
+                >
+                  {hasCurrentReview ? "Reviewed" : "Draft"}
+                </span>
+              </div>
             </div>
 
             <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">

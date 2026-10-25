@@ -1,11 +1,12 @@
-import fs from "node:fs";
+import { readSourceText } from "./lib/source-text.mjs";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertAcyclic } from "./lib/runtime-import-graph.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "src-tauri/src/drivers/sqlite_ssh.rs";
-const facade = fs.readFileSync(path.join(root, entry), "utf8");
+const facade = readSourceText(path.join(root, entry));
 const expectedModules = ["driver", "metadata", "models", "platform", "response", "runtime", "transport"];
 const modules = [...facade.matchAll(/^mod (\w+);$/gm)]
   .map((match) => match[1])
@@ -26,7 +27,7 @@ let helpers = 0;
 let typeMethods = 0;
 for (const module of modules) {
   const file = `src-tauri/src/drivers/sqlite_ssh/${module}.rs`;
-  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const source = readSourceText(path.join(root, file));
   if (/\buse\s+super::\*|\buse\s+super::\w+::\*|\buse\s+crate::drivers::sqlite_ssh(?:::\w+)?::/.test(source))
     throw new Error(`${file}: import directly from its owning remote-SQLite module.`);
 
@@ -54,7 +55,7 @@ for (const [symbol, owner] of Object.entries({
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
 
-const driver = fs.readFileSync(path.join(root, "src-tauri/src/drivers/sqlite_ssh/driver.rs"), "utf8");
+const driver = readSourceText(path.join(root, "src-tauri/src/drivers/sqlite_ssh/driver.rs"));
 for (const method of ["execute_sqlite_rebuild_batch", "cancel_query", "get_constraints"]) {
   if (!new RegExp(`^    async fn ${method}\\b`, "m").test(driver))
     throw new Error(`${method} must remain on the sole RemoteSqliteDriver trait adapter.`);
@@ -63,7 +64,7 @@ for (const method of ["execute_sqlite_rebuild_batch", "cancel_query", "get_const
 if (helpers !== 24 || typeMethods !== 48)
   throw new Error(`Expected 24 remote-SQLite helpers and 48 type methods; found ${helpers} and ${typeMethods}.`);
 
-const tests = fs.readFileSync(path.join(root, "src-tauri/src/drivers/sqlite_ssh/tests.rs"), "utf8");
+const tests = readSourceText(path.join(root, "src-tauri/src/drivers/sqlite_ssh/tests.rs"));
 const testCount = [...tests.matchAll(/^#\[(?:tokio::)?test\]$/gm)].length;
 if (testCount !== 3) throw new Error(`Expected 3 remote-SQLite regression scenarios; found ${testCount}.`);
 

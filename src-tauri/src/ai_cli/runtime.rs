@@ -4,8 +4,6 @@ use super::codex_protocol::{codex_thread_start_params, codex_turn_start_params};
 #[cfg(test)]
 use super::executable::*;
 pub use super::executable::{resolve_command, resolve_named_command, CliCommandSpec};
-#[cfg(all(test, windows))]
-use crate::ai_cli::CliProviderKind;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use serde_json::{json, Value};

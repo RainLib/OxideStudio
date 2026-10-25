@@ -394,7 +394,7 @@ export function DatabaseEventAdminPanel({
           }
         }}
       >
-        <DialogContent className="max-w-[680px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogContent layout="custom" className="max-w-[680px] p-0">
           <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
             <DialogTitle className="text-[13px]">Create scheduled event</DialogTitle>
             <DialogDescription className="text-[11px] wb-muted">
@@ -462,7 +462,7 @@ export function DatabaseEventAdminPanel({
       </Dialog>
 
       <Dialog open={Boolean(plan)} onOpenChange={(nextOpen) => !nextOpen && closePlan()}>
-        <DialogContent className="max-w-[680px] border-[hsl(var(--wb-border))] bg-[hsl(var(--wb-panel))] p-0 text-[hsl(var(--wb-text))]">
+        <DialogContent layout="custom" className="max-w-[680px] p-0">
           <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] px-4 py-3">
             <DialogTitle className="flex items-center gap-2 text-[13px]">
               <AlertTriangle size={14} className="text-amber-300" /> Review scheduled event
