@@ -39,6 +39,13 @@ try {
       },
     });
   }
+  // Tauri bundles these licenses from outside src-tauri. Keep the isolated
+  // package versions buildable without copying the complete LSP checkout.
+  const lspLicenseDirectory = path.join(snapshot, "vendor/sql-lsp");
+  await fs.mkdir(lspLicenseDirectory, { recursive: true });
+  for (const file of ["UNICODE-LICENSE.txt", "PINYIN-LICENSE.txt"]) {
+    await fs.copyFile(path.join(root, "vendor/sql-lsp", file), path.join(lspLicenseDirectory, file));
+  }
   const manifest = path.join(snapshot, "src-tauri/Cargo.toml");
   for (const file of [manifest, path.join(snapshot, "src-tauri/Cargo.lock")]) {
     if ((await fs.lstat(file)).isSymbolicLink()) throw new Error("The upgrade source copy requires regular Cargo version files");
