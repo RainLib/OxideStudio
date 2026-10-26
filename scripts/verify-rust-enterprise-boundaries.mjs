@@ -76,13 +76,20 @@ for (const command of commands) {
     throw new Error(`${command} must be registered from enterprise/commands.rs.`);
   }
 }
-const testFiles = ["tests", "gateway_driver"];
+const catalogFile = "src-tauri/src/enterprise/gateway_driver/default_database.rs";
+const catalog = readSourceText(path.join(root, catalogFile));
+if (!/mod default_database;/.test(readSourceText(path.join(root, "src-tauri/src/enterprise/gateway_driver.rs"))) ||
+    !/pub\(super\) fn sole_catalog\(/.test(catalog) ||
+    /EnterpriseClient|ConnectionManager|DataPlaneClient/.test(catalog)) {
+  throw new Error(`${catalogFile}: keep single-catalog resolution pure and owned by the managed driver.`);
+}
+const testFiles = ["tests", "gateway_driver", "gateway_driver/default_database"];
 const testCount = testFiles.reduce((count, file) => count + [
   ...readSourceText(path.join(root, `src-tauri/src/enterprise/${file}.rs`))
     .matchAll(/^\s*#\[(?:tokio::)?test\]$/gm),
 ].length, 0);
-if (helpers !== 37 || typeMethods !== 55 || testCount !== 12) {
-  throw new Error(`Expected 37 enterprise helpers, 55 type methods and 12 tests; found ${helpers}, ${typeMethods} and ${testCount}.`);
+if (helpers !== 37 || typeMethods !== 57 || testCount !== 14) {
+  throw new Error(`Expected 37 enterprise helpers, 57 type methods and 14 tests; found ${helpers}, ${typeMethods} and ${testCount}.`);
 }
 console.log(
   `Rust enterprise boundaries verified: ${modules.length} modules, ${helpers} helpers, ${typeMethods} type methods, ${commands.length} Tauri commands, ${testCount} tests, acyclic imports.`,

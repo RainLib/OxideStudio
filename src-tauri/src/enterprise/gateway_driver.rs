@@ -21,6 +21,7 @@ use std::{fs, ops::ControlFlow};
 use tokio::sync::Mutex;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
+mod default_database;
 
 pub mod proto {
     tonic::include_proto!("oxide.enterprise.gateway.v1");
@@ -78,6 +79,7 @@ pub struct ManagedGatewayDriver {
     enterprise: EnterpriseClient,
     descriptor: ManagedDataSourceDescriptor,
     channel: Mutex<Option<(String, Channel)>>,
+    default_database: Mutex<Option<String>>,
 }
 
 impl ManagedGatewayDriver {
@@ -90,6 +92,7 @@ impl ManagedGatewayDriver {
             enterprise,
             descriptor,
             channel: Mutex::new(None),
+            default_database: Mutex::new(None),
         })
     }
 
@@ -163,6 +166,40 @@ impl ManagedGatewayDriver {
     }
 
     async fn list_resources(
+        &self,
+        kind: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+        object_name: Option<&str>,
+    ) -> Result<Vec<proto::ResourceItem>> {
+        let database = if kind != "database" && self.native_provider().is_none() {
+            Some(self.resolve_sql_database(database).await?)
+        } else {
+            database.map(str::to_string)
+        };
+        self.list_resources_raw(kind, database.as_deref(), schema, object_name)
+            .await
+    }
+
+    async fn resolve_sql_database(&self, database: Option<&str>) -> Result<String> {
+        if let Some(database) = database.filter(|name| !name.trim().is_empty()) {
+            return Ok(database.to_string());
+        }
+        let mut selected = self.default_database.lock().await;
+        if let Some(database) = selected.as_ref() {
+            return Ok(database.clone());
+        }
+        // Discovery is authorized by the Gateway. Never infer a database from
+        // a display summary or silently choose among multiple allowed targets.
+        let databases = self
+            .list_resources_raw("database", None, None, None)
+            .await?;
+        let database = default_database::sole_catalog(databases)?;
+        *selected = Some(database.clone());
+        Ok(database)
+    }
+
+    async fn list_resources_raw(
         &self,
         kind: &str,
         database: Option<&str>,
@@ -291,6 +328,8 @@ impl ManagedGatewayDriver {
                 .execute_native_query(provider, sql, database, schema)
                 .await;
         }
+        let resolved_database = self.resolve_sql_database(database).await?;
+        let database = Some(resolved_database.as_str());
         let resource_path = self.query_resource_path(sql, database, schema)?;
         let (mut client, session, scope) = self
             .open_client(AccessAction::QueryRead, resource_path)
@@ -576,6 +615,7 @@ impl DatabaseDriver for ManagedGatewayDriver {
 
     async fn disconnect(&self) -> Result<()> {
         self.channel.lock().await.take();
+        self.default_database.lock().await.take();
         Ok(())
     }
 

@@ -6,6 +6,7 @@ import {
 } from "@/lib/completionUsage";
 import {
   applyResolvedLspCompletionItem,
+  completionLabelForMonaco,
   completionResolveRequestContext,
   limitLspCompletionPresentationItems,
   lspCompletionItemsToMonacoSuggestions,
@@ -44,6 +45,14 @@ const monaco = {
 };
 
 describe("lspCompletionItemsToMonacoSuggestions", () => {
+  it("keeps long table and column prefixes secondary without changing server insertion", () => {
+    expect(completionLabelForMonaco({ label: "very_long_catalog.public.adapter", kind: CompletionItemKind.Class }))
+      .toEqual({ label: "adapter", description: "very_long_catalog.public" });
+    expect(completionLabelForMonaco({ label: "adapter_runs.duration_ms", kind: CompletionItemKind.Field }))
+      .toEqual({ label: "duration_ms", description: "adapter_runs" });
+    expect(completionLabelForMonaco({ label: '"literal.dot"', kind: CompletionItemKind.Field })).toBe('"literal.dot"');
+    expect(completionLabelForMonaco({ label: "schema.fn(text)", kind: CompletionItemKind.Function })).toBe("schema.fn(text)");
+  });
   it("bounds a large catalog while preserving server order by default", () => {
     const items = Array.from({ length: 600 }, (_, index) => ({
       label: `table_${String(599 - index).padStart(3, "0")}`,

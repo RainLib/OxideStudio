@@ -246,13 +246,13 @@ describe("production completion provider cached metadata search", () => {
   });
   it("offers a qualified table picker and chains its selected projection",async()=>{
     const f=fixture("SELECT \n<cursor>\nLIMIT 100;","postgres");f.options.schemaTables=[{name:"adapter",schema:"app"}];
-    const result=await f.request(),item=result.suggestions.find((item:any)=>item.label==="db.app.adapter");
+    const result=await f.request(),item=result.suggestions.find((item:any)=>item.label?.label==="adapter"&&item.label.description==="db.app");
     expect(item).toBeDefined();expect(item.insertText).toBe("${1} FROM app.adapter$0");
     expect(item.command.arguments.slice(2)).toEqual([true,"fallback-test"]);expect(metadata.loadTableMetadata).not.toHaveBeenCalled();
   });
   it.each(["SELECT <cursor> FROM adapter","SELECT <cursor> FROM missing JOIN users ON true","SELECT 1 + <cursor>"])("does not add a second FROM or replace an expression: %s",async sql=>{
     const f=fixture(sql,"postgres");f.options.schemaTables=[{name:"adapter",schema:"app"}];
-    expect((await f.request()).suggestions.some((item:any)=>item.label==="db.app.adapter")).toBe(false);
+    expect((await f.request()).suggestions.some((item:any)=>item.label?.label==="adapter"&&item.label.description==="db.app")).toBe(false);
   });
   it("does not grant Redis reads when only document-local inference is available",async()=>{
     const context:CompletionContextState={connection:{},runtime:{},metadataVersion:1,projectId:"project",route:"app",generation:{},available:true,lspAllowed:false,metadataAllowed:false};

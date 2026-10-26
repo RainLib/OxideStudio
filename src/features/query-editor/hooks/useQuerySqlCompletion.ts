@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from "@/features/connections/model/types";
+import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import { useBatchColumnSelection } from "@/features/query-editor/hooks/useBatchColumnSelection";
 import { useCachedSqlCompletionSource } from "@/features/query-editor/hooks/useCachedSqlCompletionSource";
 import { useLspCompletionProviderCoordinator } from "@/features/query-editor/hooks/useLspCompletionProviderCoordinator";
@@ -25,7 +26,7 @@ import type { DatabaseDriverCatalogStatus } from "@/store/useDatabaseDriverCatal
 import { useMemo, useRef } from "react";
 import {useConnectionStore} from "@/store/useConnectionStore";
 import {useConnectionSemanticStore} from "@/services/lsp/connectionSemanticState";
-import {semanticTabRoute} from "@/services/lsp/semanticContext";
+import {semanticTabRoute, semanticConnectionToken} from "@/services/lsp/semanticContext";
 import {createCompletionContextReader} from "../model/completionContextState";
 import {subscribeCompletionContext} from "../model/completionContextState";
 import {useLspRuntimeSnapshot} from "@/hooks/useLspRuntimeSnapshot";
@@ -41,6 +42,7 @@ interface QuerySqlCompletionOptions {
   driver: DatabaseDriver;
   metadataVersion: number;
   schemaTables: TableInfo[];
+  catalogDatabases?: string[];
   editorSettings: AppSettings["editor"];
   documentUri: string;
   driverCatalogStatus: DatabaseDriverCatalogStatus;
@@ -71,6 +73,7 @@ export function useQuerySqlCompletion({
   driver,
   metadataVersion,
   schemaTables,
+  catalogDatabases,
   editorSettings,
   documentUri,
   driverCatalogStatus,
@@ -94,7 +97,8 @@ export function useQuerySqlCompletion({
   const lspRuntime=useLspRuntimeSnapshot(lspClient);
   const connectionRuntime=useConnectionStore(state=>effectiveConnectionId?state.connectionRuntimeStates[effectiveConnectionId]:undefined);
   const executionObservation=useConnectionSemanticStore(state=>effectiveConnectionId?state.byConnectionId[effectiveConnectionId]:undefined);
-  const cacheScope=useMemo(()=>({connectionRuntime,executionObservation}),[connectionRuntime,executionObservation]);
+  const connectionIdentity = semanticConnectionToken(activeConnection);
+  const cacheScope=useMemo(()=>({connectionIdentity,connectionRuntime,executionObservation}),[connectionIdentity,connectionRuntime,executionObservation]);
   const runtimeSequenceRef=useRef(0);
   const observedProcess=effectiveConnectionId?lspRuntime:undefined;
   const runtimeSequence=useMemo(()=>++runtimeSequenceRef.current,[connectionRuntime,executionObservation,observedProcess]);
@@ -116,13 +120,14 @@ export function useQuerySqlCompletion({
     activeProjectId,
     connectionId: effectiveConnectionId,
     currentSchema,
-    databaseName: activeTab?.databaseName||activeConnection?.database,
+    databaseName: activeTab?.databaseName || (activeConnection && connectionCatalogDatabaseName(activeConnection)) ||
+      (catalogDatabases?.length === 1 ? catalogDatabases[0] : undefined),
     driver,
     metadataRevision: metadataVersion,
     schemaTables,
     sqlCompletion: editorSettings.sqlCompletion,
     sqlFormatting: editorSettings.sqlFormatting,
-    targetSchema: activeTab?.targetSchema,
+    targetSchema: activeTab?.targetSchema || activeTab?.schemaName,
   });
   const usageScope = completionUsageScope([
     activeProjectId,

@@ -4,6 +4,19 @@ import {
   isFileBasedDatabaseDriver,
 } from "@/lib/databaseDialect";
 import type { DatabaseDriver } from "@/services/tauri/types";
+import type { ManagedDataSourceDescriptor } from "@/services/tauri/enterprise.service";
+
+/** Permission summaries are resource paths, never connection database names. */
+export function managedCatalogDatabaseName(
+  descriptor: Pick<ManagedDataSourceDescriptor, "allowedResourceSummary">,
+) {
+  const catalogs = new Set(
+    descriptor.allowedResourceSummary.map((path) => path.split("/")[0]?.trim()),
+  );
+  if (catalogs.size !== 1) return "";
+  const catalog = [...catalogs][0];
+  return catalog && !catalog.includes("*") ? catalog : "";
+}
 
 /**
  * Resolve the configured server catalog using the same URL precedence as the
@@ -16,8 +29,15 @@ export function connectionCatalogDatabaseName(connection: {
   database?: string;
   connectionUrl?: string;
   url?: string;
+  origin?: "local" | "managed";
+  managedDescriptor?: ManagedDataSourceDescriptor;
 }) {
   const driver = connection.driver || "postgres";
+  if (connection.origin === "managed") {
+    return connection.managedDescriptor
+      ? managedCatalogDatabaseName(connection.managedDescriptor)
+      : "";
+  }
   // File-backed engines discover attached catalogs at runtime. Their
   // connection `database` is a file path, not a catalog name.
   if (isFileBasedDatabaseDriver(driver)) return "";

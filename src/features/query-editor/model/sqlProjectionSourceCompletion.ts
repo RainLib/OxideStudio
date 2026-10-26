@@ -42,7 +42,8 @@ export function sqlProjectionSourceCompletions(options:{model:any;position:any;p
     // PostgreSQL cannot query another database by adding a third name. The
     // database belongs in the label; SQL uses the selected schema and table.
     const target=[schema,table.name].filter((name):name is string=>Boolean(name)).map(name=>cachedIdentifierInsertion(name,{prefix:"",replacementLength:0},driver)).join(".");
-    return {label,kind:monaco.languages.CompletionItemKind.Struct,detail:"Choose table, then columns",documentation:{value:table.comment||"Adds this FROM target and continues with its columns."},
+    const namespace=[options.database,schema===options.database?undefined:schema].filter(Boolean).join(".");
+    return {label:{label:table.name,description:namespace},kind:monaco.languages.CompletionItemKind.Struct,detail:`${label} · Choose table, then columns`,documentation:{value:table.comment||"Adds this FROM target and continues with its columns."},
       insertText:`${context.completedKeyword?" ":""}\${1} ${from} ${snippetText(target)}$0`,insertTextRules:monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
       filterText:completionFilterTextForQuery(label,context.query),sortText:`1:${String(9999-Math.max(0,score)).padStart(4,"0")}:${label}`,
       range:context.completedKeyword?new monaco.Range(position.lineNumber,position.column,position.lineNumber,position.column):cachedIdentifierRange(monaco,options.model,position,context.fragment),[sourcePicker]:true};

@@ -9,7 +9,8 @@ import type { CachedColumnSet } from "./cached-completion/metadataSearch";
 import { cachedPhysicalNamespaceSupported, cachedCatalogNamespaceMatches } from "./cached-completion/namespace";
 import { cachedSqlRelationTargetFragment } from "./cached-completion/relations";
 import { sqlContextKeywordBeforeCursor } from "@/lib/lspCompletion";
-import {sqlProjectionSourceCompletions} from "./sqlProjectionSourceCompletion";
+import {projectionSourceContext, sqlProjectionSourceCompletions} from "./sqlProjectionSourceCompletion";
+import { completionRelationCatalog, type RelationCatalogCache } from "./cached-completion/relationCatalog";
 import {
   cachedSqlJoinTargetContext,
   cachedSqlRelationForFieldCompletion,
@@ -111,6 +112,7 @@ export type CachedSqlCompletionRequest = {
 export type CachedSqlCompletionCaches = {
   fields: Map<string, CachedField[]>;
   joinConstraints: Map<string, ConstraintInfo[]>;
+  relationCatalog?: RelationCatalogCache;
 };
 
 export function boundedSqlCompletionTextBeforeCursor(
@@ -204,16 +206,24 @@ export function createCachedSqlCompletionRequest(
   const nonSqlDocument = ["elasticsearch", "elastic", "mongodb"].includes(
     completionDriver,
   );
+  const relationTables = () => completionRelationCatalog({
+    tables: runtime.schemaTables, connectionId: runtime.connectionId, database: runtime.databaseName,
+    schema: runtime.targetSchema || runtime.currentSchema || runtime.databaseName,
+    cache: caches.relationCatalog ??= new Map(),
+    allowed: () => canUsePhysical() && !token?.isCancellationRequested,
+  });
 
   const relationSuggestions = async () => {
     if (nonSqlDocument||token?.isCancellationRequested||!canUsePhysical()) return [];
     const fragment=cachedSqlRelationTargetFragment(textBeforeCursor);
     if(fragment!==null&&!cachedCatalogNamespaceMatches(fragment,{databaseName:runtime.databaseName,schema:runtime.targetSchema||runtime.currentSchema||runtime.databaseName}))return [];
     const relationPrefix = cachedSqlRelationTargetPrefix(textBeforeCursor);
+    if (relationPrefix === null && !RELATION_COMPLETION_CONTEXTS.has(sqlContextKeywordBeforeCursor(textBeforeCursor) || "")) return [];
+    const tables = await relationTables();
     if (
       relationPrefix &&
       /^[a-z0-9]+$/iu.test(relationPrefix) &&
-      runtime.schemaTables.some((table) => containsHan(table.name))
+      tables.some((table) => containsHan(table.name))
     ) {
       await ensurePinyinCompletionSupport();
     }
@@ -222,7 +232,7 @@ export function createCachedSqlCompletionRequest(
       monaco,
       model,
       position,
-      runtime.schemaTables,
+      tables,
       textBeforeCursor,
       value=>{incomplete=value;},
     );
@@ -415,8 +425,8 @@ export function createCachedSqlCompletionRequest(
   const metadataSuggestions = async () => {
     const fields = await fieldSuggestions();
     if(fields.length>0)return fields;
-    if(canUsePhysical()&&!nonSqlDocument){
-      const sources=sqlProjectionSourceCompletions({model,position,prefix:textBeforeCursor,monaco,tables:runtime.schemaTables,driver:runtime.driver,database:runtime.databaseName,schema:runtime.targetSchema||runtime.currentSchema,keywordCase:runtime.sqlFormatting.keywordCase});
+    if(canUsePhysical()&&!nonSqlDocument&&projectionSourceContext(model,position,textBeforeCursor)){
+      const sources=sqlProjectionSourceCompletions({model,position,prefix:textBeforeCursor,monaco,tables:await relationTables(),driver:runtime.driver,database:runtime.databaseName,schema:runtime.targetSchema||runtime.currentSchema,keywordCase:runtime.sqlFormatting.keywordCase});
       if(sources.length)return sources;
     }
     return relationSuggestions();
