@@ -15,8 +15,8 @@ pub mod error;
 pub mod explain;
 #[cfg(any(feature = "desktop", test))]
 pub mod file_query;
-pub mod manager;
 pub mod managed_sql;
+pub mod manager;
 #[cfg(feature = "desktop")]
 pub mod mq_agent;
 #[cfg(feature = "desktop")]

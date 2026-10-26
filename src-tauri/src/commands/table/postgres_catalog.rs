@@ -719,8 +719,7 @@ pub(super) fn postgres_range_type_ddls(
 }
 
 pub(super) use crate::core::postgres_ddl::{
-    generate_postgres_table_ddl, is_postgres_foreign_key_constraint,
-    postgres_constraint_definition,
+    generate_postgres_table_ddl, is_postgres_foreign_key_constraint, postgres_constraint_definition,
 };
 
 /// PostgreSQL exposes a complete replayable `CREATE INDEX` statement for an

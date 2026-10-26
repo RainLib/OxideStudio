@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
     supportsTableIndexes: true,
     supportsTableConstraints: true,
     supportsForeignKeys: true,
+    supportsTableRowMutation: true,
   })),
   exportTableData: vi.fn(),
   mutateTableRows: vi.fn(),
@@ -125,6 +126,7 @@ describe("cross-database table data view", () => {
       supportsTableIndexes: true,
       supportsTableConstraints: true,
       supportsForeignKeys: true,
+      supportsTableRowMutation: true,
     });
     useProjectStore.setState({ activeProjectId: "project-analytics" });
     useConnectionStore.setState({
