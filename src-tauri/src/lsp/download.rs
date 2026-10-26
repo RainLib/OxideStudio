@@ -162,7 +162,10 @@ mod development_path_tests {
         std::fs::create_dir_all(manifest.join("binaries")).unwrap();
         let binary = manifest.join("binaries/sql-lsp.exe");
         std::fs::write(&binary, b"fixture").unwrap();
-        assert_eq!(development_binary_path(&manifest, root.path(), "sql-lsp.exe"), binary);
+        assert_eq!(
+            development_binary_path(&manifest, root.path(), "sql-lsp.exe"),
+            binary
+        );
     }
     #[test]
     fn the_workspace_binary_wins_over_an_unrelated_working_directory() {
@@ -172,7 +175,10 @@ mod development_path_tests {
             std::fs::create_dir_all(dir.join("binaries")).unwrap();
             std::fs::write(dir.join("binaries/sql-lsp.exe"), b"fixture").unwrap();
         }
-        assert_eq!(development_binary_path(&manifest, root.path(), "sql-lsp.exe"), manifest.join("binaries/sql-lsp.exe"));
+        assert_eq!(
+            development_binary_path(&manifest, root.path(), "sql-lsp.exe"),
+            manifest.join("binaries/sql-lsp.exe")
+        );
     }
     #[test]
     fn a_standalone_debug_bundle_retains_its_working_directory_fallback() {
@@ -180,7 +186,10 @@ mod development_path_tests {
         std::fs::create_dir(root.path().join("binaries")).unwrap();
         let binary = root.path().join("binaries/sql-lsp.exe");
         std::fs::write(&binary, b"fixture").unwrap();
-        assert_eq!(development_binary_path(&root.path().join("missing"), root.path(), "sql-lsp.exe"), binary);
+        assert_eq!(
+            development_binary_path(&root.path().join("missing"), root.path(), "sql-lsp.exe"),
+            binary
+        );
     }
 }
 
