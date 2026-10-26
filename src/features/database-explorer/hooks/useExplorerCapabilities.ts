@@ -1,6 +1,7 @@
 import type { ConnectionConfig } from "@/features/connections/model/types";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { databaseService } from "@/services/tauri";
+import { managedCapabilitiesFallback } from "@/features/connections/model/managedCapabilities";
 import type { DatabaseCapabilities } from "@/services/tauri/types";
 import type { DatabaseDriver } from "@/services/tauri/types/database";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
@@ -17,6 +18,7 @@ export function useExplorerCapabilities({
 }: UseExplorerCapabilitiesContext) {
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
+    connection: ConnectionConfig;
     capabilities: DatabaseCapabilities;
   } | null>(null);
   const driverCatalogStatus = useDatabaseDriverCatalogStore(
@@ -25,7 +27,7 @@ export function useExplorerCapabilities({
 
   useEffect(() => {
     let cancelled = false;
-    const fallback = defaultDatabaseCapabilities(activeDriver);
+    const fallback = activeConnection?.origin === "managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(activeDriver)) : defaultDatabaseCapabilities(activeDriver);
     if (!activeConnection) {
       setConnectionCapabilities(null);
       return () => {
@@ -34,15 +36,15 @@ export function useExplorerCapabilities({
     }
     setConnectionCapabilities(null);
 
-    databaseService
-      .getDatabaseCapabilities(
-        activeDriver,
-        activeConnection?.driverPackageVersion,
-      )
+    const request=activeConnection.origin === "managed"
+      ? databaseService.getConnectionDatabaseCapabilityContext(activeConnection.id).then(context=>context.capabilities)
+      : databaseService.getDatabaseCapabilities(activeDriver,activeConnection.driverPackageVersion);
+    request
       .then((nextCapabilities) => {
         if (!cancelled) {
           setConnectionCapabilities({
             connectionId: activeConnection.id,
+            connection:activeConnection,
             capabilities: nextCapabilities,
           });
         }
@@ -52,6 +54,7 @@ export function useExplorerCapabilities({
         if (!cancelled) {
           setConnectionCapabilities({
             connectionId: activeConnection.id,
+            connection:activeConnection,
             capabilities: fallback,
           });
         }
@@ -63,9 +66,10 @@ export function useExplorerCapabilities({
   }, [
     activeConnection?.driverPackageVersion,
     activeConnection?.id,
+    activeConnection,
     activeDriver,
     driverCatalogStatus,
   ]);
 
-  return { connectionCapabilities };
+  return { connectionCapabilities:connectionCapabilities?.connection===activeConnection?connectionCapabilities:null };
 }

@@ -197,22 +197,38 @@ impl PostgresDriver {
         sql: &str,
         conn: &mut sqlx::PgConnection,
     ) -> Result<Vec<QueryResult>> {
+        self.query_parameterized_on_connection(sql, &[], conn, DEFAULT_QUERY_RESULT_ROW_LIMIT)
+            .await
+    }
+
+    pub(super) async fn query_parameterized_on_connection(
+        &self,
+        sql: &str,
+        params: &[QueryParameter],
+        conn: &mut sqlx::PgConnection,
+        max_rows: usize,
+    ) -> Result<Vec<QueryResult>> {
         match execution_mode(sql) {
             QueryExecutionMode::ReturnsRows => {
                 let rows = {
-                    let stream = sqlx::query(sql).persistent(false).fetch(&mut *conn);
+                    let mut query = sqlx::query(sql).persistent(false);
+                    for param in params {
+                        query = bind_pg_parameter(query, param)?;
+                    }
+                    let stream = query.fetch(&mut *conn);
                     stream
-                        .take(DEFAULT_QUERY_RESULT_ROW_LIMIT + 1)
+                        .take(max_rows.saturating_add(1))
                         .try_collect::<Vec<_>>()
                         .await?
                 };
                 self.process_connection_rows(sql, rows, conn).await
             }
             QueryExecutionMode::AffectsRows => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(&mut *conn)
-                    .await?;
+                let mut query = sqlx::query(sql).persistent(false);
+                for param in params {
+                    query = bind_pg_parameter(query, param)?;
+                }
+                let result = query.execute(&mut *conn).await?;
                 Ok(vec![QueryResult::execution(
                     execution_statement_kind(sql).as_str(),
                     result.rows_affected(),

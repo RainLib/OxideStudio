@@ -31,7 +31,7 @@
 | 驱动基础设施 | 已有签名包、版本 pin、安装/激活/回滚、托管 Java、运行健康界面和通用 JDBC Agent。需要交付的是逐产品经过验证的运行能力。 |
 | 连接迁移 | 已识别 DataGrip、DBeaver、Navicat 来源；见 `src/features/connection-import/model/connectionImport.ts:3`。无需重复建设同类导入入口。 |
 | SQL 与助手 | 已有独立 SQL LSP、语句作用域处理、Agent Host、受控审批、恢复投影和 Git 审阅入口。这些能力应保留并继续做真实运行验收，不宜直接换成 DBX 的组件内实现。 |
-| 独立 Rust CLI/MCP | `src-tauri/src/bin/oxide_agent/` 已有公开 stdio/HTTP MCP、项目/连接授权、5 个只读工具、直接数据库连接与发布打包。`scripts/oxide-ai.ts` 是另一个较旧的 TypeScript 入口，不能以其中的空 adapter 判定独立 CLI/MCP 缺失。见 `docs/EXTERNAL_AI_INTEGRATION.md:3`、`oxide_agent/runtime.rs:400`。 |
+| 独立 Rust CLI/MCP | `src-tauri/src/cli/` 已有公开 stdio/HTTP MCP、项目/连接授权、5 个只读工具、直接数据库连接与发布打包。`scripts/oxide-ai.ts` 是另一个较旧的 TypeScript 入口，不能以其中的空 adapter 判定独立 CLI/MCP 缺失。见 `docs/EXTERNAL_AI_INTEGRATION.md:3`、`oxide_agent/runtime.rs:400`。 |
 
 ## 需要补齐的产品差距
 

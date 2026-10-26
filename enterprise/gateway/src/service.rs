@@ -3,6 +3,7 @@
 mod authorization;
 mod driver;
 mod models;
+mod mutation;
 mod policy;
 mod protocol;
 mod rpc;

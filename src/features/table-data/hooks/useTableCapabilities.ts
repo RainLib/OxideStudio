@@ -1,6 +1,7 @@
 import type { ConnectionConfig } from "@/features/connections/model/types";
 import { defaultDatabaseCapabilities } from "@/lib/databaseDialect";
 import { databaseService } from "@/services/tauri";
+import { managedCapabilitiesFallback } from "@/features/connections/model/managedCapabilities";
 import type { DatabaseCapabilities } from "@/services/tauri/types";
 import type { DatabaseDriver } from "@/services/tauri/types/database";
 import { useDatabaseDriverCatalogStore } from "@/store/useDatabaseDriverCatalogStore";
@@ -21,20 +22,21 @@ export function useTableCapabilities({
   const [connectionCapabilities, setConnectionCapabilities] = useState<{
     connectionId: string;
     capabilities: DatabaseCapabilities;
+    connection: ConnectionConfig;
   } | null>(null);
   const resolvedCapabilities =
     connectionCapabilities &&
-    connectionCapabilities.connectionId === activeConnection?.id
+    connectionCapabilities.connection === activeConnection
       ? connectionCapabilities.capabilities
       : null;
   const activeCapabilities =
     resolvedCapabilities?.driver === driver
       ? resolvedCapabilities
-      : defaultDatabaseCapabilities(driver);
+      : activeConnection?.origin === "managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(driver)) : defaultDatabaseCapabilities(driver);
 
   useEffect(() => {
     let cancelled = false;
-    const fallback = defaultDatabaseCapabilities(driver);
+    const fallback = activeConnection?.origin === "managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(driver)) : defaultDatabaseCapabilities(driver);
     if (!activeConnection) {
       setConnectionCapabilities(null);
       return () => {
@@ -43,12 +45,15 @@ export function useTableCapabilities({
     }
     setConnectionCapabilities(null);
 
-    databaseService
-      .getDatabaseCapabilities(driver, activeConnection?.driverPackageVersion)
+    const request=activeConnection.origin === "managed"
+      ? databaseService.getConnectionDatabaseCapabilityContext(activeConnection.id).then(context=>context.capabilities)
+      : databaseService.getDatabaseCapabilities(driver, activeConnection.driverPackageVersion);
+    request
       .then((nextCapabilities) => {
         if (!cancelled) {
           setConnectionCapabilities({
             connectionId: activeConnection.id,
+            connection: activeConnection,
             capabilities: nextCapabilities,
           });
         }
@@ -58,6 +63,7 @@ export function useTableCapabilities({
         if (!cancelled) {
           setConnectionCapabilities({
             connectionId: activeConnection.id,
+            connection: activeConnection,
             capabilities: fallback,
           });
         }
@@ -69,6 +75,7 @@ export function useTableCapabilities({
   }, [
     activeConnection?.driverPackageVersion,
     activeConnection?.id,
+    activeConnection,
     driver,
     driverCatalogStatus,
   ]);

@@ -5,8 +5,6 @@ use super::limits::{MAX_POSTGRES_BACKUP_ROUTINES, MAX_POSTGRES_ROUTINE_SOURCE_CH
 use super::policy::schema_option;
 use super::values::{value_to_export_string, value_to_string};
 use crate::core::dialect::DatabaseKind;
-use crate::core::protocol::ColumnInfo;
-use crate::core::protocol::ConstraintInfo;
 use crate::core::protocol::IndexInfo;
 use crate::core::protocol::QueryResult;
 use crate::core::protocol::TableInfo;
@@ -720,118 +718,9 @@ pub(super) fn postgres_range_type_ddls(
         .collect()
 }
 
-pub(super) fn postgres_column_definition(kind: DatabaseKind, column: &ColumnInfo) -> String {
-    let mut definition = format!(
-        "  {} {}",
-        kind.quote_identifier(&column.name),
-        column.data_type
-    );
-
-    if let Some(default_value) = &column.default_value {
-        if !default_value.trim().is_empty() {
-            definition.push_str(" DEFAULT ");
-            definition.push_str(default_value);
-        }
-    }
-
-    if !column.is_nullable {
-        definition.push_str(" NOT NULL");
-    }
-
-    definition
-}
-
-pub(super) fn postgres_constraint_definition(
-    kind: DatabaseKind,
-    constraint: &ConstraintInfo,
-) -> Option<String> {
-    let definition = constraint.definition.as_deref()?.trim();
-    if definition.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "  CONSTRAINT {} {}",
-        kind.quote_identifier(&constraint.name),
-        definition
-    ))
-}
-
-pub(super) fn is_postgres_foreign_key_constraint(constraint: &ConstraintInfo) -> bool {
-    constraint
-        .constraint_type
-        .trim()
-        .eq_ignore_ascii_case("FOREIGN KEY")
-        || constraint.definition.as_deref().is_some_and(|definition| {
-            definition
-                .trim_start()
-                .to_ascii_uppercase()
-                .starts_with("FOREIGN KEY")
-        })
-}
-
-pub(super) fn generate_postgres_table_ddl(
-    schema: &str,
-    table: &str,
-    columns: &[ColumnInfo],
-    constraints: &[ConstraintInfo],
-    indexes: &[IndexInfo],
-) -> String {
-    let kind = DatabaseKind::Postgres;
-    let mut lines: Vec<String> = columns
-        .iter()
-        .map(|column| postgres_column_definition(kind, column))
-        .collect();
-
-    let constraint_names: std::collections::HashSet<&str> = constraints
-        .iter()
-        .map(|constraint| constraint.name.as_str())
-        .collect();
-
-    for constraint in constraints {
-        if let Some(definition) = postgres_constraint_definition(kind, constraint) {
-            lines.push(definition);
-        }
-    }
-
-    if !constraints
-        .iter()
-        .any(|constraint| constraint.constraint_type == "PRIMARY KEY")
-    {
-        let primary_keys: Vec<String> = columns
-            .iter()
-            .filter(|column| column.is_primary_key)
-            .map(|column| kind.quote_identifier(&column.name))
-            .collect();
-
-        if !primary_keys.is_empty() {
-            lines.push(format!("  PRIMARY KEY ({})", primary_keys.join(", ")));
-        }
-    }
-
-    let mut ddl = format!(
-        "CREATE TABLE {} (\n{}\n);",
-        kind.qualified_table(Some(schema), table),
-        lines.join(",\n")
-    );
-
-    let extra_indexes: Vec<String> = indexes
-        .iter()
-        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
-        .filter_map(|index| index.definition.as_deref())
-        .map(str::trim)
-        .filter(|definition| !definition.is_empty())
-        .map(ToString::to_string)
-        .collect();
-
-    if !extra_indexes.is_empty() {
-        ddl.push_str("\n\n");
-        ddl.push_str(&extra_indexes.join(";\n"));
-        ddl.push(';');
-    }
-
-    ddl
-}
+pub(super) use crate::core::postgres_ddl::{
+    generate_postgres_table_ddl, is_postgres_foreign_key_constraint, postgres_constraint_definition,
+};
 
 /// PostgreSQL exposes a complete replayable `CREATE INDEX` statement for an
 /// index through `pg_get_indexdef`.  Unlike table indexes, materialized-view

@@ -5,6 +5,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
+import { managedCapabilitiesFallback } from "@/features/connections/model/managedCapabilities";
 import { reorderExplorerConnectionIds } from "@/features/database-explorer/model/explorerConnectionOrder";
 import {
   connectionRegionStyle,
@@ -181,7 +182,7 @@ export function createConnectionTreeRowRenderer({
     );
     const connectionCapabilities = isActive
       ? activeCapabilities
-      : defaultDatabaseCapabilities(connection.driver);
+      : connection.origin === "managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(connection.driver)) : defaultDatabaseCapabilities(connection.driver);
     const connectionSchemas = isActive
       ? schemaRows
       : connectionMetadata.schemas;

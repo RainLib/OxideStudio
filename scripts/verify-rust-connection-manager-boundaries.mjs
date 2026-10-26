@@ -53,8 +53,9 @@ for (const [source, method] of [[lifecycle, "replace_connection_with_tunnel_and_
   if (!new RegExp(`^    pub(?:\\(super\\))? async fn ${method}\\b`, "m").test(source))
     throw new Error(`${method} must remain owned by its connection-manager module.`);
 }
-if (methods !== 104) throw new Error(`Expected 104 ConnectionManager methods; found ${methods}.`);
+if (methods !== 106) throw new Error(`Expected 106 ConnectionManager methods; found ${methods}.`);
 const observedDispatches = [
+  "managed_table_definition", "managed_table_permissions",
   "query", "query_native_page", "fetch_native_query_page", "close_native_query_page", "cancel_query",
   "execute_parameterized", "create_database", "plan_schema_migration", "preflight_schema_migration",
   "apply_schema_migration", "verify_schema_migration", "query_parameterized", "query_database",

@@ -86,10 +86,18 @@ pub(super) async fn register_data_source(
         || !input
             .capabilities
             .iter()
-            .all(|action| action.is_stage_one_managed_action())
+            .all(|action| action.is_managed_gateway_action())
+        || (!matches!(driver.as_str(), "postgres" | "postgresql")
+            && input.capabilities.iter().any(|action| {
+                matches!(
+                    action,
+                    oxide_enterprise_contracts::AccessAction::DataWrite
+                        | oxide_enterprise_contracts::AccessAction::SchemaDdl
+                )
+            }))
     {
         return Err(ApiError::bad_request(
-            "managed data sources support PostgreSQL, MySQL, MongoDB, Elasticsearch, and Redis with read-only Gateway capabilities only",
+            "managed data sources require supported Gateway capabilities; mutations require PostgreSQL",
         ));
     }
     let identity = state.verifier.authenticate(&headers).await?;
@@ -385,7 +393,7 @@ pub(super) async fn create_access_grant(
         || !input
             .actions
             .iter()
-            .all(|action| action.is_stage_one_managed_action())
+            .all(|action| action.is_managed_gateway_action())
         || input.resource_path.len() > 16
         || input
             .resource_path

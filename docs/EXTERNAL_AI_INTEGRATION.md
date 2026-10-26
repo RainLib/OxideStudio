@@ -311,12 +311,12 @@ $metadataInput = Join-Path $env:TEMP 'oxide-live-metadata.json'
 
 ## 8. 实现位置
 
-- [CLI 命令定义](../src-tauri/src/bin/oxide_agent/cli.rs)
-- [工具清单和输入 Schema](../src-tauri/src/bin/oxide_agent/catalog.rs)
-- [MCP 协议边界](../src-tauri/src/bin/oxide_agent/mcp.rs)
-- [Streamable HTTP 传输](../src-tauri/src/bin/oxide_agent/http.rs)
-- [HTTP Token 与 Origin 校验](../src-tauri/src/bin/oxide_agent/http_auth.rs)
+- [CLI 命令定义](../src-tauri/src/cli/cli.rs)
+- [工具清单和输入 Schema](../src-tauri/src/cli/catalog.rs)
+- [MCP 协议边界](../src-tauri/src/cli/mcp.rs)
+- [Streamable HTTP 传输](../src-tauri/src/cli/http.rs)
+- [HTTP Token 与 Origin 校验](../src-tauri/src/cli/http_auth.rs)
 - [Desktop 服务托管](../src-tauri/src/commands/mcp_http.rs)
-- [工具执行和数据库安全边界](../src-tauri/src/bin/oxide_agent/runtime.rs)
-- [项目/连接授权策略](../src-tauri/src/bin/oxide_agent/policy.rs)
+- [工具执行和数据库安全边界](../src-tauri/src/cli/runtime.rs)
+- [项目/连接授权策略](../src-tauri/src/cli/policy.rs)
 

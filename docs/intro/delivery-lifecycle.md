@@ -138,7 +138,7 @@
 | 规划       | [统一架构与技术总览](README.md)、[当前架构](../architecture.md)、driver conformance 文档 | 能力地图、风险分级、ADR                   |
 | 构建       | `src/features/`、`src/services/tauri/`、`src-tauri/src/commands/`、`src-tauri/src/drivers/`          | 同边界测试、最小可运行切片                |
 | 校准       | `tests/frontend/`、`src-tauri/tests/`、真实数据库 fixture                                            | 人工走查记录、差异/性能证据               |
-| 外部自动化 | [统一架构与技术总览](README.md)、`src-tauri/src/bin/oxide_agent/`                   | 固定 grant、越权拒绝、HTTP/stdio 联通证据 |
+| 外部自动化 | [统一架构与技术总览](README.md)、`src-tauri/src/cli/`                   | 固定 grant、越权拒绝、HTTP/stdio 联通证据 |
 | 发布       | `README.md`、`docs/UPDATES.md`、GitHub Actions workflows                                             | 版本、安装包、签名/更新与已知边界         |
 
 最重要的交付原则是：功能的**权威状态和安全决策在后端**，前端是其可解释的操作投影；外部 Harness 是受限证据入口，而不是对桌面管理能力的远程复制。

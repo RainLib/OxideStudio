@@ -530,6 +530,7 @@ export function useQueryEditorController(props: QueryEditorProps = {}) {
     driver,
     metadataVersion,
     schemaTables,
+    catalogDatabases,
     editorSettings,
     documentUri,
     driverCatalogStatus,

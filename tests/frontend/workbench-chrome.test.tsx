@@ -57,6 +57,9 @@ describe("WorkbenchChrome", () => {
     );
     expect(trigger).toBeTruthy();
     await act(async () => {
+      // These tests assert task hydration, not cold module transformation time.
+      // Await the real lazy module before focusing its activation trigger.
+      await import("@/components/workspace/TaskStatusCenter");
       trigger?.focus();
       await Promise.resolve();
     });

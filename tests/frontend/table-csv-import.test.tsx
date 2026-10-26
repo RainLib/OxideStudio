@@ -45,7 +45,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/services/tauri", () => ({
   databaseService: {
-    getDatabaseCapabilities: vi.fn(async (driver: string) => ({ driver })),
+    getDatabaseCapabilities: vi.fn(async (driver: string) => ({ driver, supportsTableRowMutation: true })),
   },
   queryService: {
     executeQuery: vi.fn(async () => []),

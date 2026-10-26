@@ -8,6 +8,7 @@
         "beforeDevCommand": "npm run agent-host:build && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-rocketmq-agent.mjs && node scripts/prepare-sql-lsp.mjs && npm run dev",
         "devUrl": "http://localhost:1420",
         "beforeBuildCommand": "npm run build && node scripts/prepare-agent-host.mjs && node scripts/prepare-oxide-agent.mjs && node scripts/prepare-rocketmq-agent.mjs && node scripts/prepare-sql-lsp.mjs",
+        "beforeBundleCommand": "node scripts/stage-bundled-cli.mjs",
         "frontendDist": "../dist"
     },
     "app": {

@@ -9,6 +9,7 @@ import {
   usageRankedCompletionSortText,
 } from "@/lib/completionUsage";
 import type { CompletionItem } from "@/services/lsp/types";
+import { CompletionItemKind } from "@/services/lsp/types";
 import {
   lspDocumentationForMonaco,
   toMonacoCompletionRange,
@@ -157,13 +158,21 @@ export function applyResolvedLspCompletionItem(
 }
 
 export function completionLabelForMonaco(item: CompletionItem) {
-  return item.labelDetails?.detail || item.labelDetails?.description
-    ? {
+  if (item.labelDetails?.detail || item.labelDetails?.description) {
+    return {
         label: item.label,
         detail: item.labelDetails.detail,
         description: item.labelDetails.description,
-      }
-    : item.label;
+      };
+  }
+  // Presentation only: retain server-owned text edits, identity and ranking.
+  // Do not split quoted identifiers, signatures or arbitrary dotted prose.
+  if ([CompletionItemKind.Field, CompletionItemKind.Class].includes(item.kind!) &&
+      /^[\p{L}_][\p{L}\p{N}_$]*(?:\.[\p{L}_][\p{L}\p{N}_$]*)+$/u.test(item.label)) {
+    const separator = item.label.lastIndexOf(".");
+    return { label: item.label.slice(separator + 1), description: item.label.slice(0, separator) };
+  }
+  return item.label;
 }
 
 function completionInsertTextRules(

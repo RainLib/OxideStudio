@@ -15,6 +15,43 @@ use oxide_driver_protocol::{
 };
 
 impl ConnectionManager {
+    pub async fn managed_table_permissions(
+        &self,
+        id: &str,
+        database: Option<&str>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<crate::core::driver::ManagedTablePermissions>> {
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        operation
+            .run(async {
+                driver
+                    .managed_table_permissions(database, schema, table)
+                    .await
+            })
+            .await
+    }
+    pub async fn managed_table_definition(
+        &self,
+        id: &str,
+        database: Option<&str>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<String>> {
+        let (driver, operation) = self.get_observed_driver(id).await?;
+        if !driver.is_managed_data_source() {
+            return Ok(None);
+        }
+        operation
+            .run(async {
+                driver
+                    .get_table_definition(database, schema, table)
+                    .await
+                    .map(Some)
+            })
+            .await
+    }
+
     pub async fn statement_scan_dialect(
         &self,
         id: &str,

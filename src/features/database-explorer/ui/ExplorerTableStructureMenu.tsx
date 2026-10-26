@@ -189,7 +189,6 @@ export function ExplorerTableStructureMenu({
             }
             disabled={
               isReadOnlyRelation ||
-              !relationCapabilities.supportsTableDdl ||
               !relationCapabilities.supportsColumnAlteration
             }
           >

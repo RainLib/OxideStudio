@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from "@/features/connections/model/types";
+import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import { useBatchColumnSelection } from "@/features/query-editor/hooks/useBatchColumnSelection";
 import { useCachedSqlCompletionSource } from "@/features/query-editor/hooks/useCachedSqlCompletionSource";
 import { useLspCompletionProviderCoordinator } from "@/features/query-editor/hooks/useLspCompletionProviderCoordinator";
@@ -25,11 +26,12 @@ import type { DatabaseDriverCatalogStatus } from "@/store/useDatabaseDriverCatal
 import { useMemo, useRef } from "react";
 import {useConnectionStore} from "@/store/useConnectionStore";
 import {useConnectionSemanticStore} from "@/services/lsp/connectionSemanticState";
-import {semanticTabRoute} from "@/services/lsp/semanticContext";
+import {semanticTabRoute, semanticConnectionToken} from "@/services/lsp/semanticContext";
 import {createCompletionContextReader} from "../model/completionContextState";
 import {subscribeCompletionContext} from "../model/completionContextState";
 import {useLspRuntimeSnapshot} from "@/hooks/useLspRuntimeSnapshot";
 import {useCompletionContextRefresh} from "./useCompletionContextRefresh";
+import {triggerChainedSqlCompletion} from "../model/completionContinuation";
 
 interface QuerySqlCompletionOptions {
   syncDocument?:(model:any)=>Promise<void>;
@@ -40,6 +42,7 @@ interface QuerySqlCompletionOptions {
   driver: DatabaseDriver;
   metadataVersion: number;
   schemaTables: TableInfo[];
+  catalogDatabases?: string[];
   editorSettings: AppSettings["editor"];
   documentUri: string;
   driverCatalogStatus: DatabaseDriverCatalogStatus;
@@ -70,6 +73,7 @@ export function useQuerySqlCompletion({
   driver,
   metadataVersion,
   schemaTables,
+  catalogDatabases,
   editorSettings,
   documentUri,
   driverCatalogStatus,
@@ -93,7 +97,8 @@ export function useQuerySqlCompletion({
   const lspRuntime=useLspRuntimeSnapshot(lspClient);
   const connectionRuntime=useConnectionStore(state=>effectiveConnectionId?state.connectionRuntimeStates[effectiveConnectionId]:undefined);
   const executionObservation=useConnectionSemanticStore(state=>effectiveConnectionId?state.byConnectionId[effectiveConnectionId]:undefined);
-  const cacheScope=useMemo(()=>({connectionRuntime,executionObservation}),[connectionRuntime,executionObservation]);
+  const connectionIdentity = semanticConnectionToken(activeConnection);
+  const cacheScope=useMemo(()=>({connectionIdentity,connectionRuntime,executionObservation}),[connectionIdentity,connectionRuntime,executionObservation]);
   const runtimeSequenceRef=useRef(0);
   const observedProcess=effectiveConnectionId?lspRuntime:undefined;
   const runtimeSequence=useMemo(()=>++runtimeSequenceRef.current,[connectionRuntime,executionObservation,observedProcess]);
@@ -115,13 +120,14 @@ export function useQuerySqlCompletion({
     activeProjectId,
     connectionId: effectiveConnectionId,
     currentSchema,
-    databaseName: activeTab?.databaseName,
+    databaseName: activeTab?.databaseName || (activeConnection && connectionCatalogDatabaseName(activeConnection)) ||
+      (catalogDatabases?.length === 1 ? catalogDatabases[0] : undefined),
     driver,
     metadataRevision: metadataVersion,
     schemaTables,
     sqlCompletion: editorSettings.sqlCompletion,
     sqlFormatting: editorSettings.sqlFormatting,
-    targetSchema: activeTab?.targetSchema,
+    targetSchema: activeTab?.targetSchema || activeTab?.schemaName,
   });
   const usageScope = completionUsageScope([
     activeProjectId,
@@ -217,25 +223,7 @@ export function useQuerySqlCompletion({
     resolveCompletionItem,
     rankByUsage,
     recordUsage: recordCompletionUsage,
-    triggerChainedCompletion: () => {
-      const editor = mountedEditor;
-      const model = editor?.getModel();
-      if (!editor || !model) return;
-      window.setTimeout(() => {
-        if (editor.getModel() !== model || !editor.hasTextFocus()) return;
-        completionTriggerOriginRef.current = "chained";
-        editor.trigger(
-          "oxide.sql.chainedCompletion",
-          "editor.action.triggerSuggest",
-          {},
-        );
-        window.setTimeout(() => {
-          if (completionTriggerOriginRef.current === "chained") {
-            completionTriggerOriginRef.current = null;
-          }
-        }, 0);
-      }, 0);
-    },
+    triggerChainedCompletion: () => triggerChainedSqlCompletion(mountedEditor,completionTriggerOriginRef),
     triggerCharacters:
       editorLanguageId === ELASTICSEARCH_CONSOLE_LANGUAGE_ID
         ? ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS

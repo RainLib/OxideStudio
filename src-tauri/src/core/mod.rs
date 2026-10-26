@@ -15,12 +15,14 @@ pub mod error;
 pub mod explain;
 #[cfg(any(feature = "desktop", test))]
 pub mod file_query;
+pub mod managed_sql;
 pub mod manager;
 #[cfg(feature = "desktop")]
 pub mod mq_agent;
 #[cfg(feature = "desktop")]
 pub(crate) mod mysql_character;
 pub mod parser;
+pub mod postgres_ddl;
 pub(crate) mod private_file;
 pub mod protocol;
 #[cfg(feature = "desktop")]

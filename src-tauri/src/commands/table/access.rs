@@ -9,6 +9,39 @@ use crate::core::protocol::ParameterizedStatement;
 use crate::core::protocol::QueryParameter;
 use crate::core::protocol::QueryResult;
 
+pub(super) async fn execute_table_column_statements(
+    manager: &ConnectionManager,
+    connection_id: &str,
+    statements: &[String],
+) -> Result<(), String> {
+    if manager
+        .capability_snapshot(connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .managed
+    {
+        let statements = statements
+            .iter()
+            .map(|sql| ParameterizedStatement {
+                sql: sql.clone(),
+                params: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        manager
+            .execute_parameterized_batch(connection_id, &statements)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        for statement in statements {
+            manager
+                .query(connection_id, statement, None, None, None)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn resolve_object_type(
     manager: &ConnectionManager,
     connection_id: &str,

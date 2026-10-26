@@ -57,6 +57,7 @@ try {
  assert(executable,"native test executable missing");evidence.executableSha256=createHash("sha256").update(await fs.readFile(executable)).digest("hex");
  await run(executable,["--run-native-ipc",directory],path.join(directory,"native.log"),180000,path.join(root,"src-tauri"));
  const receipt=JSON.parse(await fs.readFile(path.join(directory,"receipt.json"),"utf8"));
+ for(const flag of ["acceptedSelectContinues","unboundTablePicker","sourceSelectionContinuesColumns","acceptedFromContinues","nativeQueryAfterSelection","realMonacoWidget","productionProvider","productionCoordinator","nativeSqlite"])assert.equal(receipt.completionContinuation[flag],true);
  for(const flag of ["productionFileIntelligenceHook","productionFileCommands","realDriverMetadata","rendererMetadataFixture","realWidget","reopenIsolation","actualSuffixAcceptance","realFormatting","realDiagnostics","explicitTabProblems","sourceCloseWithdrawal"])assert.equal(receipt.fileQueryIntelligence[flag],true);assert.equal(receipt.fileQueryIntelligence.realHostFileSession,false);assert.equal(receipt.fileQueryIntelligence.driverSha256,evidence.fileQueryPreparation.driverSha256);
  for(const flag of ["realHostTransport","withoutDocuments","overwriteRevoked","restartRevoked"])assert.equal(receipt.configurationReceipt[flag],true);
  for(const flag of ["productionCoreProviders","realMonacoActions","realHostLsp","fullUriAuthorityIsolation","documentAndRange","siblingDisposal"])assert.equal(receipt.multiDocumentFormatting[flag],true);

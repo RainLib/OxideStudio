@@ -30,7 +30,7 @@ fn access_session_request(action: AccessAction, source: &str) -> AccessSessionRe
 
 #[test]
 fn access_sessions_reject_actions_without_a_gateway_rpc() {
-    let input = access_session_request(AccessAction::DataWrite, "desktop");
+    let input = access_session_request(AccessAction::DataExport, "desktop");
     let error = validate_access_session_request(&input).unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 }
@@ -43,9 +43,15 @@ fn access_sessions_are_limited_to_the_desktop_client() {
 }
 
 #[test]
-fn access_sessions_accept_desktop_read_only_requests() {
-    let input = access_session_request(AccessAction::QueryRead, "desktop");
-    assert!(validate_access_session_request(&input).is_ok());
+fn access_sessions_accept_implemented_desktop_requests() {
+    for action in [
+        AccessAction::QueryRead,
+        AccessAction::DataWrite,
+        AccessAction::SchemaDdl,
+    ] {
+        let input = access_session_request(action, "desktop");
+        assert!(validate_access_session_request(&input).is_ok());
+    }
 }
 
 #[test]

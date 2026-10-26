@@ -22,6 +22,7 @@ const COMPLETION_SPACE_BLOCKING_CHARACTERS = new Set([
   '"',
 ]);
 const MAX_COMPLETION_SIGNATURE_LENGTH = 16 * 1024;
+const CONTINUING_SQL_KEYWORDS = /^(?:SELECT|DISTINCT|ALL|FROM|(?:(?:LEFT|RIGHT|FULL|INNER|CROSS)(?: OUTER)? )?JOIN|WHERE|ON|AND|OR|HAVING|GROUP BY|ORDER BY|PARTITION BY|SET|UPDATE|INSERT INTO|DELETE FROM|RETURNING|INTO|VALUES|BY)$/u;
 const MAX_COMPLETION_SIGNATURE_PARAMETERS = 64;
 const COMPLETION_GENERIC_TYPE_NAMES = new Set([
   "array",
@@ -114,9 +115,10 @@ export function shouldChainSqlCompletionAfterAccept(
   ) {
     return true;
   }
-  return (
+  if (sqlCompletionItemType(item) === "table" && /\s$/u.test(insertText)) return true;
+  if (sqlCompletionItemType(item) !== "keyword") return false;
+  return CONTINUING_SQL_KEYWORDS.test(item.label.trim().replace(/\s+/gu, " ").toLocaleUpperCase()) || (
     driver?.trim().toLocaleLowerCase() === "sqlserver" &&
-    sqlCompletionItemType(item) === "keyword" &&
     item.label.trim().toLocaleUpperCase() === "USE"
   );
 }

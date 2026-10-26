@@ -1,6 +1,9 @@
 //! Ddl commands for table operations.
 
-use super::access::{ensure_resolved_relation_operation_allowed, resolve_object_type};
+use super::access::{
+    ensure_resolved_relation_operation_allowed, execute_table_column_statements,
+    resolve_object_type,
+};
 use super::ddl_columns::{
     build_add_table_column_statements, build_alter_table_column_statements,
     build_create_materialized_view_statement, build_create_table_statements,
@@ -199,12 +202,7 @@ pub async fn add_table_column(
             build_add_table_column_statements(kind, &schema, &table, &column)?
         };
 
-        for statement in &statements {
-            manager
-                .query(&connection_id, statement, None, None, None)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        execute_table_column_statements(&manager, &connection_id, &statements).await?;
 
         Ok(TableColumnChangeResult {
             table: table.trim().to_string(),
@@ -367,12 +365,7 @@ pub async fn alter_table_column(
             &existing_columns,
         )?;
 
-        for statement in &statements {
-            manager
-                .query(&connection_id, statement, None, None, None)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        execute_table_column_statements(&manager, &connection_id, &statements).await?;
 
         Ok(TableColumnChangeResult {
             table: table.trim().to_string(),

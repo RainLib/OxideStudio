@@ -185,6 +185,21 @@ pub trait DatabaseDriver: Send + Sync {
         Err(unsupported_driver_feature("Database-scoped queries"))
     }
 
+    /// Execute in an engine-enforced read-only transaction. A SQL allowlist
+    /// alone cannot prevent writes hidden inside database functions.
+    async fn query_database_read_only(
+        &self,
+        _database: &str,
+        _schema: Option<&str>,
+        _sql: &str,
+        _params: &[QueryParameter],
+        _max_rows: u32,
+    ) -> Result<Vec<QueryResult>> {
+        Err(unsupported_driver_feature(
+            "Engine-enforced read-only queries",
+        ))
+    }
+
     /// Execute a tracked query against an explicitly selected database and
     /// optional schema. Unsupported drivers must fail instead of falling back
     /// to their primary database.
@@ -494,6 +509,27 @@ pub trait DatabaseDriver: Send + Sync {
         _relation_name: Option<&str>,
     ) -> Result<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    /// Read a complete relation definition through a driver-owned metadata
+    /// boundary, preserving the explicitly selected database identity.
+    async fn get_table_definition(
+        &self,
+        _database: Option<&str>,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<String> {
+        Err(unsupported_driver_feature("Relation definition metadata"))
+    }
+
+    /// Fresh, concrete-table enterprise permissions. Local drivers return None.
+    async fn managed_table_permissions(
+        &self,
+        _database: Option<&str>,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Option<ManagedTablePermissions>> {
+        Ok(None)
     }
 
     /// Get collections, indexes, or analogous document/search objects in a namespace.

@@ -53,7 +53,7 @@ sidecar 固定 Node 22 与 `deepagents@1.10.8`。构建先经 esbuild，再由�
 - `src-tauri/src/agent/store.rs`：项目级 thread/checkpoint/artifact 与 LangGraph checkpoint/pending writes 加密存储。
 - `src-tauri/src/agent/protocol.rs` 与 `src-tauri/src/commands/agent.rs`：Rust 侧契约和最小 Tauri command surface。
 - `src-tauri/src/ai_cli/`：Codex / CodeBuddy 安装发现、模型与 effort 探测、隔离进程、JSONL 方言映射、超时、取消和有界诊断。
-- `src-tauri/src/agent/bridge.rs` 与 `src-tauri/src/bin/oxide_agent/bridge_mcp.rs`：每 Turn 随机 endpoint/token 的私有工具桥；没有 Desktop 活动身份时立即失败。
+- `src-tauri/src/agent/bridge.rs` 与 `src-tauri/src/cli/bridge_mcp.rs`：每 Turn 随机 endpoint/token 的私有工具桥；没有 Desktop 活动身份时立即失败。
 
 `AgentHostManager` 在 Tauri setup 时只创建无副作用状态。没有配置 provider 时不启动 sidecar；首次 AI 请求时懒启动。sidecar 缺失、协议不兼容、签名/打包错误或崩溃只会让 Assistant 进入 unavailable，不得阻塞应用主界面和数据库工作台。
 

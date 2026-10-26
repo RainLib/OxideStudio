@@ -300,6 +300,7 @@ pub fn run() {
             enterprise::commands::enterprise_sync_projects,
             enterprise::commands::enterprise_sign_out,
             enterprise::commands::enterprise_connect_managed_source,
+            enterprise::commands::enterprise_get_table_permissions,
             // Query commands
             commands::query::execution::execute_query,
             commands::query::execution::execute_native_query_page,

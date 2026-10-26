@@ -104,6 +104,7 @@ it("keeps the current connection capability result when an old request resolves 
   await act(async () => first.resolve(defaultDatabaseCapabilities("postgres")));
   expect(capabilities.connectionCapabilities).toEqual({
     connectionId: "second",
+    connection: connection("second"),
     capabilities: current,
   });
 });

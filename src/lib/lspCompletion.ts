@@ -8,6 +8,11 @@ import { cachedIdentifierFragment, cachedIdentifierQualifier } from "@/features/
 
 const SQL_CONTEXT_KEYWORDS = new Set([
   "select",
+  "distinct",
+  "all",
+  "and",
+  "or",
+  "returning",
   "from",
   "join",
   "where",
@@ -74,11 +79,16 @@ export function filterCompletionsForSqlContext(
       case "where":
       case "on":
       case "having":
+      case "and":
+      case "or":
         return (
           !isRelationCompletionKind(item.kind) &&
           item.kind !== CompletionItemKind.Operator
         );
       case "select":
+      case "distinct":
+      case "all":
+      case "returning":
       case "by":
       case "values":
       case "set":

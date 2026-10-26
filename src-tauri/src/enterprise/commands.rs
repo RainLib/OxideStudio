@@ -8,6 +8,20 @@ use super::{
 use anyhow::Result;
 
 #[tauri::command]
+pub async fn enterprise_get_table_permissions(
+    manager: tauri::State<'_, crate::core::manager::ConnectionManager>,
+    connection_id: String,
+    database: Option<String>,
+    schema: String,
+    table: String,
+) -> Result<Option<crate::core::driver::ManagedTablePermissions>, String> {
+    manager
+        .managed_table_permissions(&connection_id, database.as_deref(), &schema, &table)
+        .await
+        .map_err(|error| user_facing_enterprise_error(&error))
+}
+
+#[tauri::command]
 pub async fn enterprise_get_account_status(
     client: tauri::State<'_, EnterpriseClient>,
 ) -> Result<EnterpriseAccountStatus, String> {

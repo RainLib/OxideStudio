@@ -1,4 +1,5 @@
 import { readProjectConnections } from "@/features/connections/model/connectionScope";
+import { managedCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import type { Project } from "@/services/tauri/store.service";
 import { useEnterpriseAccountStore } from "@/store/useEnterpriseAccountStore";
 
@@ -46,6 +47,6 @@ export function managedProjectConnections(
     connectionUrl: "",
     origin: "managed" as const,
     managedDescriptor: descriptor,
-    database: descriptor.allowedResourceSummary[0],
+    database: managedCatalogDatabaseName(descriptor),
   }));
 }

@@ -1,4 +1,5 @@
 import { mountApp } from "./bootstrap";
+import { configureMonacoRuntime } from "./lib/monacoRuntime";
 
 function showStartupError(error: unknown) {
   document.getElementById("app-loader")?.classList.add("has-error");
@@ -11,6 +12,7 @@ function showStartupError(error: unknown) {
 window.dispatchEvent(new Event("oxide:module-entry-ready"));
 
 try {
+  configureMonacoRuntime();
   mountApp();
 } catch (error) {
     showStartupError(error);

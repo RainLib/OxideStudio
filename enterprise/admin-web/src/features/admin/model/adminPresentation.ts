@@ -2,6 +2,8 @@ export const accessActions = [
   ["resourceDiscover", "Discover"],
   ["metadataRead", "Metadata"],
   ["queryRead", "Read query"],
+  ["dataWrite", "Edit table data"],
+  ["schemaDdl", "Alter table structure"],
 ] as const;
 
 export const driverProfiles: Record<string, { label: string; model: string }> =

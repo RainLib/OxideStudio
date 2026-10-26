@@ -2,6 +2,7 @@ import { useDebouncedLspTabSnapshot } from "@/features/lsp-sync/hooks/useDebounc
 import {useConnectionSemanticEvents} from "@/features/lsp-sync/hooks/useConnectionSemanticEvents";
 import { useLspCapabilityContext } from "@/features/lsp-sync/hooks/useLspCapabilityContext";
 import { useLspSchemaSync } from "@/features/lsp-sync/hooks/useLspSchemaSync";
+import { useLspNamespaceBootstrap } from "@/features/lsp-sync/hooks/useLspNamespaceBootstrap";
 import { useLspClient } from "@/hooks/useLspClient";
 import { supportsLspCapabilities } from "@/lib/databaseDialect";
 import { useConnectionStore } from "@/store/useConnectionStore";
@@ -32,6 +33,7 @@ export function LspConnectionSyncer() {
   const tables = useSchemaStore((state) => state.tables);
   const currentSchema = useSchemaStore((state) => state.currentSchema);
   const metadataVersion = useSchemaStore((state) => state.metadataVersion);
+  const loadSchemas = useSchemaStore((state) => state.loadSchemas);
   const tabs = useDebouncedLspTabSnapshot();
   const activeTabId = useTabStore((state) => state.activeTabId);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
@@ -113,6 +115,12 @@ export function LspConnectionSyncer() {
         supportsLspCapabilities(lspCapabilities),
     ),
     capabilities: lspCapabilities,
+  });
+
+  useLspNamespaceBootstrap({
+    connectionId: activeConnectionId, projectId: activeProjectId, runtime: activeConnectionRuntime,
+    enabled: isReady && hasConnectionLspTab && supportsMetadataSync,
+    namespaceCount: schemas.length, metadataVersion, load: loadSchemas,
   });
 
   // Track if we've already sent config for this connection+schema

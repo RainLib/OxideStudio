@@ -357,10 +357,11 @@ fn validate_source(
     }
     if source.capabilities.is_empty()
         || source.capabilities.iter().any(|capability| {
-            !matches!(
+            !(matches!(
                 capability.as_str(),
                 "resource.discover" | "metadata.read" | "query.read"
-            )
+            ) || (matches!(source.driver.as_str(), "postgres" | "postgresql")
+                && matches!(capability.as_str(), "data.write" | "schema.ddl")))
         })
     {
         anyhow::bail!("gateway source {} has unsupported capabilities", source.id);
@@ -504,9 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn source_file_rejects_write_capabilities() {
+    fn source_file_enables_writes_only_for_postgres() {
         let payload = source(Uuid::new_v4()).replace("query.read", "data.write");
-        assert!(parse_sources(format!("[{payload}]").as_bytes(), false).is_err());
+        assert!(parse_sources(format!("[{payload}]").as_bytes(), false).is_ok());
+        let other = payload.replace("postgres", "mysql");
+        assert!(parse_sources(format!("[{other}]").as_bytes(), false).is_err());
     }
 
     #[test]

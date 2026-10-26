@@ -1,12 +1,13 @@
 FROM rust:1.91.1-bookworm AS build
 WORKDIR /workspace
+ENV CARGO_BUILD_JOBS=2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 COPY enterprise ./enterprise
 COPY src-tauri ./src-tauri
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/workspace/enterprise/target \
+    --mount=type=cache,target=/workspace/enterprise/target,sharing=locked \
     cargo build --manifest-path enterprise/Cargo.toml --release -p oxide-enterprise-gateway \
     && cp enterprise/target/release/oxide-enterprise-gateway /tmp/oxide-enterprise-gateway
 

@@ -125,6 +125,10 @@ jobs:
         run: npm test -- --maxWorkers=2
 
       - name: Build frontend and admin console
+        env:
+          # Monaco and its offline language workers exceed Node's 2 GiB
+          # default heap on the Linux runner during production bundling.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           npm run build
           npm run enterprise:admin:build

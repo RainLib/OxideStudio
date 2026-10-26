@@ -2,7 +2,9 @@ use super::{
     access::allowed_paths_for_action, audit::write_management_audit, models::ControlPlaneStore,
 };
 use anyhow::{Context, Result};
-use oxide_enterprise_contracts::{AccessAction, ManagedDataSourceDescriptor, ManagedProject};
+use oxide_enterprise_contracts::{
+    AccessAction, AccessGrant, ManagedDataSourceDescriptor, ManagedProject,
+};
 use sqlx::Row;
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -208,20 +210,94 @@ impl ControlPlaneStore {
                 .iter()
                 .map(|path| path.join("/"))
                 .collect();
-            descriptor.capabilities = [
-                AccessAction::ResourceDiscover,
-                AccessAction::MetadataRead,
-                AccessAction::QueryRead,
-            ]
-            .into_iter()
-            .filter(|action| {
-                !allowed_paths_for_action(user_id, descriptor.data_source_id, &grants, *action)
-                    .is_empty()
-            })
-            .map(|action| action.as_str().to_string())
-            .collect();
+            descriptor.capabilities = granted_source_capabilities(
+                user_id,
+                descriptor.data_source_id,
+                &descriptor.capabilities,
+                &grants,
+            );
             true
         });
         Ok(descriptors)
+    }
+}
+
+// This summary enables connection-level UI controls only. Every operation still
+// requires a fresh ticket for its concrete table and action.
+fn granted_source_capabilities(
+    user_id: Uuid,
+    source_id: Uuid,
+    advertised: &BTreeSet<String>,
+    grants: &[AccessGrant],
+) -> BTreeSet<String> {
+    [
+        AccessAction::ResourceDiscover,
+        AccessAction::MetadataRead,
+        AccessAction::QueryRead,
+        AccessAction::DataWrite,
+        AccessAction::SchemaDdl,
+    ]
+    .into_iter()
+    .filter(|action| {
+        advertised.contains(action.as_str())
+            && !allowed_paths_for_action(user_id, source_id, grants, *action).is_empty()
+    })
+    .map(|action| action.as_str().to_string())
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxide_enterprise_contracts::GrantEffect;
+
+    fn grant(user: Uuid, source: Uuid, action: AccessAction, table: &str) -> AccessGrant {
+        AccessGrant {
+            id: Uuid::new_v4(),
+            principal_id: user,
+            organization_id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            data_source_id: Some(source),
+            resource_path: vec!["fixture".into(), "validation".into(), table.into()],
+            actions: BTreeSet::from([action]),
+            effect: GrantEffect::Permit,
+        }
+    }
+
+    #[test]
+    fn project_sync_includes_table_scoped_mutations_and_honors_forbids() {
+        let user = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let advertised = BTreeSet::from(["data.write".into(), "schema.ddl".into()]);
+        let mut grants = vec![
+            grant(user, source, AccessAction::DataWrite, "notes"),
+            grant(user, source, AccessAction::SchemaDdl, "sandbox"),
+        ];
+        assert_eq!(
+            granted_source_capabilities(user, source, &advertised, &grants),
+            advertised
+        );
+        let mut forbid = grants[0].clone();
+        forbid.id = Uuid::new_v4();
+        forbid.effect = GrantEffect::Forbid;
+        grants.push(forbid);
+        assert_eq!(
+            granted_source_capabilities(user, source, &advertised, &grants),
+            BTreeSet::from(["schema.ddl".into()])
+        );
+    }
+
+    #[test]
+    fn project_sync_never_expands_source_or_principal_capabilities() {
+        let user = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let grants = vec![grant(user, source, AccessAction::DataWrite, "notes")];
+        let readonly = BTreeSet::from(["query.read".into()]);
+        assert!(granted_source_capabilities(user, source, &readonly, &grants).is_empty());
+        let advertised = BTreeSet::from(["data.write".into()]);
+        assert!(
+            granted_source_capabilities(Uuid::new_v4(), source, &advertised, &grants).is_empty()
+        );
+        assert!(granted_source_capabilities(user, Uuid::new_v4(), &advertised, &grants).is_empty());
     }
 }

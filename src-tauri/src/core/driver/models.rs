@@ -3,6 +3,14 @@ use std::sync::{
     Arc,
 };
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedTablePermissions {
+    pub data_write: bool,
+    pub schema_ddl: bool,
+    pub policy_revision: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DocumentPageRequest<'a> {
     pub namespace: &'a str,

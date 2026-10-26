@@ -306,6 +306,13 @@ pub async fn get_table_ddl(
         if table_name.is_empty() {
             return Err("Object name is required".to_string());
         }
+        if let Some(definition) = manager
+            .managed_table_definition(&connection_id, database.as_deref(), &schema, table_name)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(definition);
+        }
         if manager
             .is_external_driver_connection(&connection_id)
             .await
