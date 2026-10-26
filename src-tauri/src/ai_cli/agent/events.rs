@@ -474,9 +474,11 @@ fn error_message(value: &Value) -> String {
     for pointer in [
         "/message",
         "/error/message",
+        "/error",
         "/result/error",
         "/result/message",
         "/errors/0/message",
+        "/errors/0",
     ] {
         if let Some(message) = value.pointer(pointer).and_then(Value::as_str) {
             return message.to_string();

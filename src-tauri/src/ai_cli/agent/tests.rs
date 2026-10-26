@@ -142,6 +142,22 @@ fn maps_codebuddy_normalized_tool_names_from_the_turn_manifest() {
 }
 
 #[test]
+fn preserves_codebuddy_model_entitlement_errors_from_string_arrays() {
+    let mut parser = CliAgentEventParser::new(CliProviderKind::CodebuddyCli);
+    let message = "400 model [gpt-5.4] is not allowed for user type [personal_free_user]";
+    let events = parser.parse(&json!({
+        "type":"result", "subtype":"error_during_execution", "is_error":true,
+        "errors":[message]
+    }));
+    assert!(matches!(events.as_slice(), [CliAgentEvent::Error(error)] if error.message == message));
+    assert!(parser.saw_terminal());
+    assert!(parser.saw_error());
+    let events = parser.parse(&json!({"type":"error","error":"upstream unavailable"}));
+    assert!(matches!(events.as_slice(), [CliAgentEvent::Error(error)]
+        if error.message == "upstream unavailable"));
+}
+
+#[test]
 fn classifies_authentication_and_mcp_failures() {
     assert_eq!(
         classify_cli_error(
