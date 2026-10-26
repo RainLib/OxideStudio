@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwind from "@tailwindcss/vite";
 import path from "path";
+import { monacoStyleNoncePlugin } from "./scripts/monaco-style-nonce.mjs";
 
 // @ts-expect-error process is a Node.js global
 const host = process.env.TAURI_DEV_HOST;
@@ -14,7 +15,7 @@ const forceOptimizeDeps = process.argv.includes("--force");
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwind()],
+  plugins: [monacoStyleNoncePlugin(), react(), tailwind()],
 
   resolve: {
     alias: {
