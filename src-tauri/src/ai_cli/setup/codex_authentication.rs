@@ -87,11 +87,15 @@ pub(super) async fn run_codex_authentication(
         .or_else(|| login.get("auth_url"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Codex did not return a browser sign-in URL"))?;
-    open_authentication_url(app, auth_url)?;
+    let browser_opened = open_authentication_url(app, session_id, auth_url).await?;
     update_authentication(
         session_id,
         CliAuthenticationPhase::WaitingForCallback,
-        "Complete sign-in in your browser. OxideStudio is waiting for Codex to confirm the account...",
+        if browser_opened {
+            "Complete sign-in in your browser. OxideStudio is waiting for Codex to confirm the account..."
+        } else {
+            "The browser did not open automatically. Open or copy the sign-in link in OxideStudio to continue."
+        },
     )
     .await;
     let deadline = tokio::time::sleep(AUTHENTICATION_TIMEOUT);

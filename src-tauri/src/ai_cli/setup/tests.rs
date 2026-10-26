@@ -6,6 +6,33 @@ use crate::ai_cli::CliProviderKind;
 use serde_json::json;
 
 #[test]
+fn unavailable_cli_omits_optional_discovery_fields() {
+    let result = crate::ai_cli::CliDetectionResult {
+        provider: CliProviderKind::CodebuddyCli,
+        available: false,
+        executable_path: None,
+        version: None,
+        message: "Not installed".to_string(),
+    };
+    let value = serde_json::to_value(result).unwrap();
+    assert_eq!(value["available"], false);
+    assert!(value.get("executablePath").is_none());
+    assert!(value.get("version").is_none());
+}
+
+#[test]
+fn installation_failure_keeps_the_underlying_diagnostic() {
+    let error = anyhow::anyhow!("CLI process timed out")
+        .context("failed to download the managed package for verification");
+    let message = super::installation::installation_error_message(&error);
+    assert!(message.contains("failed to download"));
+    assert!(message.contains("CLI process timed out"));
+    let bounded =
+        super::installation::installation_error_message(&anyhow::anyhow!("x".repeat(3_000)));
+    assert_eq!(bounded.len(), 2_000);
+}
+
+#[test]
 fn managed_packages_are_exactly_versioned_and_integrity_pinned() {
     for provider in [CliProviderKind::CodexCli, CliProviderKind::CodebuddyCli] {
         let package = managed_package_spec(provider);
@@ -71,6 +98,7 @@ async fn cancellation_notifies_the_worker_and_rejects_late_status_updates() {
                 phase: CliAuthenticationPhase::WaitingForCallback,
                 message: "Waiting".into(),
                 method_id: Some("browser".into()),
+                browser_url: Some("https://example.invalid/login?state=active".into()),
             },
             cancellation,
         },
@@ -78,12 +106,33 @@ async fn cancellation_notifies_the_worker_and_rejects_late_status_updates() {
     let cancelled = cancel_authentication(&id).await.unwrap();
     assert!(*receiver.borrow());
     assert_eq!(cancelled.phase, CliAuthenticationPhase::Cancelled);
+    assert!(cancelled.browser_url.is_none());
+    assert!(
+        !super::authentication_state::set_authentication_browser_url(
+            &id,
+            &url::Url::parse("https://example.invalid/login?state=late").unwrap()
+        )
+        .await
+    );
     update_authentication(&id, CliAuthenticationPhase::Succeeded, "Late success").await;
     finish_authentication_error(&id, "Late failure").await;
     let final_status = authentication_status(&id).await.unwrap();
     AUTHENTICATION_SESSIONS.lock().await.remove(&id);
     assert_eq!(final_status.phase, CliAuthenticationPhase::Cancelled);
     assert_eq!(final_status.message, cancelled.message);
+}
+
+#[test]
+fn authentication_links_reject_unsafe_schemes_and_embedded_credentials() {
+    use super::authentication_process::parse_authentication_url;
+    for value in [
+        "javascript:alert(1)",
+        "file:///tmp/login",
+        "https://user:secret@example.invalid/login",
+    ] {
+        assert!(parse_authentication_url(value).is_err());
+    }
+    assert!(parse_authentication_url("https://example.invalid/login?state=public-state").is_ok());
 }
 
 #[tokio::test]

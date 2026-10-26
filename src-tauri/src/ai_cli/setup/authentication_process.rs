@@ -1,3 +1,4 @@
+use super::authentication_state::set_authentication_browser_url;
 use crate::ai_cli::runtime::{apply_environment, isolated_working_directory, CliCommandSpec};
 use anyhow::{anyhow, Context, Result};
 use std::collections::BTreeMap;
@@ -83,14 +84,30 @@ pub(super) async fn start_codebuddy_acp(
     Ok((cwd, child, stdin, BufReader::new(stdout).lines()))
 }
 
-pub(super) fn open_authentication_url(app: &AppHandle, value: &str) -> Result<()> {
+pub(super) fn parse_authentication_url(value: &str) -> Result<Url> {
     let url = Url::parse(value).context("CLI provider returned an invalid authentication URL")?;
-    if !matches!(url.scheme(), "https" | "http") {
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return Err(anyhow!(
-            "CLI provider returned an unsupported authentication URL scheme"
+            "CLI provider returned an unsupported authentication URL"
         ));
     }
-    app.opener()
-        .open_url(url.as_str(), None::<String>)
-        .context("failed to open the provider sign-in page")
+    Ok(url)
+}
+
+pub(super) async fn open_authentication_url(
+    app: &AppHandle,
+    session_id: &str,
+    value: &str,
+) -> Result<bool> {
+    let url = parse_authentication_url(value)?;
+    if !set_authentication_browser_url(session_id, &url).await {
+        return Err(anyhow!("authentication cancelled"));
+    }
+    // Keep the worker/callback alive when the system browser cannot be opened.
+    // The renderer can reopen or copy this active session's link.
+    Ok(app.opener().open_url(url.as_str(), None::<String>).is_ok())
 }

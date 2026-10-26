@@ -1,6 +1,7 @@
 import { assistantProviderDefinition } from "@/ai/assistant/providerDefinitions";
 import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { useEffect, useState } from "react";
 import { localizedCliSetupStatus } from "./assistantProviderCopy";
 import type { AiCliProviderConfig } from "@/services/tauri/ai.service";
 import type {
@@ -9,6 +10,7 @@ import type {
 } from "@/store/useAssistantCliSetupStore";
 import {
   Check,
+  Copy,
   Circle,
   ExternalLink,
   LoaderCircle,
@@ -51,6 +53,22 @@ export function AssistantProviderSetup({
     state.phase === "installing" ||
     state.refreshing === true;
   const primaryStatus = localizedCliSetupStatus(state, t);
+  const browserUrl = safeAuthenticationUrl(state.browserUrl);
+  const [linkAction, setLinkAction] = useState<"idle" | "copied" | "open-error" | "copy-error">("idle");
+  useEffect(() => { setLinkAction("idle"); }, [state.browserUrl]);
+  const openSignIn = () => {
+    if (!browserUrl) return;
+    void import("@tauri-apps/plugin-opener")
+      .then(({ openUrl }) => openUrl(browserUrl.href))
+      .catch(() => setLinkAction("open-error"));
+  };
+  const copySignIn = async () => {
+    if (!browserUrl) return;
+    try {
+      await navigator.clipboard.writeText(browserUrl.href);
+      setLinkAction("copied");
+    } catch { setLinkAction("copy-error"); }
+  };
 
   return (
     <div
@@ -192,6 +210,25 @@ export function AssistantProviderSetup({
               </button>
             ))}
           {state.phase === "authorizing" && (
+            <>
+            {browserUrl && (
+              <div className="flex w-full flex-wrap items-center gap-1.5">
+                <button type="button" className="wb-primary-button h-7 px-2.5 text-[10px]" onClick={openSignIn}>
+                  <ExternalLink size={11} aria-hidden="true" />
+                  {t("assistant.setup.openSignIn")}
+                </button>
+                <button type="button" className="wb-text-button h-7 px-2 text-[10px]" onClick={() => void copySignIn()}>
+                  {linkAction === "copied" ? <Check size={11} aria-hidden="true" /> : <Copy size={11} aria-hidden="true" />}
+                  {t(linkAction === "copied" ? "assistant.setup.signInLinkCopied" : "assistant.setup.copySignInLink")}
+                </button>
+                <span className="wb-muted text-[10px]">{browserUrl.host}</span>
+                {(linkAction === "open-error" || linkAction === "copy-error") && (
+                  <p className="w-full text-[10px] wb-muted" role="status">
+                    {t(linkAction === "open-error" ? "assistant.setup.openSignInFailed" : "assistant.setup.copySignInFailed")}
+                  </p>
+                )}
+              </div>
+            )}
             <button
               type="button"
               className="wb-text-button h-7 px-2 text-[10px]"
@@ -200,6 +237,7 @@ export function AssistantProviderSetup({
               <Circle size={11} aria-hidden="true" />
               {t("assistant.setup.cancelSignIn")}
             </button>
+            </>
           )}
           {state.phase === "error" && (
             <button
@@ -239,6 +277,14 @@ export function AssistantProviderSetup({
       </div>
     </div>
   );
+}
+
+function safeAuthenticationUrl(value?: string) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url : null;
+  } catch { return null; }
 }
 
 function SetupStep({

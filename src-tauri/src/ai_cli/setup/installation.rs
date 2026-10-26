@@ -205,7 +205,7 @@ pub async fn begin_installation(
                 update_installation_with_result(
                     &task_session_id,
                     CliInstallationPhase::Failed,
-                    error.to_string(),
+                    installation_error_message(&error),
                     None,
                 )
                 .await;
@@ -226,6 +226,10 @@ pub async fn installation_status(session_id: &str) -> Result<CliInstallationStat
         .get(session_id)
         .map(|session| session.status.clone())
         .ok_or_else(|| anyhow!("installation session is no longer available"))
+}
+
+pub(super) fn installation_error_message(error: &anyhow::Error) -> String {
+    format!("{error:#}").chars().take(2_000).collect()
 }
 
 pub(super) async fn update_installation(

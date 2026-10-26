@@ -19,6 +19,8 @@ pub struct CliCommandSpec {
 impl CliCommandSpec {
     pub fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         command.args(&self.prefix_args);
         // GUI launches do not inherit the shell's Node manager PATH. npm
         // entrypoints use /usr/bin/env node, including during login/catalog probes.

@@ -70,7 +70,7 @@ function CatalogProbe({
 }: {
   config: AiCliProviderConfig;
   enabled?: boolean;
-  runtimeVersion?: string;
+  runtimeVersion?: string | null;
 }) {
   currentCatalog = useAiCliCatalog(config, enabled, runtimeVersion);
   return (
@@ -142,6 +142,20 @@ describe("useAiCliCatalog cache", () => {
     expect(currentCatalog?.status).toBe("ready");
     expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
     expect(mocks.listCliCommands).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles a native null version before discovery and after installation", async () => {
+    root = createRoot(container);
+    await render(root, <CatalogProbe config={BASE_CONFIG} enabled={false} runtimeVersion={null} />);
+    expect(mocks.listCliModels).not.toHaveBeenCalled();
+    await render(root, <CatalogProbe config={BASE_CONFIG} runtimeVersion={null} />);
+    expect(currentCatalog?.status).toBe("ready");
+    expect(mocks.listCliModels).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "codex-cli" }),
+      { runtimeVersion: undefined, forceRefresh: false },
+    );
+    await render(root, <CatalogProbe config={BASE_CONFIG} runtimeVersion="  " />);
+    expect(mocks.listCliModels).toHaveBeenCalledTimes(1);
   });
 
   it("does not refetch models when only the command capability failed", async () => {

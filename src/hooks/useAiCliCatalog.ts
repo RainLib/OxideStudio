@@ -341,8 +341,11 @@ function uniqueBy<T>(values: readonly T[], keyOf: (value: T) => string) {
 export function useAiCliCatalog(
   config: AiCliProviderConfig | null,
   enabled: boolean,
-  runtimeVersion?: string,
+  detectedRuntimeVersion?: string | null,
 ): AiCliCatalogController {
+  // Older native builds serialize an absent Option<String> as null. Keep the
+  // cache identity and capability requests stable during detection/install.
+  const runtimeVersion = detectedRuntimeVersion?.trim() || undefined;
   const environmentRevision = useCliEnvironmentRevision(config);
   const signature = useMemo(
     () =>

@@ -122,7 +122,9 @@ impl CliCommandInfo {
 pub struct CliDetectionResult {
     pub provider: CliProviderKind,
     pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub executable_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub message: String,
 }
@@ -133,6 +135,7 @@ pub struct CliConnectionTestResult {
     pub message: String,
     pub model: String,
     pub executable_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub latency_ms: u64,
 }
@@ -229,6 +232,9 @@ pub struct CliAuthenticationStatus {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method_id: Option<String>,
+    /// Active login link only; cleared when verification starts or the session ends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
