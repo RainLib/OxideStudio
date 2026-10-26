@@ -18,6 +18,7 @@ import {runDocumentStructureAcceptance} from "./documentStructureScenario";
 import {runDocumentSemanticsAcceptance} from "./documentSemanticsScenario";
 import {runMultiDocumentSemanticsAcceptance} from "./multiDocumentSemanticsScenario";
 import {runMultiDocumentFormattingAcceptance} from "./multiDocumentScenario";
+import {runCompletionContinuationAcceptance} from "./completionContinuationScenario";
 import { LspClient } from "@/services/lsp/client/LspClient";
 import { lspCompletionItemsToMonacoSuggestions } from "@/features/query-editor/model/lspCompletionPresentation";
 import type { CompletionItem } from "@/services/lsp/types";
@@ -43,6 +44,7 @@ async function run() {
   let sharedLocalMarkers:Awaited<ReturnType<typeof runSharedLocalMarkersAcceptance>>|undefined;
   let documentStructure:Awaited<ReturnType<typeof runDocumentStructureAcceptance>>|undefined;
   let documentSemantics:Awaited<ReturnType<typeof runDocumentSemanticsAcceptance>>|undefined;
+  let completionContinuation:Awaited<ReturnType<typeof runCompletionContinuationAcceptance>>|undefined;
   const receipts: Array<{name:string; milliseconds:number}> = [];
   const step = async (name:string, action:()=>Promise<void>) => { await invoke("acceptance_progress", {name,phase:"start"}); const start=performance.now(); await action(); receipts.push({name,milliseconds:performance.now()-start}); await invoke("acceptance_progress", {name,phase:"end"}); };
   type ObservedDiagnostic={severity?:number;message:string;code?:string|number;range:{start:{line:number;character:number};end:{line:number;character:number}}};
@@ -668,12 +670,13 @@ async function run() {
     sharedLocalMarkers=await runSharedLocalMarkersAcceptance({monaco,editor,check,step});
     documentStructure=await runDocumentStructureAcceptance({monaco,editor,binaryPath:binary.path,check,step});
     documentSemantics=await runDocumentSemanticsAcceptance({monaco,editor,binaryPath:binary.path,check,step});
+    completionContinuation=await runCompletionContinuationAcceptance({monaco,editor,client:my});
     check(monaco.editor.getModels().includes(model),"real Monaco model, no adapter mock");
   } catch(error){failure=error;}
   finally {
     for(const client of clients){if(client.isInitialized()){try{await client.didClose(uri);await client.shutdown();check(!await client.isRunning(),"session stopped");}catch(error){failure??=error;}}}
     unlisten();editor.dispose();model.dispose();
-    await invoke("acceptance_finish",{report:{success:failure===undefined,error:failure instanceof Error?failure.stack:String(failure??""),binary,assertions,receipts,realMonaco:true,productionFrontendClient:true,installedPackageTested:false,visibleSuggestionWidgetTested:false,cachedCompletion,queryDocumentCompletion,whereCompletion,defaultSchemaPerformanceSamples,configurationReceipt,multiDocumentFormatting,multiDocumentSemantics,mainRestart,sharedDocument,sharedLocalMarkers,documentStructure,documentSemantics,documentBindings,liveNamespace,semanticOperations,semanticConsumer,fileQueryIntelligence}});
+    await invoke("acceptance_finish",{report:{success:failure===undefined,error:failure instanceof Error?failure.stack:String(failure??""),binary,assertions,receipts,realMonaco:true,productionFrontendClient:true,installedPackageTested:false,visibleSuggestionWidgetTested:false,cachedCompletion,queryDocumentCompletion,whereCompletion,defaultSchemaPerformanceSamples,configurationReceipt,multiDocumentFormatting,multiDocumentSemantics,mainRestart,sharedDocument,sharedLocalMarkers,documentStructure,documentSemantics,documentBindings,liveNamespace,semanticOperations,semanticConsumer,fileQueryIntelligence,completionContinuation}});
   }
 }
 void run().catch(async(error)=>{try{await invoke("acceptance_finish",{report:{success:false,error:String(error)}});}catch{console.error(error);}});

@@ -9,6 +9,7 @@ import type { CachedColumnSet } from "./cached-completion/metadataSearch";
 import { cachedPhysicalNamespaceSupported, cachedCatalogNamespaceMatches } from "./cached-completion/namespace";
 import { cachedSqlRelationTargetFragment } from "./cached-completion/relations";
 import { sqlContextKeywordBeforeCursor } from "@/lib/lspCompletion";
+import {sqlProjectionSourceCompletions} from "./sqlProjectionSourceCompletion";
 import {
   cachedSqlJoinTargetContext,
   cachedSqlRelationForFieldCompletion,
@@ -163,7 +164,8 @@ export function cachedRelationCompletionSuggestions(
     return [];
   }
   const replacement = sqlCompletionIdentifierFragment(textBeforeCursor);
-  const range = cachedCompletionRange(monaco, model, position, replacement);
+  const completedKeyword=Boolean(sqlContextKeywordBeforeCursor(textBeforeCursor))&&!/\s$/u.test(textBeforeCursor);
+  const range = completedKeyword?new monaco.Range(position.lineNumber,position.column,position.lineNumber,position.column):cachedCompletionRange(monaco, model, position, replacement);
   const query = relationPrefix ?? "";
   const matches=tables
     .map((table, index) => ({
@@ -182,7 +184,7 @@ export function cachedRelationCompletionSuggestions(
       documentation: table.comment
         ? { value: table.comment }
         : { value: "Available from cached database metadata." },
-      insertText: quotedCompletionInsertText(table.name, replacement),
+      insertText: `${completedKeyword?" ":""}${quotedCompletionInsertText(table.name, completedKeyword?{prefix:"",replacementLength:0}:replacement)}`,
       filterText: completionFilterTextForQuery(table.name, query),
       sortText: `0:${String(9_999 - Math.max(0, score)).padStart(4, "0")}:${table.name.toLocaleLowerCase()}`,
       range,
@@ -364,10 +366,12 @@ export function createCachedSqlCompletionRequest(
     }
     const relation = cachedSqlRelationForFieldCompletion(prefix.source, document);
     if (!relation) return [];
-    const replacement = sqlCompletionIdentifierFragment(prefix.source);
+    const completedKeyword=Boolean(sqlContextKeywordBeforeCursor(prefix.source))&&!/\s$/u.test(prefix.source);
+    const replacement = completedKeyword?{prefix:"",replacementLength:0}:sqlCompletionIdentifierFragment(prefix.source);
     if(replacement.unsupported)return [];
     const fieldQuery = replacement.prefix;
-    const range = cachedCompletionRange(monaco, model, position, replacement);
+    const range = completedKeyword?new monaco.Range(position.lineNumber,position.column,position.lineNumber,position.column):cachedCompletionRange(monaco, model, position, replacement);
+    const insertField=(name:string)=>`${completedKeyword?" ":""}${cachedIdentifierInsertion(name,replacement,runtime.driver)}`;
 
     if (relation.isCte || relation.isDerived) {
       const relationKind = relation.isDerived ? "Derived table" : "CTE";
@@ -382,7 +386,7 @@ export function createCachedSqlCompletionRequest(
           documentation: {
             value: column.comment || `Column declared by ${relationKind.toLocaleLowerCase()} ${relation.table}.`,
           },
-          insertText: cachedIdentifierInsertion(column.name, replacement,runtime.driver),
+          insertText: insertField(column.name),
           filterText,
           sortText,
           range,
@@ -401,7 +405,7 @@ export function createCachedSqlCompletionRequest(
         documentation: column.comment
           ? { value: column.comment }
           : { value: `Column from cached metadata for ${relation.table}.` },
-        insertText: cachedIdentifierInsertion(column.name, replacement,runtime.driver),
+        insertText: insertField(column.name),
         filterText,
         sortText,
         range,
@@ -410,7 +414,12 @@ export function createCachedSqlCompletionRequest(
 
   const metadataSuggestions = async () => {
     const fields = await fieldSuggestions();
-    return fields.length > 0 ? fields : relationSuggestions();
+    if(fields.length>0)return fields;
+    if(canUsePhysical()&&!nonSqlDocument){
+      const sources=sqlProjectionSourceCompletions({model,position,prefix:textBeforeCursor,monaco,tables:runtime.schemaTables,driver:runtime.driver,database:runtime.databaseName,schema:runtime.targetSchema||runtime.currentSchema,keywordCase:runtime.sqlFormatting.keywordCase});
+      if(sources.length)return sources;
+    }
+    return relationSuggestions();
   };
   let metadataWork:Promise<any[]>|undefined,joinWork:Promise<any[]>|undefined;
   const guard = async (load:()=>Promise<any[]>) => {

@@ -67,14 +67,15 @@ pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, St
         });
     }
 
-    // In development mode, look in binaries/ relative to current dir (src-tauri)
-    // In production mode, look in bundled resources
+    // Debug binaries may be started directly from the workspace root or an
+    // IDE. Prefer the compiled crate's resources over an unrelated cwd.
+    // Production continues to use the installed resource directory.
     let binary_path = if cfg!(debug_assertions) {
-        // Development mode: cargo runs from src-tauri directory
-        let dev_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {}", e))?
-            .join("binaries") // Just binaries/, not src-tauri/binaries/
-            .join(&binary_name);
+        let dev_path = development_binary_path(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            &std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?,
+            &binary_name,
+        );
 
         tracing::info!("🔍 [LSP] Dev mode - checking binary at: {:?}", dev_path);
         dev_path
@@ -139,6 +140,48 @@ pub async fn check_lsp_binary(app: tauri::AppHandle) -> Result<LspBinaryInfo, St
         sha256: manifest.as_ref().map(|manifest| manifest.sha256.clone()),
         integrity_verified,
     })
+}
+
+fn development_binary_path(manifest_dir: &Path, working_dir: &Path, binary_name: &str) -> PathBuf {
+    let workspace_binary = manifest_dir.join("binaries").join(binary_name);
+    let working_binary = working_dir.join("binaries").join(binary_name);
+    if workspace_binary.is_file() || !working_binary.is_file() {
+        workspace_binary
+    } else {
+        working_binary
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod development_path_tests {
+    use super::development_binary_path;
+    #[test]
+    fn a_workspace_root_launch_resolves_the_crate_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("src-tauri");
+        std::fs::create_dir_all(manifest.join("binaries")).unwrap();
+        let binary = manifest.join("binaries/sql-lsp.exe");
+        std::fs::write(&binary, b"fixture").unwrap();
+        assert_eq!(development_binary_path(&manifest, root.path(), "sql-lsp.exe"), binary);
+    }
+    #[test]
+    fn the_workspace_binary_wins_over_an_unrelated_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("src-tauri");
+        for dir in [&manifest, root.path()] {
+            std::fs::create_dir_all(dir.join("binaries")).unwrap();
+            std::fs::write(dir.join("binaries/sql-lsp.exe"), b"fixture").unwrap();
+        }
+        assert_eq!(development_binary_path(&manifest, root.path(), "sql-lsp.exe"), manifest.join("binaries/sql-lsp.exe"));
+    }
+    #[test]
+    fn a_standalone_debug_bundle_retains_its_working_directory_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("binaries")).unwrap();
+        let binary = root.path().join("binaries/sql-lsp.exe");
+        std::fs::write(&binary, b"fixture").unwrap();
+        assert_eq!(development_binary_path(&root.path().join("missing"), root.path(), "sql-lsp.exe"), binary);
+    }
 }
 
 fn lsp_manifest_version(manifest: &LspBinaryManifest) -> String {

@@ -30,6 +30,7 @@ import {createCompletionContextReader} from "../model/completionContextState";
 import {subscribeCompletionContext} from "../model/completionContextState";
 import {useLspRuntimeSnapshot} from "@/hooks/useLspRuntimeSnapshot";
 import {useCompletionContextRefresh} from "./useCompletionContextRefresh";
+import {triggerChainedSqlCompletion} from "../model/completionContinuation";
 
 interface QuerySqlCompletionOptions {
   syncDocument?:(model:any)=>Promise<void>;
@@ -115,7 +116,7 @@ export function useQuerySqlCompletion({
     activeProjectId,
     connectionId: effectiveConnectionId,
     currentSchema,
-    databaseName: activeTab?.databaseName,
+    databaseName: activeTab?.databaseName||activeConnection?.database,
     driver,
     metadataRevision: metadataVersion,
     schemaTables,
@@ -217,25 +218,7 @@ export function useQuerySqlCompletion({
     resolveCompletionItem,
     rankByUsage,
     recordUsage: recordCompletionUsage,
-    triggerChainedCompletion: () => {
-      const editor = mountedEditor;
-      const model = editor?.getModel();
-      if (!editor || !model) return;
-      window.setTimeout(() => {
-        if (editor.getModel() !== model || !editor.hasTextFocus()) return;
-        completionTriggerOriginRef.current = "chained";
-        editor.trigger(
-          "oxide.sql.chainedCompletion",
-          "editor.action.triggerSuggest",
-          {},
-        );
-        window.setTimeout(() => {
-          if (completionTriggerOriginRef.current === "chained") {
-            completionTriggerOriginRef.current = null;
-          }
-        }, 0);
-      }, 0);
-    },
+    triggerChainedCompletion: () => triggerChainedSqlCompletion(mountedEditor,completionTriggerOriginRef),
     triggerCharacters:
       editorLanguageId === ELASTICSEARCH_CONSOLE_LANGUAGE_ID
         ? ELASTICSEARCH_COMPLETION_TRIGGER_CHARACTERS

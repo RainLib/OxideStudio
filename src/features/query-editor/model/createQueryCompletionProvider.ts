@@ -65,6 +65,7 @@ import type { LspCancellationToken } from "@/services/lsp/client";
 import {bindCompletionContext, completionContextForSuggestion, type CompletionContextState} from "@/services/lsp/semanticContext";
 import {captureLspDocumentRequest} from "./lspProviderContext";
 import {rememberIncompleteCompletionInteraction} from "./completionContextRefresh";
+import {isProjectionSourceCompletion} from "./sqlProjectionSourceCompletion";
 
 interface QueryCompletionProviderContext {
   syncDocument?:(model:any)=>Promise<void>;
@@ -485,7 +486,18 @@ export function createQueryCompletionProvider({
         suggestionCount: presentedSuggestions.length,
         reason,
       });
-      return { suggestions: presentedSuggestions.map(item=>bindCompletionContext(item,semanticContext)), incomplete };
+      const contextBoundSuggestions = presentedSuggestions.map(item => {
+        const suggestion = isProjectionSourceCompletion(item) ? {
+          ...item,
+          command: {
+            id: RECORD_COMPLETION_USAGE_COMMAND,
+            title: "Continue with table columns",
+            arguments: [usageScope, typeof item.label === "string" ? item.label : item.label.label, true, completionOwnerKey],
+          },
+        } : item;
+        return bindCompletionContext(suggestion, semanticContext);
+      });
+      return { suggestions: contextBoundSuggestions, incomplete };
     };
     try {
       const uri = completionUri;

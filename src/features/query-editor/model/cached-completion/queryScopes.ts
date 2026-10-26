@@ -183,6 +183,7 @@ export function cachedQueryScopes(source: string, cursorOffset = source.length) 
     isInputPosition: (offset: number) => inputPositions.has(offset),
     visibleInputPositions: () => [...inputPositions].filter(offset => at(offset, true) !== undefined),
     activeOwner: target.query.id,
+    activeClause: target.clause,
     fromItemAt: (offset: number) => fromCommas.has(offset) ? at(offset, true) : undefined,
     isFromComma: (offset: number) => fromCommas.has(offset),
     isCteDeclaration: (offset: number) => starts.has(offset) && locate(offset).clause === "WITH",

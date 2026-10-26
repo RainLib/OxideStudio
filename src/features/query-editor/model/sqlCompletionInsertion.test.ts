@@ -122,7 +122,7 @@ describe("chained SQL completion", () => {
     ).toBe(true);
   });
 
-  it("continues after SQL Server USE but not ordinary keywords", () => {
+  it("continues after SQL Server USE and SQL clause keywords", () => {
     expect(
       shouldChainSqlCompletionAfterAccept(
         { label: "USE", kind: CompletionItemKind.Keyword },
@@ -136,6 +136,18 @@ describe("chained SQL completion", () => {
         "SELECT ",
         "sqlserver",
       ),
-    ).toBe(false);
+    ).toBe(true);
+  });
+  it.each(["SELECT", "DISTINCT", "FROM", "JOIN", "LEFT JOIN", "WHERE", "ON", "AND", "OR", "GROUP BY", "ORDER BY", "HAVING", "SET", "UPDATE", "INSERT INTO", "RETURNING"])("continues the accepted %s clause", keyword => {
+    expect(shouldChainSqlCompletionAfterAccept({label:keyword,kind:CompletionItemKind.Keyword},`${keyword} `,"postgres")).toBe(true);
+  });
+  it("does not reopen while a function snippet or a completed expression is being accepted", () => {
+    expect(shouldChainSqlCompletionAfterAccept({label:"COUNT",kind:CompletionItemKind.Function},"COUNT(${1:value})","postgres")).toBe(false);
+    expect(shouldChainSqlCompletionAfterAccept({label:"amount",kind:CompletionItemKind.Field},"amount ","postgres")).toBe(false);
+  });
+  it("continues a table only when its insertion already advances to the next token", () => {
+    const item = { label: "adapter", kind: CompletionItemKind.Struct };
+    expect(shouldChainSqlCompletionAfterAccept(item, "adapter ", "postgres")).toBe(true);
+    expect(shouldChainSqlCompletionAfterAccept(item, "adapter", "postgres")).toBe(false);
   });
 });
