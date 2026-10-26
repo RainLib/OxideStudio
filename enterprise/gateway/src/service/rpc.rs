@@ -283,7 +283,24 @@ impl DataPlane for DataPlaneService {
             &claims.allowed_resource_paths,
             &claims.forbidden_resource_paths,
         )?;
-        let mut results = if !request.parameters_json.is_empty() {
+        if request.parameters_json.len() > 262_144 {
+            return Err(Status::invalid_argument("Query parameters exceed 256 KiB"));
+        }
+        let parameters: Vec<oxide_studio_lib::core::protocol::QueryParameter> =
+            if request.parameters_json.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_slice(&request.parameters_json).map_err(|_| {
+                    Status::invalid_argument("Query parameters must be a typed parameter array")
+                })?
+            };
+        if parameters.len() > 1000 {
+            return Err(Status::invalid_argument("Too many query parameters"));
+        }
+        let mut results = if matches!(source.driver.as_str(),"postgres"|"postgresql") {
+            let database=request.database.as_deref().ok_or_else(||Status::invalid_argument("PostgreSQL read-only queries require a database"))?;
+            driver.query_database_read_only(database,request.schema.as_deref(),&request.sql,&parameters,claims.max_rows).await
+        } else if !request.parameters_json.is_empty() {
             if request.parameters_json.len() > 262_144 { return Err(Status::invalid_argument("Query parameters exceed 256 KiB")); }
             let parameters:Vec<oxide_studio_lib::core::protocol::QueryParameter>=serde_json::from_slice(&request.parameters_json)
                 .map_err(|_|Status::invalid_argument("Query parameters must be a typed parameter array"))?;

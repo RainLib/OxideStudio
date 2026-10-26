@@ -102,6 +102,39 @@ mod policy_tests {
 
     #[test]
     fn sql_authorization_applies_explicit_exclusions() {
+        let allowed = vec![vec!["app".into(), "public".into(), "orders".into()]];
+        assert!(authorize_sql_relations(
+            "SELECT * FROM public.ORDERS",
+            StatementScanDialect::Postgres,
+            Some("app"),
+            Some("public"),
+            &allowed,
+            &[]
+        )
+        .is_ok());
+        assert!(authorize_sql_relations(
+            "SELECT * FROM public.\"Orders\"",
+            StatementScanDialect::Postgres,
+            Some("app"),
+            Some("public"),
+            &allowed,
+            &[]
+        )
+        .is_err());
+        assert!(authorize_sql_relations(
+            "SELECT * FROM public.orders",
+            StatementScanDialect::Postgres,
+            Some("app"),
+            Some("public"),
+            &allowed,
+            &[vec![
+                "app".into(),
+                "public".into(),
+                "orders".into(),
+                "secret".into()
+            ]]
+        )
+        .is_err());
         assert!(authorize_sql_relations(
             "SELECT * FROM private_orders",
             StatementScanDialect::Postgres,

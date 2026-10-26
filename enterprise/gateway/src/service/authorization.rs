@@ -182,6 +182,7 @@ pub(super) fn resource_item(
 #[derive(Default)]
 struct RelationCollector {
     relations: Vec<Vec<String>>,
+    postgres: bool,
 }
 impl Visitor for RelationCollector {
     type Break = ();
@@ -191,8 +192,20 @@ impl Visitor for RelationCollector {
             relation
                 .0
                 .iter()
-                .map(ToString::to_string)
-                .map(|segment| segment.trim_matches(['`', '"']).to_ascii_lowercase())
+                .map(|part| {
+                    if self.postgres {
+                        if let Some(ident) = part.as_ident() {
+                            return if ident.quote_style.is_some() {
+                                ident.value.clone()
+                            } else {
+                                ident.value.to_ascii_lowercase()
+                            };
+                        }
+                    }
+                    part.to_string()
+                        .trim_matches(['`', '"'])
+                        .to_ascii_lowercase()
+                })
                 .collect(),
         );
         ControlFlow::Continue(())
@@ -222,7 +235,21 @@ pub(super) fn authorize_sql_relations(
             "the query could not be parsed for enterprise object authorization",
         )
     })?;
-    let mut collector = RelationCollector::default();
+    let postgres = matches!(
+        scan_dialect,
+        oxide_studio_lib::core::statement::StatementScanDialect::Postgres
+    );
+    let within = |resource: &[String], scope: &[String]| {
+        if postgres {
+            resource.starts_with(scope)
+        } else {
+            path_is_within(resource, scope)
+        }
+    };
+    let mut collector = RelationCollector {
+        postgres,
+        ..Default::default()
+    };
     let _ = statements.visit(&mut collector);
     if collector.relations.is_empty() {
         return Err(Status::permission_denied(
@@ -233,20 +260,32 @@ pub(super) fn authorize_sql_relations(
         let mut actual = Vec::new();
         if relation.len() == 1 {
             if let Some(database) = database {
-                actual.push(database.to_ascii_lowercase());
+                actual.push(if postgres {
+                    database.to_string()
+                } else {
+                    database.to_ascii_lowercase()
+                });
             }
             if let Some(schema) = schema {
-                actual.push(schema.to_ascii_lowercase());
+                actual.push(if postgres {
+                    schema.to_string()
+                } else {
+                    schema.to_ascii_lowercase()
+                });
             }
         } else if relation.len() == 2 {
             if let Some(database) = database {
-                actual.push(database.to_ascii_lowercase());
+                actual.push(if postgres {
+                    database.to_string()
+                } else {
+                    database.to_ascii_lowercase()
+                });
             }
         }
         actual.extend(relation);
         if !allowed_scopes
             .iter()
-            .any(|allowed| path_is_within(&actual, allowed))
+            .any(|allowed| within(&actual, allowed))
         {
             return Err(Status::permission_denied(
                 "the query references an object outside the effective enterprise grants",
@@ -254,7 +293,7 @@ pub(super) fn authorize_sql_relations(
         }
         if forbidden_scopes
             .iter()
-            .any(|forbidden| path_is_within(&actual, forbidden))
+            .any(|forbidden| within(&actual, forbidden) || within(forbidden, &actual))
         {
             return Err(Status::permission_denied(
                 "the query references an explicitly excluded enterprise object",

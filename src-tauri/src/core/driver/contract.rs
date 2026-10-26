@@ -185,6 +185,21 @@ pub trait DatabaseDriver: Send + Sync {
         Err(unsupported_driver_feature("Database-scoped queries"))
     }
 
+    /// Execute in an engine-enforced read-only transaction. A SQL allowlist
+    /// alone cannot prevent writes hidden inside database functions.
+    async fn query_database_read_only(
+        &self,
+        _database: &str,
+        _schema: Option<&str>,
+        _sql: &str,
+        _params: &[QueryParameter],
+        _max_rows: u32,
+    ) -> Result<Vec<QueryResult>> {
+        Err(unsupported_driver_feature(
+            "Engine-enforced read-only queries",
+        ))
+    }
+
     /// Execute a tracked query against an explicitly selected database and
     /// optional schema. Unsupported drivers must fail instead of falling back
     /// to their primary database.

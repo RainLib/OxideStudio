@@ -949,6 +949,7 @@ fn decode_items<T: serde::de::DeserializeOwned>(items: Vec<proto::ResourceItem>)
 #[derive(Default)]
 struct FirstRelation {
     relation: Option<Vec<String>>,
+    postgres: bool,
 }
 
 impl Visitor for FirstRelation {
@@ -960,8 +961,17 @@ impl Visitor for FirstRelation {
                 relation
                     .0
                     .iter()
-                    .map(ToString::to_string)
-                    .map(|segment| segment.trim_matches(['`', '"', '[', ']']).to_string())
+                    .map(|part| {
+                        part.as_ident()
+                            .map(|ident| {
+                                if self.postgres && ident.quote_style.is_none() {
+                                    ident.value.to_ascii_lowercase()
+                                } else {
+                                    ident.value.clone()
+                                }
+                            })
+                            .unwrap_or_else(|| part.to_string())
+                    })
                     .collect(),
             );
         }
@@ -977,7 +987,10 @@ fn first_relation(sql: &str, dialect: Option<StatementScanDialect>) -> Result<Ve
         None => return Err(anyhow!("managed driver does not support SQL queries")),
     }
     .context("query could not be parsed for managed object authorization")?;
-    let mut collector = FirstRelation::default();
+    let mut collector = FirstRelation {
+        postgres: matches!(dialect, Some(StatementScanDialect::Postgres)),
+        ..Default::default()
+    };
     let _ = statements.visit(&mut collector);
     collector
         .relation
@@ -990,6 +1003,22 @@ mod tests {
 
     #[test]
     fn extracts_qualified_query_target() {
+        assert_eq!(
+            first_relation(
+                "SELECT * FROM PUBLIC.ORDERS",
+                Some(StatementScanDialect::Postgres)
+            )
+            .unwrap(),
+            vec!["public", "orders"]
+        );
+        assert_eq!(
+            first_relation(
+                "SELECT * FROM public.\"Odd\"\"Name\"",
+                Some(StatementScanDialect::Postgres)
+            )
+            .unwrap(),
+            vec!["public", "Odd\"Name"]
+        );
         assert_eq!(
             first_relation(
                 "SELECT id FROM app.public.orders",

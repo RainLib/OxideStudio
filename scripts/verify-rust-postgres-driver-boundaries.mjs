@@ -63,8 +63,8 @@ for (const [symbol, owner] of Object.entries({
 })) if (definitions.get(symbol) !== owner)
   throw new Error(`${symbol} must have one owner in ${owner}.`);
 
-if (helpers !== 37 || driverMethods !== 76)
-  throw new Error(`Expected 37 PostgreSQL helpers and 76 driver methods; found ${helpers} and ${driverMethods}.`);
+if (helpers !== 37 || driverMethods !== 78)
+  throw new Error(`Expected 37 PostgreSQL helpers and 78 driver methods; found ${helpers} and ${driverMethods}.`);
 
 const tests = ["core", "tracking", "statements", "live"];
 const testFolder = path.join(root, "src-tauri/src/drivers/postgres/tests");

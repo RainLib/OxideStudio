@@ -78,7 +78,8 @@ impl DataPlaneService {
         let statements = request
             .statements
             .into_iter()
-            .map(|statement| {
+            .zip(plans)
+            .map(|(statement, plan)| {
                 let params: Vec<QueryParameter> =
                     serde_json::from_slice(&statement.parameters_json).map_err(|_| {
                         Status::invalid_argument(
@@ -89,7 +90,7 @@ impl DataPlaneService {
                     return Err(Status::invalid_argument("Too many mutation parameters"));
                 }
                 Ok(ParameterizedStatement {
-                    sql: statement.sql,
+                    sql: plan.sql,
                     params,
                 })
             })

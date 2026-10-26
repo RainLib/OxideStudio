@@ -14,6 +14,8 @@ Gateway 的 PostgreSQL 数据源需要在 `capabilities` 中显式启用相应�
 
 原有只读数据源可以继续使用前三项能力。客户端同时检查服务端协商的 `sql.mutation.postgres.v1` 和具体表的实时授权；未加载、请求失败或切换表时，编辑入口默认关闭。每次实际写入仍重新申请绑定具体表的票据，并由 Gateway 再次核对。
 
+PostgreSQL 查询通道使用数据库强制的 READ ONLY 事务并在结束后回滚，即使数据库角色拥有部分表的写权限，查询里的函数也不能通过此通道修改持久数据。写入语句的目标则在执行前固定为已授权的 Schema 和表，保留类型化参数。
+
 ## hs_test 验证矩阵
 
 隔离测试库为 `oxide_studio_validation`，Schema 为 `validation`。权限测试使用独立数据源和 `oxide_studio_gateway_editor` 角色，原有只读数据源与生产 PostgreSQL 实例配置保持独立。

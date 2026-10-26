@@ -4,8 +4,8 @@ use anyhow::{anyhow, bail, Result};
 use oxide_enterprise_contracts::AccessAction;
 use sqlparser::{
     ast::{
-        AlterTableOperation, ColumnOption, DropBehavior, Expr, ObjectName, Statement,
-        TableConstraint, Visit, Visitor,
+        AlterTableOperation, ColumnOption, DropBehavior, Expr, Ident, ObjectName, Statement,
+        TableConstraint, Visit, VisitMut, Visitor, VisitorMut,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -15,6 +15,16 @@ use std::ops::ControlFlow;
 pub struct ManagedMutationPlan {
     pub action: AccessAction,
     pub target: Vec<String>,
+    pub sql: String,
+}
+
+struct MutationTargetQualifier(ObjectName);
+impl VisitorMut for MutationTargetQualifier {
+    type Break = ();
+    fn pre_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
+        *relation = self.0.clone();
+        ControlFlow::Continue(())
+    }
 }
 
 struct MutationVisitor<'a> {
@@ -155,11 +165,40 @@ pub fn managed_mutation_plan(
             }
         }
     }
+    let target = visitor
+        .target
+        .ok_or_else(|| anyhow!("Mutation has no table target"))?;
+    let qualified = ObjectName::from(vec![
+        Ident::with_quote('"', &target[1]),
+        Ident::with_quote('"', &target[2]),
+    ]);
+    let mut executable = statement.clone();
+    let _ = VisitMut::visit(
+        &mut executable,
+        &mut MutationTargetQualifier(qualified.clone()),
+    );
+    if let Statement::AlterTable { operations, .. } = &mut executable {
+        for operation in operations {
+            match operation {
+                AlterTableOperation::AddConstraint {
+                    constraint: TableConstraint::ForeignKey { foreign_table, .. },
+                    ..
+                } => *foreign_table = qualified.clone(),
+                AlterTableOperation::AddColumn { column_def, .. } => {
+                    for option in &mut column_def.options {
+                        if let ColumnOption::ForeignKey { foreign_table, .. } = &mut option.option {
+                            *foreign_table = qualified.clone();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(ManagedMutationPlan {
         action,
-        target: visitor
-            .target
-            .ok_or_else(|| anyhow!("Mutation has no table target"))?,
+        target,
+        sql: executable.to_string(),
     })
 }
 
@@ -214,6 +253,16 @@ mod tests {
     }
     #[test]
     fn preserves_quotes_parameters_and_selected_database() {
+        let unqualified = managed_mutation_plan(
+            "UPDATE notes SET note=$1 WHERE id=$2",
+            "fixture",
+            Some("app"),
+        )
+        .unwrap();
+        assert_eq!(
+            unqualified.sql,
+            "UPDATE \"app\".\"notes\" SET note = $1 WHERE id = $2"
+        );
         assert_eq!(
             managed_mutation_plan("UPDATE APP.NOTES SET note=$1", "fixture", None)
                 .unwrap()

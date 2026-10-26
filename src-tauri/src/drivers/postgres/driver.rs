@@ -123,6 +123,53 @@ impl DatabaseDriver for PostgresDriver {
             .map_err(|_| anyhow!("Timed out querying PostgreSQL database '{}'", database))?
     }
 
+    async fn query_database_read_only(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        params: &[QueryParameter],
+        max_rows: u32,
+    ) -> Result<Vec<QueryResult>> {
+        let mut metadata_pool = self.metadata_pool.lock().await;
+        self.get_pool().await?;
+        let pool = self
+            .ensure_metadata_pool(&mut metadata_pool, database)
+            .await?;
+        drop(metadata_pool);
+        let mut transaction = pool.begin().await?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '20s'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '2s'")
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(schema) = schema.filter(|value| !value.is_empty()) {
+            let namespace = format!(
+                "pg_catalog, {}",
+                crate::core::dialect::DatabaseKind::Postgres.quote_identifier(schema)
+            );
+            sqlx::query("SELECT pg_catalog.set_config('search_path',$1,true)")
+                .bind(namespace)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let result = self
+            .query_parameterized_on_connection(sql, params, &mut transaction, max_rows as usize)
+            .await;
+        let rollback = transaction.rollback().await;
+        match result {
+            Ok(results) => {
+                rollback?;
+                Ok(results)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn query_database_with_context_tracked(
         &self,
         query_id: Option<&str>,
