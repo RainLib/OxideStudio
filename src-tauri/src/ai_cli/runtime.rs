@@ -717,7 +717,7 @@ mod tests {
                 ""
             };
             let body = format!(
-                "@echo {{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}\r\n@echo {{\"type\":\"result\",\"subtype\":\"success\"}}\r\n@echo fixture diagnostic 1>&2\r\n{wait_command}"
+                "@set /p fixture_prompt=\r\n@echo {{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}\r\n@echo {{\"type\":\"result\",\"subtype\":\"success\"}}\r\n@echo fixture diagnostic 1>&2\r\n{wait_command}"
             );
             (script, body)
         };
@@ -726,7 +726,7 @@ mod tests {
             let script = directory.path().join("fake-cli.sh");
             let wait_command = if wait { "sleep 5\n" } else { "" };
             let body = format!(
-                "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\nprintf '%s\\n' 'fixture diagnostic' >&2\n{wait_command}"
+                "cat >/dev/null\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\nprintf '%s\\n' 'fixture diagnostic' >&2\n{wait_command}"
             );
             (script, body)
         };
