@@ -15,6 +15,7 @@ use zeroize::Zeroize;
 
 pub struct PreparedCliRun {
     pub provider: CliProviderKind,
+    pub tool_names: Vec<String>,
     pub command: CliCommandSpec,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
