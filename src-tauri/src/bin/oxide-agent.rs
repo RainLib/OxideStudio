@@ -1,4 +1,4 @@
-#[path = "oxide_agent/mod.rs"]
+#[path = "../cli/mod.rs"]
 mod oxide_agent;
 
 #[tokio::main]

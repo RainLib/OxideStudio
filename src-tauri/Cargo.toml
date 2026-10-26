@@ -5,6 +5,7 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 default-run = "oxide-studio"
+autobins = false
 
 [[bin]]
 name = "oxide-studio"

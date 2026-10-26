@@ -163,7 +163,7 @@ Schema migration 不接受前端传来的任意执行 SQL。后端使用 snapsho
 | 前端服务适配 | `src/services/tauri/`、`src/services/lsp/` | 收敛 `invoke()` 参数、camelCase 映射、错误类型、LSP 文档同步和路径检查；UI 不应自行拼 IPC payload。 |
 | Tauri command | `src-tauri/src/commands/` | `connection`、`query`、`schema`、`table`、`transaction`、`project_files`、`settings`、`store`、`lsp`、`ai/agent` 等按领域注册，负责输入校验、获取 State、调用 core/driver 和可序列化错误。 |
 | Rust core | `src-tauri/src/core/` | `ConnectionManager` 维护活动 driver，`MetaStore` 保存项目范围 metadata，driver package registry 管理签名安装与激活，取消/事务/查询范围在此边界统一执行。 |
-| AI / Agent | `src-tauri/src/agent`、`src-tauri/src/bin/oxide_agent/` | 应用内 Agent Host 与外部 `oxide-agent` 分开；前者以审批 lease 接入桌面能力，后者以固定只读 grant 接入 MCP。 |
+| AI / Agent | `src-tauri/src/agent`、`src-tauri/src/cli/` | 应用内 Agent Host 与外部 `oxide-agent` 分开；前者以审批 lease 接入桌面能力，后者以固定只读 grant 接入 MCP。 |
 
 前端状态并非数据库真相。切换项目会清理连接/schema 快照；执行 DDL 后会让 metadata 失效并刷新；Query Tab、事务上下文与 Task 状态以会话为单位留在内存。项目、连接定义、历史和资源 artifact 才写入 MetaStore；provider secret 不与普通 UI store 混存。
 

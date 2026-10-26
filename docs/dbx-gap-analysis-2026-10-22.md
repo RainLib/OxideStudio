@@ -38,7 +38,7 @@
 | G12 / P2：参考目录 | 已对齐固定基线的 88 项，当前 93 个 candidate；7 项与图标补齐。对本轮最新 DBX 的结构化审计也通过。 | 持续核对来源、产品语义和状态；新增名称仍需单独驱动交付。 | `node scripts/audit-dbx-reference-catalog.mjs`，当前新增/删除均为空；目录完成不代表所有产品已支持。 |
 | G13 / P1：MySQL 迁移保真 | Rust/TS/外置协议、列元数据、snapshot/diff、ADD/CREATE/MODIFY、编辑和 transfer 已补字符集/排序规则。Windows MySQL 8.0.46/8.4.13 的专项迁移均已实际通过。 | 继续补其他平台；跨产品字符语义映射仍属于专用适配器范围。 | 目标默认 latin1、源列 utf8mb4/latin1 覆盖；新增、仅 collation 改变、执行后重新比较、旧快照修改保留目标属性。 |
 
-主要代码入口：`src-tauri/jdbc-agent/README.md`、`src-tauri/src/bin/oxide_agent/`、`src-tauri/src/commands/sqlite_backup_schedule/`、`src-tauri/src/core/transfer_jobs/`、`src-tauri/src/commands/table/{limits,compare_types,export_database}.rs`、`src-tauri/src/core/schema_diff/`、`src-tauri/tests/live_database/mysql_character.rs`。
+主要代码入口：`src-tauri/jdbc-agent/README.md`、`src-tauri/src/cli/`、`src-tauri/src/commands/sqlite_backup_schedule/`、`src-tauri/src/core/transfer_jobs/`、`src-tauri/src/commands/table/{limits,compare_types,export_database}.rs`、`src-tauri/src/core/schema_diff/`、`src-tauri/tests/live_database/mysql_character.rs`。
 
 ## 工程优化，逐项列明
 
