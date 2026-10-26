@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = "tests/frontend/assistant-agent-sidebar.test.tsx";
 const directory = "tests/frontend/assistant-agent-sidebar";
-const scenarios = ["identity", "lifecycle", "conversations", "composer", "cli"];
+const scenarios = ["identity", "lifecycle", "conversations", "composer", "cli", "cli-setup"];
 const expectedImports = scenarios.map((name) => `./assistant-agent-sidebar/${name}`);
 const entrySource = readSourceText(path.join(root, entry));
 const actualImports = [...entrySource.matchAll(/import\s+["']([^"']+)["'];/g)].map(
@@ -46,8 +46,8 @@ for (const scenario of scenarios) {
   }
   testCount += [...source.matchAll(/\bit\(/g)].length;
 }
-if (testCount !== 57) {
-  throw new Error(`Expected 57 AssistantSidebar regression tests; found ${testCount}.`);
+if (testCount !== 59) {
+  throw new Error(`Expected 59 AssistantSidebar regression tests; found ${testCount}.`);
 }
 
 console.log(

@@ -46,6 +46,7 @@ pub async fn begin_authentication(
         }) {
             let _ = session.cancellation.send(true);
             session.status.phase = CliAuthenticationPhase::Cancelled;
+            session.status.browser_url = None;
             session.status.message = "A newer sign-in attempt replaced this one.".to_string();
         }
         sessions.insert(
@@ -58,6 +59,7 @@ pub async fn begin_authentication(
                     phase: CliAuthenticationPhase::Starting,
                     message: format!("Starting {} secure sign-in...", config.kind.display_name()),
                     method_id: method_id.clone(),
+                    browser_url: None,
                 },
                 cancellation,
             },

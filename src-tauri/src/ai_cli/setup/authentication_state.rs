@@ -31,6 +31,7 @@ pub async fn cancel_authentication(session_id: &str) -> Result<CliAuthentication
     if !session.status.phase.is_terminal() {
         let _ = session.cancellation.send(true);
         session.status.phase = CliAuthenticationPhase::Cancelled;
+        session.status.browser_url = None;
         session.status.message =
             "Sign-in was cancelled. Your existing CLI credentials were not changed.".to_string();
     }
@@ -46,6 +47,9 @@ pub(super) async fn update_authentication(
         if !session.status.phase.is_terminal() {
             session.status.phase = phase;
             session.status.message = message.into();
+            if phase.is_terminal() || phase == CliAuthenticationPhase::Verifying {
+                session.status.browser_url = None;
+            }
         }
     }
 }
@@ -58,6 +62,7 @@ pub(super) async fn finish_authentication_error(session_id: &str, error: &str) {
     if session.status.phase.is_terminal() {
         return;
     }
+    session.status.browser_url = None;
     if error.contains("authentication cancelled") {
         session.status.phase = CliAuthenticationPhase::Cancelled;
         session.status.message =
@@ -66,4 +71,16 @@ pub(super) async fn finish_authentication_error(session_id: &str, error: &str) {
         session.status.phase = CliAuthenticationPhase::Failed;
         session.status.message = error.to_string();
     }
+}
+
+pub(super) async fn set_authentication_browser_url(session_id: &str, url: &url::Url) -> bool {
+    let mut sessions = AUTHENTICATION_SESSIONS.lock().await;
+    let Some(session) = sessions.get_mut(session_id) else {
+        return false;
+    };
+    if session.status.phase.is_terminal() {
+        return false;
+    }
+    session.status.browser_url = Some(url.as_str().to_string());
+    true
 }

@@ -4,3 +4,4 @@ import "./assistant-agent-sidebar/lifecycle";
 import "./assistant-agent-sidebar/conversations";
 import "./assistant-agent-sidebar/composer";
 import "./assistant-agent-sidebar/cli";
+import "./assistant-agent-sidebar/cli-setup";

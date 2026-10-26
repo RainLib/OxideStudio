@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(super) const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+// Large bundled CLIs can take several minutes to download on ordinary links.
+// Keep a bounded deadline without cancelling a healthy transfer after 60s.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub(super) const CODEX_PACKAGE_VERSION: &str = "0.147.0";
 
@@ -74,7 +77,7 @@ pub(super) async fn download_verified_package(
         &BTreeMap::new(),
         Some(cwd),
         None,
-        Duration::from_secs(60),
+        DOWNLOAD_TIMEOUT,
     )
     .await
     .context("failed to download the managed package for verification")?;

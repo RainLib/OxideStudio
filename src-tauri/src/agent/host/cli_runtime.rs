@@ -101,8 +101,9 @@ impl AgentHostInner {
         .await;
 
         let (events_sender, mut events_receiver) = mpsc::unbounded_channel();
+        let mut parser =
+            CliAgentEventParser::new(provider).with_tool_names(prepared.tool_names.clone());
         let runner = tokio::spawn(prepared.run(cancellation.clone(), events_sender));
-        let mut parser = CliAgentEventParser::new(provider);
         let mut terminal_error: Option<CliAgentError> = None;
         while let Some(raw_event) = events_receiver.recv().await {
             if !self.cli_generation_is_current(&key, generation).await {

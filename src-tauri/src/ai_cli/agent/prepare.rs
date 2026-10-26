@@ -93,6 +93,7 @@ pub async fn prepare_cli_run(
     };
     Ok(PreparedCliRun {
         provider: provider_kind,
+        tool_names: request.tools.iter().map(|tool| tool.name.clone()).collect(),
         command,
         args,
         environment,

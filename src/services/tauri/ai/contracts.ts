@@ -204,4 +204,5 @@ export interface AiCliAuthenticationStatus {
   phase: AiCliAuthenticationPhase;
   message: string;
   methodId?: string;
+  browserUrl?: string;
 }

@@ -139,8 +139,10 @@ export function useAssistantProviderLifecycle({
     try {
       updateCliSetup(provider, (current) => ({
         ...current,
-        phase: "authorizing",
+        // Poll only after the native worker has returned a session ID.
+        phase: "checking",
         message: t("assistant.setup.startingSignIn"),
+        authenticationSessionId: undefined,
         authenticationMethodId: methodId,
       }));
       const result = await aiService.beginCliAuthentication(
@@ -401,7 +403,7 @@ export function useAssistantProviderLifecycle({
       .then((methods) => {
         updateCliSetup(provider, (current) => ({
           ...current,
-          phase: "auth-required",
+          phase: current?.phase ?? "auth-required",
           message: current?.message ?? t("assistant.setup.chooseSignIn"),
           authenticationMethods: methods,
           authMethodsLoading: false,
@@ -410,7 +412,7 @@ export function useAssistantProviderLifecycle({
       .catch((error) => {
         updateCliSetup(provider, (current) => ({
           ...current,
-          phase: "auth-required",
+          phase: current?.phase ?? "auth-required",
           message: error instanceof Error ? error.message : String(error),
           authMethodsLoading: false,
         }));
@@ -492,6 +494,7 @@ export function useAssistantProviderLifecycle({
             message: status.message,
             authenticationSessionId,
             authenticationMethodId: status.methodId,
+            browserUrl: status.browserUrl,
           }));
           timer = window.setTimeout(poll, 1_000);
         })

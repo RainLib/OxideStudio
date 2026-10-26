@@ -33,6 +33,7 @@ pub enum CliAgentEvent {
 pub struct CliAgentEventParser {
     provider: CliProviderKind,
     tool_names: HashMap<String, String>,
+    tool_aliases: HashMap<String, String>,
     final_text: String,
     saw_terminal: bool,
     saw_error: bool,
@@ -45,12 +46,22 @@ impl CliAgentEventParser {
         Self {
             provider,
             tool_names: HashMap::new(),
+            tool_aliases: HashMap::new(),
             final_text: String::new(),
             saw_terminal: false,
             saw_error: false,
             mutation_result_unknown: false,
             last_usage: None,
         }
+    }
+
+    pub fn with_tool_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        for name in names {
+            // CodeBuddy normalizes MCP punctuation in streamed tool names.
+            // Resolve only names declared for this turn; leave unknown names intact.
+            self.tool_aliases.insert(name.replace('.', "_"), name);
+        }
+        self
     }
 
     pub fn parse(&mut self, value: &Value) -> Vec<CliAgentEvent> {
@@ -274,6 +285,11 @@ impl CliAgentEventParser {
                                 .and_then(Value::as_str)
                                 .map(display_tool_name)
                                 .unwrap_or_else(|| "oxide tool".to_string());
+                            let tool_name = self
+                                .tool_aliases
+                                .get(&tool_name)
+                                .cloned()
+                                .unwrap_or(tool_name);
                             self.tool_names.insert(call_id.clone(), tool_name.clone());
                             events.push(CliAgentEvent::ToolStarted { call_id, tool_name });
                         }
@@ -458,9 +474,11 @@ fn error_message(value: &Value) -> String {
     for pointer in [
         "/message",
         "/error/message",
+        "/error",
         "/result/error",
         "/result/message",
         "/errors/0/message",
+        "/errors/0",
     ] {
         if let Some(message) = value.pointer(pointer).and_then(Value::as_str) {
             return message.to_string();

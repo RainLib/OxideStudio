@@ -41,7 +41,7 @@ const allowed = {
     "authentication_protocol",
     "authentication_verification",
   ]),
-  authentication_process: new Set(),
+  authentication_process: new Set(["authentication_state"]),
   authentication_protocol: new Set(),
   authentication_verification: new Set(["authentication_state"]),
 };

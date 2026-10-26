@@ -23,6 +23,7 @@ export type AssistantCliSetupState = {
   installationSessionId?: string;
   authenticationSessionId?: string;
   authenticationMethodId?: string;
+  browserUrl?: string;
   authMethodsLoading?: boolean;
 };
 
@@ -65,7 +66,10 @@ export const useAssistantCliSetupStore = create<AssistantCliSetupStore>(
     updateSetup: (provider, update) =>
       set((current) => {
         const previous = current.setupByProvider[provider] ?? null;
-        const next = typeof update === "function" ? update(previous) : update;
+        const requested = typeof update === "function" ? update(previous) : update;
+        const next = requested.phase === "authorizing" || !requested.browserUrl
+          ? requested
+          : { ...requested, browserUrl: undefined };
         if (previous === next) return current;
         return {
           setupByProvider: {
