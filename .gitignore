@@ -26,6 +26,7 @@ test-results/
 playwright-report/
 .vitest/
 .vite/
+__pycache__/
 src-tauri/target/
 # Standalone driver packages build in their own Cargo workspaces.
 src-tauri/crates/**/target/

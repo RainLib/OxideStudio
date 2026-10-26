@@ -144,7 +144,10 @@
     "verify:query-execution-boundaries": "node scripts/verify-query-execution-boundaries.mjs",
     "verify:connection-form-boundaries": "node scripts/verify-connection-form-boundaries.mjs",
     "verify:ai-settings-boundaries": "node scripts/verify-ai-settings-boundaries.mjs",
-    "verify:connection-ssh-fields-boundaries": "node scripts/verify-connection-ssh-fields-boundaries.mjs"
+    "verify:connection-ssh-fields-boundaries": "node scripts/verify-connection-ssh-fields-boundaries.mjs",
+    "demo:prepare": "python3 scripts/prepare-sharing-demo.py",
+    "demo:check-device": "python3 scripts/check-sharing-device.py",
+    "test:sharing-demo": "python3 -m unittest discover -s scripts -p 'test_prepare_sharing_demo.py'"
   },
   "dependencies": {
     "@glideapps/glide-data-grid": "6.0.4-alpha24",
