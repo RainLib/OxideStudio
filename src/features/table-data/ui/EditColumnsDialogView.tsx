@@ -39,6 +39,7 @@ export function EditColumnsDialogView({
     renamingColumn,
     droppingColumn,
     isSubmitting,
+    canModifyColumns,
     handleStartAlterColumn,
     handleRenameColumn,
     handleDropColumn,
@@ -57,13 +58,16 @@ export function EditColumnsDialogView({
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent layout="custom" className="flex max-h-[82vh] w-[780px] max-w-[calc(100vw-32px)] flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-[hsl(var(--wb-border-subtle))] bg-[hsl(var(--wb-toolbar))] px-4 py-3">
-          <DialogTitle className="text-[13px] font-semibold">Edit Columns</DialogTitle>
+          <DialogTitle className="text-[13px] font-semibold">{canModifyColumns ? "Edit Columns" : "Table Columns"}</DialogTitle>
           <div className="truncate font-mono text-[10px] text-[hsl(var(--wb-text-muted))]">
             {schema}.{tableName}
           </div>
         </DialogHeader>
 
         <div className="flex-1 space-y-4 overflow-y-auto p-4">
+          {!canModifyColumns && (
+            <p role="status" className="text-xs text-[hsl(var(--wb-text-muted))]">Read-only column metadata</p>
+          )}
           {error && (
             <div className="rounded-[4px] border border-destructive/25 bg-destructive/10 px-2.5 py-2 text-[10px] text-destructive" role="alert">
               {error}
@@ -119,6 +123,7 @@ export function EditColumnsDialogView({
                         className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
                         onClick={() => handleStartAlterColumn(column)}
                         disabled={
+                          !canModifyColumns ||
                           !!alteringColumn ||
                           !!renamingColumn ||
                           !!droppingColumn ||
@@ -134,6 +139,7 @@ export function EditColumnsDialogView({
                         className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-[hsl(var(--wb-text))]"
                         onClick={() => handleRenameColumn(column.name)}
                         disabled={
+                          !canModifyColumns ||
                           !!renamingColumn ||
                           !!droppingColumn ||
                           !!alteringColumn ||
@@ -149,6 +155,7 @@ export function EditColumnsDialogView({
                         className="h-7 w-7 text-[hsl(var(--wb-text-muted))] hover:text-destructive"
                         onClick={() => handleDropColumn(column.name)}
                         disabled={
+                          !canModifyColumns ||
                           !!droppingColumn ||
                           !!renamingColumn ||
                           !!alteringColumn ||
@@ -289,7 +296,7 @@ export function EditColumnsDialogView({
                 />
                 <Button
                   onClick={handleAlterColumn}
-                  disabled={!!alteringColumn || isSubmitting}
+                  disabled={!canModifyColumns || !!alteringColumn || isSubmitting}
                   className="col-span-3 h-8 text-xs"
                 >
                   {alteringColumn ? "Saving..." : "Save Changes"}
@@ -389,7 +396,7 @@ export function EditColumnsDialogView({
           <Button className="h-7 text-[11px]" variant="ghost" onClick={onClose} disabled={isSubmitting}>
             Close
           </Button>
-          <Button className="h-7 text-[11px]" onClick={handleAddColumn} disabled={isSubmitting}>
+          <Button className="h-7 text-[11px]" onClick={handleAddColumn} disabled={!canModifyColumns || isSubmitting}>
             <Plus size={14} className="mr-2" />
             {isSubmitting ? "Adding..." : "Add Column"}
           </Button>

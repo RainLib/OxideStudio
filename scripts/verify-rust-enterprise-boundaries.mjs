@@ -69,6 +69,7 @@ const commands = [
   "enterprise_sync_projects",
   "enterprise_sign_out",
   "enterprise_connect_managed_source",
+  "enterprise_get_table_permissions",
 ];
 const lib = readSourceText(path.join(root, "src-tauri/src/lib.rs"));
 for (const command of commands) {
@@ -88,8 +89,8 @@ const testCount = testFiles.reduce((count, file) => count + [
   ...readSourceText(path.join(root, `src-tauri/src/enterprise/${file}.rs`))
     .matchAll(/^\s*#\[(?:tokio::)?test\]$/gm),
 ].length, 0);
-if (helpers !== 37 || typeMethods !== 57 || testCount !== 14) {
-  throw new Error(`Expected 37 enterprise helpers, 57 type methods and 14 tests; found ${helpers}, ${typeMethods} and ${testCount}.`);
+if (helpers !== 38 || typeMethods !== 64 || testCount !== 14) {
+  throw new Error(`Expected 38 enterprise helpers, 64 type methods and 14 tests; found ${helpers}, ${typeMethods} and ${testCount}.`);
 }
 console.log(
   `Rust enterprise boundaries verified: ${modules.length} modules, ${helpers} helpers, ${typeMethods} type methods, ${commands.length} Tauri commands, ${testCount} tests, acyclic imports.`,

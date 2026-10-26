@@ -496,6 +496,27 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Read a complete relation definition through a driver-owned metadata
+    /// boundary, preserving the explicitly selected database identity.
+    async fn get_table_definition(
+        &self,
+        _database: Option<&str>,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<String> {
+        Err(unsupported_driver_feature("Relation definition metadata"))
+    }
+
+    /// Fresh, concrete-table enterprise permissions. Local drivers return None.
+    async fn managed_table_permissions(
+        &self,
+        _database: Option<&str>,
+        _schema: &str,
+        _table: &str,
+    ) -> Result<Option<ManagedTablePermissions>> {
+        Ok(None)
+    }
+
     /// Get collections, indexes, or analogous document/search objects in a namespace.
     async fn get_collections(&self, _namespace: &str) -> Result<Vec<CollectionInfo>> {
         Ok(Vec::new())

@@ -19,6 +19,8 @@ import {
   type EditColumnsDialogProps,
 } from "@/features/table-data/model/editColumnsDialog";
 import type { ColumnInfo, DatabaseCapabilities } from "@/services/tauri/types";
+import { managedCapabilitiesFallback } from "@/features/connections/model/managedCapabilities";
+import { useManagedTablePermissions } from "./useManagedTablePermissions";
 
 export function useEditColumnsDialogController({
   isOpen,
@@ -28,7 +30,9 @@ export function useEditColumnsDialogController({
   schema,
   tableName,
 }: EditColumnsDialogProps) {
-  const fallbackCapabilities = defaultDatabaseCapabilities(driver);
+  const connection=useConnectionStore(state=>state.connections.find(item=>item.id===connectionId));
+  const permissions=useManagedTablePermissions(isOpen?connection:undefined,undefined,schema,tableName);
+  const fallbackCapabilities = connection?.origin==="managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(driver)) : defaultDatabaseCapabilities(driver);
   const [capabilities, setCapabilities] =
     useState<DatabaseCapabilities>(fallbackCapabilities);
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
@@ -48,6 +52,7 @@ export function useEditColumnsDialogController({
     state.connections.find((item) => item.id === connectionId)
       ?.driverPackageVersion,
   );
+  const canModifyColumns=Boolean(connection)&&(connection?.origin!=="managed" || Boolean(capabilities.supportsColumnAlteration&&permissions.permissions?.schemaDdl));
   const draftAutoIncrementSupported = supportsAutoIncrementForDataType(
     capabilities,
     draft.type
@@ -114,15 +119,17 @@ export function useEditColumnsDialogController({
     if (!isOpen) return;
 
     let cancelled = false;
-    const fallback = defaultDatabaseCapabilities(driver);
+    const fallback = fallbackCapabilities;
     setCapabilities(fallback);
     setDraft(createDefaultColumnDraft(fallback));
     setColumns([]);
     setAlterDraft(null);
     setError(null);
 
-    databaseService
-      .getDatabaseCapabilities(driver, packageVersion)
+    const request=connection?.origin === "managed"
+      ? databaseService.getConnectionDatabaseCapabilityContext(connectionId).then(context=>context.capabilities)
+      : databaseService.getDatabaseCapabilities(driver,packageVersion);
+    request
       .then((value) => {
         if (cancelled) return;
         setCapabilities(value);
@@ -137,7 +144,7 @@ export function useEditColumnsDialogController({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, connectionId, driver, packageVersion, schema, tableName]);
+  }, [isOpen, connectionId, driver, packageVersion, schema, tableName,connection]);
 
   const updateDraft = (
     field: keyof ColumnDraft,
@@ -170,6 +177,7 @@ export function useEditColumnsDialogController({
   };
 
   const handleAddColumn = async () => {
+    if(!canModifyColumns)return;
     if (!draft.name.trim()) {
       setError("Column name is required");
       return;
@@ -198,6 +206,7 @@ export function useEditColumnsDialogController({
   };
 
   const handleDropColumn = async (columnName: string) => {
+    if(!canModifyColumns)return;
     const confirmed = (await confirmAction(
       `Drop column "${columnName}" from "${tableName}"? This cannot be undone.`
     ));
@@ -222,6 +231,7 @@ export function useEditColumnsDialogController({
   };
 
   const handleRenameColumn = async (columnName: string) => {
+    if(!canModifyColumns)return;
     const nextName = (await promptValue("Rename column to:", columnName));
     if (nextName === null) return;
 
@@ -248,11 +258,13 @@ export function useEditColumnsDialogController({
   };
 
   const handleStartAlterColumn = (column: ColumnInfo) => {
+    if(!canModifyColumns)return;
     setAlterDraft(createAlterColumnDraft(column, capabilities));
     setError(null);
   };
 
   const handleAlterColumn = async () => {
+    if(!canModifyColumns)return;
     if (!alterDraft) return;
 
     const typeChanged =
@@ -313,6 +325,7 @@ export function useEditColumnsDialogController({
     renamingColumn,
     droppingColumn,
     isSubmitting,
+    canModifyColumns,
     handleStartAlterColumn,
     handleRenameColumn,
     handleDropColumn,

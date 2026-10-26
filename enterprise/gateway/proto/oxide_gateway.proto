@@ -10,6 +10,7 @@ service DataPlane {
   // separate, provider-specific read-only allowlist at the Gateway rather
   // than being passed through the SQL parser.
   rpc ExecuteNativeReadOnly(NativeQueryRequest) returns (stream QueryChunk);
+  rpc ExecuteMutation(MutationRequest) returns (MutationResponse);
 }
 
 message CapabilitiesRequest {
@@ -21,6 +22,7 @@ message CapabilitiesResponse {
   uint32 contract_version = 1;
   repeated string capabilities = 2;
   string policy_revision = 3;
+  repeated string features = 4;
 }
 
 message RequestScope {
@@ -39,6 +41,25 @@ message QueryRequest {
   string sql = 3;
   optional string database = 4;
   optional string schema = 5;
+  bytes parameters_json = 6;
+}
+
+message MutationStatement {
+  string sql = 1;
+  bytes parameters_json = 2;
+}
+
+message MutationRequest {
+  string access_ticket = 1;
+  RequestScope scope = 2;
+  string database = 3;
+  optional string schema = 4;
+  repeated MutationStatement statements = 5;
+}
+
+message MutationResponse {
+  repeated uint64 rows_affected = 1;
+  string policy_revision = 2;
 }
 
 message NativeQueryRequest {

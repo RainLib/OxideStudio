@@ -67,6 +67,10 @@ export interface ManagedDeviceEnrollment {
 }
 
 export const enterpriseService = {
+  getTablePermissions: (connectionId: string, database: string | undefined, schema: string, table: string) =>
+    invokeRawCommand<{dataWrite:boolean;schemaDdl:boolean;policyRevision:string} | null>(
+      "enterprise_get_table_permissions", {connectionId,database:database || null,schema,table},
+    ),
   getPublicConfig: () =>
     invokeRawCommand<EnterprisePublicConfig | null>(
       "enterprise_get_public_config",

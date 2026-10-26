@@ -1,8 +1,8 @@
 use super::{
     authorization::{
         authorize_native_resource, authorize_sql_relations, metadata_error,
-        metadata_parent_path_for_source, path_is_within, require_metadata_scope_for_source,
-        resource_item,
+        metadata_parent_path_for_source, path_is_within, require_complete_metadata_scope,
+        require_metadata_scope_for_source, resource_item,
     },
     models::DataPlaneService,
     policy::{
@@ -12,8 +12,9 @@ use super::{
     protocol::encode_bounded_results,
 };
 use crate::proto::{
-    data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse, NativeQueryRequest,
-    QueryChunk, QueryRequest, ResourceRequest, ResourceResponse,
+    data_plane_server::DataPlane, CapabilitiesRequest, CapabilitiesResponse, MutationRequest,
+    MutationResponse, NativeQueryRequest, QueryChunk, QueryRequest, ResourceRequest,
+    ResourceResponse,
 };
 use oxide_enterprise_contracts::{AccessAction, ENTERPRISE_CONTRACT_VERSION};
 use oxide_studio_lib::core::statement::validate_read_only_sql;
@@ -22,6 +23,12 @@ use tokio_stream::{self as stream, Stream};
 use tonic::{Request, Response, Status};
 #[tonic::async_trait]
 impl DataPlane for DataPlaneService {
+    async fn execute_mutation(
+        &self,
+        request: Request<MutationRequest>,
+    ) -> Result<Response<MutationResponse>, Status> {
+        self.execute_managed_mutation(request).await
+    }
     async fn capabilities(
         &self,
         request: Request<CapabilitiesRequest>,
@@ -39,6 +46,14 @@ impl DataPlane for DataPlaneService {
         require_ticket_target_binding(&claims, source)?;
         Ok(Response::new(CapabilitiesResponse {
             contract_version: ENTERPRISE_CONTRACT_VERSION.into(),
+            features: if matches!(source.driver.as_str(), "postgres" | "postgresql") {
+                vec![
+                    "metadata.definition.v1".into(),
+                    "sql.mutation.postgres.v1".into(),
+                ]
+            } else {
+                Vec::new()
+            },
             capabilities: source.capabilities.clone(),
             policy_revision: claims.policy_revision,
         }))
@@ -50,7 +65,7 @@ impl DataPlane for DataPlaneService {
     ) -> Result<Response<ResourceResponse>, Status> {
         let peer_certificate_fingerprint = Self::peer_certificate_fingerprint(&request)?;
         let request = request.into_inner();
-        let action = if request.kind == "column" {
+        let action = if matches!(request.kind.as_str(), "column" | "definition") {
             AccessAction::MetadataRead
         } else {
             AccessAction::ResourceDiscover
@@ -65,6 +80,20 @@ impl DataPlane for DataPlaneService {
         require_ticket_driver(&claims, source)?;
         require_ticket_target_binding(&claims, source)?;
         require_metadata_scope_for_source(&request, &authorization.resource_path, &source.driver)?;
+        if request.kind == "definition" {
+            if metadata_parent_path_for_source(&request, &source.driver)?
+                != authorization.resource_path
+            {
+                return Err(Status::permission_denied(
+                    "Definition target must exactly match its ticket scope",
+                ));
+            }
+            require_complete_metadata_scope(
+                &authorization.resource_path,
+                &claims.allowed_resource_paths,
+                &claims.forbidden_resource_paths,
+            )?;
+        }
         let driver = self.driver(authorization.data_source_id).await?;
         let mut items = match request.kind.as_str() {
             "database" => driver
@@ -133,6 +162,35 @@ impl DataPlane for DataPlaneService {
                     .into_iter()
                     .map(|column| resource_item("column", column.name.clone(), &column))
                     .collect::<Result<Vec<_>, _>>()?
+            }
+            "definition" => {
+                if !matches!(source.driver.as_str(), "postgres" | "postgresql") {
+                    return Err(Status::unimplemented(
+                        "This Gateway provider does not implement relation definitions",
+                    ));
+                }
+                let database = request
+                    .database
+                    .as_deref()
+                    .ok_or_else(|| Status::invalid_argument("database is required"))?;
+                let schema = request
+                    .schema
+                    .as_deref()
+                    .ok_or_else(|| Status::invalid_argument("schema is required"))?;
+                let table = request
+                    .object_name
+                    .as_deref()
+                    .ok_or_else(|| Status::invalid_argument("object_name is required"))?;
+                let definition =
+                    oxide_studio_lib::core::postgres_ddl::read_postgres_relation_definition(
+                        driver.as_ref(),
+                        database,
+                        schema,
+                        table,
+                    )
+                    .await
+                    .map_err(metadata_error)?;
+                vec![resource_item("definition", table.to_string(), &definition)?]
             }
             "collection" => {
                 let namespace = request
@@ -225,7 +283,14 @@ impl DataPlane for DataPlaneService {
             &claims.allowed_resource_paths,
             &claims.forbidden_resource_paths,
         )?;
-        let mut results = if let Some(database) = request.database.as_deref() {
+        let mut results = if !request.parameters_json.is_empty() {
+            if request.parameters_json.len() > 262_144 { return Err(Status::invalid_argument("Query parameters exceed 256 KiB")); }
+            let parameters:Vec<oxide_studio_lib::core::protocol::QueryParameter>=serde_json::from_slice(&request.parameters_json)
+                .map_err(|_|Status::invalid_argument("Query parameters must be a typed parameter array"))?;
+            if parameters.len()>1000 { return Err(Status::invalid_argument("Too many query parameters")); }
+            let database=request.database.as_deref().ok_or_else(||Status::invalid_argument("Parameterized queries require a database"))?;
+            driver.query_database_parameterized(database,&request.sql,&parameters).await
+        } else if let Some(database) = request.database.as_deref() {
             driver
                 .query_database_with_context_tracked(
                     None,

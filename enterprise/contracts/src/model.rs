@@ -175,14 +175,15 @@ impl AccessAction {
 
     /// Actions implemented by the current managed Gateway data plane.
     ///
-    /// Keep this deliberately narrower than the policy vocabulary. The
-    /// control plane may model future write, export, AI, and MCP permissions,
-    /// but it must not advertise or issue them until a Gateway RPC can enforce
-    /// them end-to-end.
-    pub const fn is_stage_one_managed_action(self) -> bool {
+    /// Export, AI and MCP remain unavailable until their RPCs enforce them.
+    pub const fn is_managed_gateway_action(self) -> bool {
         matches!(
             self,
-            Self::ResourceDiscover | Self::MetadataRead | Self::QueryRead
+            Self::ResourceDiscover
+                | Self::MetadataRead
+                | Self::QueryRead
+                | Self::DataWrite
+                | Self::SchemaDdl
         )
     }
 }
@@ -271,18 +272,18 @@ mod tests {
     }
 
     #[test]
-    fn stage_one_gateway_actions_are_read_only() {
-        assert!(AccessAction::ResourceDiscover.is_stage_one_managed_action());
-        assert!(AccessAction::MetadataRead.is_stage_one_managed_action());
-        assert!(AccessAction::QueryRead.is_stage_one_managed_action());
+    fn gateway_actions_match_implemented_operations() {
+        assert!(AccessAction::ResourceDiscover.is_managed_gateway_action());
+        assert!(AccessAction::MetadataRead.is_managed_gateway_action());
+        assert!(AccessAction::QueryRead.is_managed_gateway_action());
+        assert!(AccessAction::DataWrite.is_managed_gateway_action());
+        assert!(AccessAction::SchemaDdl.is_managed_gateway_action());
         for action in [
-            AccessAction::DataWrite,
-            AccessAction::SchemaDdl,
             AccessAction::DataExport,
             AccessAction::AiUse,
             AccessAction::McpUse,
         ] {
-            assert!(!action.is_stage_one_managed_action());
+            assert!(!action.is_managed_gateway_action());
         }
     }
 

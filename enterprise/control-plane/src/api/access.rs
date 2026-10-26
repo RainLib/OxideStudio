@@ -168,9 +168,9 @@ pub(super) async fn create_access_session(
 pub(super) fn validate_access_session_request(
     input: &AccessSessionRequest,
 ) -> Result<(), ApiError> {
-    if !input.action.is_stage_one_managed_action() {
+    if !input.action.is_managed_gateway_action() {
         return Err(ApiError::bad_request(
-            "the managed Gateway currently supports resource discovery, metadata reads, and read-only queries only",
+            "the managed Gateway does not implement this permission action",
         ));
     }
     if input.source != "desktop" {

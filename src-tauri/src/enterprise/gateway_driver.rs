@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
 mod default_database;
+mod mutation;
 
 pub mod proto {
     tonic::include_proto!("oxide.enterprise.gateway.v1");
@@ -80,6 +81,7 @@ pub struct ManagedGatewayDriver {
     descriptor: ManagedDataSourceDescriptor,
     channel: Mutex<Option<(String, Channel)>>,
     default_database: Mutex<Option<String>>,
+    features: std::sync::RwLock<std::collections::BTreeSet<String>>,
 }
 
 impl ManagedGatewayDriver {
@@ -93,6 +95,7 @@ impl ManagedGatewayDriver {
             descriptor,
             channel: Mutex::new(None),
             default_database: Mutex::new(None),
+            features: std::sync::RwLock::new(Default::default()),
         })
     }
 
@@ -214,7 +217,7 @@ impl ManagedGatewayDriver {
         } else {
             metadata_parent_path(kind, database, schema, object_name)?
         };
-        let action = if kind == "column" {
+        let action = if matches!(kind, "column" | "definition") {
             AccessAction::MetadataRead
         } else {
             AccessAction::ResourceDiscover
@@ -264,7 +267,13 @@ impl ManagedGatewayDriver {
             .await
             .context("managed Gateway capability negotiation failed")?
             .into_inner();
-        validate_gateway_capabilities(&self.descriptor, &session.policy_revision, &response)
+        validate_gateway_capabilities(&self.descriptor, &session.policy_revision, &response)?;
+        *self
+            .features
+            .write()
+            .map_err(|_| anyhow!("Gateway feature state is unavailable"))? =
+            response.features.into_iter().collect();
+        Ok(())
     }
 
     fn query_resource_path(
@@ -328,6 +337,15 @@ impl ManagedGatewayDriver {
                 .execute_native_query(provider, sql, database, schema)
                 .await;
         }
+        if matches!(self.descriptor.driver.as_str(), "postgres" | "postgresql")
+            && crate::core::statement::validate_read_only_sql(
+                sql,
+                crate::core::statement::StatementScanDialect::Postgres,
+            )
+            .is_err()
+        {
+            return self.execute_mutation_query(sql, database, schema).await;
+        }
         let resolved_database = self.resolve_sql_database(database).await?;
         let database = Some(resolved_database.as_str());
         let resource_path = self.query_resource_path(sql, database, schema)?;
@@ -339,6 +357,7 @@ impl ManagedGatewayDriver {
                 access_ticket: session.ticket,
                 scope: Some(scope),
                 sql: sql.to_string(),
+                parameters_json: Vec::new(),
                 database: database.map(str::to_string),
                 schema: schema.map(str::to_string),
             })
@@ -594,11 +613,23 @@ impl DatabaseDriver for ManagedGatewayDriver {
     }
 
     fn package_capabilities(&self) -> Option<DatabaseCapabilities> {
-        // The stage-one Gateway implements discovery, metadata and bounded
-        // read-only queries only. Descriptor permissions for future actions
-        // must not make local write/export controls appear before the data
-        // plane implements and re-authorizes those exact RPCs.
-        managed_capabilities(&self.descriptor)
+        // Descriptor permission names alone cannot enable write controls.
+        // Require the concrete Gateway's implemented mutation feature too.
+        let mut capabilities = managed_capabilities(&self.descriptor)?;
+        if self.mutation_feature_enabled() {
+            capabilities.supports_table_row_mutation = self
+                .descriptor
+                .capabilities
+                .contains(AccessAction::DataWrite.as_str());
+            // Generic create/drop/rename table DDL remains unavailable. The
+            // reviewed column boundary is advertised independently.
+            capabilities.supports_column_alteration = self
+                .descriptor
+                .capabilities
+                .contains(AccessAction::SchemaDdl.as_str());
+            capabilities.supports_column_comments = false;
+        }
+        Some(capabilities)
     }
 
     fn statement_scan_dialect(&self) -> Option<StatementScanDialect> {
@@ -714,6 +745,88 @@ impl DatabaseDriver for ManagedGatewayDriver {
         )
     }
 
+    async fn get_table_definition(
+        &self,
+        database: Option<&str>,
+        schema: &str,
+        table: &str,
+    ) -> Result<String> {
+        let definitions: Vec<String> = decode_items(
+            self.list_resources("definition", database, Some(schema), Some(table))
+                .await?,
+        )?;
+        match definitions.as_slice() {
+            [definition] if !definition.trim().is_empty() => Ok(definition.clone()),
+            _ => Err(anyhow!(
+                "Managed Gateway did not return a complete relation definition"
+            )),
+        }
+    }
+
+    async fn managed_table_permissions(
+        &self,
+        database: Option<&str>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<crate::core::driver::ManagedTablePermissions>> {
+        self.table_permissions(database, schema, table)
+            .await
+            .map(Some)
+    }
+
+    async fn execute_parameterized(
+        &self,
+        sql: &str,
+        params: &[crate::core::protocol::QueryParameter],
+    ) -> Result<u64> {
+        Ok(self
+            .execute_mutation_batch(
+                None,
+                None,
+                &[crate::core::protocol::ParameterizedStatement {
+                    sql: sql.to_string(),
+                    params: params.to_vec(),
+                }],
+            )
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or(0))
+    }
+
+    async fn execute_parameterized_batch(
+        &self,
+        statements: &[crate::core::protocol::ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        self.execute_mutation_batch(None, None, statements).await
+    }
+
+    async fn query_parameterized(
+        &self,
+        sql: &str,
+        params: &[crate::core::protocol::QueryParameter],
+    ) -> Result<Vec<QueryResult>> {
+        self.parameterized_read(None, sql, params).await
+    }
+
+    async fn query_database_parameterized(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[crate::core::protocol::QueryParameter],
+    ) -> Result<Vec<QueryResult>> {
+        self.parameterized_read(Some(database), sql, params).await
+    }
+
+    async fn execute_database_parameterized_batch(
+        &self,
+        database: &str,
+        statements: &[crate::core::protocol::ParameterizedStatement],
+    ) -> Result<Vec<u64>> {
+        self.execute_mutation_batch(Some(database), None, statements)
+            .await
+    }
+
     async fn get_collections(&self, namespace: &str) -> Result<Vec<CollectionInfo>> {
         match self.native_provider() {
             Some("mongodb") => decode_items(
@@ -801,7 +914,7 @@ fn metadata_parent_path(
                 .context("schema is required to list managed tables")?
                 .to_string(),
         ),
-        "column" => {
+        "column" | "definition" => {
             path.push(
                 schema
                     .context("schema is required to list managed columns")?
@@ -960,6 +1073,7 @@ mod tests {
         };
         let valid = CapabilitiesResponse {
             contract_version: u32::from(ENTERPRISE_CONTRACT_VERSION),
+            features: Vec::new(),
             capabilities: descriptor.capabilities.iter().cloned().collect(),
             policy_revision: "policy-8".into(),
         };

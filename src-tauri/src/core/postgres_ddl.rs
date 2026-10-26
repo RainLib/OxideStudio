@@ -1,0 +1,247 @@
+//! Pure PostgreSQL relation DDL reconstruction shared by Desktop and Gateway.
+use crate::core::dialect::DatabaseKind;
+use crate::core::protocol::{ColumnInfo, ConstraintInfo, IndexInfo};
+
+pub fn postgres_column_definition(kind: DatabaseKind, column: &ColumnInfo) -> String {
+    let mut definition = format!(
+        "  {} {}",
+        kind.quote_identifier(&column.name),
+        column.data_type
+    );
+
+    if let Some(default_value) = &column.default_value {
+        if !default_value.trim().is_empty() {
+            definition.push_str(" DEFAULT ");
+            definition.push_str(default_value);
+        }
+    }
+
+    if !column.is_nullable {
+        definition.push_str(" NOT NULL");
+    }
+
+    definition
+}
+
+pub fn postgres_constraint_definition(
+    kind: DatabaseKind,
+    constraint: &ConstraintInfo,
+) -> Option<String> {
+    let definition = constraint.definition.as_deref()?.trim();
+    if definition.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "  CONSTRAINT {} {}",
+        kind.quote_identifier(&constraint.name),
+        definition
+    ))
+}
+
+pub fn is_postgres_foreign_key_constraint(constraint: &ConstraintInfo) -> bool {
+    constraint
+        .constraint_type
+        .trim()
+        .eq_ignore_ascii_case("FOREIGN KEY")
+        || constraint.definition.as_deref().is_some_and(|definition| {
+            definition
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("FOREIGN KEY")
+        })
+}
+
+pub fn generate_postgres_table_ddl(
+    schema: &str,
+    table: &str,
+    columns: &[ColumnInfo],
+    constraints: &[ConstraintInfo],
+    indexes: &[IndexInfo],
+) -> String {
+    let kind = DatabaseKind::Postgres;
+    let lines: Vec<String> = columns
+        .iter()
+        .map(|column| postgres_column_definition(kind, column))
+        .collect();
+    generate_postgres_table_ddl_with_columns(schema, table, &lines, columns, constraints, indexes)
+}
+
+pub fn generate_postgres_table_ddl_with_columns(
+    schema: &str,
+    table: &str,
+    definitions: &[String],
+    columns: &[ColumnInfo],
+    constraints: &[ConstraintInfo],
+    indexes: &[IndexInfo],
+) -> String {
+    let kind = DatabaseKind::Postgres;
+    let mut lines = definitions.to_vec();
+
+    let constraint_names: std::collections::HashSet<&str> = constraints
+        .iter()
+        .map(|constraint| constraint.name.as_str())
+        .collect();
+
+    for constraint in constraints {
+        if let Some(definition) = postgres_constraint_definition(kind, constraint) {
+            lines.push(definition);
+        }
+    }
+
+    if !constraints
+        .iter()
+        .any(|constraint| constraint.constraint_type == "PRIMARY KEY")
+    {
+        let primary_keys: Vec<String> = columns
+            .iter()
+            .filter(|column| column.is_primary_key)
+            .map(|column| kind.quote_identifier(&column.name))
+            .collect();
+
+        if !primary_keys.is_empty() {
+            lines.push(format!("  PRIMARY KEY ({})", primary_keys.join(", ")));
+        }
+    }
+
+    let mut ddl = format!(
+        "CREATE TABLE {} (\n{}\n);",
+        kind.qualified_table(Some(schema), table),
+        lines.join(",\n")
+    );
+
+    let extra_indexes: Vec<String> = indexes
+        .iter()
+        .filter(|index| !index.is_primary && !constraint_names.contains(index.name.as_str()))
+        .filter_map(|index| index.definition.as_deref())
+        .map(str::trim)
+        .filter(|definition| !definition.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    if !extra_indexes.is_empty() {
+        ddl.push_str("\n\n");
+        ddl.push_str(&extra_indexes.join(";\n"));
+        ddl.push(';');
+    }
+
+    ddl
+}
+
+/// Driver-owned catalog read. Names are typed parameters; catalog SQL never
+/// enters the user's SQL/query permission route.
+pub async fn read_postgres_relation_definition(
+    driver: &dyn crate::core::driver::DatabaseDriver,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<String> {
+    use crate::core::protocol::QueryParameter;
+    use anyhow::{anyhow, Context};
+    let parameters = [schema, table].map(|name| QueryParameter {
+        value: serde_json::Value::String(name.to_string()),
+        data_type: Some("text".to_string()),
+    });
+    let results = driver.query_database_parameterized(database, r#"
+        SELECT c.relkind::text,
+          CASE WHEN c.relkind IN ('v','m') THEN pg_catalog.pg_get_viewdef(c.oid, true) ELSE '' END,
+          c.relispopulated,
+          COALESCE((SELECT jsonb_agg(
+            pg_catalog.format('%I %s%s%s%s', a.attname,
+              pg_catalog.format_type(a.atttypid, a.atttypmod),
+              CASE WHEN a.attcollation <> t.typcollation AND a.attcollation <> 0
+                THEN ' COLLATE ' || a.attcollation::regcollation::text ELSE '' END,
+              CASE a.attidentity WHEN 'a' THEN ' GENERATED ALWAYS AS IDENTITY'
+                WHEN 'd' THEN ' GENERATED BY DEFAULT AS IDENTITY'
+                ELSE CASE WHEN COALESCE(to_jsonb(a)->>'attgenerated','') <> ''
+                  THEN ' GENERATED ALWAYS AS (' || pg_catalog.pg_get_expr(d.adbin,d.adrelid) || ') ' ||
+                    CASE WHEN to_jsonb(a)->>'attgenerated' = 'v' THEN 'VIRTUAL' ELSE 'STORED' END
+                  WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_catalog.pg_get_expr(d.adbin,d.adrelid)
+                  ELSE '' END END,
+              CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END)
+            ORDER BY a.attnum)
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+            LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+            WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped), '[]'::jsonb),
+          COALESCE((SELECT jsonb_agg(pg_catalog.format('COMMENT ON COLUMN %I.%I.%I IS %L;', n.nspname,c.relname,a.attname,description.description) ORDER BY a.attnum)
+            FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_description description
+              ON description.objoid=a.attrelid AND description.objsubid=a.attnum AND description.classoid='pg_catalog.pg_class'::regclass
+            WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped), '[]'::jsonb),
+          CASE WHEN pg_catalog.obj_description(c.oid,'pg_class') IS NOT NULL
+            THEN pg_catalog.format('COMMENT ON %s %I.%I IS %L;',
+              CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,
+              n.nspname,c.relname,pg_catalog.obj_description(c.oid,'pg_class')) ELSE '' END
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind IN ('r','v','m') AND NOT c.relispartition
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inheritance WHERE inheritance.inhrelid=c.oid OR inheritance.inhparent=c.oid)
+    "#, &parameters).await?;
+    let row = results
+        .first()
+        .and_then(|result| result.rows.first())
+        .ok_or_else(|| anyhow!("Relation definition is unavailable for this object type"))?;
+    let kind = DatabaseKind::Postgres;
+    let qualified = kind.qualified_table(Some(schema), table);
+    let relation_kind = row
+        .first()
+        .and_then(serde_json::Value::as_str)
+        .context("Missing relation kind")?;
+    let mut ddl = match relation_kind {
+        "v" | "m" => {
+            let definition = row
+                .get(1)
+                .and_then(serde_json::Value::as_str)
+                .context("Missing view definition")?;
+            if relation_kind == "v" {
+                format!(
+                    "CREATE OR REPLACE VIEW {qualified} AS\n{};",
+                    definition.trim_end_matches(';')
+                )
+            } else {
+                let population = if row
+                    .get(2)
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    "DATA"
+                } else {
+                    "NO DATA"
+                };
+                format!(
+                    "CREATE MATERIALIZED VIEW {qualified} AS\n{} WITH {population};",
+                    definition.trim_end_matches(';')
+                )
+            }
+        }
+        "r" => {
+            let definitions: Vec<String> =
+                serde_json::from_value(row.get(3).cloned().context("Missing column definitions")?)?;
+            let constraints = driver
+                .get_database_constraints(database, schema, table)
+                .await?;
+            let indexes = driver.get_database_indexes(database, schema, table).await?;
+            generate_postgres_table_ddl_with_columns(
+                schema,
+                table,
+                &definitions,
+                &[],
+                &constraints,
+                &indexes,
+            )
+        }
+        _ => return Err(anyhow!("Unsupported relation definition kind")),
+    };
+    let comments: Vec<String> =
+        serde_json::from_value(row.get(4).cloned().context("Missing column comments")?)?;
+    for comment in comments
+        .iter()
+        .map(String::as_str)
+        .chain(row.get(5).and_then(serde_json::Value::as_str))
+    {
+        if !comment.is_empty() {
+            ddl.push('\n');
+            ddl.push_str(comment);
+        }
+    }
+    Ok(ddl)
+}

@@ -97,6 +97,39 @@ pub(super) fn metadata_error(error: anyhow::Error) -> Status {
     Status::internal("managed metadata request failed")
 }
 
+/// A definition is one indivisible metadata value. Column-only grants or
+/// exclusions cannot safely be applied by filtering the returned SQL text.
+pub(super) fn require_complete_metadata_scope(
+    target: &[String],
+    allowed: &[Vec<String>],
+    forbidden: &[Vec<String>],
+) -> Result<(), Status> {
+    if !allowed.iter().any(|scope| target.starts_with(scope))
+        || forbidden
+            .iter()
+            .any(|scope| target.starts_with(scope) || scope.starts_with(target))
+    {
+        return Err(Status::permission_denied(
+            "A complete relation definition requires metadata access to the entire relation",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn authorize_postgres_mutation_target(
+    requested: &[String],
+    target: &[String],
+    allowed: &[Vec<String>],
+    forbidden: &[Vec<String>],
+) -> Result<(), Status> {
+    if requested != target {
+        return Err(Status::permission_denied(
+            "Mutation table does not exactly match its ticket scope",
+        ));
+    }
+    require_complete_metadata_scope(target, allowed, forbidden)
+}
+
 fn metadata_parent_path(request: &ResourceRequest) -> Result<Vec<String>, Status> {
     let mut expected = Vec::new();
     if let Some(database) = request.database.as_deref() {
@@ -112,7 +145,7 @@ fn metadata_parent_path(request: &ResourceRequest) -> Result<Vec<String>, Status
                 .ok_or_else(|| Status::invalid_argument("schema is required"))?
                 .to_string(),
         ),
-        "column" => {
+        "column" | "definition" => {
             expected.push(
                 request
                     .schema

@@ -279,11 +279,23 @@ pub(super) async fn ensure_host_table_ddl_allowed(
     connection_id: &str,
     operation: &str,
 ) -> Result<(), String> {
-    let capabilities = manager
-        .package_capabilities(connection_id)
+    let snapshot = manager
+        .capability_snapshot(connection_id)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_host_table_ddl_capability(capabilities.as_ref(), operation)
+    if snapshot.managed
+        && matches!(
+            operation,
+            "column creation" | "column deletion" | "column rename" | "column alteration"
+        )
+        && snapshot
+            .package_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.supports_column_alteration)
+    {
+        return Ok(());
+    }
+    ensure_host_table_ddl_capability(snapshot.package_capabilities.as_ref(), operation)
 }
 
 pub(super) fn validated_raw_filter_sql(

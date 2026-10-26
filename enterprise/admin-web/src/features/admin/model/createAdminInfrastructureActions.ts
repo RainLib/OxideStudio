@@ -156,7 +156,7 @@ export function createAdminInfrastructureActions({
         driver: sourceDriver,
         targetBinding: sourceTargetBinding,
         displayName: sourceName,
-        capabilities: ["resourceDiscover", "metadataRead", "queryRead"],
+        capabilities: ["resourceDiscover", "metadataRead", "queryRead", ...(sourceDriver === "postgres" || sourceDriver === "postgresql" ? ["dataWrite", "schemaDdl"] : [])],
       });
       setSourceName("");
       setSourceTargetBinding("");

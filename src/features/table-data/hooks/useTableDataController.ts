@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DataGridHandle, DataGridSelectionSummary } from "@/components/workspace/DataGrid";
 import { transposeQueryResult } from "@/features/data-grid";
 import { useTableCapabilities } from "@/features/table-data/hooks/useTableCapabilities";
+import { useManagedTablePermissions } from "@/features/table-data/hooks/useManagedTablePermissions";
 import { useTableExportReport } from "@/features/table-data/hooks/useTableExportReport";
 import { useTableImportEvents } from "@/features/table-data/hooks/useTableImportEvents";
 import { useTableTransferProgress } from "@/features/table-data/hooks/useTableTransferProgress";
@@ -119,10 +120,16 @@ export function useTableDataController() {
   const tabConnectionId = activeTab?.connectionId || activeConnectionId;
   const activeConnection = connections.find((c) => c.id === tabConnectionId);
   const driver = activeConnection?.driver || DEFAULT_DATABASE_DRIVER;
-  const { activeCapabilities } = useTableCapabilities({
+  const { activeCapabilities: connectionCapabilities } = useTableCapabilities({
     driver,
     activeConnection,
   });
+  const tablePermissions=useManagedTablePermissions(activeConnection,activeTab?.databaseName,activeTab?.schemaName,activeTab?.tableName);
+  const activeCapabilities=activeConnection?.origin==="managed" ? {...connectionCapabilities,
+    supportsTableRowMutation:connectionCapabilities.supportsTableRowMutation&&Boolean(tablePermissions.permissions?.dataWrite),
+    supportsTableDdl:connectionCapabilities.supportsTableDdl&&Boolean(tablePermissions.permissions?.schemaDdl),
+    supportsColumnAlteration:connectionCapabilities.supportsColumnAlteration&&Boolean(tablePermissions.permissions?.schemaDdl),
+  } : connectionCapabilities;
 
   const tableExportFormats = HOST_TABLE_EXPORT_FORMATS.filter((format) =>
     activeCapabilities.tableExportFormats?.includes(format),
@@ -146,9 +153,9 @@ export function useTableDataController() {
     activeCapabilities.dataModel === "document" &&
     normalizeDatabaseDriverName(driver) === "mongodb" &&
     !activeConnection?.driverPackageVersion;
-  const isCrossDatabasePreview = Boolean(activeTab?.databaseName);
+  const isCrossDatabasePreview = Boolean(activeTab?.databaseName) && activeConnection?.origin!=="managed";
   const isReadOnlyRelation = isReadOnlyRelationObject(activeTab?.objectType);
-  const isTableReadOnly = isReadOnlyRelation || isNativeObjectPreview;
+  const isTableReadOnly = isReadOnlyRelation || isNativeObjectPreview || !activeCapabilities.supportsTableRowMutation;
   const canManageIndexes =
     !isCrossDatabasePreview &&
     activeCapabilities.supportsTableDdl &&
@@ -203,7 +210,7 @@ export function useTableDataController() {
   } = inspection;
   const [mutationError, setMetadataError] = useState<string | null>(null);
   const metadataError =
-    mutationError || inspection.metadataError || inspection.referencesError;
+    mutationError || tablePermissions.error || inspection.metadataError || inspection.referencesError;
   const supportsSqlConflictUpdate =
     supportsSqlConflictSkip &&
     metadataColumns.some((column) => column.is_primary_key);

@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from "@/features/connections/model/types";
+import { managedCapabilitiesFallback } from "@/features/connections/model/managedCapabilities";
 import { useExplorerCapabilities } from "@/features/database-explorer/hooks/useExplorerCapabilities";
 import {
   objectGroupKey,
@@ -91,7 +92,7 @@ export function useExplorerSourceContext({
     connectionCapabilities.connectionId === activeConnectionId &&
     connectionCapabilities.capabilities.driver === activeDriver
       ? connectionCapabilities.capabilities
-      : defaultDatabaseCapabilities(activeDriver);
+      : activeConnection?.origin === "managed" ? managedCapabilitiesFallback(defaultDatabaseCapabilities(activeDriver)) : defaultDatabaseCapabilities(activeDriver);
 
   const canBrowseDatabaseCatalogs = Boolean(
     activeCapabilities.supportsDatabaseCatalogs,

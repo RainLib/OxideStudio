@@ -3,7 +3,8 @@ mod policy_tests {
 
     use super::super::{
         authorization::{
-            authorize_native_resource, authorize_sql_relations, metadata_parent_path_for_source,
+            authorize_native_resource, authorize_postgres_mutation_target, authorize_sql_relations,
+            metadata_parent_path_for_source, require_complete_metadata_scope,
         },
         policy::{
             require_ticket_driver, require_ticket_target_binding,
@@ -14,6 +15,44 @@ mod policy_tests {
     use crate::{config::DataSourceConfig, proto::ResourceRequest};
     use oxide_enterprise_contracts::ENTERPRISE_CONTRACT_VERSION;
     use oxide_studio_lib::core::statement::StatementScanDialect;
+
+    #[test]
+    fn definitions_require_the_whole_relation_and_respect_descendant_exclusions() {
+        let path = vec!["app".into(), "public".into(), "orders".into()];
+        let column = vec![
+            "app".into(),
+            "public".into(),
+            "orders".into(),
+            "secret".into(),
+        ];
+        assert!(require_complete_metadata_scope(
+            &path,
+            &[vec!["app".into(), "public".into()]],
+            &[]
+        )
+        .is_ok());
+        assert!(require_complete_metadata_scope(&path, std::slice::from_ref(&path), &[]).is_ok());
+        assert!(
+            require_complete_metadata_scope(&path, std::slice::from_ref(&column), &[]).is_err()
+        );
+        assert!(require_complete_metadata_scope(&path, &[vec![]], &[column]).is_err());
+        assert!(
+            require_complete_metadata_scope(&path, &[vec![]], std::slice::from_ref(&path)).is_err()
+        );
+        assert!(require_complete_metadata_scope(&path, &[vec![]], &[vec!["app".into()]]).is_err());
+        let quoted_case = vec!["app".into(), "public".into(), "Orders".into()];
+        assert!(authorize_postgres_mutation_target(
+            &path,
+            &quoted_case,
+            std::slice::from_ref(&path),
+            &[]
+        )
+        .is_err());
+        assert!(
+            require_complete_metadata_scope(&quoted_case, std::slice::from_ref(&path), &[])
+                .is_err()
+        );
+    }
     use uuid::Uuid;
 
     #[test]
