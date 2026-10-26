@@ -10,9 +10,11 @@ export const MONGODB_COMPLETION_TRIGGER_CHARACTERS = Array.from(
   ),
 );
 
+const registrations = new WeakMap<object, Array<{ dispose: () => void }>>();
+
 export function registerMongoDbConsoleLanguage(monaco: any) {
   const registrationKey = "__oxideMongoDbConsoleRegistration";
-  if (monaco[registrationKey]) return;
+  if (registrations.has(monaco) || monaco[registrationKey]) return;
   if (
     !monaco.languages
       .getLanguages()
@@ -73,7 +75,7 @@ export function registerMongoDbConsoleLanguage(monaco: any) {
       ],
     }),
   ];
-  monaco[registrationKey] = disposables;
+  registrations.set(monaco, disposables);
 }
 
 /** Keep semantic completion kinds while still enabling Monaco tab stops. */

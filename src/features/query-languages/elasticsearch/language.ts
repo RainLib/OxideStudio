@@ -8,9 +8,15 @@ import {
 import { elasticsearchJsonKeyReplacementRange } from "@/features/query-languages/elasticsearch/replacementRange";
 import { type ElasticsearchServerVersion } from "@/features/query-languages/elasticsearch/types";
 
+const registrations = new WeakMap<object, {
+  version: number;
+  disposables: Array<{ dispose: () => void }>;
+}>();
+
 export function registerElasticsearchConsoleLanguage(monaco: any) {
   const registrationKey = "__oxideElasticsearchConsoleRegistration";
-  const previousRegistration = monaco[registrationKey] as
+  // Bundled Monaco is an immutable ESM namespace. Keep owned state outside it.
+  const previousRegistration = (registrations.get(monaco) ?? monaco[registrationKey]) as
     | { version: number; disposables: Array<{ dispose: () => void }> }
     | Array<{ dispose: () => void }>
     | undefined;
@@ -253,8 +259,8 @@ export function registerElasticsearchConsoleLanguage(monaco: any) {
       },
     ),
   );
-  monaco[registrationKey] = {
+  registrations.set(monaco, {
     version: registrationVersion,
     disposables,
-  };
+  });
 }
