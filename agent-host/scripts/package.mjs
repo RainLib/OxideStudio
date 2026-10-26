@@ -71,6 +71,8 @@ try {
   }
 
   await rm(temporaryOutput, { force: true });
+  // Keep pkg's default macOS signing: it also extends __LINKEDIT to cover
+  // the embedded payload, which later Developer ID signing requires.
   await exec([
     join(workspace, "agent-host", "dist", "oxide-agent-host.cjs"),
     "--targets",
@@ -81,7 +83,6 @@ try {
     "GZip",
     "--fallback-to-source",
     "--no-native-build",
-    "--no-signature",
   ]);
   if (!extension) await chmod(temporaryOutput, 0o755);
 

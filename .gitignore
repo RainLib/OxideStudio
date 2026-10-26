@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Local release credentials
+/.env
+/.env.*
+!/.env.example
+/output/macos-release/
+
 # Reproducible frontend, test, and Rust build artifacts
 *.tsbuildinfo
 coverage/

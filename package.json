@@ -19,6 +19,7 @@
     "verify:frontend-bundle": "node scripts/verify-frontend-bundle.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
+    "release:macos": "node scripts/release-macos.mjs",
     "ai": "node scripts/oxide-ai.mjs",
     "ai:mcp": "node scripts/oxide-ai.mjs mcp stdio",
     "test": "vitest run",

@@ -43,6 +43,7 @@ function goTarget(value) {
     case "x86_64-pc-windows-msvc": return { GOOS: "windows", GOARCH: "amd64" };
     case "x86_64-unknown-linux-gnu": return { GOOS: "linux", GOARCH: "amd64" };
     case "aarch64-apple-darwin": return { GOOS: "darwin", GOARCH: "arm64" };
+    case "x86_64-apple-darwin": return { GOOS: "darwin", GOARCH: "amd64" };
     default: throw new Error(`RocketMQ agent does not support target ${value}`);
   }
 }

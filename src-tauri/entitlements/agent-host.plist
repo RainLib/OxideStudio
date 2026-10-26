@@ -5,5 +5,8 @@
     <!-- The packaged Node 22 runtime uses V8 JIT under Hardened Runtime. -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
+    <!-- Intel V8 also creates executable pages without MAP_JIT. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
 </dict>
 </plist>
