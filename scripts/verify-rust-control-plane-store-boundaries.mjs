@@ -91,9 +91,9 @@ for (const [symbol, owner] of Object.entries({
   }
 }
 
-if (helpers !== 13 || typeMethods !== 36 || tests !== 5) {
+if (helpers !== 14 || typeMethods !== 36 || tests !== 7) {
   throw new Error(
-    `Expected 13 helpers, 36 ControlPlaneStore methods and 5 tests; found ${helpers}, ${typeMethods} and ${tests}.`,
+    `Expected 14 helpers, 36 ControlPlaneStore methods and 7 tests; found ${helpers}, ${typeMethods} and ${tests}.`,
   );
 }
 console.log(
