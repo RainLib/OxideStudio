@@ -55,6 +55,17 @@ fn maps_codex_app_server_stream_and_final_usage() {
 }
 
 #[test]
+fn codex_plan_uses_authoritative_completed_item() {
+    let mut parser = CliAgentEventParser::new(CliProviderKind::CodexCli);
+    parser.parse(&json!({"method":"item/agentMessage/delta","params":{"delta":"Checking data."}}));
+    assert!(parser
+        .parse(&json!({"method":"item/plan/delta","params":{"itemId":"p1","delta":"draft"}}))
+        .is_empty());
+    assert_eq!(parser.parse(&json!({"method":"item/completed","params":{"item":{"type":"plan","id":"p1","text":"# Verified plan"}}})), vec![CliAgentEvent::TextDelta("\n\n# Verified plan".to_string())]);
+    assert_eq!(parser.final_text(), "Checking data.\n\n# Verified plan");
+}
+
+#[test]
 fn maps_codebuddy_tool_lifecycle_and_usage() {
     let mut parser = CliAgentEventParser::new(CliProviderKind::CodebuddyCli);
     let started = parser.parse(&json!({

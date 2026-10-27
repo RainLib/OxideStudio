@@ -177,7 +177,19 @@ impl CliAgentEventParser {
             "item/completed" => {
                 let item = params.get("item").unwrap_or(params);
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-                if matches!(item_type, "mcpToolCall" | "mcp_tool_call" | "mcpTool") {
+                if item_type == "plan" {
+                    // The completed plan is authoritative: streamed plan deltas
+                    // are explicitly not guaranteed to concatenate to its text.
+                    let text = text_field(item, &["text"]);
+                    let text = text.filter(|value| !value.trim().is_empty()).map(|value| {
+                        if self.final_text.is_empty() {
+                            value
+                        } else {
+                            format!("\n\n{value}")
+                        }
+                    });
+                    self.push_text(text)
+                } else if matches!(item_type, "mcpToolCall" | "mcp_tool_call" | "mcpTool") {
                     let (call_id, parsed_name) = parse_codex_tool(item)
                         .unwrap_or_else(|| (fallback_call_id(item), "oxide tool".to_string()));
                     let tool_name = self.tool_names.remove(&call_id).unwrap_or(parsed_name);
