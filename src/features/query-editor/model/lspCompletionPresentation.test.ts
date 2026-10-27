@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+// Monaco does not publish declarations for its internal scoring implementation.
+// @ts-expect-error internal Monaco module has no public declaration
+import { fuzzyScore } from "monaco-editor/esm/vs/base/common/filters.js";
+// @ts-expect-error internal Monaco module has no public declaration
+import { CompletionModel, LineContext } from "monaco-editor/esm/vs/editor/contrib/suggest/browser/completionModel.js";
 import { CompletionItemKind } from "@/services/lsp/types";
 import {
   recordCompletionUsage,
@@ -45,6 +50,50 @@ const monaco = {
 };
 
 describe("lspCompletionItemsToMonacoSuggestions", () => {
+  it.each(["validation.sh", "validation."])("aligns Monaco filtering with a qualified server edit: %s", (fragment) => {
+    const line = `SELECT * FROM ${fragment}`;
+    const typedWord = fragment.endsWith(".") ? "" : "sh";
+    const [suggestion] = lspCompletionItemsToMonacoSuggestions({
+      monaco, ownerKey: "owner", typedWord, completedContextKeyword: false,
+      lineBeforeCursor: line, cursorLine: 1,
+      defaultRange: new MockRange(1, line.length - typedWord.length + 1, 1, line.length + 1),
+      rankByUsage: false, usageScope: "postgres", recordUsageCommand: "record",
+      items: [{ label: "validation.sharing_share_demo", filterText: "sharing_share_demo", kind: CompletionItemKind.Class,
+        textEdit: { newText: "validation.sharing_share_demo", range: { start: { line: 0, character: 14 }, end: { line: 0, character: line.length } } } }],
+    });
+    expect(suggestion?.filterText).toBe("validation.sharing_share_demo");
+    const filterText = suggestion!.filterText!;
+    expect(fuzzyScore(fragment, fragment.toLowerCase(), 0, filterText, filterText.toLowerCase(), 0, { firstMatchCanBeWeak: true, boostFullMatch: true })).toBeDefined();
+    const itemForMonaco = (filter: string) => ({
+      isInvalid: false, provider: {}, container: { incomplete: false },
+      position: { lineNumber: 1, column: line.length + 1 }, editStart: { lineNumber: 1, column: 15 },
+      completion: { ...suggestion!, filterText: filter }, filterTextLow: filter.toLowerCase(),
+      textLabel: "sharing_share_demo", labelLow: "sharing_share_demo",
+    });
+    const visible = (filter: string) => new CompletionModel(
+      [itemForMonaco(filter)], line.length + 1, new LineContext(line, 0),
+      { distance: () => 0 }, { filterGraceful: false }, "inline",
+    ).items;
+    expect(visible("sharing_share_demo")).toHaveLength(0);
+    expect(visible(filterText)).toHaveLength(1);
+    expect(suggestion?.insertText).toBe("validation.sharing_share_demo");
+    expect(suggestion?.range).toEqual(new MockRange(1, 15, 1, line.length + 1));
+  });
+  it("preserves an existing qualified filter and an ordinary suffix-only edit", () => {
+    const line = "SELECT * FROM validation.sh";
+    const range = { start: { line: 0, character: 14 }, end: { line: 0, character: line.length } };
+    const suffix = { start: { line: 0, character: 25 }, end: { line: 0, character: line.length } };
+    const suggestions = lspCompletionItemsToMonacoSuggestions({
+      monaco, ownerKey: "owner", typedWord: "sh", completedContextKeyword: false,
+      lineBeforeCursor: line, cursorLine: 1, defaultRange: new MockRange(1, 26, 1, 28),
+      rankByUsage: false, usageScope: "postgres", recordUsageCommand: "record",
+      items: [
+        { label: "validation.sharing_share_demo", filterText: "validation.sharing_share_demo", textEdit: { newText: "validation.sharing_share_demo", range } },
+        { label: "sharing_orders", filterText: "sharing_orders", textEdit: { newText: "sharing_orders", range: suffix } },
+      ],
+    });
+    expect(suggestions.map((item) => item.filterText)).toEqual(["validation.sharing_share_demo", "sharing_orders"]);
+  });
   it("keeps long table and column prefixes secondary without changing server insertion", () => {
     expect(completionLabelForMonaco({ label: "very_long_catalog.public.adapter", kind: CompletionItemKind.Class }))
       .toEqual({ label: "adapter", description: "very_long_catalog.public" });

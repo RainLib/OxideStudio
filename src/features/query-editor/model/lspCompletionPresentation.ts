@@ -35,6 +35,9 @@ export interface LspCompletionPresentationOptions {
   /** The document revision that produced these lazy-resolvable candidates. */
   requestUri?: string;
   requestModelVersion?: number;
+  /** Text preceding the cursor, used to align filtering with server edit ranges. */
+  lineBeforeCursor?: string;
+  cursorLine?: number;
 }
 
 const LSP_COMPLETION_ITEM_PROPERTY = "__oxideLspCompletionItem";
@@ -211,6 +214,8 @@ export function lspCompletionItemsToMonacoSuggestions({
   nextCharacter,
   requestUri,
   requestModelVersion,
+  lineBeforeCursor,
+  cursorLine,
 }: LspCompletionPresentationOptions) {
   return limitLspCompletionPresentationItems(items, {
     rankByUsage,
@@ -237,6 +242,26 @@ export function lspCompletionItemsToMonacoSuggestions({
       functionInsertion.insertText,
       driver,
     );
+    let filterText = completionFilterText(item, typedWord, completedContextKeyword);
+    const edit = item.textEdit;
+    const editRange = edit && ("range" in edit ? edit.range : edit.insert);
+    if (
+      lineBeforeCursor !== undefined &&
+      cursorLine !== undefined &&
+      editRange?.start.line === cursorLine - 1
+    ) {
+      const wordStart = lineBeforeCursor.length - typedWord.length;
+      const prefix = lineBeforeCursor.slice(editRange.start.character, wordStart);
+      // Monaco filters from the beginning of the replacement range. A server
+      // may replace `schema.ta` while advertising only `table` as filterText.
+      // Preserve the server edit and make its filter cover the same qualifier.
+      if (prefix.endsWith(".") && editRange.start.character <= wordStart) {
+        const suffix = filterText || item.label;
+        filterText = suffix.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())
+          ? suffix
+          : prefix + suffix;
+      }
+    }
     return {
       label: completionLabelForMonaco(item),
       kind: toMonacoCompletionKind(monaco, item.kind),
@@ -249,11 +274,7 @@ export function lspCompletionItemsToMonacoSuggestions({
             completionUsageScore(usageScope, item.label),
           )
         : completionSortText(item),
-      filterText: completionFilterText(
-        item,
-        typedWord,
-        completedContextKeyword,
-      ),
+      filterText,
       preselect: item.preselect,
       tags: item.deprecated
         ? [monaco.languages.CompletionItemTag.Deprecated]

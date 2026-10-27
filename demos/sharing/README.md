@@ -22,6 +22,8 @@
 
 AI 预演：切换 Plan 模式，使用 `PLAN-PROMPT.txt`，选择已登录、可用的运行时和模型。必须等到真实完成后才纳入现场演示。外部 CLI 生成的报告、离线文字和 mock 不等于应用内 Plan 验收。若模型依赖超过 10 秒，现场切回架构图，不等待生成。
 
+该 Plan 预演使用上述本地 SQLite 项目。组织项目当前可通过托管 Gateway 查询和验证权限，但 AI 数据库工具对组织项目会返回 `active agent project no longer exists`；在组织项目支持该工具并完成真实验收前，不要把本地 Plan 描述为组织数据库 AI 访问。
+
 ## 会后可选演示
 
 - 执行 `02-join.sql`：订单金额应为 102 / 129900、105 / 75700、101 / 49700（单位：分）。可用于 Explain、结果导出。
@@ -46,7 +48,7 @@ AI 预演：切换 Plan 模式，使用 `PLAN-PROMPT.txt`，选择已登录、�
 | Mac 设备 | 独立 device ID、clientAuth 证书、私钥匹配、CA 验证通过，登记状态 active |
 | 资源与查询 | 展开 validation，查询 sharing_share_demo，返回 Bob 92、Alice 86 |
 | 普通表写入 | 没有 data.write 时入口关闭，服务端也拒绝 |
-| 允许表写入 | 为 sharing_share_demo 配置明确 data.write 后，修改 Bob、保存、刷新、恢复 |
-| 结构变更 | schema.ddl 只授予 sharing_schema_sandbox，新增/删除演示列后恢复 |
-| 禁止资源 | restricted_records 仍被显式拒绝；不为演示撤销 forbid |
+| 允许表写入 | 在 hs_test permissions 数据源中修改 adapter_notes 的合成备注，保存、刷新后恢复原值；实际 data.write 授予此表 |
+| 结构变更 | 在 hs_test permissions 数据源的 schema_sandbox 中新增/删除临时列；实际 schema.ddl 授予此表 |
+| 禁止资源 | hs_test permissions 数据源对 restricted_records 显式拒绝；只读 TLS validation 数据源使用独立授权，不能把该拒绝描述为组织内所有数据源的全局规则 |
 | 审计 | 查询/允许写入/拒绝请求均可按该设备和数据源检索 |

@@ -233,6 +233,25 @@ beforeEach(() => {
   }));
 });
 describe("production completion provider cached metadata search", () => {
+  it("completes a schema-qualified managed table prefix", async () => {
+    const f = fixture("SELECT * FROM validation.sh<cursor>", "postgres");
+    f.options.currentSchema = "validation";
+    f.options.databaseName = "oxide_studio_validation";
+    f.options.schemaTables = [{ name: "sharing_share_demo", schema: "validation" }];
+    const item = (await f.request()).suggestions.find((value: any) => value.label === "sharing_share_demo");
+    expect(item).toBeDefined();
+    expect(f.accept(item)).toBe("SELECT * FROM validation.sharing_share_demo");
+  });
+  it("completes an alias against a qualified managed relation", async () => {
+    const f = fixture("SELECT s.<cursor> FROM validation.sharing_share_demo s;", "postgres");
+    f.options.currentSchema = "validation";
+    f.options.databaseName = "oxide_studio_validation";
+    metadata.loadTableMetadata.mockResolvedValueOnce({ columns: [{ name: "score", data_type: "integer" }] });
+    const item = fields(await f.request()).find((value: any) => value.label === "score");
+    expect(item).toBeDefined();
+    expect(f.accept(item)).toBe("SELECT s.score FROM validation.sharing_share_demo s;");
+    expect(metadata.loadTableMetadata).toHaveBeenCalledWith(expect.objectContaining({ databaseName: "oxide_studio_validation", schema: "validation", table: "sharing_share_demo" }));
+  });
   it.each(["mysql", "postgres", "sqlite"] as const)("completes an empty multiline SELECT list before the adapter FROM clause (%s)", async driver => {
     const f=fixture("SELECT \n<cursor>\n\nFROM adapter\nLIMIT 100;",driver);
     const result=await f.request();

@@ -694,6 +694,8 @@ export function createQueryCompletionProvider({
         nextCharacter,
         requestUri: uri,
         requestModelVersion: modelVersion,
+        lineBeforeCursor,
+        cursorLine: position.lineNumber,
       });
       const cachedMetadata = await cachedMetadataSuggestions();
       if (
