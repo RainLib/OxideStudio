@@ -1,6 +1,7 @@
 import { confirmAction } from "@/lib/appDialogs";
 import { connectionCatalogDatabaseName } from "@/features/connections/model/catalogDatabase";
 import type { ConnectionConfig } from "@/features/connections/model/types";
+import { getConnectionMetadataNodeKey } from "@/features/schema-metadata/model/metadataIdentity";
 import {
   isEditableExplorerShortcutTarget,
   objectGroupKey,
@@ -25,7 +26,7 @@ import type {
   DatabaseCapabilities,
   DatabaseDriver,
 } from "@/services/tauri/types/database";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import { restoreConnectionSession, useConnectionStore } from "@/store/useConnectionStore";
 import { useSchemaStore } from "@/store/useSchemaStore";
 import { type KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -181,8 +182,22 @@ export function createExplorerRefreshActions({
   const handleRefreshConnection = async (connectionId: string) => {
     const wasActiveConnection = connectionId === activeConnectionId;
     const connection = connections.find((item) => item.id === connectionId);
-    if (connectionId !== activeConnectionId) {
-      await setActiveConnection(connectionId);
+    const nodeKey = getConnectionMetadataNodeKey(connectionId, connection?.driver);
+    const nodeError = useSchemaStore.getState().metadataNodeStates[nodeKey];
+    const missingSession = nodeError?.status === "error" &&
+      nodeError.message?.trim() === `Connection not found: ${connectionId}`;
+    if (missingSession) {
+      const restored = await restoreConnectionSession(connectionId);
+      if (restored.status !== "ready") {
+        if (restored.status === "error") setNamespaceError(restored.message);
+        return;
+      }
+    } else {
+      const connectionError = await setActiveConnection(connectionId);
+      if (connectionError) {
+        setNamespaceError(connectionError);
+        return;
+      }
     }
     if (
       wasActiveConnection &&
